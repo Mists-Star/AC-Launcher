@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ── AC Launcher ────────────────────────────────────────────────
+# App runtime data (launcher state, not source) — 账号/成就/实例/缓存
+data/
+config/
+saves/
+launch_logs/
+
+# 日志
+*.log
+
+# 代码保护（PyArmor 中间产物）
+.pyarmor/
+
+# 临时调试脚本（_smoke* / _probe* / _dbg* / _repro* 等，不进仓库）
+_smoke*
+_probe*
+_dbg*
+_repro*
+_t_*
+_timing*
+_make_ico*
+_build_main.log

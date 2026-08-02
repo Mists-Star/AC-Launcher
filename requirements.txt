@@ -1,0 +1,6 @@
+PySide6
+minecraft-launcher-lib
+pyinstaller
+pyjwt
+requests
+qdarkstyle
