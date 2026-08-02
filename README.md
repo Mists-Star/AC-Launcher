@@ -5,11 +5,11 @@
 
 **如绝对求解器，掌控每一次启动。**
 
-AC Launcher is a free, open-source **Minecraft: Java Edition launcher** for Windows,
-built with Python and PySide6. It helps players manage multiple game instances,
-switch Java versions, and launch the game with their Microsoft account.
+AC Launcher is a free **Minecraft: Java Edition launcher** for Windows.
+It helps players manage multiple game instances, switch Java versions, and
+launch the game with their Microsoft account.
 
-> AC Launcher 是一款免费的、开源的 Minecraft：Java 版启动器，使用 Python + PySide6 开发，
+> AC Launcher 是一款免费的 Minecraft：Java 版启动器，
 > 用于管理多个游戏实例、切换 Java 版本，并通过微软账号启动游戏。
 
 ---
