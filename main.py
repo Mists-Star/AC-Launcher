@@ -59,12 +59,18 @@ def _setup_high_dpi():
 
 
 def main():
+    _log = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "_startup.log"), "w", encoding="utf-8")
+    _log.write("0 app start\n"); _log.flush()
     _setup_high_dpi()
+    _log.write("1 high_dpi ok\n"); _log.flush()
     app = QApplication(sys.argv)
+    _log.write("2 QApplication ok\n"); _log.flush()
     app.setWindowIcon(_app_icon())  # taskbar + title bar icon
+    _log.write("3 icon ok\n"); _log.flush()
 
     # Load config FIRST so theme mode can be applied before QSS generation
     cfg = load_config()
+    _log.write("4 config ok\n"); _log.flush()
     set_theme_mode(cfg.get("theme_mode", "light"))
     from src.theme import find_theme_pack, apply_theme_pack
     pack = find_theme_pack(cfg.get("theme_pack", "")) if cfg.get("theme_pack") else None
@@ -74,12 +80,16 @@ def main():
     if cfg.get("accent_color"):
         set_accent_color(cfg["accent_color"])
     apply_qss()
+    _log.write("5 qss ok\n"); _log.flush()
 
     splash = None
     if cfg.get("splash_enabled", True):
+        _log.write("6 splash construct\n"); _log.flush()
         from src.splash_window import SplashWindow
         splash = SplashWindow()
+        _log.write("7 splash obj\n"); _log.flush()
         splash.show()
+        _log.write("8 splash shown\n"); _log.flush()
 
     # Defer MainWindow construction to the event loop so the splash animation
     # can actually render while we build the (heavier) main window.
@@ -119,9 +129,18 @@ def main():
 
         if show_onboarding:
             try:
+                from PySide6.QtCore import QTimer
                 ob = OnboardingDialog()
                 ob.style_changed.connect(lambda s: win.apply_home_style(s))
+                # Safety net: if the wizard window is swallowed (e.g. blocked
+                # by a security app) or the user walks away, never let it hang
+                # the launcher forever — auto-continue after 30 s.
+                _onboard_timer = QTimer(ob)
+                _onboard_timer.setSingleShot(True)
+                _onboard_timer.timeout.connect(ob.reject)
+                _onboard_timer.start(30_000)
                 ob.exec()  # modal — blocks until user finishes or skips
+                _onboard_timer.stop()
             except Exception as e:
                 import traceback
                 err = "新手教程初始化失败：\n" + "".join(
@@ -167,8 +186,10 @@ def main():
         # Build the main window while the splash plays on top.
         # Pump events during construction so the splash animation stays smooth.
         app.processEvents()
+        _log.write("9 boot: building MainWindow\n"); _log.flush()
         try:
             win = MainWindow()
+            _log.write("10 MainWindow built\n"); _log.flush()
         except Exception as e:
             import traceback
             err = "主窗口构造时发生异常：\n" + "".join(

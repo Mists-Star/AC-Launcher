@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QGridLayout, QMenu, QComboBox,
 )
 from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QObject, QPropertyAnimation, QEasingCurve, QRectF
+from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QColor
 
 from .theme import COLORS, RoundedCard
 from .icons import icon
@@ -1016,6 +1017,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_DISPLAY)
         _icon_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "icons")
         _icon_path = None
+        # PNG preferred: the .ico is ~360KB and decoding it 7× stalls startup
+        # (one QIcon per pixmap call). One QIcon + .pixmap() reuses the cache.
         for _ext in ("png", "ico"):
             _p = os.path.normpath(os.path.join(_icon_base, f"logo.{_ext}"))
             if os.path.isfile(_p):
@@ -1027,7 +1030,7 @@ class MainWindow(QMainWindow):
             # both render crisply.
             ico = QIcon(_icon_path)
             for _sz in (16, 24, 32, 48, 64, 128, 256):
-                ico.addPixmap(QIcon(_icon_path).pixmap(_sz, _sz))
+                ico.addPixmap(ico.pixmap(_sz, _sz))
             self.setWindowIcon(ico)
         self.resize(1100, 720)
         self.setMinimumSize(900, 600)
