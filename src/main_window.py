@@ -14,9 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QProgressBar, QGridLayout, QMenu, QComboBox,
 )
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QObject
-from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QColor
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QObject, QPropertyAnimation, QEasingCurve, QRectF
 
 from .theme import COLORS, RoundedCard
 from .icons import icon
@@ -1276,7 +1274,7 @@ class MainWindow(QMainWindow):
                     break
         idx = STACK_INDEX.get("mods", 2)
         if idx is not None and 0 <= idx < self.stack.count():
-            self.stack.setCurrentIndex(idx)
+            self._switch_stack(idx)
         if hasattr(self, "mods_page"):
             self.mods_page.refresh()
 
@@ -1539,7 +1537,7 @@ class MainWindow(QMainWindow):
         elif key == "settings":
             # Re-read config + rebuild so the page reflects external changes.
             self.settings_page.reload()
-        self.stack.setCurrentIndex(idx)
+        self._switch_stack(idx)
 
     def _show_pcl2_placeholder(self, key: str):
         """Render a '敬请期待' page inside the PCL2 main area for features that
@@ -1632,7 +1630,7 @@ class MainWindow(QMainWindow):
                 # Re-read config + rebuild so the page reflects any external
                 # changes (e.g. language switched in a previous session).
                 self.settings_page.reload()
-            self.stack.setCurrentIndex(idx)
+            self._switch_stack(idx)
             return
         # ── Dialog-only nav items (account / lobby): visually stay on the
         # previous page (no nav row jump to home), open the dialog, then
@@ -1656,11 +1654,46 @@ class MainWindow(QMainWindow):
 
         def _restore_nav():
             if 0 <= saved_idx < self.stack.count():
-                self.stack.setCurrentIndex(saved_idx)
+                self._switch_stack(saved_idx)
             else:
-                self.stack.setCurrentIndex(0)
+                self._switch_stack(0)
                 self.home._refresh()
         QTimer.singleShot(50, _restore_nav)
+
+    def _switch_stack(self, idx: int):
+        """Switch the content stack with a short fade-in (PCL2-style motion).
+
+        Falls back to an instant switch if the target index is invalid or the
+        window hasn't been shown yet (avoid animating during construction).
+        """
+        if not 0 <= idx < self.stack.count():
+            return
+        if idx == self.stack.currentIndex():
+            return
+        self.stack.setCurrentIndex(idx)
+        page = self.stack.currentWidget()
+        if page is None or not self.isVisible():
+            return
+        # Fade the incoming page in (opacity 0.25 → 1.0, 140ms).
+        try:
+            from PySide6.QtWidgets import QGraphicsOpacityEffect
+            eff = QGraphicsOpacityEffect(page)
+            page.setGraphicsEffect(eff)
+            anim = QPropertyAnimation(eff, b"opacity", self)
+            anim.setDuration(140)
+            anim.setStartValue(0.25)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+
+            def _cleanup():
+                page.setGraphicsEffect(None)
+                eff.deleteLater()
+
+            anim.finished.connect(_cleanup)
+            self._stack_anim = anim  # keep alive
+            anim.start()
+        except Exception:
+            page.setGraphicsEffect(None)
 
     def _show_page(self, key: str):
         """Programmatically switch the content stack to the given nav key."""
