@@ -237,6 +237,77 @@ def _check_assets() -> CheckResult:
 # --------------------------------------------------------------------------- #
 # public API
 # --------------------------------------------------------------------------- #
+def _check_network() -> CheckResult:
+    """Reachability of the core download endpoints (mojang / bmclapi / modrinth).
+
+    Pure TCP connect test — no HTTPS handshake, no downloads. A failing
+    endpoint explains "无法连接" style errors in versions / mods pages.
+    """
+    import socket
+    targets = [
+        ("launchermeta.mojang.com", 443, "diag.d.net.mojang"),
+        ("bmclapi2.bangbang93.com", 443, "diag.d.net.bmclapi"),
+        ("api.modrinth.com", 443, "diag.d.net.modrinth"),
+    ]
+    bad = []
+    for host, port, label_key in targets:
+        try:
+            s = socket.create_connection((host, port), timeout=5)
+            s.close()
+        except Exception as e:
+            bad.append(f"{t(label_key)} ({type(e).__name__})")
+    if bad:
+        return CheckResult(
+            "network", "diag.check.network", "diag.cat.launcher", STATUS_WARN,
+            t("diag.d.net.err", bad="、".join(bad)), repairable=False,
+        )
+    return CheckResult(
+        "network", "diag.check.network", "diag.cat.launcher", STATUS_OK,
+        t("diag.d.net.ok"), repairable=False,
+    )
+
+
+def _check_ui_state() -> CheckResult:
+    """Sanity-check the live UI: stack page count + duplicated HomePage.
+
+    Called from the main thread (needs the running MainWindow). Detects the
+    "double page" symptom early: if the content stack somehow holds two
+    HomePage instances (or the count looks wrong) we surface a warning that
+    explains what to reset.
+    """
+    try:
+        from PySide6.QtWidgets import QApplication
+        wins = QApplication.topLevelWidgets()
+        main = None
+        for w in wins:
+            cls = type(w).__name__
+            if cls == "MainWindow" and hasattr(w, "stack"):
+                main = w
+                break
+        if main is None:
+            return CheckResult(
+                "ui", "diag.check.ui", "diag.cat.launcher", STATUS_SKIP,
+                t("diag.d.ui.skip"), repairable=False,
+            )
+        n = main.stack.count()
+        from .main_window import HomePage
+        dup = sum(1 for i in range(n) if isinstance(main.stack.widget(i), HomePage))
+        if dup > 1:
+            return CheckResult(
+                "ui", "diag.check.ui", "diag.cat.launcher", STATUS_WARN,
+                t("diag.d.ui.dup_home", n=dup), repairable=False,
+            )
+        return CheckResult(
+            "ui", "diag.check.ui", "diag.cat.launcher", STATUS_OK,
+            t("diag.d.ui.ok", n=n), repairable=False,
+        )
+    except Exception as e:  # noqa: BLE001 - diagnostics must never crash
+        return CheckResult(
+            "ui", "diag.check.ui", "diag.cat.launcher", STATUS_SKIP,
+            f"{type(e).__name__}: {e}", repairable=False,
+        )
+
+
 def run_diagnostics() -> list[CheckResult]:
     """Run every check and return the results (fast, no downloads)."""
     return [
@@ -248,6 +319,8 @@ def run_diagnostics() -> list[CheckResult]:
         _check_assets(),
         _check_java(),
         _check_gamefiles(),
+        _check_network(),
+        _check_ui_state(),
     ]
 
 
