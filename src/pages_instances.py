@@ -774,6 +774,15 @@ class InstancesPage(QWidget):
         self.detail_scroll.setWidget(self.detail_content)
         body.addWidget(self.detail_scroll, stretch=1)
 
+        # ── empty-state layer (built once, toggled in _refresh) ──
+        # Inserting/removing a widget in _refresh repeatedly is what caused
+        # "double page" — Qt keeps the old slot in the layout, so the next
+        # insert lands *next to* the stale one. Build it once here and just
+        # show()/hide() it.
+        self._empty_holder = self._empty_state()
+        self._empty_holder.setVisible(False)
+        root.insertWidget(1, self._empty_holder)  # between head and body
+
         root.addLayout(body, stretch=1)
         QTimer.singleShot(0, self._refresh)
 
@@ -796,41 +805,23 @@ class InstancesPage(QWidget):
         cur = self.mgr.current_id
         insts = self.mgr.list()
         if not insts:
-            # teardown any leftover empty-state holder from a previous refresh,
-            # otherwise every refresh would stack another one on top.
-            if getattr(self, "_empty_holder", None) is not None:
-                # removeWidget detaches from layout; setParent(None) alone
-                # leaves the widget referenced by the layout, so the next
-                # insertWidget slots in *before* it instead of replacing.
-                self.layout().removeWidget(self._empty_holder)
-                self._empty_holder.setParent(None)
-                try:
-                    from shiboken6 import delete as _shibdelete
-                    _shibdelete(self._empty_holder)
-                except Exception:
-                    self._empty_holder.deleteLater()
-                self._empty_holder = None
-            # empty state fills the whole body
+            # toggle the pre-built empty-state layer — never insert/remove
+            # widgets here (that produced stacked "double page" cards).
+            holder = getattr(self, "_empty_holder", None)
+            if holder is not None:
+                holder.setVisible(True)
+                holder.raise_()
             self.list_lbl.setVisible(False)
             self.list_scroll.setVisible(False)
             self.detail_scroll.setVisible(False)
-            self._empty_holder = self._empty_state()
-            self.layout().insertWidget(self.layout().count() - 1,
-                                       self._empty_holder)
             return
 
         self.list_lbl.setVisible(True)
         self.list_scroll.setVisible(True)
         self.detail_scroll.setVisible(True)
-        if getattr(self, "_empty_holder", None) is not None:
-            self.layout().removeWidget(self._empty_holder)
-            self._empty_holder.setParent(None)
-            try:
-                from shiboken6 import delete as _shibdelete
-                _shibdelete(self._empty_holder)
-            except Exception:
-                self._empty_holder.deleteLater()
-            self._empty_holder = None
+        holder = getattr(self, "_empty_holder", None)
+        if holder is not None:
+            holder.setVisible(False)
 
         for inst in insts:
             row = _InstRow(inst, is_current=(inst.id == cur))
