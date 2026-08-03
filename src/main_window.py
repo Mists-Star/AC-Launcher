@@ -221,6 +221,16 @@ class HomePage(QWidget):
         an entire layout (which can leave transient orphans during very rapid
         rebuilds) — the old C++ object is destroyed immediately, so its visual
         frame cannot bleed into the next."""
+        # DIAG: log every content rebuild + a stack hint so we can find what
+        # triggers "打开窗口 → 页面重建". Removed once the root cause is fixed.
+        try:
+            import traceback as _tb
+            _stack = _tb.extract_stack(limit=6)
+            _caller = " <- ".join(f"{f.filename.split(chr(92))[-1]}:{f.lineno}:{f.name}" for f in _stack[-4:-1])
+            with open("_rebuild_trace.log", "a", encoding="utf-8") as _f:
+                _f.write(f"_replace_content by: {_caller}\n")
+        except Exception:
+            pass
         root = self.layout()
         if root is None:
             return
@@ -1682,6 +1692,15 @@ class MainWindow(QMainWindow):
 
     def _show_page(self, key: str):
         """Programmatically switch the content stack to the given nav key."""
+        # DIAG: log page switches to correlate with the "double page" report.
+        try:
+            import traceback as _tb
+            _stack = _tb.extract_stack(limit=5)
+            _caller = " <- ".join(f"{f.filename.split(chr(92))[-1]}:{f.lineno}:{f.name}" for f in _stack[-3:-1])
+            with open("_showpage_trace.log", "a", encoding="utf-8") as _f:
+                _f.write(f"_show_page('{key}') by: {_caller} | stack.current={self.stack.currentIndex()}\n")
+        except Exception:
+            pass
         if self.nav_layout == "pcl2":
             self._pcl2_goto(key)
             return
@@ -1816,6 +1835,21 @@ class MainWindow(QMainWindow):
 
     def retranslate_ui(self):
         """Reload all user-facing strings after a language change."""
+        # Skip the expensive home rebuild when nothing actually changed —
+        # startup calls retranslate_ui() unconditionally, and a full home
+        # rebuild (~0.5s) is what made the welcome screen feel like it
+        # "loads forever". First call still rebuilds (builds the page).
+        try:
+            from .i18n import get_language
+            _now = get_language()
+        except Exception:
+            _now = None
+        _lang = getattr(self, "_app_lang", None)
+        if _lang == _now and getattr(self, "_home_built", False):
+            return  # no language change → skip the expensive home rebuild
+        self._app_lang = _now
+        self._home_built = True
+
         # 1. Nav — layout-specific (the nav widget differs between AC / PCL2).
         if self.nav_layout == "pcl2":
             for k, b in self._pcl2_top_btns.items():
