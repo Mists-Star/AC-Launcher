@@ -227,13 +227,15 @@ class HomePage(QWidget):
         idx = root.indexOf(self.content)
         if idx < 0:
             return
-        root.removeWidget(self.content)
+        # Detach first, then schedule deletion — using deleteLater (not shiboken
+        # delete) avoids the C++ object surviving across the new insertWidget
+        # call when the widget still has queued paint events, which previously
+        # manifested as "double home/instances" cards.
         old = self.content
-        try:
-            from shiboken6 import delete as _sh_delete
-            _sh_delete(old)
-        except Exception:
-            old.deleteLater()
+        root.removeWidget(old)
+        old.hide()  # drop any pending paints before delete
+        old.setParent(None)
+        old.deleteLater()
         new_content = QWidget()
         new_content.setAttribute(Qt.WA_TranslucentBackground, True)
         root.insertWidget(idx, new_content, stretch=1)
