@@ -1626,6 +1626,12 @@ class MainWindow(QMainWindow):
         if row < 0 or not hasattr(self, "_nav_row_map") or row not in self._nav_row_map:
             return
         key = self._nav_row_map[row]
+        # DIAG: log nav → stack switching so we can see why "实例页高亮但显示首页".
+        try:
+            with open("_nav_trace.log", "a", encoding="utf-8") as _f:
+                _f.write(f"_on_nav(row={row}, key='{key}') stack_cur={self.stack.currentIndex()} count={self.stack.count()}\n")
+        except Exception:
+            pass
         # Remember the row the user was on BEFORE clicking — used to restore
         # the nav highlight after a dialog (account / lobby) closes, so it
         # feels like a pop-up rather than a navigation.
@@ -1689,6 +1695,13 @@ class MainWindow(QMainWindow):
         if idx == self.stack.currentIndex():
             return
         self.stack.setCurrentIndex(idx)
+        # DIAG: verify the widget actually switched (double-page investigation).
+        try:
+            _w = self.stack.currentWidget()
+            with open("_nav_trace.log", "a", encoding="utf-8") as _f:
+                _f.write(f"  _switch_stack({idx}) -> now showing {type(_w).__name__}\n")
+        except Exception:
+            pass
 
     def _show_page(self, key: str):
         """Programmatically switch the content stack to the given nav key."""
