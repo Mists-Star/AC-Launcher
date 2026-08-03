@@ -309,7 +309,12 @@ def _check_ui_state() -> CheckResult:
 
 
 def run_diagnostics() -> list[CheckResult]:
-    """Run every check and return the results (fast, no downloads)."""
+    """Run every check and return the results (fast, no downloads).
+
+    NOTE: intentionally excludes the UI-state check — it touches live Qt
+    widgets and must run on the GUI thread. Call :func:`check_ui_state_now`
+    separately from the main thread.
+    """
     return [
         _check_deps(),
         _check_datadir(),
@@ -320,8 +325,15 @@ def run_diagnostics() -> list[CheckResult]:
         _check_java(),
         _check_gamefiles(),
         _check_network(),
-        _check_ui_state(),
     ]
+
+
+def check_ui_state_now() -> CheckResult:
+    """UI-state check; must run on the main (GUI) thread.
+
+    Detects the "double page" symptom: two HomePage instances in the stack.
+    """
+    return _check_ui_state()
 
 
 def repair(check_id: str) -> str:

@@ -151,6 +151,13 @@ class DiagnosticsDialog(QDialog):
         self._worker.start()
 
     def _on_done(self, results: list[diag.CheckResult]) -> None:
+        # UI-state check touches live widgets → must run on the GUI thread.
+        try:
+            ui_r = diag.check_ui_state_now()
+            if ui_r.status != diag.STATUS_SKIP:
+                results = results + [ui_r]
+        except Exception:
+            pass
         self._render(results)
         self._set_running(False)
 
