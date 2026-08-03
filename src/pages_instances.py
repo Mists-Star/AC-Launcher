@@ -799,6 +799,10 @@ class InstancesPage(QWidget):
             # teardown any leftover empty-state holder from a previous refresh,
             # otherwise every refresh would stack another one on top.
             if getattr(self, "_empty_holder", None) is not None:
+                # removeWidget detaches from layout; setParent(None) alone
+                # leaves the widget referenced by the layout, so the next
+                # insertWidget slots in *before* it instead of replacing.
+                self.layout().removeWidget(self._empty_holder)
                 self._empty_holder.setParent(None)
                 try:
                     from shiboken6 import delete as _shibdelete
@@ -819,6 +823,7 @@ class InstancesPage(QWidget):
         self.list_scroll.setVisible(True)
         self.detail_scroll.setVisible(True)
         if getattr(self, "_empty_holder", None) is not None:
+            self.layout().removeWidget(self._empty_holder)
             self._empty_holder.setParent(None)
             try:
                 from shiboken6 import delete as _shibdelete
