@@ -151,17 +151,9 @@ class LoginDialog(QDialog):
             sep1.setAlignment(Qt.AlignCenter)
             lb.addWidget(sep1)
         else:
-            # 没有配置有效 Azure 应用时显示一行说明，避免玩家点不存在/不工作的按钮
-            from .win_rounded import QLabel as _QL  # noqa
-            note = QLabel(t("login.microsoft_unavailable"))
-            note.setProperty("cls", "sub")
-            note.setWordWrap(True)
-            note.setAlignment(Qt.AlignCenter)
-            lb.addWidget(note)
-            sep1 = QLabel(t("login.or"))
-            sep1.setProperty("cls", "sub")
-            sep1.setAlignment(Qt.AlignCenter)
-            lb.addWidget(sep1)
+            # 没有配置有效 Azure 应用时不显示任何微软登录提示——
+            # 玩家没配置就别提，没意义反而碍眼。
+            pass
 
         # 离线模式（零配置，无需账号）
         off = QHBoxLayout()

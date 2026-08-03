@@ -720,8 +720,16 @@ class InstancesPage(QWidget):
         self.new_btn.clicked.connect(self._new)
         head.addWidget(self.new_btn)
 
+        # 扫描并导入（把已有的 MC 文件夹接管/复制成实例）
+        self.scan_btn = QPushButton(t("instances.scan_import"))
+        self.scan_btn.setMinimumHeight(38)
+        self.scan_btn.setIcon(icon("search"))
+        self.scan_btn.setIconSize(QSize(16, 16))
+        self.scan_btn.clicked.connect(self._open_scan)
+        head.addWidget(self.scan_btn)
+
+        # 导入整合包（.mrpack 文件）—— 次级样式以免和新建立例按钮视觉冲突
         self.mrpack_btn = QPushButton(t("instances.import_mrpack"))
-        self.mrpack_btn.setProperty("cls", "accent")
         self.mrpack_btn.setMinimumHeight(38)
         self.mrpack_btn.setIcon(icon("download"))
         self.mrpack_btn.setIconSize(QSize(16, 16))
@@ -1055,6 +1063,13 @@ class InstancesPage(QWidget):
                                 java_path=java_path)
             self._selected_id = inst.id
             self._refresh()
+
+    def _open_scan(self):
+        """Open the scan dialog to import existing MC folders from elsewhere."""
+        from .scan_dialog import ScanDialog
+        ScanDialog(self).exec()
+        # refresh in case the user took over / copied instances
+        self._refresh()
             self.current_changed.emit(inst.id)
 
     def _import_mrpack(self):

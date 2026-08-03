@@ -108,7 +108,7 @@ a = Analysis(
         "src.core.easytier",
     ],
     hookspath=[],
-    runtime_hooks=[],
+    runtime_hooks=["_rt_hook_ssl.py"],
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -128,7 +128,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,  # GUI app — no console window
+    console=False,  # GUI app — no console window
+    runtime_hooks=[],  # no ssl debug hook in release builds
     icon="assets/icons/logo.ico",
 )
 coll = COLLECT(

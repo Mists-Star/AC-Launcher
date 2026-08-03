@@ -137,7 +137,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "login.microsoft": "使用微软账号登录（正版）",
         "login.microsoft_sep": "或",
         "login.microsoft_note": "Microsoft 已要求正版 MC 登录必须通过 Azure 应用注册（已撤回免注册入口）。如需登录正版服务器，请到设置配置 Azure client_id。或使用离线 / 外置登录。",
-        "login.microsoft_unavailable": "⚠ 正版 Microsoft 登录暂不可用（微软已撤回公共 client_id）。请使用离线模式或外置登录。",
+        "login.microsoft_unavailable": "",
         "login.or": "— 或 —",
         "login.offline_name": "离线用户名",
         "login.offline_placeholder": "Player",
@@ -410,6 +410,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "crash.reason.fatal_exception": "游戏进程抛出了致命异常（详见下方日志摘要）。",
         "crash.fix.fatal_exception": "查看日志摘要定位根因；可先禁用最近安装的模组/资源包再试。",
         "instances.import_mrpack": "导入整合包",
+        "instances.scan_import": "扫描并导入",
         # ---- 新版实例页（左列表右详情）----
         "instances.list_title": "实例列表",
         "instances.launch": "启动",
@@ -938,7 +939,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "login.microsoft": "Sign in with Microsoft (official)",
         "login.microsoft_sep": "or",
         "login.microsoft_note": "Microsoft now requires Azure app registration for licensed MC logins (public client_ids retired). Configure an Azure client_id in Settings, or use offline / third-party login.",
-        "login.microsoft_unavailable": "⚠ Microsoft login unavailable (Microsoft retired public client_ids). Please use offline or third-party login.",
+        "login.microsoft_unavailable": "",
         "login.or": "— or —",
         "login.offline_name": "Offline username",
         "login.offline_placeholder": "Player",
@@ -1212,6 +1213,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "crash.reason.fatal_exception": "The game process threw a fatal exception (see the log excerpt below).",
         "crash.fix.fatal_exception": "Inspect the log excerpt to find the root cause; try disabling recently installed mods / resource packs.",
         "instances.import_mrpack": "Import Modpack",
+        "instances.scan_import": "Scan & Import",
         # ---- instance page (list + details) ----
         "instances.list_title": "Instance list",
         "instances.launch": "Launch",
