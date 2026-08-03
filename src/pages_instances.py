@@ -358,7 +358,7 @@ class NewInstanceDialog(QDialog):
         grid = QGridLayout()
         grid.setSpacing(10)
         cols = 3
-        for i, (loader_id, _name) in enumerate(LOADERS):
+        for i, loader_id in enumerate(LOADERS):
             card = _LoaderCard(self, loader_id, LOADER_BADGE.get(loader_id, LOADER_BADGE["vanilla"]))
             self._loader_cards[loader_id] = card
             grid.addWidget(card, i // cols, i % cols)
