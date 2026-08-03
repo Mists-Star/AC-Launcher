@@ -354,7 +354,7 @@ _STRINGS: dict[str, dict[str, str]] = {
 
         # ---- instances page ----
         "instances.title": "实例",
-        "instances.new": "+ 新建实例",
+        "instances.new": "新建实例",
         "instances.empty_title": "还没有游戏实例",
         "instances.empty": "每个实例是独立的空间（版本 + 加载器 + 自己的 mods / 存档）。\n点击下方按钮创建你的第一个实例吧。",
         "instances.current": "当前",
@@ -1157,7 +1157,7 @@ _STRINGS: dict[str, dict[str, str]] = {
 
         # ---- instances page ----
         "instances.title": "Instances",
-        "instances.new": "+ New Instance",
+        "instances.new": "New Instance",
         "instances.empty_title": "No instances yet",
         "instances.empty": "Each instance is an isolated space (version + loader + its own mods / saves).\nCreate your first one with the button below.",
         "instances.current": "Current",
