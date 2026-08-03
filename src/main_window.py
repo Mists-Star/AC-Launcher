@@ -20,9 +20,9 @@ from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QColor
 from .theme import COLORS, RoundedCard
 from .icons import icon
 from .i18n import t
-from .instances import manager, Instance
-from .pages_instances import InstancesPage, ModsPage
-from .pages_browse import VersionsPage, StorePage
+from src.instances import manager, Instance
+from src.pages_instances import InstancesPage, ModsPage
+from src.pages_browse import VersionsPage, StorePage
 from .frameless import FramelessHelper
 from .worker import ProgressWorker
 from .launch import launch_instance
@@ -1688,13 +1688,18 @@ class MainWindow(QMainWindow):
             anim.setEndValue(1.0)
             anim.setEasingCurve(QEasingCurve.OutCubic)
 
+            # Always force opacity back to 1.0 when the animation finishes,
+            # even if the effect object itself is gone (rapid re-switch or a
+            # modal dialog (ScanDialog) pausing the event loop mid-fade).
+            # A lingering effect with opacity < 1.0 renders the page
+            # translucent on top of itself — the "double page" ghost.
             def _cleanup():
-                # setGraphicsEffect(None) already destroys the effect in C++;
-                # deleteLater() on it afterwards raises "already deleted".
-                # Guard with shiboken validity check for rapid re-switches.
                 try:
                     from shiboken6 import isValid as _shib_is_valid
                     if _shib_is_valid(page):
+                        eff_cur = page.graphicsEffect()
+                        if eff_cur is not None:
+                            eff_cur.setOpacity(1.0)
                         page.setGraphicsEffect(None)
                 except Exception:
                     try:
@@ -1703,10 +1708,14 @@ class MainWindow(QMainWindow):
                         pass
 
             anim.finished.connect(_cleanup)
+            anim.stopped.connect(_cleanup)  # also covers interruption (modal dialogs)
             self._stack_anim = anim  # keep alive
             anim.start()
         except Exception:
-            page.setGraphicsEffect(None)
+            try:
+                page.setGraphicsEffect(None)
+            except RuntimeError:
+                pass
 
     def _show_page(self, key: str):
         """Programmatically switch the content stack to the given nav key."""
