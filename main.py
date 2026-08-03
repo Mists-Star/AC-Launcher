@@ -68,6 +68,20 @@ def main():
     app.setWindowIcon(_app_icon())  # taskbar + title bar icon
     _log.write("3 icon ok\n"); _log.flush()
 
+    # ── Single-instance guard ─────────────────────────────────────────────
+    # Double-clicking the exe (or a stuck process) used to spawn a second
+    # window that visually overlapped the first ("双页"). QLockFile is a
+    # stale-lock-safe cross-process mutex: the second process fails to
+    # acquire and quits immediately.
+    from src.paths import get_config_path
+    from PySide6.QtCore import QLockFile
+    _lock = QLockFile(get_config_path("ac.lock"))
+    _lock.setStaleLockTime(30_000)  # 30 s: released on clean exit; stale after crash
+    if not _lock.tryLock(100):
+        _log.write("3.5 another instance already running — quitting\n"); _log.flush()
+        return  # already running: silently exit (or could raise the other window)
+    _log.write("3.5 single-instance lock acquired\n"); _log.flush()
+
     # Load config FIRST so theme mode can be applied before QSS generation
     cfg = load_config()
     _log.write("4 config ok\n"); _log.flush()
