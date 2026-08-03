@@ -1689,8 +1689,18 @@ class MainWindow(QMainWindow):
             anim.setEasingCurve(QEasingCurve.OutCubic)
 
             def _cleanup():
-                page.setGraphicsEffect(None)
-                eff.deleteLater()
+                # setGraphicsEffect(None) already destroys the effect in C++;
+                # deleteLater() on it afterwards raises "already deleted".
+                # Guard with shiboken validity check for rapid re-switches.
+                try:
+                    from shiboken6 import isValid as _shib_is_valid
+                    if _shib_is_valid(page):
+                        page.setGraphicsEffect(None)
+                except Exception:
+                    try:
+                        page.setGraphicsEffect(None)
+                    except RuntimeError:
+                        pass
 
             anim.finished.connect(_cleanup)
             self._stack_anim = anim  # keep alive
