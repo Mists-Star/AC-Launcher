@@ -46,3 +46,22 @@ _t_*
 _timing*
 _make_ico*
 _build_main.log
+
+# AC Launcher build artifacts (PyInstaller variants)
+dist_pi/
+dist_fix/
+dist_noupx/
+dist_console/
+dist_probe/
+dist_sslfix/
+build_pi/
+build_fix/
+build_noupx/
+build_console/
+build_probe/
+build_sslfix/
+dist_build_tmp/
+*.nuitka*
+nuitka-crash-report.xml
+pyarmor.bug.log
+launcher_config.json
