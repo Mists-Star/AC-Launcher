@@ -17,6 +17,29 @@ try:
 except Exception:
     pass
 
+# PyInstaller needs to find src.* as a real package, not a namespace package.
+# Two adjustments:
+#   1. Add src/ to pathex so PyInstaller's analysis can resolve "src.pages_*"
+#      imports the same way Python does at runtime.
+#   2. Hardcode every src.* submodule — collect_submodules + hiddenimports
+#      both silently dropped src.pages_instances once the list grew large.
+_src_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(SPEC)), "src"))
+_src_modules = [
+    "src", "src.accounts", "src.achievements", "src.achievements_page",
+    "src.async_image", "src.brand", "src.core", "src.core.auth",
+    "src.core.authlib", "src.core.easytier", "src.core.install",
+    "src.core.java", "src.core.java_install", "src.core.mirror",
+    "src.core.sound", "src.core.utils", "src.crash_analysis",
+    "src.crash_dialog", "src.diagnostics", "src.diagnostics_dialog",
+    "src.frameless", "src.i18n", "src.icons", "src.instances",
+    "src.java_manager_dialog", "src.launch", "src.lobby", "src.lobby_dialog",
+    "src.login_dialog", "src.main_window", "src.music_page", "src.net_api",
+    "src.onboarding", "src.pages_browse", "src.pages_instances", "src.paths",
+    "src.repair_log", "src.scan", "src.scan_dialog", "src.settings_dialog",
+    "src.skin_dialog", "src.skin_render", "src.skins", "src.splash_window",
+    "src.theme", "src.wallpaper", "src.win_rounded", "src.worker",
+]
+
 a = Analysis(
     ["main.py"],
     pathex=["."],
@@ -29,9 +52,7 @@ a = Analysis(
         ("C:/Users/<user>/.workbuddy/binaries/python/versions/3.13.12/DLLs/libcrypto-3-x64.dll", "."),
     ],
     datas=datas,
-    hiddenimports=[
-        "src",
-        "src.core",
+    hiddenimports=_src_modules + [
         # --- networking: PyInstaller misses these transitive deps ---
         # idna missing → urllib3 HTTPS raises ImportError → "HTTP 连接失败"
         "idna",
@@ -69,46 +90,9 @@ a = Analysis(
         "certifi",
         "charset_normalizer",
         "charset_normalizer.md__mypyc",
-        "src.pages_instances",
-        "src.pages_browse",
-        "src.scan_dialog",
-        "src.lobby_dialog",
-        "src.login_dialog",
-        "src.settings_dialog",
-        "src.onboarding",
-        "src.splash_window",
-        "src.skin_dialog",
-        "src.diagnostics_dialog",
-        "src.crash_dialog",
-        "src.java_manager_dialog",
-        "src.lobby",
-        "src.accounts",
-        "src.skins",
-        "src.skin_render",
-        "src.worker",
-        "src.theme",
-        "src.icons",
-        "src.i18n",
-        "src.instances",
-        "src.scan",
-        "src.diagnostics",
-        "src.net_api",
-        "src.launch",
-        "src.paths",
-        "src.brand",
-        "src.frameless",
-        "src.win_rounded",
-        "src.wallpaper",
-        "src.async_image",
-        "src.core.auth",
-        "src.core.authlib",
-        "src.core.mirror",
-        "src.core.install",
-        "src.core.java",
-        "src.core.easytier",
     ],
     hookspath=[],
-    runtime_hooks=["_rt_hook_ssl.py"],
+    runtime_hooks=[],
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -129,7 +113,6 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,  # GUI app — no console window
-    runtime_hooks=[],  # no ssl debug hook in release builds
     icon="assets/icons/logo.ico",
 )
 coll = COLLECT(

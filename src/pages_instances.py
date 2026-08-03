@@ -1070,7 +1070,6 @@ class InstancesPage(QWidget):
         ScanDialog(self).exec()
         # refresh in case the user took over / copied instances
         self._refresh()
-            self.current_changed.emit(inst.id)
 
     def _import_mrpack(self):
         """Pick a .mrpack file, preview its metadata, install into a new instance."""
