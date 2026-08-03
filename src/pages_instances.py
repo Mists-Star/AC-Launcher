@@ -788,6 +788,16 @@ class InstancesPage(QWidget):
         cur = self.mgr.current_id
         insts = self.mgr.list()
         if not insts:
+            # teardown any leftover empty-state holder from a previous refresh,
+            # otherwise every refresh would stack another one on top.
+            if getattr(self, "_empty_holder", None) is not None:
+                self._empty_holder.setParent(None)
+                try:
+                    from shiboken6 import delete as _shibdelete
+                    _shibdelete(self._empty_holder)
+                except Exception:
+                    self._empty_holder.deleteLater()
+                self._empty_holder = None
             # empty state fills the whole body
             self.list_lbl.setVisible(False)
             self.list_scroll.setVisible(False)
