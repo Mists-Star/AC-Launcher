@@ -131,7 +131,14 @@ def main():
             try:
                 from PySide6.QtCore import QTimer
                 ob = OnboardingDialog()
-                ob.style_changed.connect(lambda s: win.apply_home_style(s))
+                # Style apply must not depend on the main window having been
+                # fully constructed (it is built behind the splash). Defer it
+                # so the wizard never blocks waiting on a 1.4s window build.
+                ob.style_changed.connect(
+                    lambda s: QTimer.singleShot(
+                        0, lambda _s=s: win.apply_home_style(_s)
+                    )
+                )
                 # Safety net: if the wizard window is swallowed (e.g. blocked
                 # by a security app) or the user walks away, never let it hang
                 # the launcher forever — auto-continue after 30 s.
