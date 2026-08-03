@@ -1248,11 +1248,32 @@ class ModsPage(QWidget):
         self._render_mods()
 
     def _render_mods(self):
+        # Guard against re-entrancy: combo spam / rapid toggles can fire
+        # _render_mods twice before the first finishes; a stale render would
+        # rebuild over a fresh one. Skip if we're already rendering.
+        if getattr(self, "_rendering", False):
+            return
+        self._rendering = True
+        try:
+            self._render_mods_inner()
+        finally:
+            self._rendering = False
+
+    def _render_mods_inner(self):
+        # Synchronously destroy old cards: deleteLater() leaves them alive
+        # until the event loop turns, so a rapid second call (instance combo
+        # spam, refresh during animation) would addWidget over still-alive
+        # C++ objects → layout corruption / crash.
         while self._vbox.count():
             item = self._vbox.takeAt(0)
             w = item.widget()
             if w is not None:
-                w.deleteLater()
+                w.setParent(None)
+                try:
+                    from shiboken6 import delete as _shib_delete
+                    _shib_delete(w)
+                except Exception:
+                    w.deleteLater()
         inst = self._target()
         if inst is None:
             empty = QLabel(t("mods.select_instance"))

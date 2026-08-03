@@ -1666,58 +1666,19 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(50, _restore_nav)
 
     def _switch_stack(self, idx: int):
-        """Switch the content stack with a short fade-in (PCL2-style motion).
+        """Switch the content stack.
 
-        Falls back to an instant switch if the target index is invalid or the
-        window hasn't been shown yet (avoid animating during construction).
+        No fade animation here. A QGraphicsOpacityEffect fade-in gets paused /
+        orphaned whenever a modal dialog (ScanDialog, settings, …) opens while
+        it's mid-flight, leaving the page translucent on top of itself — the
+        "double page" ghost users kept seeing. An instant switch is visually
+        fine and cannot leave any stale effect behind.
         """
         if not 0 <= idx < self.stack.count():
             return
         if idx == self.stack.currentIndex():
             return
         self.stack.setCurrentIndex(idx)
-        page = self.stack.currentWidget()
-        if page is None or not self.isVisible():
-            return
-        # Fade the incoming page in (opacity 0.25 → 1.0, 140ms).
-        try:
-            from PySide6.QtWidgets import QGraphicsOpacityEffect
-            eff = QGraphicsOpacityEffect(page)
-            page.setGraphicsEffect(eff)
-            anim = QPropertyAnimation(eff, b"opacity", self)
-            anim.setDuration(140)
-            anim.setStartValue(0.25)
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-
-            # Always force opacity back to 1.0 when the animation finishes,
-            # even if the effect object itself is gone (rapid re-switch or a
-            # modal dialog (ScanDialog) pausing the event loop mid-fade).
-            # A lingering effect with opacity < 1.0 renders the page
-            # translucent on top of itself — the "double page" ghost.
-            def _cleanup():
-                try:
-                    from shiboken6 import isValid as _shib_is_valid
-                    if _shib_is_valid(page):
-                        eff_cur = page.graphicsEffect()
-                        if eff_cur is not None:
-                            eff_cur.setOpacity(1.0)
-                        page.setGraphicsEffect(None)
-                except Exception:
-                    try:
-                        page.setGraphicsEffect(None)
-                    except RuntimeError:
-                        pass
-
-            anim.finished.connect(_cleanup)
-            anim.stopped.connect(_cleanup)  # also covers interruption (modal dialogs)
-            self._stack_anim = anim  # keep alive
-            anim.start()
-        except Exception:
-            try:
-                page.setGraphicsEffect(None)
-            except RuntimeError:
-                pass
 
     def _show_page(self, key: str):
         """Programmatically switch the content stack to the given nav key."""
