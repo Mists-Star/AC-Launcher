@@ -36,6 +36,12 @@ class MirrorSession(requests.Session):
 
     Also honours a process-wide proxy setting (see ``set_proxy``), so a user
     behind a corporate / GFW proxy can route Minecraft downloads through it.
+
+    round-48 B：多源回退。重写后走 BMCLAPI（主源），若该文件在 BMCLAPI 上失败
+    （HTTP ≥400 如 404/403/502，或连接错误如超时/被墙），自动改用该文件原始的
+    官方 URL 重试一次 —— 对齐 prism-bootstrap 的 per-file 多源回退，避免因镜像
+    个别文件缺失导致整个安装失败。仅在命中 Mojang 重写规则时参与，非 Mojang
+    主机原样透传，不影响 Modrinth 等其它下载。
     """
 
     def __init__(self, *args, **kwargs):
@@ -43,7 +49,40 @@ class MirrorSession(requests.Session):
         _apply_proxy(self, _PROXY)
 
     def request(self, method, url, *args, **kwargs):  # type: ignore[override]
-        return super().request(method, _rewrite(url), *args, **kwargs)
+        # 原样构建 PreparedRequest（保留原始 URL 供 send() 做回退判断）
+        return super().request(method, url, *args, **kwargs)
+
+    def send(self, request, **kwargs):  # type: ignore[override]
+        if request.url and isinstance(request.url, str):
+            orig = request.url
+            rewritten = _rewrite(orig)
+            if rewritten != orig and request.method == "GET":
+                # 主源 = BMCLAPI；失败再试官方源
+                request.url = rewritten
+                got = self._send_once(request, **kwargs)
+                if got is not None:
+                    return got
+                request.url = orig
+                return self._send_once(request, **kwargs, last=True)
+        return super().send(request, **kwargs)
+
+    def _send_once(self, request, *, last=False, **kwargs):
+        """发一次请求。成功(2xx)返回响应；非 last 时 ≥400 或连接错误返回 None
+        触发上层换源；last(已到官方源) 时原样返回（含 ≥400），让调用方按
+        「可选库缺失」等语义处理。"""
+        try:
+            resp = super().send(request, **kwargs)
+        except requests.RequestException:
+            if last:
+                raise
+            return None
+        if not last and resp.status_code >= 400:
+            try:
+                resp.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        return resp
 
 
 def _rewrite(url):

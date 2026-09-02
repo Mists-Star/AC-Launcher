@@ -140,7 +140,8 @@ def install_java(major: int, progress=None, image_type: str = "jre") -> str:
     try:
         if tmp_zip.endswith(".zip") and zipfile.is_zipfile(tmp_zip):
             with zipfile.ZipFile(tmp_zip) as z:
-                z.extractall(target)
+                from .utils import safe_extract_zip
+                safe_extract_zip(z, target)  # round-35 zip-slip 防护
         else:  # linux/mac tarballs
             shutil.unpack_archive(tmp_zip, target)
     finally:

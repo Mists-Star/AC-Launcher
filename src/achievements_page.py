@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 
 from .theme import COLORS, RoundedCard
 from .i18n import t
+from . import ui_kit
 from .achievements import ACHIEVEMENTS, CATEGORY_KEYS, achievements
 
 _CAT_LABEL = {
@@ -73,12 +74,7 @@ class AchievementsPage(QWidget):
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
 
-        head = QHBoxLayout()
-        title = QLabel(t("ach.title"))
-        title.setProperty("cls", "big")
-        head.addWidget(title)
-        head.addStretch(1)
-        root.addLayout(head)
+        root.addWidget(ui_kit.page_header(t("ach.title"), icon_key="achievements"))
 
         # progress bar
         self.progress = QProgressBar()

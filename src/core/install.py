@@ -30,6 +30,13 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
     ``proxy`` is the download_proxy setting ("none"/"system"/custom URL) so a
     user behind a proxy can still fetch game files.
     """
+    # round-42 auto 源：测速决定是否走 bmclapi 重写（对齐 HMCL auto provider）
+    if mirror == "auto":
+        try:
+            from ..net_api import _pick_auto_mirror
+            mirror = "bmclapi" if "bmclapi" in _pick_auto_mirror() else "official"
+        except Exception:
+            mirror = "official"
     if mirror == "bmclapi" or proxy:
         from .mirror import patch_install_session, set_proxy
         set_proxy(proxy or None)
@@ -162,6 +169,74 @@ def install_mrpack(mrpack_path: str, mc_dir: str, *, mirror: str = "official",
     return minecraft_launcher_lib.mrpack.get_mrpack_launch_version(mrpack_path)
 
 
+def apply_mrpack_to_instance(mrpack_path: str, inst, *, mirror: str = "official",
+                             proxy: str = "", callback=None) -> str:
+    """把整合包应用到**已有实例**（中轴：二次安装/升级，round-38）。
+
+    对齐 PCL2/HMCL 的"对现有实例更新整合包"：
+    1. 备份会被覆盖的 mods/config/options.txt → data/backups/<inst_id>_<ts>/
+    2. install_mrpack 覆盖安装（mll 原生支持已有目录升级：解压 overrides、
+       下载 base game + loader + 全部 mod）
+    3. 更新实例元数据：version_id（启动用）、loader/loader_version（从
+       mrpack index.json 推断）
+
+    返回新的 launch version id。``inst`` 会被就地更新（调用方负责 _save）。
+    """
+    import shutil
+    import zipfile
+    import time as _time
+
+    from ..paths import get_data_dir
+
+    # 1) 备份被覆盖内容
+    backup_root = os.path.join(get_data_dir(), "backups")
+    backup_dir = os.path.join(backup_root, f"{getattr(inst, 'id', 'inst')}_{int(_time.time())}")
+    try:
+        for sub in ("mods", "config"):
+            src = os.path.join(inst.mc_dir, sub)
+            if os.path.isdir(src) and os.listdir(src):
+                shutil.copytree(src, os.path.join(backup_dir, sub),
+                                dirs_exist_ok=True)
+        for name in ("options.txt", "servers.dat"):
+            src = os.path.join(inst.mc_dir, name)
+            if os.path.isfile(src):
+                os.makedirs(backup_dir, exist_ok=True)
+                shutil.copy2(src, os.path.join(backup_dir, name))
+    except OSError:
+        pass  # 备份失败不阻塞应用（尽量备份即可）
+
+    # 2) 覆盖安装
+    launch_version = install_mrpack(
+        mrpack_path, inst.mc_dir, mirror=mirror, proxy=proxy, callback=callback)
+
+    # 3) 从 mrpack 推断 loader（index.json: {"dependencies": {"minecraft":…, "fabric-loader":…}}）
+    try:
+        with zipfile.ZipFile(mrpack_path) as z:
+            index = _safe_json(z.read("index.json"))
+        deps = index.get("dependencies", {}) if isinstance(index, dict) else {}
+        mc_ver = deps.get("minecraft", inst.game_version)
+        inst.game_version = mc_ver or inst.game_version
+        for key in ("fabric-loader", "quilt-loader", "forge", "neoforge", "liteloader"):
+            if deps.get(key):
+                inst.loader = key.split("-")[0] if key != "neoforge" else "neoforge"
+                inst.loader_version = deps[key]
+                break
+    except Exception:
+        pass
+    if launch_version:
+        inst.version_id = launch_version
+    return launch_version
+
+
+def _safe_json(data: bytes):
+    """minified json → dict；容错返回 {}。"""
+    import json as _json
+    try:
+        return _json.loads(data)
+    except Exception:
+        return {}
+
+
 def install_liteloader(mc_version: str, mc_dir: str, *,
                        build_version: str = "", tweak_class: str = "",
                        libraries: list | None = None,
@@ -184,8 +259,7 @@ def install_liteloader(mc_version: str, mc_dir: str, *,
     )
 
     # 2) resolve jar url (snapshots maven repo; try timestamped then SNAPSHOT)
-    from ..net_api import liteloader_jar_url
-    import requests
+    from ..net_api import liteloader_jar_url, parallel_download_file
     jar_name = f"liteloader-{build_version}.jar" if build_version else "liteloader.jar"
     jar_url = liteloader_jar_url(mc_version, build_version) if build_version else ""
     ver_dir = os.path.join(mc_dir, "versions", f"{mc_version}-LiteLoader")
@@ -193,13 +267,7 @@ def install_liteloader(mc_version: str, mc_dir: str, *,
     jar_path = os.path.join(ver_dir, jar_name)
 
     if jar_url:
-        r = requests.get(jar_url, timeout=120, stream=True,
-                         headers={"User-Agent": "MC-Launcher/0.1"})
-        if r.status_code == 200:
-            with open(jar_path, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    if chunk:
-                        f.write(chunk)
+        parallel_download_file(jar_url, jar_path, timeout=120)
 
     # 3) version json: inherits base, launchwrapper main, tweak class
     liteloader_libs = [
@@ -303,26 +371,23 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
     """
     import subprocess
     import tempfile
-    import requests
-    import re as _re
+    from ..net_api import parallel_download_file
 
     if not installer_url:
         raise RuntimeError("Cleanroom: missing installer URL (need loader_version)")
     tmp_dir = tempfile.mkdtemp(prefix="ac_cleanroom_")
-    jar_path = os.path.join(tmp_dir, "cleanroom-installer.jar")
-    r = requests.get(installer_url, timeout=180, stream=True,
-                     headers={"User-Agent": "MC-Launcher/0.1"})
-    r.raise_for_status()
-    with open(jar_path, "wb") as f:
-        for chunk in r.iter_content(8192):
-            if chunk:
-                f.write(chunk)
-    if callback:
-        callback({"stage": "cleanroom", "progress": 0.6, "status": "运行 Cleanroom 安装器…"})
-    subprocess.run(
-        [java, "-jar", jar_path, "--installClient", mc_dir],
-        check=True, capture_output=True, timeout=300,
-    )
+    try:
+        jar_path = os.path.join(tmp_dir, "cleanroom-installer.jar")
+        parallel_download_file(installer_url, jar_path, timeout=180)
+        if callback:
+            callback({"stage": "cleanroom", "progress": 0.6, "status": "运行 Cleanroom 安装器…"})
+        subprocess.run(
+            [java, "-jar", jar_path, "--installClient", mc_dir],
+            check=True, capture_output=True, timeout=300,
+        )
+    finally:
+        # round-40 P2 泄漏修复：清理临时安装器（10-100MB jar）
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     # Locate the produced version id: <mc>-Cleanroom_<build> or similar
     version_id = f"{mc_version}-Cleanroom"
     vdir = os.path.join(mc_dir, "versions")
@@ -362,13 +427,17 @@ def _install_optifine(mc_version, mc_dir, *, build="", java="java", callback=Non
         target = builds[0]
     filename = target["_filename"]
     tmp_dir = tempfile.mkdtemp(prefix="ac_optifine_")
-    jar_path = download_optifine_to(filename, tmp_dir)
-    if callback:
-        callback({"stage": "optifine", "progress": 0.6, "status": "运行 OptiFine 安装器…"})
-    subprocess.run(
-        [java, "-jar", jar_path, "--installDir", mc_dir],
-        check=True, capture_output=True, timeout=300,
-    )
+    try:
+        jar_path = download_optifine_to(filename, tmp_dir)
+        if callback:
+            callback({"stage": "optifine", "progress": 0.6, "status": "运行 OptiFine 安装器…"})
+        subprocess.run(
+            [java, "-jar", jar_path, "--installDir", mc_dir],
+            check=True, capture_output=True, timeout=300,
+        )
+    finally:
+        # round-40 P2 泄漏修复：清理临时安装器目录
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     # produced version id: <mc>-OptiFine_<build>
     version_id = f"{mc_version}-OptiFine_{target.get('title', build)}"
     vdir = os.path.join(mc_dir, "versions")

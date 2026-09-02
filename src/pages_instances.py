@@ -17,18 +17,23 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QScrollArea, QDialog, QFormLayout, QLineEdit, QComboBox,
     QSizePolicy, QGridLayout, QCheckBox, QProgressBar,
+    QStackedWidget, QButtonGroup, QSplitter, QGraphicsOpacityEffect,
 )
 from PySide6.QtCore import Qt, Signal, QSize, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 
 from .theme import COLORS, RoundedCard
+from .effects import LightTrailCard  # round-50 卡片混合：实例详情卡流光
+from . import ui_kit
 from .icons import icon
 from .frameless import FramelessHelper, TitleBar
 from .win_rounded import enable_win11_round_corners, confirm, pick_files, info, warn
 from .i18n import t, loader_name
 from .instances import manager, Instance, LOADERS
 from .net_api import fetch_versions
+from .settings_dialog import load_config
 from .worker import Worker, ProgressWorker
+from .async_image import make_version_pixmap
 
 
 # ---------------------------------------------------------------- Instances
@@ -88,8 +93,10 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
     if loader == "cleanroom":
         from .net_api import fetch_cleanroom_builds
         try:
+            # round-34 修复：字段是 _installer_url（之前误读 _build 恒空 →
+            # loader_version 空 → install.py 缺 installer URL 直接抛异常）
             return [
-                {"title": b["title"], "meta": b.get("_build", "")}
+                {"title": b["title"], "meta": b.get("_installer_url", "")}
                 for b in fetch_cleanroom_builds()
             ]
         except Exception:
@@ -118,6 +125,16 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
             ]
     except Exception:
         pass
+    # quilt via minecraft-launcher-lib（round-68 补齐分支）
+    try:
+        from minecraft_launcher_lib.mod_loader import Quilt
+        if loader == "quilt":
+            return [
+                {"title": v, "meta": v}
+                for v in Quilt().get_loader_versions(mc_version, True)
+            ]
+    except Exception:
+        pass
     # fabric via minecraft-launcher-lib
     try:
         from minecraft_launcher_lib.fabric import get_all_loader_versions
@@ -131,13 +148,14 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
     return []
 
 
-class InstanceCard(RoundedCard):
+class InstanceCard(LightTrailCard):
     set_current = Signal(str)
     removed = Signal(str)
     analyze = Signal(object)  # CrashAnalyzerDialog
 
     def __init__(self, inst: Instance, is_current: bool, parent=None):
-        super().__init__(radius=12, parent=parent)
+        # round-50 实例列表流光：低强度慢速，视觉整洁不抢主内容
+        super().__init__(radius=12, parent=parent, strength=0.45, speed=0.6)
         self.inst = inst
         self.setMinimumHeight(84)
         self.setMaximumHeight(96)  # anti-stretch: cap height so the card stays compact
@@ -208,14 +226,17 @@ class InstanceCard(RoundedCard):
         lay.addWidget(del_btn)
 
 
-class _InstRow(RoundedCard):
+class _InstRow(LightTrailCard):
     """Compact row for the left instance list (Prism style)."""
 
     clicked = Signal(str)
 
-    def __init__(self, inst: Instance, is_current: bool, parent=None):
-        super().__init__(radius=10, parent=parent)
+    def __init__(self, inst: Instance, is_current: bool, parent=None,
+                 on_menu=None):
+        # round-50 左侧实例列表流光：低强度慢速，视觉整洁
+        super().__init__(radius=10, parent=parent, strength=0.4, speed=0.55)
         self.inst = inst
+        self._on_menu = on_menu  # round-42 右键菜单回调
         self._selected = False
         self.setMinimumHeight(56)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -254,9 +275,19 @@ class _InstRow(RoundedCard):
                         2 if on else 1)
         self.update()
 
+    def refresh_state(self, is_current: bool):
+        """round-38 性能：更新 ✓ 标签而不重建行（快切卡顿优化）。"""
+        self._cur_tag.setVisible(is_current)
+
     def mousePressEvent(self, e):
         self.clicked.emit(self.inst.id)
         super().mousePressEvent(e)
+
+    def contextMenuEvent(self, e):
+        # round-42 右键菜单（对齐 Prism 鼠标流）：on_menu(inst, global_pos)
+        if self._on_menu is not None:
+            self._on_menu(self.inst, e.globalPos())
+        e.accept()
 
 
 class _LoaderCard(QFrame):
@@ -310,111 +341,360 @@ class _LoaderCard(QFrame):
 
 
 class NewInstanceDialog(QDialog):
-    """Create-instance wizard: name → loader → game version → Java."""
+    """Two-step create-instance wizard:
 
-    def __init__(self, parent=None, preset_version: str = ""):
+    Step 1 — pick a game version (card list like VersionsPage).
+    Step 2 — pick a compatible mod loader, loader version, Java and name.
+
+    When ``embedded=True`` the widget is placed directly inside another page
+    (no separate window, no title bar) and reports its outcome through the
+    ``created`` / ``cancelled`` signals.  When ``embedded=False`` it behaves
+    like a normal modal dialog.
+
+    This mirrors mainstream launchers (PCL2 / HMCL) and prevents players from
+    choosing loaders that do not exist for the selected Minecraft version.
+    """
+
+    created = Signal(str, str, str, str, str)   # name, version, loader, java_path, loader_version
+    cancelled = Signal()
+
+    _GROUP_ORDER = ["release", "snapshot", "april", "legacy"]
+    _GROUP_OF_TYPE = {"release": "release", "snapshot": "snapshot",
+                      "old_beta": "legacy", "old_alpha": "legacy"}
+    # round-38 性能：版本组懒加载，每组最多渲染这些卡（其余折叠「显示全部」）
+    _MAX_GROUP_VISIBLE = 12
+
+    def __init__(self, parent=None, preset_version: str = "", embedded: bool = False):
         super().__init__(parent)
-        self.setWindowTitle(t("new_instance.title"))
-        self.setMinimumWidth(520)
-        self._versions = []
+        self._group_expanded: dict[str, bool] = {}
+        self._embedded = embedded
+        self._versions: list[dict] = []
+        self._selected_version: str = preset_version or ""
         self._loader = "vanilla"
         self._java_path = ""
-        self._loader_cards = {}
         self._preset_version = preset_version
+        self._loader_cards: dict[str, _LoaderCard] = {}
+        self._version_filter = "all"
+        self._version_search = ""
+        self._busy = False  # 防抖：过渡期间禁止页间切换（round-29 防快速连点闪退）
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.titlebar = TitleBar(self, title=t("new_instance.title"), height=38)
-        root.addWidget(self.titlebar)
+        if not embedded:
+            self.setWindowTitle(t("new_instance.title"))
+            self.setMinimumWidth(640)
+            self.setMinimumHeight(520)
+            self.titlebar = TitleBar(self, title=t("new_instance.title"), height=38)
+            root.addWidget(self.titlebar)
+        else:
+            self.titlebar = None
+            # 嵌入式模式必须去掉 QDialog 的 Window/Dialog 窗口标志，否则它被
+            # addWidget 进 QStackedWidget 后仍会被 Qt 渲染成「浮动独立窗口」叠加
+            # 在主页之上；关闭时 deleteLater 延迟销毁，浮动窗残留 = 持续双页。
+            # 设为 Qt.Widget 使其成为被 stack 正常管理的普通子控件。
+            self.setWindowFlags(Qt.Widget)
+            self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+        self.stack = QStackedWidget()
+        self._page_version = self._build_version_page()
+        self._page_loader = self._build_loader_page()
+        self.stack.addWidget(self._page_version)
+        self.stack.addWidget(self._page_loader)
+        root.addWidget(self.stack, stretch=1)
 
-        body = QWidget()
-        lay = QVBoxLayout(body)
+        if not embedded:
+            self._frameless = FramelessHelper(self)
+            self._frameless.set_titlebar(self.titlebar)
+            from .win_rounded import enable_win11_round_corners
+            enable_win11_round_corners(self)
+        else:
+            self._frameless = None
+
+        # round-46 用户反馈"新建实例看不到任何东西"：先显示 loading 占位，
+        # fetch 完成后替换。替代方案是显示空白。
+        loading = QLabel(t("versions.loading"))
+        loading.setProperty("cls", "sub")
+        loading.setAlignment(Qt.AlignCenter)
+        loading.setMinimumHeight(80)
+        self._ver_vbox.addWidget(loading)
+        self._ver_loading_label = loading
+
+        # default state
+        self._select_loader("vanilla")
+        if preset_version:
+            self._go_to_loader_page()
+
+        self._worker = Worker(fetch_versions)
+        self._worker.finished.connect(self._on_versions)
+        self._worker.error.connect(self._on_versions_error)
+        self._worker.start()
+
+    # ------------------------------------------------------------------ page 1
+    def _build_version_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
         lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(18)
+        lay.setSpacing(16)
 
-        scroll.setWidget(body)
-        root.addWidget(scroll, stretch=1)
+        title = QLabel(t("new_instance.step_version"))
+        title.setProperty("cls", "big")
+        lay.addWidget(title)
 
-        # ── name ──
-        name_lbl = QLabel(t("new_instance.name"))
-        name_lbl.setProperty("cls", "group")
-        lay.addWidget(name_lbl)
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText(t("new_instance.name_placeholder"))
-        self.name_edit.setMinimumHeight(36)
-        lay.addWidget(self.name_edit)
+        # filter chips
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(8)
+        chip_row.addStretch(1)
+        self._ver_filter_group = QButtonGroup(self)
+        self._ver_filter_group.setExclusive(True)
+        self._ver_filter_btns: dict[str, QPushButton] = {}
+        for key, lbl in [
+            ("all", t("versions.filter_all")),
+            ("release", t("versions.filter_release")),
+            ("snapshot", t("versions.filter_snapshot")),
+            ("april", t("versions.filter_april")),
+            ("legacy", t("versions.filter_legacy")),
+        ]:
+            btn = QPushButton(lbl)
+            btn.setCheckable(True)
+            btn.setMinimumHeight(32)
+            btn.clicked.connect(lambda _checked=False, k=key: self._set_version_filter(k))
+            self._ver_filter_group.addButton(btn)
+            self._ver_filter_btns[key] = btn
+            chip_row.addWidget(btn)
+        chip_row.addStretch(1)
+        lay.addLayout(chip_row)
 
-        # ── loader picker ──
-        ld_title = QLabel(t("new_instance.loader_pick"))
-        ld_title.setProperty("cls", "group")
-        lay.addWidget(ld_title)
+        # search
+        self._ver_search = QLineEdit()
+        self._ver_search.setPlaceholderText(t("versions.filter_placeholder"))
+        self._ver_search.setMinimumHeight(34)
+        self._ver_search.textChanged.connect(self._on_version_search)
+        lay.addWidget(self._ver_search)
 
-        grid = QGridLayout()
-        grid.setSpacing(10)
+        # version card list
+        self._ver_scroll = QScrollArea()
+        self._ver_scroll.setWidgetResizable(True)
+        self._ver_scroll.setFrameShape(QFrame.NoFrame)
+        self._ver_content = QWidget()
+        self._ver_vbox = QVBoxLayout(self._ver_content)
+        self._ver_vbox.setContentsMargins(0, 0, 0, 0)
+        self._ver_vbox.setSpacing(10)
+        self._ver_scroll.setWidget(self._ver_content)
+        lay.addWidget(self._ver_scroll, stretch=1)
+
+        # now that _ver_vbox exists, apply the default filter
+        self._set_version_filter("all")
+
+        # footer
+        foot = QHBoxLayout()
+        foot.addStretch(1)
+        cancel = QPushButton(t("new_instance.cancel"))
+        cancel.setMinimumHeight(38)
+        cancel.clicked.connect(self._on_cancel)
+        self._next_btn = QPushButton(t("new_instance.next"))
+        self._next_btn.setProperty("cls", "accent")
+        self._next_btn.setMinimumHeight(38)
+        self._next_btn.setEnabled(bool(self._selected_version))
+        self._next_btn.clicked.connect(self._go_to_loader_page)
+        foot.addWidget(cancel)
+        foot.addWidget(self._next_btn)
+        lay.addLayout(foot)
+        return page
+
+    def _set_version_filter(self, key: str):
+        self._version_filter = key
+        for k, btn in self._ver_filter_btns.items():
+            btn.setChecked(k == key)
+            self._style_filter_btn(btn, k == key)
+        self._refresh_version_list()
+
+    def _style_filter_btn(self, btn: QPushButton, active: bool):
+        if active:
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {COLORS['accent']}; color: #FFFFFF; "
+                f"border: none; border-radius: 8px; padding: 5px 14px; font-weight: 600; }}"
+            )
+        else:
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {COLORS['bg_panel']}; color: {COLORS['text_sub']}; "
+                f"border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 5px 14px; }}"
+                f"QPushButton:hover {{ background: {COLORS['bg_hover']}; color: {COLORS['text_main']}; }}"
+            )
+
+    def _on_version_search(self, text: str):
+        self._version_search = text.strip().lower()
+        self._refresh_version_list()
+
+    def _group_of(self, v: dict) -> str:
+        if v.get("april"):
+            return "april"
+        return self._GROUP_OF_TYPE.get(v.get("type", "release"), "legacy")
+
+    def _refresh_version_list(self):
+        # round-38 性能：懒加载——每组最多渲染 _MAX_GROUP_VISIBLE 张卡，
+        # 超出折叠为「显示全部 N 个」按钮（全量渲染 200+ 卡导致新建向导卡顿）
+        while self._ver_vbox.count():
+            item = self._ver_vbox.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        versions = [v for v in self._versions
+                    if not self._version_search or self._version_search in v.get("id", "").lower()]
+        groups = self._GROUP_ORDER if self._version_filter == "all" else [self._version_filter]
+        expanded = getattr(self, "_group_expanded", {})
+
+        for g in groups:
+            members = [v for v in versions if self._group_of(v) == g]
+            if not members:
+                continue
+            # latest group at top when "all"
+            if self._version_filter == "all" and g == "release":
+                latest = members[0]
+                snap_members = [v for v in versions if self._group_of(v) == "snapshot"]
+                latest_snap = snap_members[0] if snap_members else None
+                hdr = QLabel(t("versions.group.latest"))
+                hdr.setProperty("cls", "group")
+                self._ver_vbox.addWidget(hdr)
+                self._ver_vbox.addWidget(self._make_version_card(latest))
+                if latest_snap and latest_snap["id"] != latest["id"]:
+                    self._ver_vbox.addWidget(self._make_version_card(latest_snap))
+                continue
+            hdr = QLabel(t(f"versions.group.{g}"))
+            hdr.setProperty("cls", "group")
+            self._ver_vbox.addWidget(hdr)
+            show_all = expanded.get(g, False)
+            visible = members if (show_all or len(members) <= self._MAX_GROUP_VISIBLE) \
+                else members[:self._MAX_GROUP_VISIBLE]
+            for v in visible:
+                self._ver_vbox.addWidget(self._make_version_card(v))
+            if not show_all and len(members) > self._MAX_GROUP_VISIBLE:
+                more = QPushButton(t("versions.show_all", n=len(members)))
+                more.setProperty("cls", "secondary")
+                more.setMinimumHeight(32)
+                more.setCursor(Qt.PointingHandCursor)
+                more.clicked.connect(lambda _, gg=g: self._expand_version_group(gg))
+                self._ver_vbox.addWidget(more)
+        self._ver_vbox.addStretch(1)
+
+    def _expand_version_group(self, group: str):
+        """展开某版本组（懒加载优化）。"""
+        if not hasattr(self, "_group_expanded"):
+            self._group_expanded = {}
+        self._group_expanded[group] = True
+        self._refresh_version_list()
+
+    def _make_version_card(self, v: dict) -> QFrame:
+        ver_id = v["id"]
+        vtype = "april" if v.get("april") else v.get("type", "release")
+        card = RoundedCard(radius=12)
+        card.setMinimumHeight(72)
+        lay = QHBoxLayout(card)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(12)
+
+        tile = QLabel()
+        tile.setPixmap(make_version_pixmap(ver_id, vtype, 48))
+        tile.setFixedSize(48, 48)
+        lay.addWidget(tile)
+
+        info = QVBoxLayout()
+        info.setSpacing(2)
+        name = QLabel(ver_id)
+        name.setProperty("cls", "title")
+        info.addWidget(name)
+        date = QLabel(t("versions.released", date=v.get("releaseTime", "")[:10]))
+        date.setProperty("cls", "sub")
+        info.addWidget(date)
+        lay.addLayout(info, stretch=1)
+
+        selected = QLabel("✓ " + t("instances.current") if ver_id == self._selected_version else "")
+        if selected.text():
+            selected.setStyleSheet(f"color: {COLORS['success']}; font-weight: 600;")
+            lay.addWidget(selected)
+
+        btn = QPushButton(t("versions.install"))
+        btn.setMinimumHeight(32)
+        if ver_id == self._selected_version:
+            btn.setProperty("cls", "accent")
+            btn.setText(t("instances.current"))
+        btn.clicked.connect(lambda _checked=False, vid=ver_id: self._select_version(vid))
+        lay.addWidget(btn)
+        return card
+
+    def _select_version(self, ver_id: str):
+        self._selected_version = ver_id
+        self._next_btn.setEnabled(True)
+        self._refresh_version_list()
+
+    # ------------------------------------------------------------------ page 2
+    def _build_loader_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(16)
+
+        # header with back-to-version
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        title = QLabel(t("new_instance.step_loader"))
+        title.setProperty("cls", "big")
+        head.addWidget(title)
+        head.addStretch(1)
+        self._selected_ver_lbl = QLabel()
+        self._selected_ver_lbl.setProperty("cls", "sub")
+        head.addWidget(self._selected_ver_lbl)
+        change_ver = QPushButton(t("new_instance.browse_versions"))
+        change_ver.setMinimumHeight(32)
+        change_ver.clicked.connect(self._go_to_version_page)
+        head.addWidget(change_ver)
+        lay.addLayout(head)
+
+        # compatible loader grid
+        # round-29：移除"选择原版"卡片——玩家不选任何附加加载器即为原版，
+        # 默认 _loader="vanilla"，无卡时也是原版，无需冗余选项。
+        self._loader_grid = QGridLayout()
+        self._loader_grid.setSpacing(10)
         cols = 3
-        for i, loader_id in enumerate(LOADERS):
+        ui_loaders = [l for l in LOADERS if l != "vanilla"]
+        # round-68 设置开关：show_quilt=False 时新建实例页不出现 Quilt 卡片
+        if not load_config().get("show_quilt", True):
+            ui_loaders = [l for l in ui_loaders if l != "quilt"]
+        for i, loader_id in enumerate(ui_loaders):
             card = _LoaderCard(self, loader_id, LOADER_BADGE.get(loader_id, LOADER_BADGE["vanilla"]))
             self._loader_cards[loader_id] = card
-            grid.addWidget(card, i // cols, i % cols)
-        # LabyMod card (opens the official site — not installable in-app)
+            self._loader_grid.addWidget(card, i // cols, i % cols)
+        # LabyMod is not installable in-app; keep it as a link card
         labymod_card = _LoaderCard(self, "labymod", LOADER_BADGE.get("labymod"))
-        grid.addWidget(labymod_card, len(LOADERS) // cols, len(LOADERS) % cols)
-        lay.addLayout(grid)
+        self._loader_cards["labymod"] = labymod_card
+        self._loader_grid.addWidget(labymod_card, len(ui_loaders) // cols, len(ui_loaders) % cols)
+        lay.addLayout(self._loader_grid)
 
-        # ── game version ──
-        ver_title = QLabel(t("new_instance.version"))
-        ver_title.setProperty("cls", "group")
-        lay.addWidget(ver_title)
-        self.version_combo = QComboBox()
-        self.version_combo.setMinimumHeight(36)
-        if preset_version:
-            # 从版本页"安装"进入：锁定该版本，避免玩家改错。
-            self.version_combo.setEnabled(False)
-            self.version_combo.addItem(preset_version, preset_version)
-        else:
-            self.version_combo.addItem(t("new_instance.loading"))
-        # ── 跳到版本库选择 ──
-        # 同步体验：NewInstanceDialog 的 QComboBox 是平铺下拉，跟 VersionsPage
-        # 的"最新/正式/快照/愚人节"分组卡片视觉差距大。给玩家一个"在版本库选"入口，
-        # 跳到 VersionsPage 的卡牌界面（带加载器筛选），选完回调填入当前 combo。
-        self.browse_btn = QPushButton(t("new_instance.browse_versions"))
-        self.browse_btn.setMinimumHeight(32)
-        self.browse_btn.clicked.connect(self._open_versions_picker)
-        if preset_version:
-            self.browse_btn.setEnabled(False)
-        lay.addWidget(self.version_combo)
-        lay.addWidget(self.browse_btn)
-        self.snap_toggle = QCheckBox(t("new_instance.show_snapshots"))
-        self.snap_toggle.setChecked(False)
-        self.snap_toggle.toggled.connect(self._on_snap_toggle)
-        lay.addWidget(self.snap_toggle)
+        self._no_loader_hint = QLabel(t("new_instance.no_compatible_loader"))
+        self._no_loader_hint.setProperty("cls", "sub")
+        self._no_loader_hint.setAlignment(Qt.AlignCenter)
+        self._no_loader_hint.setVisible(False)
+        lay.addWidget(self._no_loader_hint)
 
-        # ── loader version (hidden until a loader is chosen) ──
+        # loader version
         ldver_box = QWidget()
-        ldver_box.setVisible(False)
-        lv_lay = QVBoxLayout(ldver_box)
-        lv_lay.setContentsMargins(0, 0, 0, 0)
-        lv_lay.setSpacing(6)
+        ldver_lay = QVBoxLayout(ldver_box)
+        ldver_lay.setContentsMargins(0, 0, 0, 0)
+        ldver_lay.setSpacing(6)
         ldver_title = QLabel(t("new_instance.loader_version"))
         ldver_title.setProperty("cls", "group")
-        lv_lay.addWidget(ldver_title)
+        ldver_lay.addWidget(ldver_title)
         self.ldver_combo = QComboBox()
         self.ldver_combo.setMinimumHeight(36)
         self.ldver_combo.addItem(t("new_instance.ldver_latest"))
         self.ldver_combo.setToolTip(t("new_instance.ldver_hint"))
-        lv_lay.addWidget(self.ldver_combo)
+        ldver_lay.addWidget(self.ldver_combo)
         self.ldver_box = ldver_box
         lay.addWidget(ldver_box)
-        # 版本变化 → 重新拉该版本的加载器列表
-        self.version_combo.currentIndexChanged.connect(self._on_version_changed)
 
-        # ── Java ──
+        # Java
         java_title = QLabel(t("new_instance.java_section"))
         java_title.setProperty("cls", "group")
         lay.addWidget(java_title)
@@ -437,113 +717,152 @@ class NewInstanceDialog(QDialog):
         self.java_row_w.setVisible(False)
         lay.addWidget(self.java_row_w)
 
-        # ── save path preview ──
+        # name
+        name_lbl = QLabel(t("new_instance.name"))
+        name_lbl.setProperty("cls", "group")
+        lay.addWidget(name_lbl)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText(t("new_instance.name_placeholder"))
+        self.name_edit.setMinimumHeight(36)
+        self.name_edit.textChanged.connect(self._update_path)
+        lay.addWidget(self.name_edit)
+
+        # path preview
         self.path_lbl = QLabel()
         self.path_lbl.setProperty("cls", "sub")
         self.path_lbl.setWordWrap(True)
         self.path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         lay.addWidget(self.path_lbl)
 
-        # ── footer ──
+        lay.addStretch(1)
+
+        # footer
         foot = QHBoxLayout()
         foot.addStretch(1)
+        back = QPushButton(t("new_instance.back"))
+        back.setMinimumHeight(38)
+        back.clicked.connect(self._go_to_version_page)
         cancel = QPushButton(t("new_instance.cancel"))
         cancel.setMinimumHeight(38)
-        cancel.clicked.connect(self.reject)
+        cancel.clicked.connect(self._on_cancel)
         ok = QPushButton(t("new_instance.create"))
         ok.setProperty("cls", "accent")
         ok.setMinimumHeight(38)
-        ok.clicked.connect(self.accept)
+        ok.clicked.connect(self._on_create)
+        foot.addWidget(back)
         foot.addWidget(cancel)
         foot.addWidget(ok)
         lay.addLayout(foot)
+        return page
 
-        # frameless + DWM rounded corners
-        self._frameless = FramelessHelper(self)
-        self._frameless.set_titlebar(self.titlebar)
-        from .win_rounded import enable_win11_round_corners
-        enable_win11_round_corners(self)
-
-        # default to vanilla, kick off version fetch
-        self._select_loader("vanilla")
-        self.name_edit.textChanged.connect(self._update_path)
-        self._update_path()
-
-        self._worker = Worker(fetch_versions)
-        self._worker.finished.connect(self._on_versions)
-        self._worker.error.connect(lambda e: None)
-        self._worker.start()
-
-    # ------------------------------------------------------------------
-    def _mc_too_new_for_liteloader(self) -> bool:
-        parts = self._current_version_id().split(".")
+    def _go_to_loader_page(self):
+        if not self._selected_version:
+            return
+        # 防抖：round-29 用户反馈快速连续点击会闪退。
+        # _busy 在过渡期间禁用所有 next/back，动画完成后重置。
+        if self._busy:
+            return
+        self._busy = True
         try:
-            major, minor = int(parts[0]), int(parts[1])
-            return (major, minor) > (1, 12)
+            self._selected_ver_lbl.setText(t("new_instance.selected_version", ver=self._selected_version))
+            self._update_compatible_loaders()
+            self._update_path()
+            self.stack.setCurrentIndex(1)
+        finally:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(200, lambda: setattr(self, '_busy', False))
+
+    def _go_to_version_page(self):
+        if getattr(self, '_busy', False):
+            return
+        self._busy = True
+        try:
+            self.stack.setCurrentIndex(0)
+            self._refresh_version_list()
+        finally:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(200, lambda: setattr(self, '_busy', False))
+
+    # ---------------- loader compatibility ----------------
+    def _parse_mc_version(self, ver: str) -> tuple[int, int]:
+        parts = ver.split(".")
+        try:
+            return int(parts[0]), int(parts[1])
         except Exception:
-            return True  # unknown version — assume too new
+            return 0, 0
+
+    def _compatible_loaders(self, ver: str) -> list[str]:
+        """Return loaders that make sense for the chosen MC version.
+
+        This is a conservative allow-list. It does not guarantee the loader has
+        a build for *every* patch version, but it prevents the user from seeing
+        impossible choices (e.g. NeoForge on 1.12.2).
+        """
+        major, minor = self._parse_mc_version(ver)
+        if major != 1:
+            return ["vanilla"]
+        loaders = ["vanilla"]
+        if minor >= 14:
+            loaders.append("fabric")
+        if minor >= 18:
+            # round-68 尊重设置开关：show_quilt=False 时 Quilt 不可选
+            if load_config().get("show_quilt", True):
+                loaders.append("quilt")
+        if minor >= 20:
+            loaders.append("neoforge")
+        # Forge exists for almost every release/snapshot
+        if minor >= 6:
+            loaders.append("forge")
+        if minor <= 13:
+            loaders.append("legacyfabric")
+        if minor <= 12:
+            loaders.extend(["liteloader", "cleanroom"])
+        # OptiFine standalone install is available for many versions
+        loaders.append("optifine")
+        # LabyMod is always a link-out, keep it visible
+        loaders.append("labymod")
+        return loaders
+
+    def _update_compatible_loaders(self):
+        allowed = set(self._compatible_loaders(self._selected_version))
+        visible_any = False
+        for loader_id, card in self._loader_cards.items():
+            ok = loader_id in allowed
+            card.setVisible(ok)
+            if ok:
+                visible_any = True
+        self._no_loader_hint.setVisible(not visible_any)
+        # if currently selected loader became incompatible, reset to vanilla
+        if self._loader not in allowed:
+            self._select_loader("vanilla")
+        else:
+            self._select_loader(self._loader)
 
     def _select_loader(self, loader_id: str):
         if loader_id == "labymod":
             self._open_labymod()
             return
-        if loader_id == "liteloader":
-            if self._mc_too_new_for_liteloader():
-                info(self, t("common.hint"),
-                     t("new_instance.ld_liteloader_new", ver=self._current_version_id()))
-                return
-        elif loader_id == "legacyfabric":
-            if not self._is_legacy_fabric_ok(self._current_version_id()):
-                info(self, t("common.hint"),
-                     t("new_instance.ld_legacyfabric_new"))
-                loader_id = "vanilla"
-        elif loader_id == "cleanroom":
-            if not self._is_legacy_fabric_ok("1.12.2"):
-                info(self, t("common.hint"),
-                     t("new_instance.ld_cleanroom_new"))
-                loader_id = "vanilla"
-
         self._loader = loader_id
         for lid, card in self._loader_cards.items():
-            card.set_selected(lid == loader_id)
-
+            card.set_selected(lid == loader_id and card.isVisible())
         show_ldver = loader_id not in ("vanilla", "optifine", "labymod")
-        if hasattr(self, "ldver_box"):
-            self.ldver_box.setVisible(show_ldver)
-            if show_ldver:
-                self._load_loader_versions()
+        self.ldver_box.setVisible(show_ldver)
+        if show_ldver:
+            self._load_loader_versions()
         self._update_path()
 
     def _open_labymod(self):
         QDesktopServices.openUrl(QUrl("https://www.labymod.net"))
         info(self, t("common.hint"), t("new_instance.labymod_visit"))
 
-    def _is_legacy_fabric_ok(self, ver: str) -> bool:
-        parts = ver.split(".")
-        try:
-            major, minor = int(parts[0]), int(parts[1])
-            return (major, minor) <= (1, 13)
-        except Exception:
-            return False
-
-    def _current_version_id(self) -> str:
-        return self.version_combo.currentData() or self.version_combo.currentText() or ""
-
-    def _on_version_changed(self, _index: int):
-        if self._loader not in ("vanilla", "optifine", "labymod"):
-            if hasattr(self, "ldver_box"):
-                self._load_loader_versions()
-        self._update_path()
-
     # ---------------- loader versions ----------------
     def _load_loader_versions(self):
-        mc = self._current_version_id()
+        mc = self._selected_version
         loader = self._loader
         self.ldver_combo.blockSignals(True)
         self.ldver_combo.clear()
         self.ldver_combo.addItem(t("new_instance.ldver_latest"))
         self.ldver_combo.blockSignals(False)
-        # 防竞态：生成器序号，只接受最新一次的返回
         gen = getattr(self, "_ldver_gen", 0) + 1
         self._ldver_gen = gen
         self._ldver_worker = Worker(_fetch_loader_versions, mc, loader)
@@ -553,7 +872,7 @@ class NewInstanceDialog(QDialog):
                 return
             self._on_loader_versions(versions)
 
-        def _err(e, g=gen):
+        def _err(_e, g=gen):
             if getattr(self, "_ldver_gen", 0) != g:
                 return
 
@@ -573,7 +892,7 @@ class NewInstanceDialog(QDialog):
         self.ldver_combo.blockSignals(False)
 
     def selected_loader_version(self) -> str:
-        if not hasattr(self, "ldver_combo") or not self.ldver_combo.isVisible():
+        if not self.ldver_box.isVisible():
             return ""
         return self.ldver_combo.currentData() or ""
 
@@ -592,67 +911,84 @@ class NewInstanceDialog(QDialog):
             self.java_path_lbl.setText(
                 t("new_instance.java_selected", path=self._java_path))
 
-    # ---------------- version library picker ----------------
-    def _open_versions_picker(self):
-        """Open a VersionsPage in a dialog; picking a version fills the combo."""
-        from .pages_browse import VersionsPage
-        dlg = QDialog(self)
-        dlg.setWindowTitle(t("new_instance.browse_versions_title"))
-        dlg.resize(880, 600)
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(0, 0, 0, 0)
-        v = VersionsPage()
-        # Intercept "install this version" → fill our combo instead of installing.
-        if hasattr(v, "instance_created"):
-            v.instance_created.disconnect()
-        orig_create = v._create
-
-        def _on_card_click(ver_id):
-            self.version_combo.blockSignals(True)
-            self.version_combo.clear()
-            self.version_combo.addItem(ver_id, ver_id)
-            self.version_combo.blockSignals(False)
-            self._on_version_changed(0)
-            dlg.accept()
-
-        def _pick_create(ver_id):
-            _on_card_click(ver_id)
-
-        v._create = _pick_create
-        lay.addWidget(v)
-        dlg.exec()
-
     # ---------------- versions ----------------
-    def _on_snap_toggle(self, on: bool):
-        self._populate_versions(on)
-
-    def _populate_versions(self, include_snap: bool):
-        self.version_combo.blockSignals(True)
-        self.version_combo.clear()
-        if not self._versions:
-            self.version_combo.addItem(t("new_instance.loading"))
-            self.version_combo.blockSignals(False)
-            return
-        versions = [v for v in self._versions
-                    if v.get("type") == "release"]
-        if include_snap:
-            versions = self._versions
-        for v in versions[:60]:
-            self.version_combo.addItem(v["id"], v["id"])
-        if self.version_combo.count() == 0:
-            self.version_combo.addItem("1.21.4", "1.21.4")
-        self.version_combo.blockSignals(False)
+    def closeEvent(self, e):
+        """round-44 闪退修复：关闭时版本 Worker 可能还在跑（网络慢），
+        它完成后 emit finished → 连到已销毁 dialog 的槽 → 崩（Internal C++
+        object already deleted / heap corruption）。关闭即中断 + join。"""
+        try:
+            w = getattr(self, "_worker", None)
+            if w is not None and w.isRunning():
+                w.requestInterruption()
+                w.wait(1500)
+        except Exception:
+            pass
+        super().closeEvent(e)
 
     def _on_versions(self, data):
-        err, versions = data if isinstance(data, tuple) else (None, data or [])
+        # round-44：dialog 已销毁（用户快速关闭）时静默返回，防信号回调崩
+        from shiboken6 import isValid
+        if not isValid(self):
+            return
+        # round-48 修复：原 isinstance(data, data) 笔误（第二参必须是类型）→
+        # TypeError 崩掉整个版本列表回调。Worker.finished 直接传
+        # fetch_versions() 的返回值 (latest, versions)；错误走 error 信号。
+        # round-57 加固：旧磁盘缓存/异常数据可能带来 list[str]，逐条过滤到
+        # dict 再使用，接住 net_api 侧的 schema 校验（防 _group_of 对 str 崩）。
+        data_list = data[1] if isinstance(data, tuple) and len(data) == 2 else (data or [])
+        versions = [v for v in data_list if isinstance(v, dict)]
+        err, versions = None, versions
         self._versions = versions or []
-        self._populate_versions(self.snap_toggle.isChecked())
+        # if a preset version is locked, make sure it exists in the list
+        if self._preset_version and not any(v.get("id") == self._preset_version for v in self._versions):
+            self._versions.insert(0, {"id": self._preset_version, "type": "release", "releaseTime": ""})
+        # round-46：fetch 完成后删 loading 占位再 refresh
+        try:
+            if getattr(self, "_ver_loading_label", None) is not None:
+                self._ver_vbox.removeWidget(self._ver_loading_label)
+                self._ver_loading_label.deleteLater()
+                self._ver_loading_label = None
+        except Exception:
+            pass
+        if err and not self._versions:
+            err_lbl = QLabel(t("versions.load_failed", err=str(err) if err else ""))
+            err_lbl.setProperty("cls", "sub")
+            err_lbl.setAlignment(Qt.AlignCenter)
+            err_lbl.setMinimumHeight(80)
+            err_lbl.setWordWrap(True)
+            self._ver_vbox.addWidget(err_lbl)
+            self._ver_vbox.addStretch(1)
+            return
+        self._refresh_version_list()
+
+    def _on_versions_error(self, exc):
+        """round-46：Worker.fetch_versions 失败回调（err tuple 中的 err）。
+
+        对应 Worker.error 信号（Worker 会把异常重打包成 (err, None) 传入
+        finished；此回调保留作 Worker 直接 emit error 时的兜底）。
+        """
+        from shiboken6 import isValid
+        if not isValid(self):
+            return
+        try:
+            if getattr(self, "_ver_loading_label", None) is not None:
+                self._ver_vbox.removeWidget(self._ver_loading_label)
+                self._ver_loading_label.deleteLater()
+                self._ver_loading_label = None
+        except Exception:
+            pass
+        err_lbl = QLabel(t("versions.load_failed", err=str(exc) if exc else ""))
+        err_lbl.setProperty("cls", "sub")
+        err_lbl.setAlignment(Qt.AlignCenter)
+        err_lbl.setMinimumHeight(80)
+        err_lbl.setWordWrap(True)
+        self._ver_vbox.addWidget(err_lbl)
+        self._ver_vbox.addStretch(1)
 
     # ---------------- naming / path ----------------
     def _auto_name(self) -> str:
-        ver = self.version_combo.currentData() or self.version_combo.currentText() or ""
-        ver = ver.strip()
-        if ver == t("new_instance.loading"):
+        ver = self._selected_version.strip()
+        if not ver:
             ver = "1.20.1"
         loader = self._loader
         name = ver
@@ -668,16 +1004,32 @@ class NewInstanceDialog(QDialog):
         else:
             self.name_edit.setPlaceholderText(t("new_instance.name_placeholder"))
         from .paths import get_data_dir
-        safe_name = "".join(c for c in (name or auto) if c not in "-_. ")
+        # round-40 P3 修复：过滤方向反了——应保留安全字符，去掉 Windows 非法字符
+        # （之前 c not in "-_. " 删掉连字符/点/空格却保留 \\/:*?\"<>| ）
+        safe_name = "".join(
+            c for c in (name or auto)
+            if c.isalnum() or c in "-_. ()"
+        ) or "instance"
         preview = os.path.join(get_data_dir(), "instances", f"{safe_name}/")
         self.path_lbl.setText(t("new_instance.save_to", path=preview))
+
+    def _on_cancel(self):
+        if self._embedded:
+            self.cancelled.emit()
+        else:
+            self.reject()
+
+    def _on_create(self):
+        if self._embedded:
+            self.created.emit(*self.result_data())
+        else:
+            self.accept()
 
     def result_data(self) -> tuple[str, str, str, str, str]:
         name = self.name_edit.text().strip()
         if not name:
             name = self._auto_name()
-        version = self.version_combo.currentData() or self.version_combo.currentText()
-        return (name, version, self._loader, self._java_path,
+        return (name, self._selected_version, self._loader, self._java_path,
                 self.selected_loader_version())
 
 
@@ -696,55 +1048,78 @@ class InstancesPage(QWidget):
 
     current_changed = Signal(str)
     section_requested = Signal(str, str)  # section key, instance id
+    scan_done = Signal()  # emitted when the embedded scanner closes
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.mgr = manager()
         self._rows: dict[str, _InstRow] = {}
         self._selected_id: str | None = None
+        self._scan_panel = None
+        self._new_panel = None
+        self._closing_new = False
+        self._closing_scan = False
+        self._empty_btn = None
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
 
         # ── header ──
-        head = QHBoxLayout()
-        self.title_lbl = QLabel(t("instances.title"))
-        self.title_lbl.setProperty("cls", "big")
-        head.addWidget(self.title_lbl)
-        head.addStretch(1)
-        self.new_btn = QPushButton(t("instances.new"))
-        self.new_btn.setProperty("cls", "accent")
-        self.new_btn.setMinimumHeight(38)
-        self.new_btn.setIcon(icon("add"))
-        self.new_btn.setIconSize(QSize(16, 16))
-        self.new_btn.clicked.connect(self._new)
-        head.addWidget(self.new_btn)
+        # round-45c 重做：header 按钮不再走全局 QSS（$bg_frost 替换 + 布局挤压
+        # 双重干扰导致文字模糊/重叠），改为 inline 样式 + setFixedWidth 完全
+        # 自控：字号 13px、明确边框、白底/紫底各一、图标+文字独立布局。
+        self.new_btn = self._mk_header_btn(
+            t("instances.new"), "add", self._new, w=110, accent=False)
+        self.scan_btn = self._mk_header_btn(
+            t("instances.scan_import"), "search", self._open_scan, w=132)
+        self.mrpack_btn = self._mk_header_btn(
+            t("instances.import_pack"), "download", self._import_mrpack, w=120)
+        head_actions = QWidget()
+        head_actions.setStyleSheet("background: transparent;")
+        hl = QHBoxLayout(head_actions)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(8)
+        hl.addWidget(self.new_btn)
+        hl.addWidget(self.scan_btn)
+        hl.addWidget(self.mrpack_btn)
+        hl.addStretch(1)
+        self._header = ui_kit.page_header(
+            t("instances.title"), action=head_actions, icon_key="instances")
+        self.title_lbl = self._header.title_lbl
+        root.addWidget(self._header)
 
-        # 扫描并导入（把已有的 MC 文件夹接管/复制成实例）
-        self.scan_btn = QPushButton(t("instances.scan_import"))
-        self.scan_btn.setMinimumHeight(38)
-        self.scan_btn.setIcon(icon("search"))
-        self.scan_btn.setIconSize(QSize(16, 16))
-        self.scan_btn.clicked.connect(self._open_scan)
-        head.addWidget(self.scan_btn)
+        # ── body: stacked view switcher (prevents the "double page" bug) ──
+        # We use a QStackedWidget for the body so only one view is ever visible:
+        #   0 = empty state   (no instances yet)
+        #   1 = split view    (list + details)
+        #   2 = new instance wizard
+        #   3 = scan panel
+        # This replaces the old manual show/hide juggling that left stale
+        # widgets stacked on top of each other.
+        self._body_stack = QStackedWidget()
 
-        # 导入整合包（.mrpack 文件）—— 次级样式以免和新建立例按钮视觉冲突
-        self.mrpack_btn = QPushButton(t("instances.import_mrpack"))
-        self.mrpack_btn.setMinimumHeight(38)
-        self.mrpack_btn.setIcon(icon("download"))
-        self.mrpack_btn.setIconSize(QSize(16, 16))
-        self.mrpack_btn.clicked.connect(self._import_mrpack)
-        head.addWidget(self.mrpack_btn)
-        root.addLayout(head)
+        # page 0: empty state
+        self._empty_page = self._empty_state()
+        self._body_stack.addWidget(self._empty_page)
 
-        # ── body: left list | right details ──
-        body = QHBoxLayout()
-        body.setSpacing(16)
+        # page 1: split view (left list | right details) with resizable splitter
+        self._split_view = QWidget()
+        body = QVBoxLayout(self._split_view)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
 
-        # ══ left column ══
-        left = QWidget()
-        left.setFixedWidth(280)
-        left_lay = QVBoxLayout(left)
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(3)
+        self._splitter.setStyleSheet(
+            "QSplitter::handle { background: transparent; }"
+            "QSplitter::handle:hover { background: rgba(124,58,237,0.3); }"
+        )
+
+        self._left_panel = QWidget()
+        self._left_panel.setMinimumWidth(220)
+        self._left_panel.setMaximumWidth(400)
+        left_lay = QVBoxLayout(self._left_panel)
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.setSpacing(8)
 
@@ -761,9 +1136,8 @@ class InstancesPage(QWidget):
         self._list_vbox.setSpacing(6)
         self.list_scroll.setWidget(self._list_content)
         left_lay.addWidget(self.list_scroll, stretch=1)
-        body.addWidget(left)
+        self._splitter.addWidget(self._left_panel)
 
-        # ══ right details panel ══
         self.detail_scroll = QScrollArea()
         self.detail_scroll.setWidgetResizable(True)
         self.detail_scroll.setFrameShape(QFrame.NoFrame)
@@ -772,62 +1146,87 @@ class InstancesPage(QWidget):
         self.detail_lay.setContentsMargins(0, 0, 0, 0)
         self.detail_lay.setSpacing(16)
         self.detail_scroll.setWidget(self.detail_content)
-        body.addWidget(self.detail_scroll, stretch=1)
+        self._splitter.addWidget(self.detail_scroll)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([280, 720])
 
-        # ── empty-state layer (built once, toggled in _refresh) ──
-        # Inserting/removing a widget in _refresh repeatedly is what caused
-        # "double page" — Qt keeps the old slot in the layout, so the next
-        # insert lands *next to* the stale one. Build it once here and just
-        # show()/hide() it.
-        self._empty_holder = self._empty_state()
-        self._empty_holder.setVisible(False)
-        root.insertWidget(1, self._empty_holder)  # between head and body
+        body.addWidget(self._splitter, stretch=1)
+        self._body_stack.addWidget(self._split_view)
 
-        root.addLayout(body, stretch=1)
+        root.addWidget(self._body_stack, stretch=1)
         QTimer.singleShot(0, self._refresh)
 
     # ------------------------------------------------------------------ view
-    def _refresh(self):
-        """Rebuild the left list + right details from the manager."""
-        # teardown rows
-        self._rows.clear()
-        while self._list_vbox.count():
-            item = self._list_vbox.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-                try:
-                    from shiboken6 import delete as _shibdelete
-                    _shibdelete(w)
-                except Exception:
-                    w.deleteLater()
+    def refresh(self):
+        """Public entry point: rebuild the instance list. Called by the main
+        window after the scan dialog closes so imported instances appear."""
+        self._refresh()
+
+    def _refresh(self, *, switch: bool = True):
+        """Rebuild the left list + right details from the manager.
+
+        ``switch=False`` leaves the body stack on its current page — useful
+        when the user is interacting with an embedded panel and we only need
+        to refresh the underlying list state before the panel closes.
+
+        round-38 性能：实例行改**增量更新**——只增删变化的行，未变行调用
+        refresh_state() 而不重建（之前每次全量销毁+重建所有行，快切卡顿）。
+        """
+        # 面板（新建向导 / 扫描面板）打开时，绝不切走 body stack 当前页，
+        # 否则延迟刷新会把面板直接隐藏掉，表现为「面板一开就消失 / 双页」。
+        if switch and (self._new_panel is not None or self._scan_panel is not None):
+            switch = False
 
         cur = self.mgr.current_id
-        insts = self.mgr.list()
+        # round-42 分组：同组连续显示（未分组排最后），视觉上形成分组
+        insts = sorted(self.mgr.list(),
+                       key=lambda i: ((i.group or "~").lower(), i.name.lower()))
         if not insts:
-            # toggle the pre-built empty-state layer — never insert/remove
-            # widgets here (that produced stacked "double page" cards).
-            holder = getattr(self, "_empty_holder", None)
-            if holder is not None:
-                holder.setVisible(True)
-                holder.raise_()
-            self.list_lbl.setVisible(False)
-            self.list_scroll.setVisible(False)
-            self.detail_scroll.setVisible(False)
+            # 全部清空（含删除所有行）
+            for rid in list(self._rows.keys()):
+                row = self._rows.pop(rid)
+                row.setParent(None)
+                try:
+                    from shiboken6 import delete as _shibdelete
+                    _shibdelete(row)
+                except Exception:
+                    row.deleteLater()
+            if switch and self._body_stack is not None:
+                self._body_stack.setCurrentIndex(0)  # empty state
             return
 
-        self.list_lbl.setVisible(True)
-        self.list_scroll.setVisible(True)
-        self.detail_scroll.setVisible(True)
-        holder = getattr(self, "_empty_holder", None)
-        if holder is not None:
-            holder.setVisible(False)
+        # 移除不再存在的行
+        new_ids = {inst.id for inst in insts}
+        for rid in list(self._rows.keys()):
+            if rid not in new_ids:
+                row = self._rows.pop(rid)
+                row.setParent(None)
+                try:
+                    from shiboken6 import delete as _shibdelete
+                    _shibdelete(row)
+                except Exception:
+                    row.deleteLater()
 
-        for inst in insts:
-            row = _InstRow(inst, is_current=(inst.id == cur))
-            row.clicked.connect(self._select)
-            self._rows[inst.id] = row
-            self._list_vbox.addWidget(row)
+        # 去掉末尾旧 stretch（增量插入前）
+        for i in range(self._list_vbox.count() - 1, -1, -1):
+            item = self._list_vbox.itemAt(i)
+            if item.widget() is None:  # spacer item
+                self._list_vbox.takeAt(i)
+                break
+
+        # 新增 / 更新行（insertWidget 对已存在 widget 自动移动位置）
+        # round-42 分组渲染：按 group 排序，分组变化时行会移动到对应组
+        for idx, inst in enumerate(insts):
+            row = self._rows.get(inst.id)
+            if row is None:
+                row = _InstRow(inst, is_current=(inst.id == cur),
+                               on_menu=self._show_row_menu)
+                row.clicked.connect(self._select)
+                self._rows[inst.id] = row
+            else:
+                row.refresh_state(inst.id == cur)
+            self._list_vbox.insertWidget(idx, row)
         self._list_vbox.addStretch(1)
 
         # restore selection (keep previous if still valid, else current/first)
@@ -836,6 +1235,8 @@ class InstancesPage(QWidget):
         for rid, row in self._rows.items():
             row.set_selected(rid == self._selected_id)
         self._render_detail()
+        if switch and self._body_stack is not None:
+            self._body_stack.setCurrentIndex(1)  # split view
 
     def _render_detail(self):
         """Fill the right-hand details panel for the selected instance."""
@@ -857,7 +1258,7 @@ class InstancesPage(QWidget):
         self._render_detail_card(inst)
 
     def _render_detail_card(self, inst: Instance):
-        card = RoundedCard(radius=16)
+        card = LightTrailCard(radius=16)  # round-50 卡片混合：详情卡流光+反射
         lay = QVBoxLayout(card)
         lay.setContentsMargins(28, 24, 28, 24)
         lay.setSpacing(14)
@@ -913,6 +1314,8 @@ class InstancesPage(QWidget):
         grid.setHorizontalSpacing(24)
         grid.setVerticalSpacing(10)
         grid.setLabelAlignment(Qt.AlignRight)
+        # 字段列伸展填满详情面板宽度，长路径不再被压成一行截断
+        grid.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         grid.addRow(QLabel(t("instances.detail_path")), self._mono(inst.mc_dir))
         grid.addRow(QLabel(t("instances.detail_source")),
                     QLabel(inst.launcher or "AC"))
@@ -933,6 +1336,22 @@ class InstancesPage(QWidget):
         open_btn.clicked.connect(lambda: self._open_folder(inst))
         actions.addWidget(open_btn)
 
+        # round-42：打开存档目录（对齐 Prism Saves 页入口）
+        saves_btn = QPushButton(t("instances.open_saves"))
+        saves_btn.setMinimumHeight(34)
+        saves_btn.setIcon(icon("folder"))
+        saves_btn.setIconSize(QSize(15, 15))
+        saves_btn.clicked.connect(lambda: self._open_saves(inst))
+        actions.addWidget(saves_btn)
+
+        # round-42：实例级设置覆盖（内存/JVM 参数/分组）
+        inst_set_btn = QPushButton(t("instances.instance_settings"))
+        inst_set_btn.setMinimumHeight(34)
+        inst_set_btn.setIcon(icon("settings"))
+        inst_set_btn.setIconSize(QSize(15, 15))
+        inst_set_btn.clicked.connect(lambda: self._edit_instance_settings(inst))
+        actions.addWidget(inst_set_btn)
+
         cur_btn = QPushButton(t("instances.set_current"))
         cur_btn.setMinimumHeight(34)
         cur_btn.setIcon(icon("check"))
@@ -940,6 +1359,14 @@ class InstancesPage(QWidget):
         cur_btn.setEnabled(inst.id != self.mgr.current_id)
         cur_btn.clicked.connect(lambda: self._set_current(inst.id))
         actions.addWidget(cur_btn)
+
+        # round-38 中轴：把整合包应用到已有实例（二次安装/升级）
+        pack_btn = QPushButton(t("instances.apply_pack"))
+        pack_btn.setMinimumHeight(34)
+        pack_btn.setIcon(icon("download"))
+        pack_btn.setIconSize(QSize(15, 15))
+        pack_btn.clicked.connect(lambda: self._apply_mrpack_to(inst))
+        actions.addWidget(pack_btn)
 
         crash_btn = QPushButton(t("instances.crash_analyze"))
         crash_btn.setMinimumHeight(34)
@@ -985,6 +1412,7 @@ class InstancesPage(QWidget):
 
     @staticmethod
     def _mono(text: str) -> QLabel:
+        # round-44 路径完整展示：wordWrap + ToolTip + 可选中复制
         lbl = QLabel(text)
         lbl.setStyleSheet(
             f"color: {COLORS['text_sub']}; font-family: Consolas, monospace; "
@@ -992,6 +1420,8 @@ class InstancesPage(QWidget):
             f"border-radius: 6px; padding: 4px 10px;"
         )
         lbl.setWordWrap(True)
+        lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lbl.setToolTip(text)
         return lbl
 
     def _select(self, inst_id: str):
@@ -999,6 +1429,179 @@ class InstancesPage(QWidget):
         for rid, row in self._rows.items():
             row.set_selected(rid == inst_id)
         self._render_detail()
+
+    def selected_instance(self) -> Instance | None:
+        """当前选中的实例（供快捷键/外部调用）。round-42。"""
+        if self._selected_id:
+            return self.mgr.get(self._selected_id)
+        return None
+
+    # ── 右键菜单（round-42，对齐 Prism 鼠标流）──
+    def _show_row_menu(self, inst: Instance, pos):
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        m.addAction(t("instances.set_current"),
+                    lambda: self._set_current(inst.id))
+        m.addAction(t("instances.duplicate"),
+                    lambda: self._duplicate(inst))
+        m.addSeparator()
+        m.addAction(t("instances.backup"),
+                    lambda: self._backup(inst))
+        m.addAction(t("instances.restore"),
+                    lambda: self._restore(inst))
+        m.addSeparator()
+        m.addAction(t("modcheck.title"),
+                    lambda: self._mod_check(inst))
+        m.addSeparator()
+        m.addAction(t("instances.open_folder"),
+                    lambda: self._open_folder(inst))
+        m.addAction(t("instances.crash_analyze"),
+                    lambda: self._show_crash(inst))
+        m.addSeparator()
+        m.addAction(t("instances.group_move_to"),
+                    lambda: self._edit_group(inst))
+        m.addAction(t("common.delete"),
+                    lambda: self._delete_instance(inst))
+        m.exec(pos)
+
+    def _duplicate(self, inst: Instance):
+        """克隆实例（Worker 复制目录，防大实例卡 UI）。"""
+        from .win_rounded import text_input, warn, info
+        from .worker import Worker
+        name, ok = text_input(
+            self, t("instances.duplicate_title"),
+            t("instances.duplicate_hint"), default=f"{inst.name} (副本)")
+        if not ok or not name.strip():
+            return
+        self._dup_worker = Worker(self.mgr.duplicate, inst.id, name.strip())
+        self._dup_worker.finished.connect(
+            lambda _n: (self._refresh(), self._set_current(_n.id) if _n else None))
+        self._dup_worker.error.connect(
+            lambda e: warn(self, t("instances.duplicate_title"), str(e)))
+        self._dup_worker.start()
+
+    # ── 实例备份 / 回滚（N1，对齐 Prism 一键备份 / 更新坏了一键回滚）──
+    def _backup(self, inst: Instance):
+        """创建一份完整快照（后台 Worker，防大实例卡 UI）。"""
+        from .win_rounded import info, warn
+        from .core.backup import create_backup
+        from .worker import Worker
+        self._backup_worker = Worker(create_backup, inst)
+        self._backup_worker.finished.connect(
+            lambda _s: info(self, t("instances.backup_title"),
+                            t("instances.backup_done")))
+        self._backup_worker.error.connect(
+            lambda e: warn(self, t("instances.backup_title"), str(e)))
+        self._backup_worker.start()
+
+    def _restore(self, inst: Instance):
+        """选一份历史快照，回滚覆盖当前 mods / config / 存档。"""
+        from .win_rounded import info, warn, confirm
+        from .worker import Worker
+        from .core.backup import list_backups, load_manifest, restore_backup
+
+        snaps = list_backups(inst)
+        if not snaps:
+            info(self, t("instances.restore_title"),
+                 t("instances.restore_none"))
+            return
+
+        pick = self._pick_backup(inst, snaps)
+        if pick is None:
+            return
+        # 覆写前：先警告建议做当前备份，再明确确认不可逆
+        tip = t("instances.restore_warn")
+        if not confirm(
+            self, t("instances.restore_title"),
+            t("instances.restore_confirm", name=inst.name)
+            + "\n\n" + tip,
+        ):
+            return
+
+        self._restore_worker = Worker(restore_backup, inst, pick)
+        self._restore_worker.finished.connect(
+            lambda _m: (info(self, t("instances.restore_title"),
+                             t("instances.restore_done")),
+                        self._refresh(), self._render_detail()))
+        self._restore_worker.error.connect(
+            lambda e: warn(self, t("instances.restore_title"), str(e)))
+        self._restore_worker.start()
+
+    def _pick_backup(self, inst: Instance, snaps: list[str]):
+        """列快照供选择；返回选中的快照路径，取消返回 None。"""
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                       QLabel, QListWidget, QPushButton)
+        from .core.backup import load_manifest
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(t("instances.restore_pick_title"))
+        dlg.setMinimumWidth(420)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+        lay.addWidget(QLabel(t("instances.restore_pick_hint")))
+        lst = QListWidget()
+        for snap in snaps:
+            m = load_manifest(snap)
+            name = m.get("instance_name") or inst.name
+            when = m.get("snapshot_time") or os.path.basename(snap)
+            ver = m.get("game_version") or ""
+            load = m.get("loader") or ""
+            lst.addItem(f"{name} · {when}\n  {ver} / {load}"
+                        if ver else f"{name} · {when}")
+        if snaps:
+            lst.setCurrentRow(0)
+        lay.addWidget(lst)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        cancel = QPushButton(t("common.cancel"))
+        cancel.clicked.connect(dlg.reject)
+        ok = QPushButton(t("common.ok"))
+        ok.setProperty("cls", "accent")
+        ok.clicked.connect(dlg.accept)
+        btn_row.addWidget(cancel)
+        btn_row.addWidget(ok)
+        lay.addLayout(btn_row)
+        if dlg.exec() != 1:
+            return None
+        row = lst.currentRow()
+        if row < 0:
+            return None
+        return snaps[row]
+
+    def _edit_group(self, inst: Instance):
+        """设置/清除实例分组。"""
+        from .win_rounded import text_input, info
+        from .i18n import t as _t
+        from PySide6.QtWidgets import QInputDialog, QLineEdit
+        from PySide6.QtCore import Qt as _Qt
+        cur = inst.group or ""
+        name, ok = text_input(
+            self, _t("instances.group_title"),
+            _t("instances.group_hint"), default=cur)
+        if not ok:
+            return
+        inst.group = (name or "").strip()
+        self.mgr.save(inst)
+        self._refresh()
+
+    def _show_crash(self, inst: Instance):
+        from .crash_dialog import CrashDialog
+        CrashDialog(inst, parent=self).exec()
+
+    def _mod_check(self, inst: Instance):
+        """启动前模组冲突预检（N5）：静态扫描 + 弹报告。"""
+        from .mod_check_dialog import open_check_dialog
+        open_check_dialog(self, inst)
+
+    def _delete_instance(self, inst: Instance):
+        from .win_rounded import confirm
+        if not confirm(
+            self, t("instances.delete_title"),
+            t("instances.delete_confirm", name=inst.name),
+        ):
+            return
+        self.mgr.remove(inst.id)
+        self._refresh()
 
     def _launch(self, inst_id: str):
         """Select in manager and jump to home (the launch button lives there)."""
@@ -1012,74 +1615,470 @@ class InstancesPage(QWidget):
         if os.path.isdir(p):
             QDesktopServices.openUrl(QUrl.fromLocalFile(p))
 
-    # ------------------------------------------------------------------ util
-    def _empty_state(self) -> QWidget:
-        """Friendly first-run state: hint + one big 'create instance' button."""
-        box = RoundedCard(radius=12)
-        box.setMinimumHeight(220)
-        l = QVBoxLayout(box)
-        l.setContentsMargins(40, 36, 40, 36)
-        l.setSpacing(14)
+    def _open_saves(self, inst: Instance):
+        """打开存档目录（不存在则创建）。round-42 新增，round-57 修：版本隔离
+        下游戏存档实际读写 <game_dir>/saves，之前固定 mc_dir/saves 打开的是
+        错误目录（同 round-56 mods_dir 的脱节）。"""
+        from PySide6.QtGui import QDesktopServices
+        p = os.path.join(inst.game_dir, "saves")
+        os.makedirs(p, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(p))
 
-        icon_lbl = QLabel()
-        icon_lbl.setPixmap(icon("instances").pixmap(40, 40))
-        icon_lbl.setAlignment(Qt.AlignCenter)
-        l.addWidget(icon_lbl)
+    def _edit_instance_settings(self, inst: Instance):
+        """实例级覆盖设置：内存 / JVM / 渲染器 / GC / 启动高级设置（round-42/53/55）。
 
-        title = QLabel(t("instances.empty_title"))
-        title.setProperty("cls", "big")
-        title.setAlignment(Qt.AlignCenter)
-        l.addWidget(title)
-
-        hint = QLabel(t("instances.empty"))
-        hint.setProperty("cls", "sub")
-        hint.setAlignment(Qt.AlignCenter)
-        hint.setWordWrap(True)
-        l.addWidget(hint)
-
+        round-55 新增：游戏附加参数、JVM 预设、版本隔离（含自定义目录）、
+        启动后/退出后命令——全部「空值 = 跟随全局」。
+        """
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                       QLabel, QSpinBox, QLineEdit, QPushButton,
+                                       QComboBox, QCheckBox, QScrollArea,
+                                       QWidget, QFrame)
+        from .i18n import t as _t
+        dlg = QDialog(self)
+        dlg.setWindowTitle(_t("instances.instance_settings"))
+        dlg.resize(480, 620)
+        root = QVBoxLayout(dlg)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        root.addWidget(scroll, stretch=1)
+        content = QWidget()
+        lay = QVBoxLayout(content)
+        lay.setSpacing(12)
+        # 内存
+        mem_row = QHBoxLayout()
+        mem_row.addWidget(QLabel(_t("instances.setting_mem")))
+        mem = QSpinBox()
+        mem.setRange(0, 32768)
+        mem.setSingleStep(512)
+        mem.setValue(inst.ram_mb or 0)
+        mem.setSuffix(" MB（0=全局）")
+        mem_row.addWidget(mem, stretch=1)
+        lay.addLayout(mem_row)
+        # JVM 参数
+        lay.addWidget(QLabel(_t("instances.setting_jvm")))
+        jvm = QLineEdit(inst.jvm_args or "")
+        jvm.setPlaceholderText(_t("instances.setting_jvm_hint"))
+        lay.addWidget(jvm)
+        # round-55 JVM 预设（对齐 PCL2「JVM 参数」预设；空 = 跟随全局）
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel(_t("instances.jvm_preset")))
+        jvm_preset = QComboBox()
+        jvm_preset.addItem(_t("instances.jvm_preset_follow"), "")
+        jvm_preset.addItem(_t("instances.jvm_preset_default"), "default")
+        jvm_preset.addItem(_t("instances.jvm_preset_aikar"), "aikar")
+        jvm_preset.addItem(_t("instances.jvm_preset_custom"), "custom")
+        idx = jvm_preset.findData((inst.jvm_preset or ""))
+        jvm_preset.setCurrentIndex(idx if idx >= 0 else 0)
+        preset_row.addWidget(jvm_preset, stretch=1)
+        lay.addLayout(preset_row)
+        # round-53 渲染器（对齐 HMCL 版本设置→渲染器 / PCL2 启动设置）
+        renderer_row = QHBoxLayout()
+        renderer_row.addWidget(QLabel(_t("instances.setting_renderer_title")))
+        renderer = QComboBox()
+        renderer.addItem(_t("instances.renderer_auto"), "auto")
+        renderer.addItem(_t("instances.renderer_software"), "software")
+        renderer.addItem(_t("instances.renderer_legacy"), "legacy")
+        idx = renderer.findData((inst.renderer or "auto"))
+        renderer.setCurrentIndex(idx if idx >= 0 else 0)
+        renderer.setToolTip(_t("instances.renderer_hint"))
+        renderer_row.addWidget(renderer, stretch=1)
+        lay.addLayout(renderer_row)
+        # round-55 游戏附加参数（--server 直连等；空 = 跟随全局）
+        ga_row = QHBoxLayout()
+        ga_row.addWidget(QLabel(_t("instances.game_args")))
+        game_args = QLineEdit((inst.game_args or "").strip())
+        game_args.setPlaceholderText(_t("instances.game_args_hint"))
+        ga_row.addWidget(game_args, stretch=1)
+        lay.addLayout(ga_row)
+        # round-55 版本隔离（空 = 跟随全局；custom 时填自定义目录）
+        iso_row = QHBoxLayout()
+        iso_row.addWidget(QLabel(_t("instances.isolation")))
+        iso_combo = QComboBox()
+        iso_combo.addItem(_t("instances.isolation_follow"), "")
+        iso_combo.addItem(_t("instances.isolation_isolated"), "isolated")
+        iso_combo.addItem(_t("instances.isolation_custom"), "custom")
+        idx = iso_combo.findData((inst.isolation or ""))
+        iso_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        iso_row.addWidget(iso_combo, stretch=1)
+        lay.addLayout(iso_row)
+        game_dir_edit = QLineEdit((inst.game_dir_override or "").strip())
+        game_dir_edit.setPlaceholderText(_t("instances.game_dir_override_hint"))
+        game_dir_edit.setVisible(iso_combo.currentData() == "custom")
+        iso_combo.currentIndexChanged.connect(
+            lambda _i: game_dir_edit.setVisible(iso_combo.currentData() == "custom"))
+        lay.addWidget(game_dir_edit)
+        # round-53 实验性性能（对齐 PCL2 性能高级设置）
+        lay.addWidget(QLabel(_t("instances.setting_perf_title")))
+        g1gc = QCheckBox(_t("instances.perf_g1gc"))
+        g1gc.setChecked(bool(getattr(inst, "perf_g1gc", True)))
+        g1gc.setToolTip(_t("instances.perf_g1gc_hint"))
+        lay.addWidget(g1gc)
+        noexgc = QCheckBox(_t("instances.perf_disable_explicit_gc"))
+        noexgc.setChecked(bool(getattr(inst, "perf_disable_explicit_gc", False)))
+        noexgc.setToolTip(_t("instances.perf_disable_explicit_gc_hint"))
+        lay.addWidget(noexgc)
+        # round-55 启动后 / 退出后命令（空 = 跟随全局）
+        lay.addWidget(QLabel(_t("instances.post_launch_cmd")))
+        post_cmd = QLineEdit((inst.post_launch_cmd or "").strip())
+        post_cmd.setPlaceholderText(_t("instances.hook_ph"))
+        lay.addWidget(post_cmd)
+        lay.addWidget(QLabel(_t("instances.exit_cmd")))
+        exit_cmd = QLineEdit((inst.exit_cmd or "").strip())
+        exit_cmd.setPlaceholderText(_t("instances.hook_ph"))
+        lay.addWidget(exit_cmd)
+        # 分组
+        grp_row = QHBoxLayout()
+        grp_row.addWidget(QLabel(_t("instances.group_title")))
+        grp = QLineEdit(inst.group or "")
+        grp.setPlaceholderText(_t("instances.group_hint"))
+        grp_row.addWidget(grp, stretch=1)
+        lay.addLayout(grp_row)
+        scroll.setWidget(content)
+        # 按钮（滚动区外，始终可见）
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-        create_btn = QPushButton(t("instances.new"))
-        create_btn.setProperty("cls", "accent")
-        create_btn.setMinimumHeight(40)
-        create_btn.setIcon(icon("add"))
-        create_btn.setIconSize(QSize(16, 16))
-        create_btn.clicked.connect(self._new)
-        btn_row.addWidget(create_btn)
-        btn_row.addStretch(1)
-        l.addLayout(btn_row)
-        return box
+        cancel = QPushButton(_t("common.cancel"))
+        cancel.clicked.connect(dlg.reject)
+        ok = QPushButton(_t("common.ok"))
+        ok.setProperty("cls", "accent")
+        ok.clicked.connect(dlg.accept)
+        btn_row.addWidget(cancel)
+        btn_row.addWidget(ok)
+        root.addLayout(btn_row)
+        if dlg.exec() != 1:
+            return
+        inst.ram_mb = mem.value()
+        inst.jvm_args = jvm.text().strip()
+        inst.jvm_preset = jvm_preset.currentData() or ""
+        inst.renderer = renderer.currentData() or "auto"
+        inst.game_args = game_args.text().strip()
+        inst.isolation = iso_combo.currentData() or ""
+        inst.game_dir_override = game_dir_edit.text().strip()
+        inst.perf_g1gc = g1gc.isChecked()
+        inst.perf_disable_explicit_gc = noexgc.isChecked()
+        inst.post_launch_cmd = post_cmd.text().strip()
+        inst.exit_cmd = exit_cmd.text().strip()
+        inst.group = grp.text().strip()
+        self.mgr.save(inst)
+        self._refresh()
+
+    # ── 整合包应用到已有实例（round-38 中轴：二次安装/升级）──
+    def _apply_mrpack_to(self, inst: Instance):
+        from .win_rounded import pick_files, confirm, info
+        from .worker import ProgressWorker
+        from .core.install import apply_mrpack_to_instance
+
+        path = pick_files(
+            self, t("modpack.file_pick"), "",
+            t("modpack.filter_all"),
+            multi=False, dir_only=False,
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".mrpack"):
+            info(self, t("modpack.title"), t("instances.apply_pack_format"))
+            return
+        if not confirm(
+            self, t("instances.apply_pack_title"),
+            t("instances.apply_pack_confirm", name=inst.name),
+            detail=t("instances.apply_pack_hint"),
+        ):
+            return
+
+        settings = load_config()
+        self._pack_worker = ProgressWorker(
+            apply_mrpack_to_instance, path, inst,
+            mirror=settings.get("download_mirror", "official"),
+            proxy=settings.get("download_proxy", ""),
+        )
+        self._pack_worker.status.connect(
+            lambda s: self.window().statusBar().showMessage(s))
+        self._pack_worker.finished.connect(
+            lambda v: self._on_pack_applied(inst, v))
+        self._pack_worker.error.connect(
+            lambda e: self._on_pack_error(e))
+        self._pack_worker.start()
+
+    def _on_pack_applied(self, inst: Instance, launch_version):
+        try:
+            self.mgr.save(inst)
+            self._refresh()
+        except Exception:
+            pass
+        from .win_rounded import info
+        info(self, t("instances.apply_pack_title"),
+             t("instances.apply_pack_done", ver=launch_version or ""))
+
+    def _on_pack_error(self, msg: str):
+        from .win_rounded import warn
+        warn(self, t("instances.apply_pack_title"),
+             t("instances.apply_pack_fail", err=msg))
+
+    # ------------------------------------------------------------------ util
+    def _empty_state(self) -> QWidget:
+        """Friendly first-run state with a clear primary action.
+
+        The page header already exposes 扫描并导入 / 导入包 buttons, so the
+        empty-state card only surfaces the primary CTA (新建实例) to avoid
+        three nearly-identical button rows competing for attention.
+        """
+        card = RoundedCard(radius=16)
+        # 默认 fill 跟随全局 frosted 开关（半透明/实色），不显式 set_fill，
+        # 开关切换时 paintEvent 自动用新的 token 重绘。
+        card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        l = QVBoxLayout(card)
+        l.setContentsMargins(24, 24, 24, 24)
+
+        new_btn = ui_kit.make_button(
+            t("instances.new"), kind="accent", icon_key="add",
+            on_click=self._new, min_h=40)
+        self._empty_btn = new_btn
+
+        es = ui_kit.empty_state(
+            "instances",
+            t("instances.empty_title"),
+            t("instances.empty"),
+            actions=[new_btn],
+            icon_size=80,
+        )
+        l.addWidget(es)
+        return card
 
     # ------------------------------------------------------------------ ops
+    def _set_header_buttons_enabled(self, on: bool):
+        self.new_btn.setEnabled(on)
+        self.scan_btn.setEnabled(on)
+        self.mrpack_btn.setEnabled(on)
+
+    def _mk_header_btn(self, text: str, icon_key: str, on_click,
+                       w: int, accent: bool = False) -> QPushButton:
+        """round-45e header 按钮：3 个按钮**完全统一**风格（白底+黑字+灰边+hover 灰底），
+        accent 形参保留用于后续其他场景，但实例页 3 按钮统一关闭。
+        宽度由调用方传入，padding 6/14 + 字号 13px，"新建实例"4 字需 w≥110 才不挤压。
+        """
+        b = QPushButton(text)
+        b.setFixedSize(w, 34)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setIcon(icon(icon_key))
+        b.setIconSize(QSize(15, 15))
+        bg = COLORS["bg_btn"]
+        fg = COLORS["text_main"]
+        bd = COLORS["border"]
+        b.setStyleSheet(
+            f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {bd};"
+            f" border-radius: 8px; padding: 6px 14px; font-size: 13px;"
+            f" font-weight: 600; }}"
+            f"QPushButton:hover {{ background: {COLORS['bg_hover']}; }}"
+        )
+        b.clicked.connect(on_click)
+        return b
+
     def _new(self):
-        dlg = NewInstanceDialog(self)
-        if dlg.exec() == QDialog.Accepted:
-            name, version, loader, java_path, ldver = dlg.result_data()
-            inst = self.mgr.add(name, version, loader, loader_version=ldver,
-                                java_path=java_path)
-            self._selected_id = inst.id
+        """Open the create-instance wizard embedded in the body (no popup)."""
+        if self._new_panel is not None or self._closing_new:
+            return
+        if self._scan_panel is not None:
+            self._close_scan_panel()
+        self._set_header_buttons_enabled(False)
+        if self._empty_btn is not None:
+            self._empty_btn.setEnabled(False)
+        self._new_panel = NewInstanceDialog(self, embedded=True)
+        self._new_panel.created.connect(self._on_new_created)
+        self._new_panel.cancelled.connect(self._close_new_panel)
+        idx = self._body_stack.addWidget(self._new_panel)
+        self._body_stack.setCurrentIndex(idx)
+
+    def _on_new_created(self, name: str, version: str, loader: str,
+                        java_path: str, ldver: str):
+        inst = self.mgr.add(name, version, loader, loader_version=ldver,
+                            java_path=java_path)
+        self._selected_id = inst.id
+        self._close_new_panel()
+        # _close_new_panel defers _refresh() via QTimer so the view rebuilds
+        # after the wizard is fully destroyed.
+
+    def _close_new_panel(self):
+        """Remove the embedded create wizard and restore the instance view."""
+        if self._new_panel is None:
+            return
+        panel = self._new_panel
+        self._new_panel = None
+        self._closing_new = True
+        self._set_header_buttons_enabled(True)
+        if self._empty_btn is not None:
+            self._empty_btn.setEnabled(True)
+        self._body_stack.removeWidget(panel)
+        panel.deleteLater()
+        # Defer the refresh so Qt can finish deleting the panel (and its
+        # children/workers) before we rebuild the underlying list view.
+        QTimer.singleShot(0, self._finish_close_new)
+
+    def _finish_close_new(self):
+        self._closing_new = False
+        # 若关闭期间又打开了别的面板（如 _open_scan 已切到扫描面板），
+        # 就不再刷新（避免把面板隐藏 / 重复重建列表）。
+        if self._new_panel is None and self._scan_panel is None:
             self._refresh()
 
     def _open_scan(self):
-        """Open the scan dialog to import existing MC folders from elsewhere."""
-        from .scan_dialog import ScanDialog
-        ScanDialog(self).exec()
-        # refresh in case the user took over / copied instances
-        self._refresh()
-
-    def _import_mrpack(self):
-        """Pick a .mrpack file, preview its metadata, install into a new instance."""
-        from .win_rounded import pick_files
-        import minecraft_launcher_lib
-
-        path = pick_files(self, t("mrpack.file_pick"), "", t("mrpack.filter"))
-        if not path or not path.lower().endswith(".mrpack"):
+        """Embed the scanner into the body area (no modal dialog)."""
+        if self._scan_panel is not None or self._closing_scan:
             return
+        if self._new_panel is not None:
+            self._close_new_panel()
+        from .scan_dialog import ScanPanel
+
+        self._set_header_buttons_enabled(False)
+        if self._empty_btn is not None:
+            self._empty_btn.setEnabled(False)
+        self._scan_panel = ScanPanel(self)
+        self._scan_panel.done.connect(self._close_scan_panel)
+        idx = self._body_stack.addWidget(self._scan_panel)
+        self._body_stack.setCurrentIndex(idx)
+
+    def _close_scan_panel(self):
+        """Remove the embedded scanner and refresh the instance list."""
+        if self._scan_panel is None:
+            return
+        panel = self._scan_panel
+        self._scan_panel = None
+        self._closing_scan = True
+        self._set_header_buttons_enabled(True)
+        if self._empty_btn is not None:
+            self._empty_btn.setEnabled(True)
+        self._body_stack.removeWidget(panel)
+        panel.deleteLater()
+        QTimer.singleShot(0, self._finish_close_scan)
+
+    def _finish_close_scan(self):
+        self._closing_scan = False
+        if self._new_panel is None and self._scan_panel is None:
+            self._refresh()
+        self.scan_done.emit()
+
+    def _import_pack(self):
+        """Import a modpack or instance folder (.mrpack / CurseForge .zip / plain .zip / folder).
+
+        The file picker accepts several formats; we detect the format and pick
+        the right importer so the user has a single "Import pack" entry point.
+        """
+        from PySide6.QtWidgets import QProgressDialog, QApplication
+        from .win_rounded import pick_files, info, warn
+        from .modpack_import import (
+            detect_pack_format, import_curseforge_zip,
+            import_zip_as_instance, import_folder_as_instance,
+        )
+        from .net_api import NetError
+
+        path = pick_files(
+            self, t("modpack.file_pick"), "",
+            t("modpack.filter_all"),
+            multi=False,
+            dir_only=False,
+        )
+        if not path:
+            return
+
+        fmt = detect_pack_format(path)
+        if fmt is None:
+            warn(self, t("modpack.title"), t("modpack.unknown_format"))
+            return
+
+        # Close any embedded panels before the modal import flow so the body
+        # stack is in a clean state when we refresh afterwards.
+        if self._new_panel is not None:
+            self._close_new_panel()
+        if self._scan_panel is not None:
+            self._close_scan_panel()
+
+        # .mrpack keeps the existing metadata + install dialog (has its own worker)
+        if fmt == "mrpack":
+            self._show_mrpack_dialog(path)
+            return
+
+        # CurseForge requires an API key; ask once before starting the worker.
+        if fmt == "curseforge":
+            if not confirm(
+                self, t("modpack.curseforge_key_title"),
+                t("modpack.curseforge_key_body"),
+            ):
+                return
+
+        # Run heavy import in a worker so the UI doesn't freeze.
+        fn_map = {
+            "curseforge": import_curseforge_zip,
+            "zip_mc": import_zip_as_instance,
+            "folder": import_folder_as_instance,
+        }
+        fn = fn_map[fmt]
+        progress = QProgressDialog(self)
+        progress.setWindowTitle(t("modpack.title"))
+        progress.setLabelText(t("modpack.importing"))
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setRange(0, 0)  # indeterminate
+        progress.setMinimumWidth(420)
+
+        worker = Worker(fn, path, self.mgr)
+
+        def _done(inst):
+            progress.close()
+            info(self, t("modpack.title"), t("modpack.done"))
+            self._refresh()
+            if inst and getattr(inst, "id", None):
+                self.mgr.set_current(inst.id)
+                self.current_changed.emit(inst.id)
+
+        def _err(e):
+            progress.close()
+            if isinstance(e, NetError):
+                warn(self, t("modpack.title"), str(e))
+            else:
+                warn(self, t("modpack.title"), t("modpack.error", e=e))
+
+        worker.finished.connect(_done)
+        worker.error.connect(_err)
+        worker.start()
+
+    # ── 拖拽导入（round-42，对齐 MultiMC/Prism：拖 .mrpack/.zip 进窗口即导入）──
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            for u in e.mimeData().urls():
+                p = u.toLocalFile()
+                if p.lower().endswith((".mrpack", ".zip")):
+                    e.acceptProposedAction()
+                    return
+        super().dragEnterEvent(e)
+
+    def dropEvent(self, e):
+        from .modpack_import import detect_pack_format
+        for u in e.mimeData().urls():
+            p = u.toLocalFile()
+            if not p:
+                continue
+            fmt = detect_pack_format(p) if p.lower().endswith(".zip") else \
+                ("mrpack" if p.lower().endswith(".mrpack") else None)
+            if fmt == "mrpack":
+                self._show_mrpack_dialog(p)
+            elif fmt is not None:
+                # 走统一的「导入包」流程（CF zip / 普通 zip）
+                self._import_pack_path(p)
+            else:
+                info(self, t("modpack.title"), t("modpack.unknown_format"))
+        e.acceptProposedAction()
+
+    def _show_mrpack_dialog(self, path: str):
+        """Keep the original mrpack preview + install dialog for .mrpack files."""
+        import minecraft_launcher_lib
+        from .modpack_import import _parse_mrpack_info
+
         try:
             raw = minecraft_launcher_lib.mrpack.get_mrpack_information(path)
             launch_version = minecraft_launcher_lib.mrpack.get_mrpack_launch_version(path)
         except Exception:
-            confirm(self, t("mrpack.title"), t("mrpack.bad_file"))
+            warn(self, t("mrpack.title"), t("mrpack.bad_file"))
             return
         info = _parse_mrpack_info(raw)
         info["launch_version"] = launch_version
@@ -1089,6 +2088,41 @@ class InstancesPage(QWidget):
         cur = self.mgr.current_id
         if cur:
             self.current_changed.emit(cur)
+
+    def _import_mrpack(self):
+        """Backwards-compatible alias for the old 'Import Modpack' button."""
+        self._import_pack()
+
+    def _import_pack_path(self, path: str):
+        """统一的整合包导入流程（拖拽/按钮共用）。round-42。"""
+        from .win_rounded import warn
+        from .modpack_import import (
+            detect_pack_format, import_curseforge_zip,
+            import_zip_as_instance, import_folder_as_instance,
+        )
+        fmt = detect_pack_format(path)
+        if fmt is None:
+            warn(self, t("modpack.title"), t("modpack.unknown_format"))
+            return
+        from .win_rounded import QProgressDialog, QApplication
+        from .worker import Worker
+        if fmt == "curseforge":
+            self._pack_worker = Worker(import_curseforge_zip, path, self.mgr)
+            self._pack_worker.finished.connect(self._on_pack_imported)
+            self._pack_worker.error.connect(
+                lambda e: warn(self, t("modpack.title"), str(e)))
+            self._pack_worker.start()
+        elif fmt == "zip":
+            self._pack_worker = Worker(import_zip_as_instance, path, self.mgr)
+            self._pack_worker.finished.connect(self._on_pack_imported)
+            self._pack_worker.error.connect(
+                lambda e: warn(self, t("modpack.title"), str(e)))
+            self._pack_worker.start()
+
+    def _on_pack_imported(self, inst):
+        self._refresh()
+        if inst is not None and getattr(inst, "id", None):
+            self._set_current(inst.id)
 
     def _analyze_crash(self, inst):
         from .crash_dialog import CrashAnalyzerDialog
@@ -1128,40 +2162,109 @@ class InstancesPage(QWidget):
     def retranslate_ui(self):
         self.title_lbl.setText(t("instances.title"))
         self.new_btn.setText(t("instances.new"))
+        self.scan_btn.setText(t("instances.scan_import"))
+        self.mrpack_btn.setText(t("instances.import_pack"))
         self.list_lbl.setText(t("instances.list_title"))
-        self._refresh()  # refreshes rows/details (which use t() dynamically)
+        # Don't jump away from an embedded panel when the language changes.
+        self._refresh(switch=not (self._new_panel or self._scan_panel))
 
 
 # ---------------------------------------------------------------- Mods
+def _mod_display_name(path: str) -> str:
+    """Human-readable mod name from a jar path. Strips the extension and the
+    optional ``.disabled`` toggle suffix, then prettifies dashes/underscores."""
+    base = os.path.basename(path)
+    if base.endswith(".disabled"):
+        base = base[: -len(".disabled")]
+    if base.lower().endswith(".jar"):
+        base = base[: -len(".jar")]
+    return base.replace("_", " ").replace("-", " ").strip() or os.path.basename(path)
+
+
+_LOADER_HINT = {
+    "fabric": "fabric", "neofabric": "fabric",
+    "forge": "forge", "neoforge": "neoforge",
+    "quilt": "quilt", "liteloader": "liteloader",
+    "cleanroom": "cleanroom",
+}
+
+
+def _mod_loader_hint(path: str) -> str:
+    """Best-effort loader tag from the mod filename (for a small badge);
+    "" if none is detectable."""
+    low = os.path.basename(path).lower()
+    for key, loader in _LOADER_HINT.items():
+        if key in low:
+            return loader
+    return ""
+
+
 class ModCard(RoundedCard):
     toggled = Signal(str, bool)  # path, enabled
     removed = Signal(str)
 
     def __init__(self, path: str, enabled: bool, parent=None):
-        super().__init__(radius=10, parent=parent)
+        super().__init__(radius=12, parent=parent)
         self.path = path
         self.enabled = enabled
-        self.setMinimumHeight(56)
+        self.setMinimumHeight(74)
+        # disabled mods read as muted & slightly faded — more obviously "off".
+        if not enabled:
+            op = QGraphicsOpacityEffect(self)
+            op.setOpacity(0.62)
+            self.setGraphicsEffect(op)
+
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(16, 10, 16, 10)
-        lay.setSpacing(12)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(14)
 
-        ic = QLabel()
-        ic.setPixmap(icon("mods").pixmap(16, 16))
-        lay.addWidget(ic)
+        # ── loader-tinted icon tile ──
+        loader = _mod_loader_hint(path)
+        tile_key = "mods"
+        tile = ui_kit.tile(tile_key, 44, 22,
+                           bg=LOADER_BADGE.get(loader, "#7C3AED14"))
+        lay.addWidget(tile)
 
-        name = QLabel(os.path.basename(path))
-        name.setProperty("cls", "sub" if not enabled else "title")
-        lay.addWidget(name, 1)
+        # ── info column: name + meta (loader pill · state) ──
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        name = QLabel(_mod_display_name(path))
+        name.setProperty("cls", "title")
+        col.addWidget(name)
+        meta = QHBoxLayout()
+        meta.setSpacing(8)
+        if loader:
+            ld = QLabel(loader_name(loader))
+            ld.setStyleSheet(_badge_style(LOADER_BADGE.get(loader, "#6B7280")))
+            meta.addWidget(ld)
+        state = QLabel(
+            t("mods.state_enabled") if enabled else t("mods.state_disabled"))
+        if enabled:
+            state.setStyleSheet(
+                f"color: {COLORS['success']}; background: #22C55E1A; "
+                f"font-weight: 600; border-radius: 9px; padding: 2px 10px; "
+                f"font-size: 11px;")
+        else:
+            state.setStyleSheet(
+                f"color: {COLORS['text_sub']}; background: {COLORS['bg_hover']}; "
+                f"font-weight: 600; border-radius: 9px; padding: 2px 10px; "
+                f"font-size: 11px;")
+        meta.addWidget(state)
+        meta.addStretch(1)
+        col.addLayout(meta)
+        lay.addLayout(col, 1)
 
-        tog = QPushButton(t("mods.enable") if not enabled else t("mods.disable"))
-        tog.setMinimumHeight(30)
+        # ── toggle + delete ──
+        tog = QPushButton(t("mods.disable") if enabled else t("mods.enable"))
+        tog.setMinimumHeight(32)
+        tog.setIcon(icon("check" if enabled else "add"))
+        tog.setIconSize(QSize(15, 15))
         tog.clicked.connect(lambda: self.toggled.emit(path, not self.enabled))
         lay.addWidget(tog)
 
         del_btn = QPushButton(t("mods.delete"))
         del_btn.setProperty("cls", "danger")
-        del_btn.setMinimumHeight(30)
+        del_btn.setMinimumHeight(32)
         del_btn.clicked.connect(lambda: self.removed.emit(path))
         lay.addWidget(del_btn)
 
@@ -1177,29 +2280,38 @@ class ModsPage(QWidget):
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
 
-        head = QHBoxLayout()
-        self.title_lbl = QLabel(t("mods.title"))
-        self.title_lbl.setProperty("cls", "big")
-        head.addWidget(self.title_lbl)
-        head.addSpacing(16)
-
         self.target_lbl = QLabel(t("mods.target_label"))
         self.target_lbl.setProperty("cls", "sub")
-        head.addWidget(self.target_lbl)
         self.inst_combo = QComboBox()
         self.inst_combo.setMinimumHeight(34)
-        self.inst_combo.setMinimumWidth(240)
+        # round-52 自适应：不再硬设 220 最小宽度（会把 header 撑爆到 >620px，
+        # 窄窗口下溢出）。combo 在操作行里用 stretch=1 弹性伸展，缩到理想宽度。
+        self.inst_combo.setMinimumWidth(0)
         self.inst_combo.currentIndexChanged.connect(self._on_target_changed)
-        head.addWidget(self.inst_combo)
-        head.addStretch(1)
-        self.add_btn = QPushButton(t("mods.add"))
-        self.add_btn.setProperty("cls", "accent")
-        self.add_btn.setMinimumHeight(38)
-        self.add_btn.setIcon(icon("add"))
-        self.add_btn.setIconSize(QSize(16, 16))
-        self.add_btn.clicked.connect(self._add)
-        head.addWidget(self.add_btn)
-        root.addLayout(head)
+        self.add_btn = ui_kit.make_button(
+            t("mods.add"), kind="accent", icon_key="add",
+            on_click=self._add, min_h=38)
+        self.update_btn = ui_kit.make_button(
+            t("mods.check_updates"), kind="secondary", icon_key="download",
+            on_click=self._check_updates, min_h=38)
+
+        self._header = ui_kit.page_header(
+            t("mods.title"), icon_key="mods")
+        self.title_lbl = self._header.title_lbl
+        root.addWidget(self._header)
+
+        # round-52 操作行独立成一行：目标实例 + 组合 + 两个按钮。
+        # combo 用 stretch 弹性伸展，窄窗口下按钮不被挤压、内容不溢出。
+        action_widget = QWidget()
+        action_widget.setStyleSheet("background: transparent;")
+        al = QHBoxLayout(action_widget)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.setSpacing(10)
+        al.addWidget(self.target_lbl)
+        al.addWidget(self.inst_combo, stretch=1)
+        al.addWidget(self.add_btn)
+        al.addWidget(self.update_btn)
+        root.addWidget(action_widget)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -1226,6 +2338,68 @@ class ModsPage(QWidget):
 
     def _on_target_changed(self, _index: int):
         self._render_mods()
+
+    # ── 检查更新 / 批量更新（round-41，对齐 Prism/CF App）──
+    def _check_updates(self):
+        inst = self._target()
+        if inst is None:
+            info(self, t("common.hint"), t("mods.no_instance"))
+            return
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText(t("mods.checking_updates"))
+        from .worker import Worker
+        from .mod_updater import check_updates
+        self._check_worker = Worker(
+            check_updates, inst,
+            mc_version=getattr(inst, "game_version", "") or "",
+            loader=getattr(inst, "loader", "") or "",
+        )
+        self._check_worker.finished.connect(self._on_updates_checked)
+        self._check_worker.error.connect(self._on_updates_error)
+        self._check_worker.start()
+
+    def _on_updates_checked(self, result):
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText(t("mods.check_updates"))
+        updates = result.get("updates", [])
+        unknown = result.get("unknown", [])
+        if not updates:
+            msg = t("mods.up_to_date")
+            if unknown:
+                msg = t("mods.up_to_date_unknown", n=len(unknown))
+            info(self, t("mods.check_updates"), msg)
+            return
+        detail = "\n".join(
+            f"• {u['title']}: {u['local_version']} → {u['latest_version']}" for u in updates[:30])
+        if len(updates) > 30:
+            detail += f"\n… 共 {len(updates)} 个"
+        if unknown:
+            detail += f"\n\n（{len(unknown)} 个 mod 无法识别来源，已跳过）"
+        from .win_rounded import confirm
+        if not confirm(
+            self, t("mods.update_found_title"),
+            t("mods.update_found_body", n=len(updates)),
+            detail=detail,
+        ):
+            return
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText(t("mods.updating"))
+        from .mod_updater import update_mods
+        self._update_worker = Worker(update_mods, self._target(), updates)
+        self._update_worker.finished.connect(self._on_updates_done)
+        self._update_worker.error.connect(self._on_updates_error)
+        self._update_worker.start()
+
+    def _on_updates_done(self, ok_count):
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText(t("mods.check_updates"))
+        info(self, t("mods.check_updates"), t("mods.update_done", n=ok_count or 0))
+        self._render_mods()
+
+    def _on_updates_error(self, msg: str):
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText(t("mods.check_updates"))
+        warn(self, t("mods.check_updates"), t("mods.update_fail", err=msg))
 
     def refresh(self):
         if not hasattr(self, "inst_combo"):
@@ -1276,9 +2450,9 @@ class ModsPage(QWidget):
                     w.deleteLater()
         inst = self._target()
         if inst is None:
-            empty = QLabel(t("mods.select_instance"))
-            empty.setProperty("cls", "sub")
-            empty.setAlignment(Qt.AlignCenter)
+            empty = ui_kit.empty_state(
+                "mods", t("mods.empty_title"), t("mods.select_instance"),
+                icon_size=72)
             self._vbox.addWidget(empty)
             return
         mods_dir = inst.mods_dir
@@ -1340,34 +2514,15 @@ class ModsPage(QWidget):
     def retranslate_ui(self):
         self.title_lbl.setText(t("mods.title"))
         self.target_lbl.setText(t("mods.target_label"))
+        # round-44 补全：add_btn / update_btn 文本刷新
+        if hasattr(self, "add_btn"):
+            self.add_btn.setText(t("mods.add"))
+        if hasattr(self, "update_btn"):
+            self.update_btn.setText(t("mods.check_updates"))
         self.refresh()
 
 
 # ---------------------------------------------------------------- mrpack import
-def _parse_mrpack_info(raw: dict) -> dict:
-    name = raw.get("name") or t("new_instance.unnamed")
-    deps = raw.get("dependencies") or []
-    mc_version = ""
-    loader = "vanilla"
-    for d in deps:
-        did = (d.get("id") or "").lower()
-        if did.startswith("minecraft"):
-            mc_version = did.split(":")[-1] if ":" in did else did
-        elif did in ("fabric-loader", "quilt-loader"):
-            loader = "fabric" if did == "fabric-loader" else "quilt"
-        elif did == "forge":
-            loader = "forge"
-        elif did == "neoforge":
-            loader = "neoforge"
-    mods = raw.get("files") or []
-    return {
-        "name": name,
-        "mc_version": mc_version,
-        "loader": loader,
-        "mods": len(mods),
-    }
-
-
 class _MrpackDialog(QDialog):
     """Show modpack metadata, then install into a fresh instance on confirm."""
 
@@ -1472,5 +2627,17 @@ class _MrpackDialog(QDialog):
     def _err(self, e: str):
         self.bar.setVisible(False)
         self.status.setText(t("mrpack.error", e=e))
+        # round-40 P2-11：安装失败时移除刚创建的空实例（含空目录），
+        # 避免"脏实例"永久留在列表（PCL2/HMCL 均为成功后才注册）。
+        try:
+            inst = getattr(self, "_inst", None)
+            if inst is not None:
+                self.mgr.remove(inst.id)
+                import shutil
+                shutil.rmtree(inst.root, ignore_errors=True)
+                self._inst = None
+        except Exception:
+            pass
+        self.cancel_btn.setText(t("common.close"))
         self.ok_btn.setEnabled(True)
         self.cancel_btn.setEnabled(True)

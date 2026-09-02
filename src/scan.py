@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import platform
 import re
 import string
@@ -568,7 +569,7 @@ def discover_instances(progress=None) -> list[ScannedInstance]:
     appdata = os.environ.get("APPDATA", "")
     local = os.environ.get("LOCALAPPDATA", "")
     profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
-    public = os.environ.get("PUBLIC", "C:/Users/Public")
+    public = os.environ.get("PUBLIC") or str(Path.home().parent / "Public")
 
     def tick(msg: str) -> None:
         if progress:

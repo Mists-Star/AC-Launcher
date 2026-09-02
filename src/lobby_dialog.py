@@ -7,20 +7,79 @@ Matches the PCL/HMCL lobby pattern:
   · Active lobby: member list, copy code, leave
 """
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QComboBox, QGroupBox, QListWidget, QListWidgetItem,
-    QWidget, QProgressBar,
+    QWidget, QProgressBar, QPushButton,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from .theme import COLORS
 from .i18n import t
+from . import ui_kit
 from .frameless import FramelessHelper, TitleBar
-from .win_rounded import warn, info, confirm
+from .win_rounded import warn
 from .lobby import (
     create_lobby, join_lobby, leave_lobby,
 )
 from .instances import manager as instances_manager
 from .core import easytier
+
+# 第三方虚拟局域网联机工具官网（round-64 多工具选择：玩家未安装时自行挑选）
+# · EasyTier   —— 开源虚拟局域网内核，启动器内置下载（easytier.py）
+# · 陶瓦 Terracotta —— 基于 EasyTier 的 P2P 联机工具（HMCL 内置同款，Burning_TNT 开源）
+# · MCTier    —— 免安装联机工具，内置语音/聊天/文件传输/屏幕共享（官网 mctier.pmhs.top）
+TERRACOTTA_URL = "https://github.com/burningtnt/Terracotta/releases"
+MCTIER_URL = "https://mctier.pmhs.top"
+
+
+class _ToolPicker(QDialog):
+    """联机工具选择器：EasyTier 内置一键下载 / 陶瓦 / MCTier 打开官网。
+
+    exec() 返回码：1=EasyTier，2=Terracotta，3=MCTier，0=取消。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("lobby.tool_title"))
+        self.setModal(True)
+        self.setMinimumWidth(440)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setSpacing(8)
+
+        ti = QLabel(t("lobby.tool_title"))
+        ti.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {COLORS['text_main']};")
+        lay.addWidget(ti)
+
+        body = QLabel(t("lobby.tool_body"))
+        body.setStyleSheet(f"color: {COLORS['text_sub']}; font-size: 12px;")
+        body.setWordWrap(True)
+        lay.addWidget(body)
+        lay.addSpacing(4)
+
+        for code, name, desc in [
+            (1, t("lobby.tool_easytier"), t("lobby.tool_easytier_desc")),
+            (2, t("lobby.tool_terracotta"), t("lobby.tool_terracotta_desc")),
+            (3, t("lobby.tool_mctier"), t("lobby.tool_mctier_desc")),
+        ]:
+            btn = QPushButton(name)
+            btn.setProperty("cls", "surface")
+            btn.setMinimumHeight(44)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, c=code: self.done(c))
+            lay.addWidget(btn)
+            dl = QLabel(desc)
+            dl.setStyleSheet(f"color: {COLORS['text_sub']}; font-size: 11px;")
+            dl.setWordWrap(True)
+            lay.addWidget(dl)
+
+        lay.addSpacing(8)
+        cancel = QPushButton(t("lobby.tool_cancel"))
+        cancel.setProperty("cls", "secondary")
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.clicked.connect(lambda: self.done(0))
+        lay.addWidget(cancel)
 
 
 class LobbyDialog(QDialog):
@@ -68,12 +127,9 @@ class LobbyDialog(QDialog):
             (t("lobby.paste"), self._paste_code),
             (t("lobby.join_btn"), self._do_join),
         ]:
-            btn = QPushButton(txt)
-            btn.setMinimumHeight(36)
-            if txt == t("lobby.join_btn"):
-                btn.setProperty("cls", "accent")
-            btn.clicked.connect(slot)
-            code_row.addWidget(btn)
+            code_row.addWidget(ui_kit.make_button(
+                txt, kind="accent" if txt == t("lobby.join_btn") else None,
+                on_click=slot, min_h=36))
         jl.addLayout(code_row)
         lay.addWidget(join_grp)
 
@@ -92,10 +148,9 @@ class LobbyDialog(QDialog):
         cl.addLayout(inst_row)
 
         create_btn_row = QHBoxLayout()
-        self.create_btn = QPushButton(t("lobby.create_btn"))
-        self.create_btn.setProperty("cls", "accent")
-        self.create_btn.setMinimumHeight(38)
-        self.create_btn.clicked.connect(self._do_create)
+        self.create_btn = ui_kit.make_button(
+            t("lobby.create_btn"), kind="accent", on_click=self._do_create,
+            min_h=38, min_w=120)
         create_btn_row.addWidget(self.create_btn)
         create_btn_row.addStretch(1)
         cl.addLayout(create_btn_row)
@@ -122,8 +177,8 @@ class LobbyDialog(QDialog):
             f"font-size: 14px; color: {COLORS['accent']}; font-weight: bold;"
         )
         code_display_row.addWidget(self.lobby_code_lbl, stretch=1)
-        copy_btn = QPushButton(t("lobby.copy_code"))
-        copy_btn.clicked.connect(self._copy_code)
+        copy_btn = ui_kit.make_button(
+            t("lobby.copy_code"), on_click=self._copy_code, min_h=34)
         code_display_row.addWidget(copy_btn)
         pl.addLayout(code_display_row)
 
@@ -135,9 +190,8 @@ class LobbyDialog(QDialog):
         # Leave button
         leave_row = QHBoxLayout()
         leave_row.addStretch(1)
-        self.leave_btn = QPushButton(t("common.close"))
-        self.leave_btn.setMinimumHeight(34)
-        self.leave_btn.clicked.connect(self._do_leave)
+        self.leave_btn = ui_kit.make_button(
+            t("common.close"), kind="secondary", on_click=self._do_leave, min_h=34)
         leave_row.addWidget(self.leave_btn)
         pl.addLayout(leave_row)
 
@@ -206,18 +260,9 @@ class LobbyDialog(QDialog):
         """Launch a virtual-LAN node for this lobby (best effort)."""
         if not easytier.easytier_installed():
             self._status("")
-            self.et_status.setText(t("lobby.et_missing"))
-            dl = QPushButton(t("lobby.et_download"))
-            dl.setMinimumHeight(34)
-            dl.clicked.connect(self._download_easytier)
-            # Reuse et_status area: append a download button under it.
-            # Simplest: show a confirm dialog instead.
-            from .win_rounded import confirm as _confirm
-            if _confirm(
-                self, t("lobby.et_download_title"),
-                t("lobby.et_download_body"),
-            ):
-                self._download_easytier()
+            self.et_status.setText(t("lobby.tool_missing"))
+            # 未安装联机工具：弹出选择器，EasyTier 内置下载 / 陶瓦 / MCTier 打开官网
+            self._choose_tool_prompt(lob)
             return
         self.et_status.setText(t("lobby.et_starting"))
         from .worker import Worker
@@ -244,6 +289,29 @@ class LobbyDialog(QDialog):
             self.et_status.setText(t("lobby.et_ready", ip=ip))
         else:
             self.et_status.setText(t("lobby.et_ready_noip"))
+
+    def _choose_tool_prompt(self, lob):
+        """弹出联机工具选择器：EasyTier 内置下载 / 陶瓦 / MCTier 打开官网。
+
+        无论选择哪个，大厅簿记仍可继续使用；只有 EasyTier 会由启动器自动
+        下载并接回虚拟局域网启动流程。
+        """
+        pick = _ToolPicker(self)
+        code = pick.exec()
+        if code == 1:
+            # EasyTier：内置下载，完成后 _on_et_downloaded 会自动重新拉起
+            self._download_easytier()
+        elif code in (2, 3):
+            url = TERRACOTTA_URL if code == 2 else MCTIER_URL
+            self._open_url(url)
+            self._status(t("lobby.tool_browser"))
+
+    def _open_url(self, url: str):
+        """用系统默认浏览器打开外部链接。"""
+        try:
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _download_easytier(self):
         """Download + unzip easytier-core into the data dir."""

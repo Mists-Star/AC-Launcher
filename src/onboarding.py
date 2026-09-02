@@ -65,22 +65,29 @@ def increment_launch_count() -> int:
 
 
 def mark_onboarding_done() -> None:
-    """Force the launch_count past the onboarding threshold so the wizard
-    never shows again — called both when the user completes it (done step)
-    AND when they skip it (reject). Without this, every fresh launch sees
-    ``launch_count=0 < 3`` and the wizard reappears forever (every prior
-    ship had this bug — the done/skip paths never wrote the counter)."""
-    p = os.path.join(get_data_dir(), "launch_count.txt")
+    """round-45 恢复 flag 文件方案（用户明确说别乱改 onboarding）：
+    写显式「已完成」flag，不依赖 launch_count。"""
+    p = os.path.join(get_data_dir(), "onboarding_done.flag")
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w") as f:
-            f.write("999")
+        open(p, "w").close()
+    except OSError:
+        pass
+
+
+def reset_onboarding() -> None:
+    """清 flag——让教程重新显示。设置页「重置新手教程」用。"""
+    p = os.path.join(get_data_dir(), "onboarding_done.flag")
+    try:
+        os.remove(p)
     except OSError:
         pass
 
 
 def should_show_onboarding() -> bool:
-    return get_launch_count() < 3
+    # round-45 恢复（用户说别乱改 onboarding）：回到 round-44 flag 文件方案
+    return not os.path.exists(
+        os.path.join(get_data_dir(), "onboarding_done.flag"))
 
 
 class OnboardingDialog(QDialog):
@@ -141,7 +148,8 @@ class OnboardingDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.titlebar = TitleBar(self, title=t("onboard.title"), height=38)
+        # round-46 用户反馈：教程不该有 min/max/close（正常只有跳过/下一步）→ controls="none"
+        self.titlebar = TitleBar(self, title=t("onboard.title"), height=38, controls="none")
         root.addWidget(self.titlebar)
 
         # content area — card style
@@ -666,6 +674,10 @@ class _JavaScanThread(QThread):
     done = Signal(object)  # (sys_java, ours_dict)
 
     def run(self) -> None:
+        # round-34 加固：注册到 worker._LIVE，关窗时 drain_workers 能 join，
+        # 否则解释器退出销毁运行中 QThread → heap corruption 0xc0000374。
+        from .worker import _register, _unregister
+        _register(self)
         try:
             from .core.java import find_java
             from .core import java_install
@@ -674,6 +686,8 @@ class _JavaScanThread(QThread):
             self.done.emit((sys_java, ours))
         except Exception:  # noqa: BLE001 - treat as "no java detected"
             self.done.emit((None, {}))
+        finally:
+            _unregister(self)
 
 
 class _JavaInstallThread(QThread):
@@ -692,6 +706,9 @@ class _JavaInstallThread(QThread):
         self._major = major
 
     def run(self) -> None:
+        # round-34 加固：注册到 worker._LIVE（同 _JavaScanThread）
+        from .worker import _register, _unregister
+        _register(self)
         try:
             from .core import java_install
 
@@ -702,3 +719,5 @@ class _JavaInstallThread(QThread):
             self.done.emit(path)
         except Exception as e:  # noqa: BLE001 - surface to the UI
             self.failed.emit(str(e))
+        finally:
+            _unregister(self)

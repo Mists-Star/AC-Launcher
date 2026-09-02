@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget, QPushButton, QLabel, QHBoxLayout,
 )
 from PySide6.QtCore import Qt, QEvent, QPoint, QObject
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QMouseEvent, QCursor
 
 
 class TitleBar(QWidget):
@@ -54,10 +54,14 @@ class TitleBar(QWidget):
         title: str = "",
         show_controls: bool = True,
         height: int = 44,
+        # round-46 用户要求：对话框只留关闭键（默认 close-only），
+        # 需要完整控制栏的窗口显式传 controls="all"
+        controls: str = "close",
     ):
         super().__init__(parent)
         self.setFixedHeight(height)
         self._window = lambda: self.window()
+        self._drag_from: tuple[QPoint, QPoint] | None = None
 
         # Explicit themed background — frameless windows lose native chrome
         # so we must paint our own to keep text readable in both modes.
@@ -80,12 +84,90 @@ class TitleBar(QWidget):
         # ---- right: window controls ----
         self._btns: dict[str, QPushButton] = {}
         if show_controls:
-            for name, txt, tip, slot in [
-                ("min", "─", "Minimize", "_on_min"),
-                ("max", "□", "Maximize", "_on_max"),
-                ("close", "✕", "Close", "_on_close"),
-            ]:
-                btn = QPushButton(txt)
+            # controls: "all" | "close" | "none"
+            # round-46：root cause fix——最小化按钮用字符 "−/－" 在不同字体基线
+            # 永远偏低。直接自绘 QPushButton 子类 paintEvent 画 12x2 横线，
+            # 不依赖任何字符字形 + 用 text="" 避免 paint 字符与自绘重叠。
+            from PySide6.QtGui import QPainter
+            from PySide6.QtCore import QRectF
+
+            class _GlyphButton(QPushButton):
+                """Self-painted glyph button — paintEvent 画指定符号。
+
+                shape: "min"=横线 / "max"=方框 / "close"=叉号 / "restore"=双方框
+                """
+                def __init__(self, shape: str, parent=None):
+                    super().__init__("", parent)  # text="" —— 只用自绘
+                    self._shape = shape
+                    self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                def paintEvent(self, e):
+                    super().paintEvent(e)  # 走 QSS hover/pressed 状态
+                    p = QPainter(self)
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    # 自绘颜色：跟随 QSS color（hover 时 QSS 已切 color）
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(self.palette().color(self.foregroundRole()))
+                    r = self.rect()
+                    if self._shape == "min":
+                        # 横线 12x2 居中（按钮 52x38 → y 18 线 2 高）
+                        line_w = 12
+                        line_h = 2
+                        x = r.x() + (r.width() - line_w) / 2
+                        y = r.y() + r.height() / 2 - line_h / 2
+                        p.drawRect(QRectF(x, y, line_w, line_h))
+                    elif self._shape == "max":
+                        s = 12
+                        x = r.x() + (r.width() - s) / 2
+                        y = r.y() + (r.height() - s) / 2
+                        # 空心方框：先填白再画边
+                        from PySide6.QtGui import QColor
+                        bg = self.palette().color(self.backgroundRole())
+                        p.setBrush(bg)
+                        p.drawRect(QRectF(x, y, s, s))
+                        p.setBrush(self.palette().color(self.foregroundRole()))
+                        pen = p.pen()
+                        from PySide6.QtCore import Qt as _Qt
+                        p.setPen(self.palette().color(self.foregroundRole()))
+                        p.drawRect(QRectF(x + 0.5, y + 0.5, s - 1, s - 1))
+                        p.setPen(pen)
+                    elif self._shape == "restore":
+                        s = 12
+                        x = r.x() + (r.width() - s) / 2
+                        y = r.y() + (r.height() - s) / 2
+                        # 双方框叠层
+                        from PySide6.QtGui import QColor
+                        bg = self.palette().color(self.backgroundRole())
+                        p.setBrush(bg)
+                        p.drawRect(QRectF(x, y, s, s))
+                        p.setPen(self.palette().color(self.foregroundRole()))
+                        p.drawRect(QRectF(x + 0.5, y + 0.5, s - 1, s - 1))
+                    elif self._shape == "close":
+                        # 叉号
+                        from PySide6.QtGui import QPen
+                        pen = QPen(self.palette().color(self.foregroundRole()), 2)
+                        p.setPen(pen)
+                        s = 12
+                        cx, cy = r.x() + r.width() / 2, r.y() + r.height() / 2
+                        p.drawLine(int(cx - s / 2 + 0.5), int(cy - s / 2 + 0.5),
+                                   int(cx + s / 2 - 0.5), int(cy + s / 2 - 0.5))
+                        p.drawLine(int(cx - s / 2 + 0.5), int(cy + s / 2 - 0.5),
+                                   int(cx + s / 2 - 0.5), int(cy - s / 2 + 0.5))
+                    p.end()
+
+            all_buttons = [
+                ("max", _GlyphButton, "Maximize", "_on_max"),
+                ("min", _GlyphButton, "Minimize", "_on_min"),
+                ("close", _GlyphButton, "Close", "_on_close"),
+            ]
+            if controls == "close":
+                button_defs = [b for b in all_buttons if b[0] == "close"]
+            elif controls == "none":
+                button_defs = []
+            else:
+                button_defs = all_buttons
+
+            for name, btn_cls, tip, slot in button_defs:
+                btn = btn_cls(shape=name)
                 btn.setObjectName(f"tb_{name}")
                 btn.setFixedSize(52, 38)
                 btn.setCursor(Qt.PointingHandCursor)
@@ -93,6 +175,8 @@ class TitleBar(QWidget):
                 btn.clicked.connect(getattr(self, slot))
                 lay.addWidget(btn)
                 self._btns[name] = btn
+            # round-46 用户要求：控制按钮组回到右上角（删掉 round-45 误加的
+            # 右侧 stretch——它把按钮组水平居中了，用户明确否定）
 
             # Base style for all titlebar buttons
             self._tb_css_base = (
@@ -170,14 +254,33 @@ class TitleBar(QWidget):
         self._window().close()
 
     # ---- drag ----
+    # round-54 兜底：无边框 + WA_TranslucentBackground 下 startSystemMove 在
+    # Win11/Qt6 经常失效。按下时记录起点并请求系统移动，同时保留手动移动
+    # 兜底——系统移动一旦接管，应用收不到 Move 事件，二者互斥不冲突。
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
+            self._drag_from = (QCursor.pos(), self._window().pos())
             try:
                 self._window().startSystemMove()
             except AttributeError:
                 pass  # Very old Qt; fall through without drag
             event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if (self._drag_from is not None and (event.buttons() & Qt.LeftButton)
+                and not self._window().isMaximized()):
+            press_global, start_win = self._drag_from
+            delta = event.globalPosition().toPoint() - press_global
+            self._window().move(start_win + delta)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            self._drag_from = None
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton and "max" in self._btns:

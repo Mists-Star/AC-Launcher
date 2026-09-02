@@ -378,6 +378,50 @@ def login_with_microsoft_code_display(
 import uuid as _uuid
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 微软 token 静默续期（round-34 修复 P1-5）
+# ── 之前 refresh_token 存了但从未使用：微软 access_token 约 2h 过期，
+#    过期后只能重新完整走设备码登录。现在用 refresh_token 静默换新 token，
+#    再重走 XBL→XSTS→MC 链路，无用户交互。
+# ══════════════════════════════════════════════════════════════════════════
+# round-40 P1 修复：与登录端点（_TOKEN_URL/devicecode 均 /consumers/）一致，
+# 内置 Xbox client（consumers 租户）用 /common/ 会 AADSTS700011 导致静默续期失效。
+_TOKEN_REFRESH_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+
+
+def refresh_microsoft(profile: dict) -> dict | None:
+    """Silently refresh an expired Microsoft session via ``refresh_token``.
+
+    Returns an updated profile dict (same shape as ``complete_login_with_token``
+    的输出 + 保留原 id)，或 None（refresh_token 缺失 / 刷新被拒 / 网络异常）——
+    调用方回退到完整交互登录即可，绝不让刷新失败抛异常。
+    """
+    refresh_token = (profile.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return None
+    try:
+        r = requests.post(
+            _TOKEN_REFRESH_URL,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": MICROSOFT_CLIENT_ID,
+                "refresh_token": refresh_token,
+                "scope": MICROSOFT_SCOPE,
+            },
+            headers=_UA,
+            timeout=30,
+        )
+        data = r.json()
+        if "access_token" not in data:
+            return None  # 刷新被拒（token 失效/撤销）→ 需重新登录
+        new_profile = complete_login_with_token(MICROSOFT_CLIENT_ID, data)
+        # 保留原账号 id，避免刷新后账号身份漂移
+        new_profile["id"] = profile.get("id", new_profile.get("id", ""))
+        return new_profile
+    except Exception:  # noqa: BLE001 - 静默刷新失败绝不能崩
+        return None
+
+
 def _client_token() -> str:
     return str(_uuid.uuid4())
 

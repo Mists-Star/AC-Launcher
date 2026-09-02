@@ -23,6 +23,8 @@ THEME_LIGHT = {
     "bg_app":       "#FFFFFF",
     "bg_panel":     "#F8F9FA",
     "bg_card":      "#FFFFFF",
+    "bg_btn":       "#FFFFFF",   # round-44 按钮背景（light 同 bg_card）
+    "bg_frost":     "#A8FFFFFF",   # frosted-glass translucent card (alpha 168)
     "bg_hover":     "#F0F1F3",
     "bg_input":     "#F8F9FA",
 
@@ -58,7 +60,11 @@ THEME_DARK = {
     "bg_app":       "#1E1E1E",
     "bg_panel":     "#2A2A2E",
     "bg_card":      "#2A2A2E",
-    "bg_hover":     "#33333A",
+    # round-44 按钮背景：dark 下区分面板（#33333A），与 bg_card 同色导致按钮
+    # 边框融背景，文字看不清。light 主题保持白底。
+    "bg_btn":       "#33333A",
+    "bg_frost":     "#942A2C38",   # frosted-glass translucent card (alpha 148)
+    "bg_hover":     "#3F3F47",
     "bg_input":     "#232327",
 
     # brand
@@ -91,6 +97,80 @@ THEME_DARK = {
 # Active token table (default: LIGHT — matches user's Ardot white-bg design)
 COLORS = dict(THEME_LIGHT)
 _theme_mode = "light"
+# round-49 修复「改选项把强调色拉回紫色」：记录用户自定义的 accent。set_theme_mode /
+# apply_theme_pack 重置基础色表后必须重新套用自定义 accent，否则 accent 恒被
+# THEME_LIGHT/THEME_DARK 里的 #7C3AED 覆盖。None = 未自定义（用内置紫）。
+_custom_accent: str | None = None
+
+# ── 玻璃拟态（round-52 恢复；round-32 曾拍板删除）─────────────────────
+# 曾经做过：半透明卡片+渐变底（round-23~28）、系统 Acrylic 透桌面
+# （round-30~31，BlockHelm 方案）。round-32 暂时移除；round-51 先恢复
+# 系统 Acrylic（transparent_window 透底），round-52 恢复应用层半透明
+# 卡片（$glassy token）。开启时容器走 bg_frost 半透明、按钮仍实色。
+_frosted = False
+
+
+def set_frosted(on: bool) -> None:
+    """玻璃拟态开关（round-52 恢复，round-32~49 为 no-op）。
+
+    开启：卡片/分组框走半透明 ``bg_frost``（透出 Acrylic 桌面模糊），
+    按钮与导航仍实色（round-44 对比度不回退）。关闭：全部实色。
+    需要配合系统 Acrylic（transparent_window）才有效果；无 Acrylic 时
+    半透明卡片叠实色底仍可读（alpha 高），不做强制降级。
+    """
+    global _frosted
+    on = bool(on)
+    if on == _frosted:
+        return
+    _frosted = on
+    _QSS_CACHE.clear()
+    _notify_theme_change()
+
+
+def is_frosted() -> bool:
+    """当前是否开启玻璃拟态（半透明卡片）。"""
+    return _frosted
+
+
+def get_frosted_global() -> bool:
+    """兼容别名：同 is_frosted。"""
+    return _frosted
+
+# ── 透底效果（round-51）：系统级 Acrylic 真毛玻璃时，应用层背景变半透明，
+# ── 让 DWM 的桌面模糊透出来。关闭时恢复实色（round-32 的默认行为）。
+_app_bg_translucent = False
+
+
+def set_app_background_translucent(on: bool) -> None:
+    """透底模式：应用层 QSS 背景改为半透明（否则 Acrylic 被实色盖住）。
+
+    只影响 ``bg_app_frost``（QWidget/QMainWindow/QDialog 的底色），卡片等
+    表面仍走 ``bg_frost``（实色），保证文字可读。
+    """
+    global _app_bg_translucent
+    on = bool(on)
+    if on == _app_bg_translucent:
+        return
+    _app_bg_translucent = on
+    _QSS_CACHE.clear()
+    _notify_theme_change()
+
+
+def is_app_background_translucent() -> bool:
+    return _app_bg_translucent
+
+
+def _to_translucent(hex_color: str, alpha: int) -> str:
+    """把 #RRGGBB 转成 #AARRGGBB（alpha 0..255）。"""
+    try:
+        c = hex_color.lstrip("#")
+        if len(c) != 6:
+            return hex_color
+        r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        return f"#{alpha:02X}{r:02X}{g:02X}{b:02X}"
+    except Exception:
+        return hex_color
+
 
 # Active design tokens (override-able via theme packs)
 RADII = {"card": 12, "big": 16, "btn": 10, "small": 6}
@@ -100,16 +180,39 @@ FONT_FAMILY = FONT_FAMILY_BASE
 # Currently applied theme pack id ("" = none)
 _theme_pack_id = ""
 
+# Theme-change listeners (e.g. title-bar icons that need re-rendering)
+_theme_change_listeners: list = []
+
+
+def on_theme_change(callback):
+    """Register a callback invoked whenever the theme mode or pack changes."""
+    if callback not in _theme_change_listeners:
+        _theme_change_listeners.append(callback)
+
+
+def _notify_theme_change():
+    """Broadcast theme change to all registered listeners."""
+    for cb in list(_theme_change_listeners):
+        try:
+            cb()
+        except Exception:
+            pass
+
 
 def set_theme_mode(mode: str) -> None:
     """Switch between 'light' and 'dark'. Regenerates COLORS in-place."""
     global _theme_mode
     _theme_mode = mode
-    COLORS.copy()  # no-op placeholder for future signal
-    if mode == "dark":
-        COLORS.update(THEME_DARK)
-    else:
-        COLORS.update(THEME_LIGHT)
+    COLORS.update(THEME_DARK if mode == "dark" else THEME_LIGHT)
+    # round-49 修复「改选项把强调色拉回紫色」：重置基础色表后重新套用用户
+    # 自定义 accent，避免 accent 被 THEME_LIGHT/DARK 的 #7C3AED 覆盖。
+    if _custom_accent:
+        _apply_accent(_custom_accent)
+    # round-45 兜底：text_on_accent 只在 set_accent_color 里设置，若启动时
+    # config 无 accent_color（旧版/被清）会缺失 → QSS 出现字面 $text_on_accent
+    if "text_on_accent" not in COLORS:
+        COLORS["text_on_accent"] = "#FFFFFF"
+    _notify_theme_change()
 
 
 def get_theme_mode() -> str:
@@ -118,6 +221,16 @@ def get_theme_mode() -> str:
 
 def set_accent_color(hex_color: str) -> None:
     """Update accent color tokens in-place. Does NOT regenerate QSS (caller must)."""
+    global _custom_accent
+    _custom_accent = hex_color
+    _apply_accent(hex_color)
+
+
+def _apply_accent(hex_color: str) -> None:
+    """Derive all accent-family tokens from a single base hex and write them
+    into COLORS. Used by set_accent_color and re-applied after any base-table
+    reset (set_theme_mode / apply_theme_pack) so the user's custom accent
+    survives option changes."""
     COLORS["accent"] = hex_color
     # Derive hover/press/soft variants from the base accent
     r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
@@ -132,6 +245,11 @@ def set_accent_color(hex_color: str) -> None:
     COLORS["accent_soft"] = f"{_darken(0.95)}22"  # very faint tint with alpha
     COLORS["text_accent"] = _lighten(0.15)
     COLORS["border_focus"] = hex_color
+    # round-44 按钮文字自适应：accent 亮度低（深紫等）用白字，亮度高（浅色
+    # 自定义主题）用深字——之前固定 #FFFFFF，用户把 accent 设成浅色时白字
+    # 看不清（「新建实例」按钮在白色主题下看不清的根因）。
+    _luma = (r * 299 + g * 587 + b * 114) / 1000
+    COLORS["text_on_accent"] = "#1F2937" if _luma > 150 else "#FFFFFF"
 
 R_CARD = 12
 R_BIG = 16
@@ -307,9 +425,14 @@ def apply_theme_pack(pack: dict | None) -> None:
         COLORS.update(pack.get("colors", {}))
         RADII.update(pack.get("radii", {}))
         FONTS.update(pack.get("fonts", {}))
+    elif _custom_accent:
+        # round-49：无主题包时，重置基础表后重新套用用户自定义 accent，
+        # 否则 accent 又变回内置紫。
+        _apply_accent(_custom_accent)
     _sync_radii()
     _sync_fonts()
     _QSS_CACHE = {}  # invalidate so next apply_qss() rebuilds
+    _notify_theme_change()
 
 
 def get_active_theme_pack_id() -> str:
@@ -319,19 +442,19 @@ def get_active_theme_pack_id() -> str:
 QSS_TEMPLATE = Template("""
 /* ---- global reset ---- */
 QWidget {
-    background: $bg_app;
+    background: $bg_app_frost;
     color: $text_main;
     font-family: $font_family;
     font-size: ${f_md}px;
 }
 QMainWindow {
-    background: $bg_app;
+    background: $bg_app_frost;
     /* no border — frameless windows must be edge-to-edge */
 }
 
 /* ---- CRITICAL: dialogs must NOT be white ---- */
 QDialog {
-    background: $bg_app;
+    background: $bg_app_frost;
     color: $text_main;
     /* no border — FramelessHelper handles chrome */
 }
@@ -342,21 +465,21 @@ QDialog {
    变成黑框直角（用户反馈"数值统计黑框没圆角"）。
    保留无类型前缀的 [cls="card"] 作为非 QFrame 容器（QWidget 等）的兜底。 */
 QFrame[cls="card"] {
-    background: $bg_card;
+    background: $glassy;
     border: 1px solid $border;
     border-radius: ${r_card}px;
 }
 QFrame[cls="card"]:hover {
-    background: $bg_hover;
+    background: $glassy;
     border: 1px solid $border_light;
 }
 [cls="card"] {
-    background: $bg_card;
+    background: $glassy;
     border: 1px solid $border;
     border-radius: ${r_card}px;
 }
 [cls="card"]:hover {
-    background: $bg_hover;
+    background: $glassy;
     border: 1px solid $border_light;
 }
 
@@ -401,13 +524,11 @@ QLabel[cls="group"] {
     font-weight: 700;
     color: $text_main;
     padding: 4px 2px;
-    border-bottom: 2px solid $accent_soft;
-    margin-bottom: 2px;
 }
 
 /* ---- push buttons ---- */
 QPushButton {
-    background: $bg_card;
+    background: $bg_frost;
     color: $text_main;
     border: 1px solid $border;
     border-radius: ${r_btn}px;
@@ -430,7 +551,7 @@ QPushButton:disabled {
 QPushButton[cls="accent"] {
     background: $accent;
     border: none;
-    color: #FFFFFF;
+    color: $text_on_accent;   /* round-44：随 accent 亮度自适应黑/白字 */
     font-weight: 600;
 }
 QPushButton[cls="accent"]:hover { background: $accent_hover; }
@@ -442,6 +563,21 @@ QPushButton[cls="danger"] {
     color: $danger;
 }
 QPushButton[cls="danger"]:hover { background: rgba(239,68,68,0.08); }
+/* secondary outline button (visible on both light and dark themes) */
+QPushButton[cls="secondary"] {
+    background: transparent;
+    border: 1px solid $border;
+    color: $text_main;
+}
+QPushButton[cls="secondary"]:hover {
+    background: $accent_soft;
+    border-color: $accent;
+    color: $accent;
+}
+QPushButton[cls="secondary"]:pressed {
+    background: $accent;
+    color: #FFFFFF;
+}
 /* segmented control button (新手 / 进阶) */
 QPushButton[cls="seg"] {
     background: $bg_input;
@@ -519,12 +655,15 @@ QSlider::sub-page:horizontal {
     border-radius: 3px;
 }
 QSlider::handle:horizontal {
-    width: 18px;
-    height: 18px;
-    margin: -6px 0;
+    /* round-48 修复：QSS 不支持 # 注释！原 # 注释让 Qt 解析器进入错误
+     * 恢复，吞掉其后所有 radio/checkbox 规则，选中圆点因此消失。
+     * 现已改为合法的斜杠星注释。 */
+    width: 10px;
+    height: 10px;
+    margin: -2px 0;
     background: #FFFFFF;
     border: 2px solid $accent;
-    border-radius: 9px;
+    border-radius: 7px;
 }
 QSlider::handle:horizontal:hover {
     background: $accent_hover;
@@ -545,21 +684,62 @@ QListWidget::item {
 }
 QListWidget::item:hover { background: $bg_hover; color: $text_main; }
 QListWidget::item:selected {
-    background: $accent_soft;
-    color: $accent;
+    /* round-46 用户反馈：白主题下选中态 accent_soft 太浅看不清。
+     * 改为 accent 实色底 + text_on_accent 白字（类似主按钮）——
+     * 强对比，深浅主题都清晰。 */
+    background: $accent;
+    color: $text_on_accent;
     font-weight: 600;
-    border-left: 3px solid $accent;
+    border-left: 3px solid $accent_press;
 }
 
 /* 左侧导航分组标题（不可选灰字，功能区分化） */
 [cls="nav-group"] {
     color: $text_sub;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
-    letter-spacing: 2px;
+    letter-spacing: 1px;
     background: transparent;
     border: none;
-    padding: 8px 0 4px 8px;
+    padding: 14px 0 4px 18px;
+    padding-left: 18px;
+}
+
+/* ---- AC left sidebar (scoped by object name) ---- */
+#ac-nav {
+    background: $bg_panel;
+    border: none;
+    border-right: 1px solid $border;
+    outline: 0;
+}
+#ac-nav::item {
+    color: $text_sub;
+    background: transparent;
+    padding: 10px 14px;
+    margin: 3px 10px;
+    border-radius: ${r_btn}px;
+    font-size: ${f_md}px;
+}
+#ac-nav::item:hover {
+    background: $bg_hover;
+    color: $text_main;
+}
+#ac-nav::item:selected {
+    /* round-46（TRAE 视觉反馈）：AC 导航选中态之前用 accent_soft 浅紫底，
+     * 白主题下和未选中几乎无法区分（用户多次反馈"选中看不清"）。
+     * 与通用 QListWidget 选中态统一为 accent 实色 + 白字。 */
+    background: $accent;
+    color: $text_on_accent;
+    font-weight: 700;
+    border-left: 3px solid $accent_press;
+    padding-left: 11px;
+}
+#ac-nav::item:selected:!active {
+    background: $accent;
+    color: $text_on_accent;
+}
+#ac-nav::item:!selected:pressed {
+    background: $border;
 }
 
 /* ---- scroll area ---- */
@@ -577,6 +757,21 @@ QScrollBar::handle:vertical {
 QScrollBar::handle:vertical:hover { background: $text_disabled; }
 QScrollBar::add-line:vertical,
 QScrollBar::sub-line:vertical { height: 0; }
+/* round-44 横向滚动条（之前只定义 vertical，底部横条走系统默认灰条
+   与主题割裂——实例页/设置页底部会显形难看）。height:8 配合 horizontal 关键字。 */
+QScrollBar:horizontal {
+    background: $bg_app;
+    height: 8px;
+    margin: 0;
+}
+QScrollBar::handle:horizontal {
+    background: $border_light;
+    border-radius: 4px;
+    min-width: 28px;
+}
+QScrollBar::handle:horizontal:hover { background: $text_disabled; }
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal { width: 0; }
 
 /* ---- progress bar ---- */
 QProgressBar {
@@ -609,35 +804,45 @@ QRadioButton {
     background: transparent;
     color: $text_main;
     spacing: 8px;
+    padding: 4px 6px;
+    border-radius: 6px;
 }
 QRadioButton::indicator {
     width: 18px; height: 18px;
-    border: 2px solid $border;
+    /* round-46 用户反馈"白色块看不见"：$border 在白主题下太浅（#E5E7EB），
+     * radio 圆圈在白背景几乎透明。改用 $text_sub（深灰）作为未选边框，可见。 */
+    border: 2px solid $text_sub;
     border-radius: 9px;
-    background: $bg_card;
+    background: #FFFFFF;
 }
 QRadioButton::indicator:checked {
     background: $accent;
     border-color: $accent;
 }
-QRadioButton::indicator:hover { border-color: $border_light; }
+QRadioButton::indicator:hover { border-color: $accent; }
+QRadioButton:checked {
+    /* round-46：选中态——浅紫底 + 加粗文字 + 深紫 accent indicator 三重确认。 */
+    background: $accent_soft;
+    font-weight: 600;
+    color: $accent;
+}
 
 /* ---- group box (settings sections) ---- */
 QGroupBox {
-    background: $bg_card;
+    background: $glassy;
     border: 1px solid $border;
     border-radius: ${r_card}px;
-    padding: 20px 16px 16px 16px;
-    margin-top: 12px;
+    padding: 24px 18px 18px 18px;
+    margin-top: 14px;
     font-size: ${f_lg}px;
-    font-weight: 600;
+    font-weight: 700;
     color: $text_main;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
-    left: 16px;
+    left: 14px;
     padding: 0 8px;
-    color: $text_main;
+    color: $accent;
 }
 
 /* ---- text edit (JVM args) ---- */
@@ -655,7 +860,7 @@ QTextEdit:focus { border: 2px solid $border_focus; }
 /* ---- tooltip ---- */
 QToolTip {
     background: $text_main;
-    color: $bg_panel;
+    color: $bg_card;   /* opaque — bg_panel may be translucent in frosted mode */
     border: none;
     border-radius: ${r_small}px;
     padding: 4px 10px;
@@ -698,7 +903,7 @@ QStatusBar {
     border-top: 1px solid $border;
 }
 [cls="surface"] {
-    background: $bg_panel;
+    background: $glassy;
     border: 1px solid $border;
     border-radius: 12px;
 }
@@ -710,7 +915,7 @@ QPushButton[cls="surface"]:hover {
     border: 2px solid $accent;
 }
 [cls="row"] {
-    background: $bg_panel;
+    background: $glassy;
     border: 1px solid $border;
     border-radius: 10px;
 }
@@ -742,7 +947,7 @@ QPushButton[cls="icon-btn"]:hover {
     font-size: 11px;
 }
 [cls="loader-card"] {
-    background: $bg_card;
+    background: $glassy;
     border: 1px solid $border;
     border-radius: 10px;
 }
@@ -772,21 +977,59 @@ QPushButton[cls="pcl2-pill"]:checked {
     color: $accent;
     font-weight: 600;
 }
+QPushButton[cls="chip"] {
+    background: $bg_card;
+    color: $text_sub;
+    border: 1px solid $border;
+    border-radius: 10px;
+    padding: 4px 15px;
+    font-size: 13px;
+}
+QPushButton[cls="chip"]:hover {
+    background: $bg_hover;
+    color: $text_main;
+}
+QPushButton[cls="chip"]:checked {
+    background: $accent;
+    color: #FFFFFF;
+    border-color: $accent;
+    font-weight: 600;
+}
 """)
 
 
 def build_qss() -> str:
-    # Cache per (theme mode, accent) so repeated toggles don't re-substitute.
-    key = (_theme_mode, COLORS.get("accent"))
+    # Cache per (theme mode, accent, frosted) so repeated toggles don't
+    # re-substitute.
+    key = (_theme_mode, COLORS.get("accent"), _frosted)
     cached = _QSS_CACHE.get(key)
     if cached is not None:
         return cached
-    qss = QSS_TEMPLATE.safe_substitute(
-        **COLORS,
-        font_family=FONT_FAMILY,
-        f_sm=F_SM, f_md=F_MD, f_lg=F_LG, f_xl=F_XL,
-        r_card=R_CARD, r_big=R_BIG, r_btn=R_BTN, r_small=R_SMALL,
-    )
+    subst = dict(COLORS)
+    subst["font_family"] = FONT_FAMILY
+    subst["f_sm"] = F_SM
+    subst["f_md"] = F_MD
+    subst["f_lg"] = F_LG
+    subst["f_xl"] = F_XL
+    subst["r_card"] = R_CARD
+    subst["r_big"] = R_BIG
+    subst["r_btn"] = R_BTN
+    subst["r_small"] = R_SMALL
+    # 透底模式（round-51）：应用层底色转半透明，让系统 Acrylic 的桌面模糊
+    # 透出来；关闭时保持实色（round-32 默认）。
+    if _app_bg_translucent:
+        subst["bg_app_frost"] = _to_translucent(COLORS["bg_app"], 205)
+    else:
+        subst["bg_app_frost"] = COLORS["bg_app"]
+    # round-44 dark 主题按钮对比度：$bg_frost 走新 bg_btn（dark=#33333A，
+    # light=#FFFFFF），避免按钮底色与面板同色导致边框融背景看不清。
+    subst["bg_frost"] = COLORS.get("bg_btn", COLORS["bg_card"])
+    # round-52 玻璃拟态：容器/卡片/分组框走 $glassy —— 开启时用半透明
+    # bg_frost（透出 Acrylic 桌面模糊），关闭时实色 bg_card。注意此处必须
+    # 直接读 COLORS["bg_frost"]（上方 subst["bg_frost"] 已被映射成 bg_btn，
+    # 那是给按钮的对比度颜色，不是卡片玻璃色）。
+    subst["glassy"] = COLORS["bg_frost"] if _frosted else COLORS["bg_card"]
+    qss = QSS_TEMPLATE.safe_substitute(**subst)
     _QSS_CACHE[key] = qss
     return qss
 
@@ -860,6 +1103,10 @@ class RoundedCard(QFrame):
         self.update()
 
     def set_fill(self, fill) -> None:
+        # 允许传入 hex 字符串（如 COLORS["bg_card"]），统一归一为 QColor，
+        # 否则 paintEvent 里 QPainter.fillPath 收到裸字符串会抛 TypeError。
+        if isinstance(fill, str):
+            fill = QColor(fill)
         self._fill = fill
         self.update()
 
@@ -874,7 +1121,15 @@ class RoundedCard(QFrame):
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         path = QPainterPath()
         path.addRoundedRect(r, self._radius, self._radius)
-        brush = self._fill if self._fill is not None else QColor(COLORS["bg_card"])
+        fill = self._fill
+        if fill is None:
+            # frosted → translucent card; otherwise solid (same token logic
+            # as the QSS $bg_frost substitution in build_qss()).
+            brush = QColor(COLORS["bg_frost"] if _frosted else COLORS["bg_card"])
+        elif isinstance(fill, str):
+            brush = QColor(fill)
+        else:
+            brush = fill
         p.fillPath(path, brush)
         # 左侧 accent 条（toast / 通知卡用）
         if self._accent_border > 0:
@@ -899,3 +1154,65 @@ if __name__ == "__main__":
     qss = build_qss()
     print("QSS generated, length:", len(qss))
     print("sample:", qss[:120])
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# round-46 结构性修复：QSlider 自绘样式
+# Qt QSS 对 QSlider::sub-page 的 border-radius **不支持**（只渲染 background）
+# → 之前几轮改 QSS 数值（handle margin/border-radius）全部无效，滑条满格时
+# 右端永远是直边。改用 QProxyStyle 自绘 groove/sub-page/handle：
+#   groove 圆角条（$border）→ sub-page 圆角条（$accent）→ 圆形 handle。
+# 挂载：app.setStyle(AcSliderStyle())（main.py 在 apply_qss 后调用）。
+# ═══════════════════════════════════════════════════════════════════════
+from PySide6.QtWidgets import QProxyStyle, QStyle, QSlider
+from PySide6.QtCore import Qt, QRectF, QPointF
+from PySide6.QtGui import QPainter, QColor
+
+
+class AcSliderStyle(QProxyStyle):
+    """自绘横向 QSlider：圆角 groove + 圆角 sub-page + 圆形 handle。
+
+    解决 QSS 无法给 sub-page 圆角的问题（Qt 样式表对 sub-page 只认
+    background，border-radius 静默忽略 → 满格右端是直边）。
+    """
+
+    def drawComplexControl(self, cc, opt, p, widget=None):
+        if cc == QStyle.ComplexControl.CC_Slider and widget is not None:
+            qs = widget
+            if qs.orientation() == Qt.Horizontal:
+                try:
+                    self._paint_slider(opt, p, qs)
+                    return
+                except Exception:
+                    pass  # 自绘失败退回 base（不崩）
+        return super().drawComplexControl(cc, opt, p, widget)
+
+    def _paint_slider(self, opt, p, widget):
+        from .theme import COLORS
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        r = opt.rect
+        # groove：左右留 4px，垂直居中 6px 高
+        g = QRectF(r.left() + 4, r.center().y() - 3, r.width() - 8, 6)
+        p.setBrush(QColor(COLORS.get("border", "#E5E7EB")))
+        p.drawRoundedRect(g, 3, 3)
+        # handle 中心 x（按 slider 值比例）
+        span = max(0, (opt.maximum - opt.minimum))
+        frac = (opt.sliderValue - opt.minimum) / span if span else 0.0
+        hx = g.left() + g.width() * max(0.0, min(1.0, frac))
+        # sub-page：从左到 handle 中心，圆角（左右都圆，handle 处自然衔接）
+        sp = QRectF(g.left(), g.top(), max(6.0, hx - g.left()), g.height())
+        p.setBrush(QColor(COLORS.get("accent", "#7C3AED")))
+        p.drawRoundedRect(sp, 3, 3)
+        # handle：圆形 12px（accent 边 + 白心）
+        hr = 6.0
+        p.setBrush(QColor("#FFFFFF"))
+        pen = p.pen()
+        from PySide6.QtGui import QPen
+        p.setPen(QPen(QColor(COLORS.get("accent", "#7C3AED")), 2))
+        p.drawEllipse(QPointF(hx, g.center().y()), hr, hr)
+        p.setPen(pen)
+
+    def sizeFromContents(self, ct, opt, contents, w):
+        # 滑条控件自身高度保持 QSS groove 的 6px 视觉 —— 默认高度足够
+        return super().sizeFromContents(ct, opt, contents, w)

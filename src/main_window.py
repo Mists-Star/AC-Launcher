@@ -12,12 +12,16 @@ import os
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QListWidget, QListWidgetItem, QStackedWidget,
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QProgressBar, QGridLayout, QMenu, QComboBox,
+    QProgressBar, QGridLayout, QMenu, QComboBox, QScrollArea, QSizePolicy,
 )
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QObject, QPropertyAnimation, QEasingCurve, QRectF
-from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QColor
+from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject, QPropertyAnimation, QEasingCurve, QRectF, QByteArray
+from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QColor, QPixmap, QLinearGradient, QCursor
+from PySide6.QtSvg import QSvgRenderer
 
-from .theme import COLORS, RoundedCard
+from .theme import COLORS, RoundedCard, set_theme_mode, get_theme_mode, on_theme_change
+from .effects import (
+    LightTrailCard, set_effects_enabled, set_window_opacity, fade_page_transition,
+)
 from .icons import icon
 from .i18n import t
 from src.instances import manager, Instance
@@ -63,7 +67,7 @@ NAV_GROUPS = [
     ("nav.group.resource", [("nav.store", "store"), ("nav.versions", "versions")]),
     ("nav.group.fun", [("nav.music", "music"), ("nav.achievements", "achievements")]),                # 音乐（direction B 彩蛋）
     ("nav.group.multiplayer", [("lobby.nav_lobby", "lobby")]),
-    ("nav.group.system", [("nav.account", "account"), ("nav.settings", "settings")]),
+    ("nav.group.system", [("nav.account", "account"), ("nav.console", "console"), ("nav.settings", "settings")]),
 ]
 
 # Stack index of every page — single source of truth for BOTH nav layouts
@@ -72,7 +76,7 @@ NAV_GROUPS = [
 STACK_INDEX = {
     "home": 0, "instances": 1, "mods": 2, "store": 3,
     "versions": 4, "lobby": 5, "settings": 6, "toolbox": 7,
-    "music": 8, "achievements": 9,
+    "music": 8, "achievements": 9, "console": 10,
 }
 
 # ── PCL2 top-bar navigation model (optional layout, chosen in settings) ──
@@ -123,11 +127,106 @@ def _yield():
         app.processEvents()
 
 
+class _InstanceCard(LightTrailCard):
+    """A clickable instance tile for the home instance-grid (GDLauncher / HMCL
+    style). Clicking the card body selects it as the current instance; the
+    embedded play button launches it directly."""
+
+    def __init__(self, inst, is_current, on_select, on_play, parent=None):
+        # round-50 首页实例网格流光：低强度慢速，视觉整洁
+        super().__init__(
+            radius=14, parent=parent,
+            border_color=COLORS["accent"] if is_current else COLORS["border"],
+            border_width=2 if is_current else 1,
+            strength=0.5, speed=0.7,
+        )
+        self._inst = inst
+        self._on_select_cb = on_select
+        self._on_play_cb = on_play
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(144)
+        # 允许高度随内容撑开（早年固定高度会裁掉底部播放钮/时间行）
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+
+        vl = QVBoxLayout(self)
+        vl.setContentsMargins(16, 14, 16, 14)
+        vl.setSpacing(8)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        ic = QLabel()
+        ic.setPixmap(icon("instances").pixmap(22, 22))
+        top.addWidget(ic)
+        name = QLabel(inst.name or "—")
+        name.setProperty("cls", "big")
+        name.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        top.addWidget(name, stretch=1)
+        src = getattr(inst, "launcher", "AC") or "AC"
+        if src != "AC":
+            badge = QLabel(src)
+            badge.setStyleSheet(
+                f"background:{COLORS['accent']}22; color:{COLORS['accent']}; "
+                f"border-radius:6px; padding:1px 8px; font-size:10px; font-weight:600;"
+            )
+            top.addWidget(badge)
+        if is_current:
+            cur = QLabel("▶ " + t("home.current"))
+            cur.setStyleSheet(f"color:{COLORS['accent']}; font-size:10px; font-weight:600;")
+            top.addWidget(cur)
+        vl.addLayout(top)
+
+        det = QLabel(
+            f"{inst.game_version or '?'}  ·  {getattr(inst, 'loader', 'vanilla') or 'vanilla'}"
+        )
+        det.setProperty("cls", "sub")
+        vl.addWidget(det)
+        vl.addStretch(1)
+
+        bot = QHBoxLayout()
+        bot.setSpacing(8)
+        last = getattr(inst, "last_played", None)
+        last_txt = ""
+        if last:
+            try:
+                import datetime as _dt
+                last_txt = t("home.last_played",
+                             time=_dt.datetime.fromtimestamp(last).strftime("%m-%d %H:%M"))
+            except Exception:
+                last_txt = ""
+        last_lbl = QLabel(last_txt)
+        last_lbl.setProperty("cls", "sub")
+        bot.addWidget(last_lbl, stretch=1)
+        play_btn = QPushButton()
+        play_btn.setIcon(icon("play"))
+        play_btn.setIconSize(QSize(20, 20))
+        play_btn.setProperty("cls", "accent")
+        play_btn.setCursor(Qt.PointingHandCursor)
+        play_btn.setFixedSize(40, 40)
+        play_btn.setToolTip(t("home.play"))
+        # 紫底 + 白字 + 深紫边框（round-33 修复 inline 样式覆盖 bug）
+        play_btn.setStyleSheet(
+            "QPushButton { background: #7C3AED; color: #FFFFFF; border: 2px solid #5B21B6; border-radius: 10px; padding: 0; font-weight: 600; }"
+            "QPushButton:hover { background: #8B5CF6; border: 2px solid #6D28D9; }"
+        )
+        play_btn.clicked.connect(lambda *a: self._emit_play())
+        bot.addWidget(play_btn)
+        vl.addLayout(bot)
+
+    def _emit_play(self):
+        self._on_play_cb(self._inst.id)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._on_select_cb(self._inst.id)
+        super().mouseReleaseEvent(e)
+
+
 class HomePage(QWidget):
     def __init__(self, on_play, get_current_instance, cfg,
                  on_open_settings=None, on_open_instances=None,
                  on_open_versions=None, on_open_mods=None,
-                 list_instances=None, set_current_instance=None, parent=None):
+                 list_instances=None, set_current_instance=None,
+                 on_scan_done=None, inst_mgr=None, parent=None):
         super().__init__(parent)
         self.on_play = on_play
         self.get_current_instance = get_current_instance
@@ -138,7 +237,10 @@ class HomePage(QWidget):
         self.on_open_instances = on_open_instances
         self.on_open_versions = on_open_versions
         self.on_open_mods = on_open_mods
+        self.on_scan_done = on_scan_done  # fired after the scan dialog closes
+        self.inst_mgr = inst_mgr  # optional; used by the "refresh list" chip
         self._rebuilding = False  # guard against rapid-fire rebuild() calls
+        self._scan_panel = None  # embedded ScanPanel, when active
         # Backdrop sits behind everything and never eats clicks.
         from .wallpaper import WallpaperWidget
 
@@ -154,9 +256,10 @@ class HomePage(QWidget):
         # Defer wallpaper (esp. video) init OFF the constructor: a media-backend
         # hiccup during synchronous QMediaPlayer init must never stall
         # MainWindow construction or leave the splash screen hanging.
-        QTimer.singleShot(0, self._apply_wallpaper)
+        QTimer.singleShot(0, lambda: self._apply_wallpaper(version_id=self._current_version_id()))
         self._build()
-        self._refresh()
+        # 延后到事件循环再扫盘刷新，避免阻塞 MainWindow 构造（启动提速）。
+        QTimer.singleShot(0, self._refresh)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -204,9 +307,25 @@ class HomePage(QWidget):
         # 时旧控件异步删除导致屏幕上出现"双面板"残留。
         self._replace_content()
         style = self.cfg.get("home_style", "ac_default")
-        lay = QVBoxLayout(self.content)
-        lay.setContentsMargins(48, 40, 48, 40)
-        lay.setSpacing(20)
+        if style != "ac_default" and not self.cfg.get("dev_mode", False):
+            style = "ac_default"
+        # 整个首页包一层 QScrollArea：1100×720 窗口下垂直内容（统计条 + hero
+        # + 实例网格 + 日志 + 快捷行）远超视口，不滚动就会被 Qt 硬压缩导致
+        # 显示不全。滚动时背景壁纸保持固定（scroll 透明、backdrop 在底层）。
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        inner = QWidget()
+        inner.setAttribute(Qt.WA_TranslucentBackground, True)
+        scroll.setWidget(inner)
+        outer = QVBoxLayout(self.content)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(48, 32, 48, 32)
+        lay.setSpacing(16)
         builder = {
             "pcl_card": self._build_pcl_card,
             "hmcl_list": self._build_hmcl_list,
@@ -221,16 +340,6 @@ class HomePage(QWidget):
         an entire layout (which can leave transient orphans during very rapid
         rebuilds) — the old C++ object is destroyed immediately, so its visual
         frame cannot bleed into the next."""
-        # DIAG: log every content rebuild + a stack hint so we can find what
-        # triggers "打开窗口 → 页面重建". Removed once the root cause is fixed.
-        try:
-            import traceback as _tb
-            _stack = _tb.extract_stack(limit=6)
-            _caller = " <- ".join(f"{f.filename.split(chr(92))[-1]}:{f.lineno}:{f.name}" for f in _stack[-4:-1])
-            with open("_rebuild_trace.log", "a", encoding="utf-8") as _f:
-                _f.write(f"_replace_content by: {_caller}\n")
-        except Exception:
-            pass
         root = self.layout()
         if root is None:
             return
@@ -257,7 +366,7 @@ class HomePage(QWidget):
             return
         self._rebuilding = True
         try:
-            self._apply_wallpaper()
+            self._apply_wallpaper(version_id=self._current_version_id())
             self._build()
             self._refresh()
         finally:
@@ -273,12 +382,18 @@ class HomePage(QWidget):
 
     # ── shared widget factories ──
     def _title_block(self, lay):
+        # 紧凑品牌行：标题 + 副语并排，减少首页纵向堆叠感（对齐简洁启动器）。
+        row = QHBoxLayout()
+        row.setSpacing(14)
         head = QLabel(t("home.title"))
         head.setProperty("cls", "title")
+        row.addWidget(head)
         sub = QLabel(t("home.subtitle"))
         sub.setProperty("cls", "sub")
-        lay.addWidget(head)
-        lay.addWidget(sub)
+        sub.setStyleSheet("font-size: 12px;")
+        row.addWidget(sub, alignment=Qt.AlignBottom)
+        row.addStretch(1)
+        lay.addLayout(row)
 
     def _instance_card(self) -> RoundedCard:
         card = RoundedCard(radius=12)
@@ -309,13 +424,35 @@ class HomePage(QWidget):
             self._refresh()
 
     def _make_play_btn(self) -> QPushButton:
+        """Hero / lobby 的"启动游戏"大按钮——必须一眼可见。
+
+        紫色实色 + 白字 + 明显边框 + 投影，padding 充足，minHeight 60，
+        文字 18px Bold。边框用深紫（不是白——round-32 颜色统一深色系）。
+        """
         b = QPushButton(t("home.play"))
         b.setProperty("cls", "accent")
-        b.setMinimumHeight(52)
-        b.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        b.clicked.connect(self._on_play)
+        b.setMinimumHeight(60)
+        b.setMinimumWidth(160)
+        b.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+        b.setCursor(Qt.PointingHandCursor)
         b.setIcon(icon("play"))
-        b.setIconSize(QSize(22, 22))
+        b.setIconSize(QSize(24, 24))
+        # 强化可见性：紫底 + 白字 + 深紫边框（round-32 颜色统一；round-33
+        # 修复 inline setStyleSheet 覆盖主题 QSS 导致按钮变白底的问题——
+        # 显式设 background/color，杜绝继承不一致）。
+        b.setStyleSheet(
+            "QPushButton {"
+            "  background: #7C3AED;"
+            "  color: #FFFFFF;"
+            "  border: 2px solid #5B21B6;"
+            "  padding: 8px 24px;"
+            "  border-radius: 12px;"
+            "  font-weight: 600;"
+            "}"
+            "QPushButton:hover { background: #8B5CF6; border: 2px solid #6D28D9; }"
+            "QPushButton:pressed { background: #6D28D9; border: 2px solid #4C1D95; }"
+        )
+        b.clicked.connect(self._on_play)
         return b
 
     def _make_scan_btn(self) -> QPushButton:
@@ -430,71 +567,136 @@ class HomePage(QWidget):
         self.stat_instances = self._stat_cell(sl, "0", t("home.stat_taken"))
         self.stat_sources = self._stat_cell(sl, "0", t("home.stat_sources"))
         self.stat_repair = self._stat_cell(sl, "0", t("home.stat_repair"))
-        sl.addStretch(1)
-        self.repair_btn = QPushButton(t("home.stat_repair_btn"))
-        self.repair_btn.setProperty("cls", "accent")
-        self.repair_btn.setMinimumHeight(32)
-        self.repair_btn.setIcon(icon("repair"))
-        self.repair_btn.setIconSize(QSize(15, 15))
-        self.repair_btn.clicked.connect(self._open_scan)
-        sl.addWidget(self.repair_btn)
+        # round-46 用户反馈"统计条最右边的扳手孤立"：去掉右端 repair_btn
+        # （修复入口改由 stat_repair 格点击触发——下一轮迭代做可点击统计格）
         lay.addWidget(stats)
 
-        # ── hero 实例卡（AC 品牌默认样式：左信息 / 右大启动按钮）──
-        hero = RoundedCard(radius=12)
-        hero.setMinimumHeight(190)
+        # ── hero 实例卡（渐变横幅）── 对照 Home.svg：紫→青线性渐变 + 白 CTA pill。
+        _hero_g = QLinearGradient(0, 0, 900, 0)
+        _hero_g.setColorAt(0.0, QColor("#7C3AED"))
+        _hero_g.setColorAt(1.0, QColor("#28BCD8"))
+        hero = RoundedCard(radius=16, fill=_hero_g)
+        hero.setMinimumHeight(192)
+        _white = "#FFFFFF"
         hl = QHBoxLayout(hero)
         hl.setContentsMargins(28, 22, 28, 22)
         hl.setSpacing(24)
 
-        # 左：当前实例身份
+        # 左：当前实例身份（白字，渐变底）
         left = QVBoxLayout()
         left.setSpacing(8)
         name_row = QHBoxLayout()
         name_row.setSpacing(10)
         name = QLabel("—")
-        name.setProperty("cls", "big")
         name.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
+        name.setStyleSheet(f"color: {_white}; background: transparent;")
         name_row.addWidget(name)
         # 来源徽章（PCL2/HMCL/Prism…）——控制中枢叙事：这个实例从哪个启动器接管
         self.src_badge = QLabel("")
         self.src_badge.setStyleSheet(
-            f"background: {COLORS['accent']}22; color: {COLORS['accent']}; "
-            f"border-radius: 8px; padding: 2px 10px; font-size: 11px; font-weight: 600;"
+            f"background: #FFFFFF33; color: {_white}; border-radius: 8px; "
+            f"padding: 2px 10px; font-size: 11px; font-weight: 600;"
         )
         self.src_badge.setVisible(False)
         name_row.addWidget(self.src_badge)
         name_row.addStretch(1)
         left.addLayout(name_row)
         detail = QLabel("")
-        detail.setProperty("cls", "sub")
+        detail.setStyleSheet(f"color: {_white}; font-size: 13px; background: transparent;")
         left.addWidget(detail)
         left.addSpacing(8)
         self.inst_combo = QComboBox()
-        self.inst_combo.setProperty("cls", "instance-selector")
         self.inst_combo.setMinimumHeight(38)
-        self.inst_combo.setMinimumWidth(260)
+        self.inst_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.inst_combo.setStyleSheet(
+            "QComboBox { background: rgba(255,255,255,0.22); color: #FFFFFF; "
+            "border: 1px solid rgba(255,255,255,0.45); border-radius: 10px; padding: 0 12px; }"
+            "QComboBox:hover { background: rgba(255,255,255,0.32); }"
+            "QComboBox QAbstractItemView { background: #2D2B36; color: #FFFFFF; "
+            "selection-background-color: #7C3AED; border-radius: 8px; }"
+            "QComboBox::drop-down { border: none; width: 24px; }"
+        )
         self.inst_combo.currentIndexChanged.connect(self._on_inst_changed)
         left.addWidget(self.inst_combo)
         left.addStretch(1)
         hl.addLayout(left, stretch=1)
 
-        # 右：醒目启动按钮
+        # 右：渐变底上的白色 pill 启动按钮 + 结束游戏按钮
         play = self._make_play_btn()
-        play.setMinimumHeight(60)
-        play.setMinimumWidth(220)
-        play.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+        play.setMinimumHeight(56)
+        play.setMinimumWidth(200)
+        play.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        play.setFont(QFont("Segoe UI", 17, QFont.Weight.Bold))
+        play.setStyleSheet(
+            "QPushButton { background:#FFFFFF; color:#5B21B6; border:none; "
+            "border-radius: 28px; padding:8px 26px; font-weight:700; }"
+            "QPushButton:hover { background:#F3EEFF; }"
+            "QPushButton:pressed { background:#E9E2FB; }"
+            "QPushButton:disabled { background:#F0F0F0; color:#A9A9B0; }"
+        )
         self.play_btn = play
         hl.addWidget(play, alignment=Qt.AlignVCenter | Qt.AlignRight)
+        kill = QPushButton(t("home.kill_game"))
+        kill.setMinimumHeight(40)
+        kill.setCursor(Qt.PointingHandCursor)
+        kill.setVisible(False)
+        kill.setStyleSheet(
+            "QPushButton { background:rgba(255,255,255,0.92); color:#EF4444; border:none; "
+            "border-radius: 20px; padding:6px 18px; font-weight:600; }"
+            "QPushButton:hover { background:#FFFFFF; }"
+        )
+        kill.clicked.connect(self._on_kill_game)
+        self.kill_btn = kill
+        hl.addWidget(kill, alignment=Qt.AlignVCenter | Qt.AlignRight)
 
         self.inst_lbl = name
         self.detail_lbl = detail
         lay.addWidget(hero)
+        lay.addSpacing(14)
+
+        # ── 实例卡片网格（GDLauncher / HMCL 风格：点选切换 + 直接启动）──
+        grid_card = RoundedCard(radius=12)
+        grid_card.setMinimumHeight(96)
+        # round-46 用户反馈"首页实例网格被挤压"：maxHeight 320 太小——卡片
+        # minHeight 144 + 间距，2 行就超 → 卡片被压扁。提高到 520，滚动接管。
+        grid_card.setMaximumHeight(520)
+        self.inst_grid_card = grid_card
+        ginner = QVBoxLayout(grid_card)
+        ginner.setContentsMargins(16, 16, 16, 16)
+        ginner.setSpacing(10)
+
+        grid_head = QHBoxLayout()
+        grid_title = QLabel(t("home.instances_grid"))
+        grid_title.setProperty("cls", "group")
+        grid_head.addWidget(grid_title)
+        grid_head.addStretch(1)
+        grid_manage = QPushButton(t("home.manage_all"))
+        grid_manage.setCursor(Qt.PointingHandCursor)
+        grid_manage.setStyleSheet(
+            f"QPushButton {{ font-size:12px; border:none; background:transparent; "
+            f"color:{COLORS['accent']}; padding:4px 8px; border-radius:6px; }} "
+            f"QPushButton:hover {{ background:{COLORS['accent_soft']}; text-decoration:underline; }}"
+        )
+        grid_manage.clicked.connect(self._open_instances)
+        grid_head.addWidget(grid_manage)
+        ginner.addLayout(grid_head)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background:transparent; border:none;")
+        self.inst_grid = QWidget()
+        self.inst_grid_lay = QGridLayout(self.inst_grid)
+        self.inst_grid_lay.setContentsMargins(0, 0, 0, 0)
+        self.inst_grid_lay.setSpacing(14)
+        scroll.setWidget(self.inst_grid)
+        ginner.addWidget(scroll, stretch=1)
+        lay.addWidget(grid_card)
 
         # ── 修复日志流（direction A：看得见的自修复）──
         log_card = RoundedCard(radius=12)
-        log_card.setMinimumHeight(88)
-        log_card.setMaximumHeight(140)
+        log_card.setMinimumHeight(64)
+        log_card.setMaximumHeight(108)
         ll2 = QVBoxLayout(log_card)
         ll2.setContentsMargins(20, 10, 20, 10)
         ll2.setSpacing(6)
@@ -544,19 +746,19 @@ class HomePage(QWidget):
         # 列宽避免 0/1/2/10 切换时整列跳动。
         v = QLabel(value)
         v.setProperty("cls", "big")
-        v.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
+        v.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
         v.setAlignment(Qt.AlignCenter)
-        v.setMinimumWidth(72)
+        v.setMinimumWidth(56)
         # 显式配色兜底：跟随当前主题（dark/light）的 text_main
         from .theme import COLORS as _C
         v.setStyleSheet(
-            f"color: {_C['text_main']}; font-size: 22px; font-weight: 700;"
+            f"color: {_C['text_main']}; font-size: 18px; font-weight: 700;"
         )
         cl.addWidget(v)
         cap = QLabel(label)
         cap.setProperty("cls", "sub")
         cap.setStyleSheet(
-            f"font-size: 11px; color: {_C['text_sub']};"
+            f"font-size: 10px; color: {_C['text_sub']};"
         )
         cap.setAlignment(Qt.AlignCenter)
         cap.setWordWrap(True)
@@ -724,13 +926,13 @@ class HomePage(QWidget):
         pl.setContentsMargins(24, 22, 24, 22)
         pl.setSpacing(10)
         ft = QLabel(t("home.featured"))
-        ft.setStyleSheet("color: rgba(255,255,255,0.92); font-weight: 600; font-size: 13px;")
+        ft.setStyleSheet("color: rgba(30,30,50,0.92); font-weight: 600; font-size: 13px;")
         pl.addWidget(ft)
         self.inst_lbl = QLabel("—")
         self.inst_lbl.setStyleSheet("color: #FFFFFF; font-weight: 700; font-size: 22px;")
         pl.addWidget(self.inst_lbl)
         self.detail_lbl = QLabel("")
-        self.detail_lbl.setStyleSheet("color: rgba(255,255,255,0.8);")
+        self.detail_lbl.setStyleSheet("color: rgba(30,30,50,0.85);")
         pl.addWidget(self.detail_lbl)
         self.play_btn = self._make_play_btn()
         self.play_btn.setStyleSheet(
@@ -776,8 +978,13 @@ class HomePage(QWidget):
             self.on_open_mods()
 
     def _label(self, text: str) -> QLabel:
+        """Hero 卡片标题（QSS cls 默认 'big' = 主标题深色）。
+
+        round-33 修复：之前默认 cls='sub' 导致"当前实例"主标题渲染成次要灰，
+        看起来像看不清。改为主标题大字号深色。
+        """
         l = QLabel(text)
-        l.setProperty("cls", "sub")
+        l.setProperty("cls", "big")
         return l
 
     @staticmethod
@@ -804,6 +1011,8 @@ class HomePage(QWidget):
 
         # ── 统御统计条（direction A）──
         self._refresh_stats(instances)
+        # 实例卡片网格（无论是否有当前实例都刷新）
+        self._refresh_inst_grid(instances, inst.id if inst else "")
 
         # inst_combo exists only in templates that build an instance
         # selector (ac_default). After a template switch its Python attr may
@@ -869,12 +1078,106 @@ class HomePage(QWidget):
                 ver_str += f"  ·  {inst.loader}"
             self.pcl_ver_text.setText(ver_str)
 
+    # ── 实例卡片网格 ──
+    def _make_instance_card(self, inst, is_current):
+        return _InstanceCard(inst, is_current, self._select_instance, self._play_instance)
+
+    def _refresh_inst_grid(self, instances, cur_id):
+        if not (hasattr(self, "inst_grid_lay") and self._alive(self.inst_grid_lay)):
+            return
+        lay = self.inst_grid_lay
+        # 清空旧卡片（同步删除，避免残留）
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                try:
+                    from shiboken6 import delete as _sh
+                    _sh(w)
+                except Exception:
+                    w.deleteLater()
+        if not instances:
+            # 单行空状态：图标 + 文字 + 两按钮 一排。
+            # 注意：empty_w 嵌在 grid_card 的 QScrollArea 里，scroll viewport
+            # 高度有限（card max 148 - header 40 ≈ 108），多行布局会裁掉底部
+            # 按钮。单行布局整体高度 ~50px，舒适放进 viewport，且更贴近
+            # BlockHelm 的极简留白。
+            if self._alive(getattr(self, "inst_grid_card", None)):
+                self.inst_grid_card.setMaximumHeight(130)
+            empty_w = QWidget()
+            empty_lay = QHBoxLayout(empty_w)
+            empty_lay.setContentsMargins(4, 0, 4, 0)
+            empty_lay.setSpacing(14)
+            empty_lay.setAlignment(Qt.AlignVCenter)
+
+            icon_lbl = QLabel()
+            icon_lbl.setPixmap(icon("instances").pixmap(36, 36))
+            icon_lbl.setAlignment(Qt.AlignCenter)
+            empty_lay.addWidget(icon_lbl, alignment=Qt.AlignVCenter)
+
+            txt = QLabel(t("home.no_instance_grid"))
+            txt.setProperty("cls", "sub")
+            txt.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            empty_lay.addWidget(txt, stretch=1)
+
+            dl_btn = QPushButton(t("home.download_version"))
+            dl_btn.setProperty("cls", "accent")
+            dl_btn.setCursor(Qt.PointingHandCursor)
+            dl_btn.setMinimumHeight(32)
+            dl_btn.clicked.connect(self._open_versions)
+            empty_lay.addWidget(dl_btn)
+
+            scan_btn = QPushButton(t("home.scan_import"))
+            scan_btn.setCursor(Qt.PointingHandCursor)
+            scan_btn.setMinimumHeight(32)
+            scan_btn.clicked.connect(self._open_scan)
+            empty_lay.addWidget(scan_btn)
+
+            lay.addWidget(empty_w, 0, 0)
+            return
+        # 有实例时恢复网格最大高度（round-46：320 → 520 防挤压）
+        if self._alive(getattr(self, "inst_grid_card", None)):
+            self.inst_grid_card.setMaximumHeight(520)
+        # 响应式列数：按内容宽度估算，限制 1~4 列
+        width = self.content.width() if self.content.width() > 0 else 900
+        cols = max(1, min(4, width // 320))
+        for idx, i in enumerate(instances):
+            r = idx // cols
+            c = idx % cols
+            card = self._make_instance_card(i, i.id == cur_id)
+            lay.addWidget(card, r, c)
+        for c in range(cols):
+            lay.setColumnStretch(c, 1)
+
+    def _select_instance(self, inst_id):
+        if inst_id:
+            self.set_current_instance(inst_id)
+            self._refresh()
+
+    def _play_instance(self, inst_id):
+        if inst_id:
+            self.set_current_instance(inst_id)
+        inst = self.get_current_instance()
+        if inst is not None:
+            self.on_play(inst)
+
     def _on_play(self):
         inst = self.get_current_instance()
         if inst is None:
             return
         self.play_btn.setEnabled(False)
         self.on_play(inst)
+
+    def _on_kill_game(self):
+        """首页「结束游戏」按钮：强杀运行中的游戏进程（round-37 轴心3）。"""
+        try:
+            win = self.window()
+            if win is not None and hasattr(win, "kill_game"):
+                if not win.kill_game():
+                    win.statusBar().showMessage(t("status.no_game_running"))
+        except Exception:
+            pass
 
     def _refresh_pcl_avatar(self):
         """PCL2 template avatar: skin head (or default account icon).
@@ -917,8 +1220,14 @@ class HomePage(QWidget):
                         continue
                 logf = os.path.join(mc, "logs", "latest.log")
                 if os.path.isfile(logf) and os.path.getsize(logf) > 0:
+                    # round-34 性能：seek 到尾部只读 20KB，之前 f.read()[-20000:]
+                    # 会把整个 latest.log（可达数百 MB）读进内存卡 UI 线程。
                     with open(logf, "r", encoding="utf-8", errors="ignore") as f:
-                        tail = f.read()[-20000:]
+                        try:
+                            f.seek(max(0, os.path.getsize(logf) - 20000))
+                        except OSError:
+                            pass
+                        tail = f.read()
                     if "ERROR" in tail or "Exception" in tail:
                         needs_repair += 1
             except Exception:
@@ -955,28 +1264,59 @@ class HomePage(QWidget):
         self._refresh_repair_log()
 
     def _open_scan(self):
-        from .scan_dialog import ScanDialog
+        """Embed the scanner directly into the home page (no modal dialog).
 
-        ScanDialog(self).exec()
-        # 成就：接管了来自其他启动器的实例
-        from .achievements import achievements as _ach
-        non_ac = [i for i in self.inst_mgr.list() if getattr(i, "launcher", "AC") != "AC"]
-        if non_ac:
-            _ach.unlock("first_instance")
-            if len(non_ac) >= 3:
-                _ach.unlock("takeover_3")
-        # Defer refresh so any pending focus-change / nav signals from the
-        # dialog teardown fire FIRST.  Without this delay, _refresh() can run
-        # and then _on_nav → _refresh() fires again immediately after,
-        # causing duplicate UI if rebuild() is also in the call chain.
-        QTimer.singleShot(100, self._refresh)
+        The panel replaces the normal content area; closing it restores the
+        home page and refreshes dependent lists.
+        """
+        if self._scan_panel is not None:
+            return
+        from .scan_dialog import ScanPanel
 
-    def _apply_wallpaper(self, cfg: dict | None = None):
-        """Re-apply the backdrop (solid / image / animated GIF / video)."""
+        self.content.setVisible(False)
+        self._scan_panel = ScanPanel(self)
+        self._scan_panel.done.connect(self._close_scan_panel)
+        self.layout().addWidget(self._scan_panel, stretch=1)
+
+    def _close_scan_panel(self):
+        """Remove the embedded scanner and refresh the home page."""
+        if self._scan_panel is None:
+            return
+        imported = self._scan_panel.imported_dirs
+        panel = self._scan_panel
+        self._scan_panel = None
+        panel.setVisible(False)
+        panel.setParent(None)
+        panel.deleteLater()
+        self.content.setVisible(True)
+
+        # Achievements: taking over instances from other launchers.
+        if imported:
+            from .achievements import achievements as _ach
+            non_ac = [
+                i for i in self.list_instances()
+                if getattr(i, "launcher", "AC") != "AC"
+            ]
+            if non_ac:
+                _ach.unlock("first_instance")
+                if len(non_ac) >= 3:
+                    _ach.unlock("takeover_3")
+
+        # Defer refresh so any pending focus-change / nav signals settle first.
+        QTimer.singleShot(100, self.on_scan_done or self._refresh)
+
+    def _current_version_id(self) -> str | None:
+        """Version id of the currently selected instance (for version-theme bg)."""
+        inst = self.get_current_instance()
+        return getattr(inst, "version_id", None) if inst is not None else None
+
+    def _apply_wallpaper(self, cfg: dict | None = None, version_id: str | None = None):
+        """Re-apply the backdrop (solid / image / animated GIF / video / version theme)."""
         if cfg is not None:
             self.cfg = cfg
         try:
-            self.backdrop.apply(self.cfg)
+            # 毛玻璃已删除（round-32）——壁纸层始终正常绘制
+            self.backdrop.apply(self.cfg, version_id)
             self.backdrop.setGeometry(self.rect())
             self.backdrop.lower()
         except Exception:  # noqa: BLE001 - a bad wallpaper must not kill the page
@@ -992,12 +1332,19 @@ class _TitleBarDragFilter(QObject):
     filter does the same for the main-window bar: installed on the bar,
     press = native window move, double-click = maximize toggle. Edge zone
     (top 6 px) is left to FramelessHelper for resize.
+
+    round-54 兜底：无边框 + WA_TranslucentBackground（Acrylic 透底）在
+    Win11/Qt6 下 ``startSystemMove`` 经常失效（窗口纹丝不动）。这里改为
+    「原生优先 + 手动移动兜底」：按下时优先请求系统移动；若失效，来自系统
+    的 Move 事件仍会送到本 filter，此时按鼠标全局位移手动 ``move()``。
+    系统移动一旦接手，应用收不到 Move 事件，二者天然互斥、永不打架。
     """
 
     def __init__(self, window: "MainWindow", bar: QWidget):
         super().__init__(bar)
         self._window = window
         self._bar = bar
+        self._drag: tuple[QPoint, QPoint] | None = None  # (press_global, win_pos)
         bar.installEventFilter(self)
 
     def eventFilter(self, obj, event) -> bool:
@@ -1007,13 +1354,27 @@ class _TitleBarDragFilter(QObject):
         if etype == QEvent.Type.MouseButtonPress and event.button() == Qt.LeftButton:
             pos = event.position().toPoint()
             if pos.y() < 6:            # resize zone — FramelessHelper's job
+                self._drag = None
                 return False
             if isinstance(self._bar.childAt(pos), QPushButton):
+                self._drag = None
                 return False           # buttons handle their own clicks
+            cursor = QCursor.pos()
+            self._drag = (cursor, self._window.pos())
             try:
                 self._window.startSystemMove()
             except AttributeError:
                 pass
+            return True
+        if etype == QEvent.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
+            self._drag = None
+            return False
+        if etype == QEvent.Type.MouseMove and self._drag is not None:
+            # 手动兜底：仅在系统移动未接管（仍能收到 Move）时生效
+            if (event.buttons() & Qt.LeftButton) and not self._window.isMaximized():
+                press_global, start_win = self._drag
+                delta = event.globalPosition().toPoint() - press_global
+                self._window.move(start_win + delta)
             return True
         if etype == QEvent.Type.MouseButtonDblClick and event.button() == Qt.LeftButton:
             pos = event.position().toPoint()
@@ -1021,6 +1382,103 @@ class _TitleBarDragFilter(QObject):
                 self._window._toggle_max()
                 return True
         return False
+
+
+# ── window-control vector glyphs (replaces Unicode chars — □ ✕) ──
+def _win_svg_pixmap(kind: str, color: str, size: int = 18) -> QPixmap:
+    """Render a crisp vector glyph for a window-control button.
+
+    The old Unicode chars (— □ ✕) rendered inconsistently across fonts/DPI
+    and looked "off" next to native chrome (Edge/Chrome use vector lines).
+    """
+    paths = {
+        # round-47 修复：min 横线在 viewBox 10×10 底部 "M2,7" → 居中 "M2,5"，
+        # 让最小化/最大化/关闭三个图标的视觉重心在同一水平线上。
+        "min": "M2,5 H8",
+        "max": "M2.5,2.5 H7.5 V7.5 H2.5 Z",
+        "restore": "M2,3.2 H6.2 V7.4 H2 Z M3.4,2 H7.6 V6.2 H3.4 Z",
+        "close": "M2.6,2.6 L7.4,7.4 M7.4,2.6 L2.6,7.4",
+    }
+    d = paths.get(kind, paths["close"])
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
+        f'viewBox="0 0 10 10">'
+        f'<path d="{d}" fill="none" stroke="{color}" stroke-width="1" '
+        f'stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    )
+    r = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    r.render(p)
+    p.end()
+    return pm
+
+
+def _win_btn_colors() -> dict:
+    """High-contrast colors for the window-control glyphs.
+
+    Using fixed dark/light greys instead of ``text_main`` guarantees the
+    buttons remain visible against both the light and dark title-bar
+    backgrounds, regardless of the active theme pack.
+    """
+    if get_theme_mode() == "dark":
+        return {
+            "normal": "#D1D5DB",
+            "hover": "#FFFFFF",
+            "hover_bg": "#333333",
+            "close_hover": "#FFFFFF",
+            "close_bg": "#EF4444",
+        }
+    return {
+        "normal": "#374151",
+        "hover": "#111827",
+        "hover_bg": "#E5E7EB",
+        "close_hover": "#FFFFFF",
+        "close_bg": "#EF4444",
+    }
+
+
+class _WinBtn(QPushButton):
+    """Window-control button with a vector icon that recolors on hover.
+
+    ``normal_color`` / ``hover_color`` let the close button flip to white on a
+    red hover, matching Edge/Chrome. ``hover_bg`` is applied via stylesheet so
+    the glyph stays readable over the hover surface.
+    """
+
+    def __init__(self, kind, normal_color, hover_color, hover_bg, slot, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self._normal = normal_color
+        self._hover = hover_color
+        self._hover_bg = hover_bg
+        self.setFixedSize(46, 40)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setIcon(QIcon(_win_svg_pixmap(kind, normal_color, 18)))
+        self.setIconSize(QSize(18, 18))
+        self.clicked.connect(slot)
+        self._update_style()
+
+    def _update_style(self):
+        # Base keeps the button transparent; hover adds a subtle surface.
+        self.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; }}\n"
+            f"QPushButton:hover {{ background: {self._hover_bg}; border-radius: 6px; }}"
+        )
+
+    def set_kind(self, kind):
+        self._kind = kind
+        self.setIcon(QIcon(_win_svg_pixmap(kind, self._normal, 18)))
+
+    def enterEvent(self, event):
+        self.setIcon(QIcon(_win_svg_pixmap(self._kind, self._hover, 18)))
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.setIcon(QIcon(_win_svg_pixmap(self._kind, self._normal, 18)))
+        super().leaveEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -1051,7 +1509,26 @@ class MainWindow(QMainWindow):
         self.accounts_manager = accounts_manager()
         self.current_account = self.accounts_manager.current()
         self._play_worker = None
+        self._game_proc = None      # round-34：运行中游戏进程
+        self._game_name = ""
+        self._game_poll_timer = None
+        self._active_toasts = []
         self.cfg = load_config()
+
+        # Apply persisted theme before any UI is built. Default is now light.
+        set_theme_mode(self.cfg.get("theme_mode", "light"))
+        # round-49 修复「启动后 accent 始终是紫色」：此前只调用 set_theme_mode，
+        # 自定义 accent_color 从未被应用。先设模式再设强调色（set_theme_mode
+        # 现在会自动保留自定义 accent，顺序无碍）。
+        from .theme import set_accent_color
+        set_accent_color(self.cfg.get("accent_color", "#7C3AED"))
+        # round-49 液态流光 effect：按配置开启流光卡片 + 全局透明度。
+        set_effects_enabled(self.cfg.get("effect_light_trail", True))
+        set_window_opacity(self, self.cfg.get("window_opacity", 1.0))
+
+        # round-51 透底效果：系统 Acrylic 在 FramelessHelper 设置完窗口标志后
+        # 再应用（见 __init__ 末尾 _apply_transparent_window），此处仅占位。
+        # 圆角由 enable_acrylic / enable_win11_round_corners 处理。
 
         # Round window corners on Win11 — call after the native window exists.
         # Safe no-op elsewhere (the function checks the platform itself).
@@ -1061,6 +1538,7 @@ class MainWindow(QMainWindow):
         # first use. Doing that here froze the splash animation, so it is
         # deferred until after the window is on screen.
         QTimer.singleShot(0, self._play_app_chime)
+        self._register_shortcuts()  # round-42 全局快捷键（Ctrl+N/D、F5）
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1096,110 +1574,40 @@ class MainWindow(QMainWindow):
             on_open_mods=lambda: self._show_page("mods"),
             list_instances=lambda: self.inst_mgr.list(),
             set_current_instance=lambda _id: self.inst_mgr.set_current(_id),
+            on_scan_done=self._refresh_after_import,
+            inst_mgr=self.inst_mgr,
         )
         self.stack.addWidget(self.home)  # 0 Home
 
-        _yield()
-        self.instances_page = InstancesPage()
-        self.instances_page.current_changed.connect(self._on_current_changed)
-        # 详情页"内容分区"按钮 → 跳到对应页面并预设实例（Mods 等页面有实例选择器）
-        self.instances_page.section_requested.connect(self._on_instance_section)
-        self.stack.addWidget(self.instances_page)  # 1
-        _yield()
-
-        self.mods_page = ModsPage(
-            list_instances=lambda: self.inst_mgr.list(),
-            get_current_instance=self.current_instance,
-        )
-        self.stack.addWidget(self.mods_page)  # 2
-        _yield()
-
-        self.store_page = StorePage(
-            list_instances=lambda: self.inst_mgr.list(),
-            get_current_instance=self.current_instance,
-        )
-        self.stack.addWidget(self.store_page)  # 3
-        _yield()
-
-        self.versions_page = VersionsPage()
-        self.versions_page.instance_created.connect(self._on_instance_created)
-        self.stack.addWidget(self.versions_page)  # 4
-        _yield()
-
-        # ── Lobby (page 5) ──
-        self.lobby_widget = QWidget()
-        ll = QVBoxLayout(self.lobby_widget)
-        ll.setContentsMargins(24, 24, 24, 24)
-        ll.setSpacing(16)
-
-        lh = QLabel(t("lobby.title"))
-        lh.setProperty("cls", "title")
-        ll.addWidget(lh)
-        self._lobby_title = lh
-
-        self._lobby_join_help = QLabel(t("lobby.join_help"))
-        ll.addWidget(self._lobby_join_help)
-
-        # Quick action buttons
-        btn_row = QHBoxLayout()
-        join_q_btn = QPushButton(t("lobby.join"))
-        join_q_btn.setMinimumHeight(40)
-        join_q_btn.setIcon(icon("login"))
-        join_q_btn.setIconSize(QSize(18, 18))
-        join_q_btn.clicked.connect(self._open_lobby)
-        btn_row.addWidget(join_q_btn)
-        self._lobby_join = join_q_btn
-
-        create_q_btn = QPushButton(t("lobby.create"))
-        create_q_btn.setProperty("cls", "accent")
-        create_q_btn.setMinimumHeight(40)
-        create_q_btn.setIcon(icon("add"))
-        create_q_btn.setIconSize(QSize(18, 18))
-        create_q_btn.clicked.connect(self._open_lobby)
-        btn_row.addWidget(create_q_btn)
-        self._lobby_create = create_q_btn
-        ll.addLayout(btn_row)
-
-        self._lobby_create_help = QLabel(t("lobby.create_help"))
-        ll.addWidget(self._lobby_create_help)
-        ll.addStretch(1)
-        self.stack.addWidget(self.lobby_widget)  # 5
-
-        # ── Settings (page 6) — embedded, no more popup dialog ──
-        self.settings_page = SettingsPage()
-        self.settings_page._window = self  # live-refresh hook
-        self.settings_page.saved.connect(self._on_settings_saved)
-        self.settings_page.close_requested.connect(lambda: self._show_page("home"))
-        self.stack.addWidget(self.settings_page)  # 6
-
-        # ── Toolbox placeholder (page 7) — PCL2 工具/百宝箱 右栏内容 ──
-        self.toolbox_widget = QWidget()
-        _tb = QVBoxLayout(self.toolbox_widget)
-        _tb.setContentsMargins(24, 24, 24, 24)
-        _tb.setSpacing(16)
-        _tbh = QLabel(t("pcl2.toolbox_title"))
-        _tbh.setProperty("cls", "title")
-        _tb.addWidget(_tbh)
-        _tbs = QLabel(t("pcl2.toolbox_empty"))
-        _tbs.setProperty("cls", "sub")
-        _tb.addWidget(_tbs)
-        _tb.addStretch(1)
-        self.stack.addWidget(self.toolbox_widget)  # 7
-
-        # ── Music player (page 8) — direction B 彩蛋 ──
-        from .music_page import MusicPage
-        self.music_page = MusicPage()
-        self.stack.addWidget(self.music_page)  # 8
-
-        # ── Achievements (page 9) — direction B 彩蛋 ──
-        from .achievements_page import AchievementsPage
-        self.achievements_page = AchievementsPage()
-        self.stack.addWidget(self.achievements_page)  # 9
+        # ── 延迟加载：仅主页（index 0）立即构建；其余页面（1-9）用轻量占位
+        # QWidget 占住 QStackedWidget 的索引，首次切换到该页时（_ensure_page）
+        # 再真正构建并连接信号。这样启动期不再同步构造 7 个页面，显著提速。
+        self._built = {0}
+        self._placeholders = {}
+        self._page_builders = {
+            1: self._build_instances,
+            2: self._build_mods,
+            3: self._build_store,
+            4: self._build_versions,
+            5: self._build_lobby,
+            6: self._build_settings,
+            7: self._build_toolbox,
+            8: self._build_music,
+            9: self._build_achievements,
+            10: self._build_console,
+        }
+        for _idx in range(1, 11):
+            _ph = QWidget()
+            self._placeholders[_idx] = _ph
+            self.stack.addWidget(_ph)
 
         right.addWidget(self.stack, stretch=1)
 
         # ── nav (layout-specific; both layouts share the stack above) ──
         self.nav_layout = self.cfg.get("nav_layout", "ac")
+        # PCL2 顶栏导航是开发者模式实验功能
+        if self.nav_layout == "pcl2" and not self.cfg.get("dev_mode", False):
+            self.nav_layout = "ac"
         if self.nav_layout == "pcl2":
             self._build_pcl2_nav(root, body)
         else:
@@ -1227,12 +1635,63 @@ class MainWindow(QMainWindow):
         # setWindowFlags() inside FramelessHelper resets the position.
         self._restore_geometry()
 
+        # round-51 透底效果：系统级 Acrylic 真毛玻璃（透桌面模糊）+ 圆角镂空。
+        # 必须在窗口标志最终确定后调用（winId/create 不会再用 setWindowFlags
+        # 重建原生窗口，避免 DWM 属性丢失）。
+        self._apply_transparent_window()
+
         # ── Achievement toast (direction B 彩蛋) ──
         from .achievements import achievements as _ach
         _ach.toast.connect(self._show_achievement_toast)
 
+        # ── round-65 版本页预热 ──
+        # 版本清单磁盘缓存会放宽到 24h 语义（net_api.fetch_versions），这里再
+        # 在后台预热一遍：用户首次切到版本页时命中内存缓存秒开，不再干等网络。
+        self._preheat_versions()
+
+    def _preheat_versions(self) -> None:
+        """启动后立即后台拉一遍版本清单（失败静默，进页面时页面自己再拉）。
+
+        用 Worker（QThread）避免阻塞启动；结果写入 net_api 缓存，
+        结果未就绪时版本页的 Worker 会正常再发一次请求兜底。
+        """
+        try:
+            from .worker import Worker
+            from .net_api import fetch_versions
+            w = Worker(fetch_versions)
+            w.finished.connect(lambda _r: None)   # 结果已写入 net_api 缓存
+            w.error.connect(lambda _e: None)       # 预热失败静默：页面再拉
+            self._preheat_worker = w               # 防 GC（退出时 drain_workers 兜底）
+            w.start()
+        except Exception:
+            pass
+
+    def _apply_transparent_window(self) -> None:
+        """透底效果：全局半透明无边框窗口 + 圆角镂空。
+
+        开启时用系统 Acrylic（DWM 桌面模糊透出）+ WA_TranslucentBackground
+        实现真半透明；应用层背景已由 theme 切半透明（main.py 里按配置设置），
+        否则 Acrylic 会被实色背景盖住。关闭时回退圆角即可。
+        """
+        try:
+            if self.cfg.get("transparent_window", True):
+                from .win_acrylic import enable_acrylic
+                self.setAttribute(Qt.WA_TranslucentBackground, True)
+                enable_acrylic(self, dark=get_theme_mode() == "dark")
+            else:
+                from .win_acrylic import disable_acrylic
+                disable_acrylic(self, dark=get_theme_mode() == "dark")
+        except Exception:
+            # 非 Windows 或 DWM 不可用 → 静默回退实色圆角窗口
+            pass
+
     def _show_achievement_toast(self, aid: str):
-        """Transient toast in the bottom-right corner on achievement unlock."""
+        """round-46 升级：MC 风格成就解锁 toast——右下角滑入 + 金边 + 大图标 + 淡出。
+
+        从右→左 250ms 滑入 → 持续 4s → 250ms 淡出 → 删除。
+        自绘 QWidget 子类（金色边框 + 棕色背景 + 🏆大图标 + 标题 + 描述）。
+        防 GC：_active_toasts 列表兜底。
+        """
         try:
             from .achievements import ACHIEVEMENTS
             from .i18n import t as _t
@@ -1240,25 +1699,124 @@ class MainWindow(QMainWindow):
             desc = _t(ACHIEVEMENTS[aid][1])
         except Exception:
             return
-        toast = RoundedCard(radius=10, fill=QColor(COLORS["bg_panel"]),
-                            accent_border=3)
-        tl = QVBoxLayout(toast)
-        tl.setContentsMargins(16, 10, 16, 10)
-        tl.setSpacing(2)
-        h = QLabel("🏆  " + _t("ach.toast_title"))
-        h.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {COLORS['accent']};")
-        tl.addWidget(h)
-        n = QLabel(title)
-        n.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {COLORS['text_main']};")
-        tl.addWidget(n)
-        d = QLabel(desc)
-        d.setStyleSheet(f"font-size: 11px; color: {COLORS['text_sub']};")
-        tl.addWidget(d)
-        toast.adjustSize()
-        toast.move(self.width() - toast.width() - 24, self.height() - toast.height() - 48)
+
+        from PySide6.QtGui import QPainter, QLinearGradient, QFont
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve, Qt as _Qt
+
+        W, H = 320, 110
+        # 自绘 toast widget —— 比 RoundedCard 更可控（金边/渐变/不裁剪 icon）
+        class _AchToast(QWidget):
+            def paintEvent(self, e):
+                p = QPainter(self)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                r = self.rect()
+                # 棕色渐变背景（MC 风格：深棕 → 中棕）
+                grad = QLinearGradient(0, 0, 0, r.height())
+                grad.setColorAt(0.0, QColor(67, 51, 35))
+                grad.setColorAt(1.0, QColor(45, 33, 21))
+                p.setBrush(grad)
+                p.setPen(QColor(255, 215, 0))  # 金色边框
+                _pen = p.pen()
+                _pen.setWidth(3)
+                p.setPen(_pen)
+                from PySide6.QtGui import QPainterPath
+                path = QPainterPath()
+                path.addRoundedRect(1.5, 1.5, r.width() - 3, r.height() - 3, 10, 10)
+                p.drawPath(path)
+
+        toast = _AchToast()
+        toast.setFixedSize(W, H)
+        toast.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
+        )
+        toast.setAttribute(Qt.WA_TranslucentBackground, True)
+        # 内容布局：左侧大图标 + 右侧标题/描述/已解锁
+        outer = QHBoxLayout(toast)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(12)
+        # 左侧 🏆 大图标（用 label + emoji，emoji 系统字体渲染）
+        icon_lbl = QLabel("🏆")
+        f = QFont("Segoe UI Emoji", 32)
+        icon_lbl.setFont(f)
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setFixedWidth(56)
+        outer.addWidget(icon_lbl, alignment=Qt.AlignVCenter)
+        # 右侧文字栈
+        right = QVBoxLayout()
+        right.setSpacing(2)
+        unlocked_lbl = QLabel("§l§6§o" if False else "已解锁！")  # 中文"已解锁！"
+        unlocked_lbl.setStyleSheet(
+            "color: #FFD700; font-size: 11px; font-weight: 700; letter-spacing: 1px;"
+        )
+        right.addWidget(unlocked_lbl)
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(
+            "color: #FFFFFF; font-size: 16px; font-weight: 700;"
+        )
+        title_lbl.setWordWrap(True)
+        right.addWidget(title_lbl)
+        desc_lbl = QLabel(desc)
+        desc_lbl.setStyleSheet(
+            "color: #D8C8A0; font-size: 11px;"
+        )
+        desc_lbl.setWordWrap(True)
+        right.addWidget(desc_lbl)
+        right.addStretch(1)
+        outer.addLayout(right, stretch=1)
+
+        # 起始位置：右外（屏幕外右侧 → 滑入到右下角）
+        win_pos = self.mapToGlobal(self.rect().topRight())
+        margin_right = 24
+        margin_bottom = 48
+        end_x = win_pos.x() - W - margin_right
+        end_y = win_pos.y() + self.height() - H - margin_bottom
+        start_x = win_pos.x() + 10
+        toast.move(start_x, end_y)
         toast.show()
         toast.raise_()
-        QTimer.singleShot(3600, toast.deleteLater)
+
+        # 入场动画（280ms 从右滑入）
+        anim_in = QPropertyAnimation(toast, b"pos")
+        anim_in.setDuration(280)
+        anim_in.setStartValue(toast.pos())
+        anim_in.setEndValue(QPoint(end_x, end_y))
+        anim_in.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def _after_in():
+            # 持续 4s 后淡出
+            QTimer.singleShot(3800, _fade_out)
+
+        def _fade_out():
+            try:
+                anim_out = QPropertyAnimation(toast, b"windowOpacity")
+                anim_out.setDuration(300)
+                anim_out.setStartValue(1.0)
+                anim_out.setEndValue(0.0)
+                anim_out.setEasingCurve(QEasingCurve.Type.InCubic)
+                anim_out.finished.connect(_dismiss)
+                anim_out.start()
+                # 动画对象必须 hold 防 GC
+                toast._anim_out = anim_out
+            except Exception:
+                _dismiss()
+
+        def _dismiss():
+            try:
+                if toast in self._active_toasts:
+                    self._active_toasts.remove(toast)
+                toast.deleteLater()
+            except Exception:
+                pass
+
+        anim_in.finished.connect(_after_in)
+        anim_in.start()
+
+        # 防 GC：闭包 + 列表双保险（之前 round-46 治 double-delete 的方案）
+        try:
+            self._active_toasts.append(toast)
+        except AttributeError:
+            self._active_toasts = [toast]
+        toast._anim_in = anim_in  # 保活动画对象
 
     def _play_app_chime(self):
         """Signature chime on app start (no-op if disabled / trigger != app)."""
@@ -1271,12 +1829,69 @@ class MainWindow(QMainWindow):
             pass
 
     # ---- shared state ----
+    def _register_shortcuts(self):
+        """round-42 全局快捷键（对齐 Prism：Ctrl+N/D、F5）。"""
+        try:
+            from PySide6.QtGui import QShortcut, QKeySequence
+            QShortcut(QKeySequence("Ctrl+N"), self,
+                      activated=self._shortcut_new_instance)
+            QShortcut(QKeySequence("Ctrl+D"), self,
+                      activated=self._shortcut_duplicate)
+            QShortcut(QKeySequence("F5"), self,
+                      activated=self._shortcut_refresh)
+        except Exception:
+            pass
+
+    def _shortcut_new_instance(self):
+        try:
+            self._switch_stack(STACK_INDEX["instances"])
+            self.instances_page._new()
+        except Exception:
+            pass
+
+    def _shortcut_duplicate(self):
+        try:
+            self._switch_stack(STACK_INDEX["instances"])
+            inst = self.instances_page.selected_instance()
+            if inst is not None:
+                self.instances_page._duplicate(inst)
+        except Exception:
+            pass
+
+    def _shortcut_refresh(self):
+        try:
+            self.instances_page.refresh()
+        except Exception:
+            pass
     def current_instance(self) -> Instance | None:
         return self.inst_mgr.current()
 
+    def _current_version_id(self) -> str | None:
+        inst = self.current_instance()
+        return getattr(inst, "version_id", None) if inst is not None else None
+
     def _on_current_changed(self, _id: str):
-        self.mods_page.refresh()
+        if getattr(self, "mods_page", None) is not None:
+            self.mods_page.refresh()
         self.home._refresh()
+        self.home._apply_wallpaper(version_id=self._current_version_id())
+
+    def _refresh_after_import(self):
+        """Refresh every page that shows the instance list after the scan /
+        import dialog closes, so newly imported instances appear immediately
+        instead of waiting for the next page switch."""
+        try:
+            self.home._refresh()
+        except Exception:  # noqa: BLE001
+            pass
+        for name in ("instances_page", "mods_page"):
+            page = getattr(self, name, None)
+            if page is None:
+                continue
+            try:
+                page.refresh()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _on_instance_section(self, section: str, inst_id: str):
         """Jump to the section page and pre-target the instance."""
@@ -1346,6 +1961,10 @@ class MainWindow(QMainWindow):
         self.account_btn.clicked.connect(self._on_account_btn_clicked)
         lay.addWidget(self.account_btn)
 
+        # ── Theme toggle pill (light/dark quick switch, top-right) ──
+        self.theme_btn = self._build_theme_toggle()
+        lay.addWidget(self.theme_btn)
+
         # ── Diagnostics & repair ──
         self.diag_btn = QPushButton()
         self.diag_btn.setIcon(icon("repair"))
@@ -1357,36 +1976,104 @@ class MainWindow(QMainWindow):
         self.diag_btn.clicked.connect(self._open_diagnostics)
         lay.addWidget(self.diag_btn)
 
-        # ── Window controls (frameless) ──
-        ctrl_base = (
-            "QPushButton { background: transparent; border: none; "
-            "font-size: 18px; color: #9CA3B0; }"
-            "QPushButton:hover { background: #33333A; color: #E5E5E5; }"
-        )
-        close_hover = (
-            "QPushButton#win_close:hover "
-            "{ background: #EF4444; color: #FFFFFF; }"
-        )
-        for name, txt, slot in [
-            ("min", "—", self.showMinimized),
-            ("max", "□", self._toggle_max),
-            ("close", "✕", self.close),
+        # ── Window controls (frameless) — vector glyphs, not Unicode ──
+        wc = _win_btn_colors()
+        self._win_btns: dict[str, _WinBtn] = {}
+        for name, kind, slot in [
+            ("min", "min", self.showMinimized),
+            ("max", "max", self._toggle_max),
+            ("close", "close", self.close),
         ]:
-            btn = QPushButton(txt)
+            if name == "close":
+                btn = _WinBtn(
+                    kind,
+                    normal_color=wc["normal"],
+                    hover_color=wc["close_hover"],
+                    hover_bg=wc["close_bg"],
+                    slot=slot,
+                )
+            else:
+                btn = _WinBtn(
+                    kind,
+                    normal_color=wc["normal"],
+                    hover_color=wc["hover"],
+                    hover_bg=wc["hover_bg"],
+                    slot=slot,
+                )
             btn.setObjectName(f"win_{name}")
-            btn.setFixedSize(48, 40)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(slot)
-            btn.setStyleSheet(ctrl_base + (close_hover if name == "close" else ""))
             lay.addWidget(btn)
+            self._win_btns[name] = btn
+
+        # Re-render icons when the user switches theme mode/pack at runtime.
+        on_theme_change(self._refresh_win_icons)
 
         return bar
+
+    def _refresh_win_icons(self):
+        """Re-render the window-control glyphs for the current theme colors."""
+        wc = _win_btn_colors()
+        btns = getattr(self, "_win_btns", None)
+        if not btns:
+            return
+        for name, b in btns.items():
+            b._normal = wc["normal"]
+            b._hover = wc["close_hover"] if name == "close" else wc["hover"]
+            b._hover_bg = wc["close_bg"] if name == "close" else wc["hover_bg"]
+            b._update_style()
+            b.setIcon(QIcon(_win_svg_pixmap(b._kind, b._normal, 18)))
 
     def _toggle_max(self):
         if self.isMaximized():
             self.showNormal()
+            self._win_btns["max"].set_kind("max")
         else:
             self.showMaximized()
+            self._win_btns["max"].set_kind("restore")
+
+    # ── theme toggle pill ──────────────────────────────────────────────────
+    def _build_theme_toggle(self) -> QPushButton:
+        b = QPushButton()
+        b.setProperty("cls", "theme-toggle")
+        b.setCursor(Qt.PointingHandCursor)
+        b.setMinimumWidth(86)
+        b.setMinimumHeight(34)
+        b.clicked.connect(self._toggle_theme)
+        on_theme_change(self._refresh_theme_toggle)
+        self._style_theme_toggle(b)
+        return b
+
+    def _style_theme_toggle(self, b: QPushButton) -> None:
+        dark = get_theme_mode() == "dark"
+        bg = "#2A2A2E" if dark else "#FFFFFF"
+        brd = "#3A3A40" if dark else "#E5E7EB"
+        fg = "#E5E5E5" if dark else "#1A1A2E"
+        hover = "#3F3F47" if dark else "#F5F6F8"
+        b.setStyleSheet(
+            f"QPushButton {{ background:{bg}; color:{fg}; border:1px solid {brd};"
+            f" border-radius:17px; padding:3px 14px; font-size:13px; font-weight:600; }}"
+            f"QPushButton:hover {{ background:{hover}; }}"
+        )
+
+    def _refresh_theme_toggle(self, _btn=None) -> None:
+        b = _btn or getattr(self, "theme_btn", None)
+        if b is None:
+            return
+        dark = get_theme_mode() == "dark"
+        b.setText(t("theme.toggle_dark") if dark else t("theme.toggle_light"))
+        b.setIcon(icon("moon" if dark else "sun"))
+        b.setIconSize(QSize(16, 16))
+        b.setToolTip(t("settings.theme.light") if dark else t("settings.theme.dark"))
+
+    def _toggle_theme(self) -> None:
+        from .theme import apply_qss
+        mode = "dark" if get_theme_mode() == "light" else "light"
+        set_theme_mode(mode)
+        apply_qss()
+        try:
+            self.cfg["theme_mode"] = mode
+            save_config(self.cfg)
+        except Exception:  # noqa: BLE001 - persistence must never break switching
+            pass
 
     # ── launcher window geometry persistence ──
     def _restore_geometry(self):
@@ -1415,9 +2102,15 @@ class MainWindow(QMainWindow):
     # ── AC layout: left vertical nav (the historical default) ──
     def _build_ac_nav(self, body: QHBoxLayout):
         nav = QListWidget()
-        nav.setFixedWidth(200)
+        nav.setObjectName("ac-nav")
+        # round-46 用户反馈"上下留白太多"：vertical margins 4px、item height 由 QSS 控
+        nav.setMinimumWidth(140)
+        nav.setMaximumWidth(200)
         nav.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        nav.setIconSize(QSize(20, 20))
+        nav.setIconSize(QSize(22, 22))
+        nav.setSpacing(0)  # 不要额外间距，留给 QSS padding
+        nav.setContentsMargins(6, 4, 6, 4)
+        nav.setUniformItemSizes(True)  # 性能 + 固定行高
         nav.currentRowChanged.connect(self._on_nav)
         self.nav = nav
         self._populate_ac_nav()
@@ -1485,7 +2178,8 @@ class MainWindow(QMainWindow):
 
         # Context-aware left sidebar (hidden for tabs without sub-items).
         side = QListWidget()
-        side.setFixedWidth(200)
+        side.setMinimumWidth(160)
+        side.setMaximumWidth(240)
         side.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         side.setIconSize(QSize(20, 20))
         side.currentRowChanged.connect(self._pcl2_on_side)
@@ -1549,9 +2243,9 @@ class MainWindow(QMainWindow):
             return
         if key == "home":
             self.home._refresh()
-        elif key == "settings":
-            # Re-read config + rebuild so the page reflects external changes.
-            self.settings_page.reload()
+        # Note: settings used to reload() here, but rebuilding the whole page on
+        # every open caused a ~1 s freeze. It is now only rebuilt when the
+        # language changes (retranslate_ui) so values stay editable.
         self._switch_stack(idx)
 
     def _show_pcl2_placeholder(self, key: str):
@@ -1626,31 +2320,22 @@ class MainWindow(QMainWindow):
         if row < 0 or not hasattr(self, "_nav_row_map") or row not in self._nav_row_map:
             return
         key = self._nav_row_map[row]
-        # DIAG: log nav → stack switching so we can see why "实例页高亮但显示首页".
-        try:
-            with open("_nav_trace.log", "a", encoding="utf-8") as _f:
-                _f.write(f"_on_nav(row={row}, key='{key}') stack_cur={self.stack.currentIndex()} count={self.stack.count()}\n")
-        except Exception:
-            pass
         # Remember the row the user was on BEFORE clicking — used to restore
         # the nav highlight after a dialog (account / lobby) closes, so it
         # feels like a pop-up rather than a navigation.
         _PAGE_KEYS = ("home", "instances", "mods", "store", "versions",
-                      "music", "achievements", "settings")
+                      "music", "achievements", "settings", "console")
         if key in _PAGE_KEYS:
             self._last_page_row = row
         idx = {
             "home": 0, "instances": 1, "mods": 2, "store": 3,
             "versions": 4, "lobby": 5, "settings": 6, "music": 8,
-            "achievements": 9,
+            "achievements": 9, "console": 10,
         }.get(key)
         if idx is not None:
             if key == "home":
                 self.home._refresh()
-            elif key == "settings":
-                # Re-read config + rebuild so the page reflects any external
-                # changes (e.g. language switched in a previous session).
-                self.settings_page.reload()
+            # Settings no longer reload()s on every open — see _pcl2_apply_sub.
             self._switch_stack(idx)
             return
         # ── Dialog-only nav items (account / lobby): visually stay on the
@@ -1681,39 +2366,196 @@ class MainWindow(QMainWindow):
                 self.home._refresh()
         QTimer.singleShot(50, _restore_nav)
 
+    # ── 延迟构建页面（首次切换时调用） ──
+    def _ensure_page(self, idx: int):
+        """首次切换到 idx 时构建真实页面并连接信号，替换占位 QWidget。
+
+        占位占住 QStackedWidget 的索引，移除占位后 insertWidget(idx) 会把真实
+        页面放回原索引，其余未构建占位相对顺序不变，索引始终稳定。
+        """
+        if idx in self._built:
+            return
+        builder = self._page_builders.get(idx)
+        if builder is None:
+            return
+        page = builder()
+        ph = self._placeholders.pop(idx, None)
+        if ph is not None:
+            self.stack.removeWidget(ph)
+            ph.deleteLater()
+        self.stack.insertWidget(idx, page)
+        self._built.add(idx)
+
+    def _build_instances(self):
+        self.instances_page = InstancesPage()
+        self.instances_page.current_changed.connect(self._on_current_changed)
+        self.instances_page.section_requested.connect(self._on_instance_section)
+        self.instances_page.scan_done.connect(self._refresh_after_import)
+        return self.instances_page
+
+    def _build_mods(self):
+        self.mods_page = ModsPage(
+            list_instances=lambda: self.inst_mgr.list(),
+            get_current_instance=self.current_instance,
+        )
+        return self.mods_page
+
+    def _build_store(self):
+        self.store_page = StorePage(
+            list_instances=lambda: self.inst_mgr.list(),
+            get_current_instance=self.current_instance,
+        )
+        return self.store_page
+
+    def _build_versions(self):
+        self.versions_page = VersionsPage()
+        self.versions_page.instance_created.connect(self._on_instance_created)
+        return self.versions_page
+
+    def _build_lobby(self):
+        self.lobby_widget = QWidget()
+        ll = QVBoxLayout(self.lobby_widget)
+        ll.setContentsMargins(40, 32, 40, 32)
+        ll.addStretch(1)
+        _card = RoundedCard(radius=16)
+        _card.setMaximumWidth(560)
+        _cl = QVBoxLayout(_card)
+        _cl.setContentsMargins(36, 30, 36, 30)
+        _cl.setSpacing(12)
+        _tile = QLabel()
+        _tile.setPixmap(icon("lobby").pixmap(40, 40))
+        _cl.addWidget(_tile)
+        self._lobby_title = QLabel(t("lobby.title"))
+        self._lobby_title.setProperty("cls", "title")
+        _cl.addWidget(self._lobby_title)
+        self._lobby_join_help = QLabel(t("lobby.join_help"))
+        self._lobby_join_help.setProperty("cls", "sub")
+        self._lobby_join_help.setWordWrap(True)
+        _cl.addWidget(self._lobby_join_help)
+        btn_row = QHBoxLayout()
+        self._lobby_join = QPushButton(icon("login"), t("lobby.join"))
+        self._lobby_join.setMinimumHeight(40)
+        self._lobby_join.clicked.connect(self._open_lobby)
+        btn_row.addWidget(self._lobby_join)
+        self._lobby_create = QPushButton(icon("add"), t("lobby.create"))
+        self._lobby_create.setProperty("cls", "accent")
+        self._lobby_create.setMinimumHeight(40)
+        self._lobby_create.clicked.connect(self._open_lobby)
+        btn_row.addWidget(self._lobby_create)
+        _cl.addLayout(btn_row)
+        self._lobby_create_help = QLabel(t("lobby.create_help"))
+        self._lobby_create_help.setProperty("cls", "sub")
+        self._lobby_create_help.setWordWrap(True)
+        _cl.addWidget(self._lobby_create_help)
+        ll.addWidget(_card)
+        ll.addStretch(1)
+        return self.lobby_widget
+
+    def _build_settings(self):
+        self.settings_page = SettingsPage()
+        self.settings_page._window = self  # live-refresh hook
+        self.settings_page.saved.connect(self._on_settings_saved)
+        self.settings_page.close_requested.connect(lambda: self._show_page("home"))
+        return self.settings_page
+
+    def _build_toolbox(self):
+        self.toolbox_widget = QWidget()
+        _tb = QVBoxLayout(self.toolbox_widget)
+        _tb.setContentsMargins(40, 32, 40, 32)
+        _tb.addStretch(1)
+        _card = RoundedCard(radius=16)
+        _card.setMaximumWidth(520)
+        _cl = QVBoxLayout(_card)
+        _cl.setContentsMargins(40, 34, 40, 34)
+        _cl.setSpacing(12)
+        _cl.setAlignment(Qt.AlignCenter)
+        _tile = QLabel()
+        _tile.setPixmap(icon("toolbox").pixmap(40, 40))
+        _tile.setAlignment(Qt.AlignCenter)
+        _cl.addWidget(_tile)
+        _t = QLabel(t("pcl2.toolbox_title"))
+        _t.setProperty("cls", "title")
+        _t.setAlignment(Qt.AlignCenter)
+        _cl.addWidget(_t)
+        _s = QLabel(t("pcl2.toolbox_empty"))
+        _s.setProperty("cls", "sub")
+        _s.setWordWrap(True)
+        _s.setAlignment(Qt.AlignCenter)
+        _cl.addWidget(_s)
+        _tag = QLabel(t("pcl2.toolbox_badge"))
+        _tag.setStyleSheet(
+            f"color: {COLORS['accent']}; background: {COLORS['accent']}1F; "
+            f"border-radius: 9px; padding: 2px 12px; font-size: 11px; "
+            f"font-weight: 600;")
+        _tag.setAlignment(Qt.AlignCenter)
+        _cl.addWidget(_tag)
+        _tb.addWidget(_card)
+        _tb.addStretch(1)
+        return self.toolbox_widget
+
+    def _build_music(self):
+        from .music_page import MusicPage
+        self.music_page = MusicPage()
+        return self.music_page
+
+    def _build_achievements(self):
+        from .achievements_page import AchievementsPage
+        self.achievements_page = AchievementsPage()
+        return self.achievements_page
+
+    def _build_console(self):
+        from .pages_console import ConsolePage
+        self.console_page = ConsolePage()
+        # 若游戏已启动（切页前就 launch 了），把当前日志绑定进控制台
+        _p = getattr(self, "_game_log_path", None)
+        _n = getattr(self, "_game_name", None)
+        if _p:
+            self.console_page.set_game(_p, _n)
+        return self.console_page
+
     def _switch_stack(self, idx: int):
         """Switch the content stack.
 
-        No fade animation here. A QGraphicsOpacityEffect fade-in gets paused /
-        orphaned whenever a modal dialog (ScanDialog, settings, …) opens while
-        it's mid-flight, leaving the page translucent on top of itself — the
-        "double page" ghost users kept seeing. An instant switch is visually
-        fine and cannot leave any stale effect behind.
+        Uses a one-shot fade-in (round-49 重启动画). The fade installs a fresh
+        QGraphicsOpacityEffect and removes it on finish, so—unlike the old
+        persistent-effect version that orphaned a ghost "double page" when a
+        modal dialog interrupted it—no translucent residue can persist. If the
+        effect or config is disabled it falls back to an instant switch.
         """
         if not 0 <= idx < self.stack.count():
             return
-        if idx == self.stack.currentIndex():
+        cur = self.stack.currentIndex()
+        if idx == cur:
             return
-        self.stack.setCurrentIndex(idx)
-        # DIAG: verify the widget actually switched (double-page investigation).
-        try:
-            _w = self.stack.currentWidget()
-            with open("_nav_trace.log", "a", encoding="utf-8") as _f:
-                _f.write(f"  _switch_stack({idx}) -> now showing {type(_w).__name__}\n")
-        except Exception:
-            pass
+        # Intercept leaving the settings page with unsaved edits: ask the user
+        # whether to save / discard / cancel (cancel = stay on settings).
+        sp = getattr(self, "settings_page", None)
+        if sp is not None and cur == self.stack.indexOf(sp):
+            if not self._maybe_save_settings():
+                return
+        self._ensure_page(idx)  # 首次切换才真正构建该页（延迟加载）
+        if self.cfg.get("page_transition", True):
+            fade_page_transition(self.stack, idx)
+        else:
+            self.stack.setCurrentIndex(idx)
+
+    def _maybe_save_settings(self) -> bool:
+        """Ask about unsaved settings. Returns True if we may proceed navigating
+        away (changes saved or discarded), False if the user cancelled."""
+        sp = getattr(self, "settings_page", None)
+        if sp is None or not sp.is_dirty():
+            return True
+        choice = sp.ask_save_dialog()
+        if choice == "save":
+            sp._save()
+            return True
+        if choice == "discard":
+            sp.discard_changes()
+            return True
+        return False
 
     def _show_page(self, key: str):
         """Programmatically switch the content stack to the given nav key."""
-        # DIAG: log page switches to correlate with the "double page" report.
-        try:
-            import traceback as _tb
-            _stack = _tb.extract_stack(limit=5)
-            _caller = " <- ".join(f"{f.filename.split(chr(92))[-1]}:{f.lineno}:{f.name}" for f in _stack[-3:-1])
-            with open("_showpage_trace.log", "a", encoding="utf-8") as _f:
-                _f.write(f"_show_page('{key}') by: {_caller} | stack.current={self.stack.currentIndex()}\n")
-        except Exception:
-            pass
         if self.nav_layout == "pcl2":
             self._pcl2_goto(key)
             return
@@ -1721,6 +2563,9 @@ class MainWindow(QMainWindow):
 
     def apply_home_style(self, style_key: str):
         """Re-render the home page live with a new style (from settings / onboarding)."""
+        # 非开发者模式只允许 AC 默认模板
+        if style_key != "ac_default" and not self.cfg.get("dev_mode", False):
+            style_key = "ac_default"
         self.cfg["home_style"] = style_key
         if hasattr(self, "home"):
             self.home.cfg = self.cfg
@@ -1876,6 +2721,7 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentIndex(0)  # force stack in sync with nav
 
         # 2. Title bar
+        self._refresh_win_icons()
         self.account_btn.setText(t("topbar.login"))
         if self.current_account:
             self.account_btn.setText(self.current_account.get("name", t("topbar.login")))
@@ -1904,6 +2750,20 @@ class MainWindow(QMainWindow):
             self._lobby_create.setText(t("lobby.create"))
             self._lobby_create_help.setText(t("lobby.create_help"))
 
+        # 7. round-44 补全：music/achievements/toolbox + 设置页设置项 label
+        if hasattr(self, 'music_page') and hasattr(self.music_page, 'retranslate_ui'):
+            self.music_page.retranslate_ui()
+        if hasattr(self, 'achievements_page') and hasattr(self.achievements_page, 'retranslate_ui'):
+            self.achievements_page.retranslate_ui()
+        if hasattr(self, 'toolbox_widget') and hasattr(self.toolbox_widget, 'retranslate_ui'):
+            self.toolbox_widget.retranslate_ui()
+        if hasattr(self, 'settings_dialog') and self.settings_dialog is not None \
+                and hasattr(self.settings_dialog, 'retranslate_ui'):
+            try:
+                self.settings_dialog.retranslate_ui()
+            except Exception:
+                pass
+
     def _open_lobby(self):
         from .lobby_dialog import LobbyDialog
 
@@ -1914,19 +2774,15 @@ class MainWindow(QMainWindow):
 
         DiagnosticsDialog(self).exec()
 
-    def _open_scan(self):
-        from .scan_dialog import ScanDialog
-
-        ScanDialog(self).exec()
-        # a new instance may have been imported — refresh the home card
-        self.home._refresh()
-
     def _handle_play(self, inst: Instance):
+        self._last_inst = inst  # round-46：记住实例，Java 选完可重试
         if self._play_worker is not None and self._play_worker.isRunning():
             return
         account = self.current_account or OFFLINE_ACCOUNT
         settings = load_config()
         log_dir = get_data_dir()
+        # round-71 借 PCL-CE McLogFilter：保存本次登录 token，console 展示打码用
+        self._game_token = account.get("token", "")
 
         # signature launch chime when starting the game
         try:
@@ -1938,21 +2794,279 @@ class MainWindow(QMainWindow):
         self._progress.setMaximum(0)
         self.statusBar().showMessage(t("status.play_request", ver=inst.name))
 
+        # round-52 启动进度对话框（对齐 HMCL/PCL2 的启动检查步骤面板）：
+        # 隐藏只收起点窗口，启动仍由后台 worker 继续（状态栏进度兜底）。
+        from .launch_dialog import LaunchProgressDialog
+        self._launch_dlg = LaunchProgressDialog(inst, parent=self)
+        self._launch_dlg.show()
+
         self._play_worker = ProgressWorker(
             launch_instance, inst, account, settings, log_dir=log_dir
         )
         self._play_worker.status.connect(self.statusBar().showMessage)
+        self._play_worker.step.connect(self._launch_dlg.set_step)
+        self._play_worker.status.connect(self._launch_dlg.set_status_text)
         self._play_worker.progress.connect(self._set_progress)
-        self._play_worker.finished.connect(lambda _p: self._on_launch_done(inst))
+        self._play_worker.progress.connect(self._launch_dlg.set_progress)
+        # launch_instance 返回 (proc, log_path)；round-34 把 proc 交给进程跟踪
+        self._play_worker.finished.connect(
+            lambda _res: self._on_launch_done(
+                inst,
+                _res[0] if isinstance(_res, (tuple, list)) and _res else None,
+                _res[1] if isinstance(_res, (tuple, list)) and len(_res) > 1 else None))
         self._play_worker.error.connect(self._on_launch_error)
         self._play_worker.start()
 
-    def _on_launch_done(self, inst: Instance):
+    def _on_launch_done(self, inst: Instance, _proc=None, _log_path=None):
         self._progress.setVisible(False)
         self.statusBar().showMessage(t("status.launched", name=inst.name))
         self.home.play_btn.setEnabled(True)
+        # round-52：进度对话框全部点亮后稍作停留再关（玩家能看到「启动游戏✔」）
+        _dlg = getattr(self, "_launch_dlg", None)
+        if _dlg is not None:
+            try:
+                _dlg.mark_launched()
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(900, _dlg.close)
+            except Exception:  # noqa: BLE001
+                _dlg.close()
+            self._launch_dlg = None
+        # round-34：游戏进程生命周期——保存 proc 引用并轮询退出状态
+        self._track_game_process(_proc, inst.name, _log_path, inst)
+
+    def _track_game_process(self, proc, name: str, log_path: str | None = None, instance=None):
+        """保存游戏进程句柄，启动 2s 间隔轮询，退出时状态栏提示。
+
+        ``instance`` 可选：round-55 用于解析实例级「退出后命令」（空回退全局）。
+        """
+        self._game_proc = proc
+        self._game_log_path = log_path
+        self._game_exit_cmd = ""
+        self._game_cwd = ""
+        if instance is not None:
+            try:
+                from .settings_dialog import load_config
+                _cfg = load_config()
+                self._game_exit_cmd = (
+                    (getattr(instance, "exit_cmd", "") or "").strip()
+                    or _cfg.get("exit_cmd", ""))
+                # round-57：退出命令工作目录跟随游戏真实数据目录（版本隔离感知）
+                try:
+                    from .launch import resolve_game_dir
+                    self._game_cwd = resolve_game_dir(instance, _cfg)
+                except Exception:  # noqa: BLE001 - 解析失败退回实例根目录
+                    self._game_cwd = getattr(instance, "mc_dir", "")
+            except Exception:  # noqa: BLE001 - 读配置失败则无退出钩子
+                pass
+        if proc is None:
+            return
+        self._game_name = name
+        # 控制台页（若已构建）绑定本次运行的日志，实时显示输出
+        _cp = getattr(self, "console_page", None)
+        if _cp is not None:
+            try:
+                _cp.set_game(log_path, name, getattr(self, "_game_token", ""))
+            except Exception:
+                pass
+        self._game_poll_timer = QTimer(self)
+        self._game_poll_timer.setInterval(2000)
+        self._game_poll_timer.timeout.connect(self._poll_game)
+        self._game_poll_timer.start()
+        # round-37 轴心3：游戏运行中显示「结束游戏」按钮
+        self._set_game_running_ui(True)
+        # round-50 退出释放资源：启动后游戏进程稳定存活则自动关闭启动器
+        self._maybe_auto_close_launcher(name)
+
+    def _maybe_auto_close_launcher(self, name: str) -> None:
+        """round-50 退出释放资源：对齐 Prism「Kill on Launch」。
+
+        游戏进程稳定存活一段时间（默认 5s，足以跨过 crash-on-start）后自动
+        `close()` 启动器，把 ~100MB 运行时内存全部让给 Minecraft。游戏是独立
+        进程，关闭启动器不会影响它；启动器开的进程轮询也随窗口销毁而停止。
+        配置 `close_after_launch=False` 时保持启动器常驻。
+        """
+        try:
+            from .settings_dialog import load_config
+            if not load_config().get("close_after_launch", True):
+                return
+            # round-57 冲突修复：配置了「退出后命令」时必须让启动器常驻——
+            # 退出钩子由本窗口的轮询定时器在游戏退出时触发，自动关闭会把
+            # 定时器连同进程一起销毁，钩子永远不执行。
+            if getattr(self, "_game_exit_cmd", ""):
+                return
+            delay = max(1, int(load_config().get("close_after_launch_delay", 5)))
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(
+                delay * 1000,
+                lambda: self._auto_close_if_game_running(name),
+            )
+        except Exception:  # noqa: BLE001 - 自动关闭失败绝不能崩启动器
+            pass
+
+    def _auto_close_if_game_running(self, name: str) -> None:
+        """回调：到点且游戏进程仍存活 → 关闭启动器释放资源。"""
+        try:
+            proc = getattr(self, "_game_proc", None)
+            if proc is not None and proc.poll() is None:
+                self.statusBar().showMessage(
+                    t("status.auto_close", name=name))
+                self.close()  # 游戏独立进程，关启动器不影响游戏
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _poll_game(self):
+        """轮询游戏进程：poll() 非 None = 已退出。"""
+        proc = getattr(self, "_game_proc", None)
+        if proc is None:
+            try:
+                self._game_poll_timer.stop()
+            except Exception:
+                pass
+            return
+        code = proc.poll()
+        if code is not None:
+            try:
+                self._game_poll_timer.stop()
+            except Exception:
+                pass
+            self._game_proc = None
+            self._set_game_running_ui(False)
+            # round-55 退出后命令：游戏进程退出时执行（实例/全局，失败静默）。
+            try:
+                from .launch import run_hook_cmd
+                run_hook_cmd(getattr(self, "_game_exit_cmd", ""),
+                             getattr(self, "_game_cwd", ""))
+            except Exception:  # noqa: BLE001 - 退出钩子失败不影响状态展示
+                pass
+            # 控制台页：游戏退出 → 停止 tail 并追加结束标记
+            _cp = getattr(self, "console_page", None)
+            if _cp is not None:
+                try:
+                    _cp.set_game_finished(code)
+                except Exception:
+                    pass
+            # round-48 C：退出原因分类——用退出码 + 崩溃日志特征给出可操作提示
+            base = t("status.game_exited", name=getattr(self, "_game_name", ""), code=code)
+            try:
+                from .launch import explain_exit
+                reason = explain_exit(code, getattr(self, "_game_log_path", None))
+            except Exception:  # noqa: BLE001 - 分类失败退回到通用文案
+                reason = ""
+            self.statusBar().showMessage(f"{base} · {reason}" if reason else base)
+
+    def _set_game_running_ui(self, running: bool):
+        """同步首页 kill 按钮 / 启动按钮状态。"""
+        try:
+            home = getattr(self, "home", None)
+            if home is None:
+                return
+            kill = getattr(home, "kill_btn", None)
+            if kill is not None:
+                kill.setVisible(running)
+            play = getattr(home, "play_btn", None)
+            if play is not None:
+                play.setEnabled(not running)
+                play.setText(t("home.game_running") if running else t("home.play"))
+        except Exception:
+            pass
+
+    def kill_game(self) -> bool:
+        """强制结束游戏进程（诊断/实例卡入口）。返回是否成功。"""
+        proc = getattr(self, "_game_proc", None)
+        if proc is None or proc.poll() is not None:
+            return False
+        try:
+            import subprocess
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=10)
+            else:
+                proc.kill()
+            try:
+                self._game_poll_timer.stop()
+            except Exception:
+                pass
+            self._game_proc = None
+            self._set_game_running_ui(False)
+            self.statusBar().showMessage(t("status.game_killed", name=getattr(self, "_game_name", "")))
+            return True
+        except Exception:
+            return False
 
     def _on_launch_error(self, msg: str):
         self._progress.setVisible(False)
+        # round-52：关闭启动进度对话框（避免错误弹窗与进度面板叠着）
+        _dlg = getattr(self, "_launch_dlg", None)
+        if _dlg is not None:
+            try:
+                _dlg.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._launch_dlg = None
         self.statusBar().showMessage(t("status.launch_error", err=msg))
         self.home.play_btn.setEnabled(True)
+        # 所有启动错误都显示对话框，不再只针对 Java 错误
+        try:
+            from PySide6.QtWidgets import QMessageBox, QFileDialog
+            from .i18n import t as _t
+            is_java_error = "java" in (msg or "").lower()
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle(_t("err.launch_failed", default="启动失败"))
+            box.setText(_t("err.launch_error_title", default="游戏启动失败"))
+            box.setInformativeText(msg)
+            
+            if is_java_error:
+                box.setDetailedText(msg)
+                pick_btn = box.addButton(
+                    _t("err.java_pick_btn", default="选择 Java..."),
+                    QMessageBox.ButtonRole.AcceptRole)
+                install_btn = box.addButton(
+                    _t("err.java_install_btn", default="安装 Java"),
+                    QMessageBox.ButtonRole.ActionRole)
+                box.addButton(QMessageBox.StandardButton.Ok)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked is pick_btn:
+                    path, _ = QFileDialog.getOpenFileName(
+                        self,
+                        _t("err.java_pick_title", default="选择 java.exe"),
+                        "",
+                        "Java (java.exe javaw.exe);;All files (*)",
+                    )
+                    if path and os.path.isfile(path):
+                        from .paths import get_data_dir
+                        import json as _json
+                        cfg_path = os.path.join(get_data_dir(), "launcher_config.json")
+                        try:
+                            with open(cfg_path, "r", encoding="utf-8") as _f:
+                                cfg = _json.load(_f)
+                        except Exception:
+                            cfg = {}
+                        cfg["java_auto"] = False
+                        cfg["java_path"] = path
+                        with open(cfg_path, "w", encoding="utf-8") as _f:
+                            _json.dump(cfg, _f, ensure_ascii=False, indent=2)
+                        # 重试用玩家选的 java
+                        self.statusBar().showMessage(_t("status.retry_with_new_java"))
+                        self._handle_play(self._last_inst or self.get_current_instance())
+                elif clicked is install_btn:
+                    # 打开设置页 Java 分区（让玩家一键安装）
+                    self._open_settings()
+                    if hasattr(self, "_sec_list") and hasattr(self, "_sec_stack"):
+                        for i in range(self._sec_list.count()):
+                            if self._sec_list.item(i).data(Qt.UserRole) == "java" \
+                                    or i == 1:  # 第二项是 Java 分区
+                                self._sec_list.setCurrentRow(i)
+                                break
+            else:
+                # 非 Java 错误：简单显示错误信息，提供重试按钮
+                retry_btn = box.addButton(
+                    _t("err.retry", default="重试"),
+                    QMessageBox.ButtonRole.AcceptRole)
+                box.addButton(QMessageBox.StandardButton.Ok)
+                box.exec()
+                if box.clickedButton() is retry_btn:
+                    self._handle_play(self._last_inst or self.get_current_instance())
+        except Exception:
+            pass

@@ -268,15 +268,20 @@ def _check_network() -> CheckResult:
 
 
 def _check_ui_state() -> CheckResult:
-    """Sanity-check the live UI: stack page count + duplicated HomePage.
+    """Sanity-check the live UI for the "double page" symptom and other
+    visual glitches.
 
-    Called from the main thread (needs the running MainWindow). Detects the
-    "double page" symptom early: if the content stack somehow holds two
-    HomePage instances (or the count looks wrong) we surface a warning that
-    explains what to reset.
+    Called from the main thread (needs the running MainWindow). Unlike the
+    old check that only counted duplicate HomePage objects in the stack, this
+    version looks at the *currently visible* page for the actual visual
+    symptoms players report as "double page":
+
+    * a stray QGraphicsOpacityEffect making the page translucent
+    * duplicate content layers inside the current page
+    * the embedded scan panel and normal content both visible at once
     """
     try:
-        from PySide6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
         wins = QApplication.topLevelWidgets()
         main = None
         for w in wins:
@@ -289,13 +294,66 @@ def _check_ui_state() -> CheckResult:
                 "ui", "diag.check.ui", "diag.cat.launcher", STATUS_SKIP,
                 t("diag.d.ui.skip"), repairable=False,
             )
+
         n = main.stack.count()
+        page = main.stack.currentWidget()
+        if page is None:
+            return CheckResult(
+                "ui", "diag.check.ui", "diag.cat.launcher", STATUS_OK,
+                t("diag.d.ui.ok", n=n), repairable=False,
+            )
+
+        findings: list[str] = []
+
+        # 1) leftover opacity effect (historical root cause of the ghost overlay)
+        fx = page.graphicsEffect()
+        if isinstance(fx, QGraphicsOpacityEffect):
+            op = fx.opacity()
+            if op < 0.99:
+                findings.append(t("diag.d.ui.opacity", op=f"{op:.2f}"))
+
+        # 2) duplicated content layers inside the visible page
         from .main_window import HomePage
+        from .pages_instances import InstancesPage
+
+        if isinstance(page, HomePage):
+            # HomePage should have exactly one visible content layer plus an
+            # optional scan panel. If both content and scan_panel are visible,
+            # that's the embedded-mode equivalent of a double page.
+            content = getattr(page, "content", None)
+            scan = getattr(page, "_scan_panel", None)
+            if content is not None and scan is not None:
+                if content.isVisible() and scan.isVisible():
+                    findings.append(t("diag.d.ui.home_both_layers"))
+            # Also look for multiple direct children that look like content
+            if content is not None:
+                vis_contents = [
+                    c for c in page.children()
+                    if isinstance(c, QWidget)
+                    and c is not page.backdrop
+                    and c is not content
+                    and c.isVisible()
+                    and c.parent() is page
+                ]
+                if len(vis_contents) > 1:  # at most the scan panel should be visible
+                    findings.append(t("diag.d.ui.home_extra_children", n=len(vis_contents)))
+
+        elif isinstance(page, InstancesPage):
+            detail = getattr(page, "detail_scroll", None)
+            scan = getattr(page, "_scan_panel", None)
+            if detail is not None and scan is not None:
+                if detail.isVisible() and scan.isVisible():
+                    findings.append(t("diag.d.ui.instances_both_layers"))
+
+        # 3) duplicate HomePage objects in the stack (old indicator)
         dup = sum(1 for i in range(n) if isinstance(main.stack.widget(i), HomePage))
         if dup > 1:
+            findings.append(t("diag.d.ui.dup_home", n=dup))
+
+        if findings:
             return CheckResult(
                 "ui", "diag.check.ui", "diag.cat.launcher", STATUS_WARN,
-                t("diag.d.ui.dup_home", n=dup), repairable=False,
+                "; ".join(findings), repairable=False,
             )
         return CheckResult(
             "ui", "diag.check.ui", "diag.cat.launcher", STATUS_OK,

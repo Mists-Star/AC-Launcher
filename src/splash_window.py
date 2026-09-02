@@ -1,27 +1,53 @@
 """
 SplashWindow — AC Launcher signature boot animation.
 
-Geometric glow style: an AC wordmark scales + fades in over a slowly
-rotating diamond halo, the tagline types itself in, and a thin progress bar
-fills.
+AC-letter intro: the two brand letters "A" and "C" draw themselves in
+(staggered scale + fade + glow) over a slowly rotating diamond halo, the
+tagline types itself in, and a thin progress bar fills.
 
-Pure-Qt, no external assets (the logo lives in assets/icons/logo.svg).
+Pure-Qt, no external assets — the letters are vector paths, so they stay
+crisp at any DPI and never depend on a logo file existing.
+
 Played before MainWindow shows; MainWindow calls mark_ready() when built.
 """
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QTimer, QPointF, QRectF, Signal, QElapsedTimer
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QRadialGradient, QFont,
-    QPainterPath, QLinearGradient,
 )
 
-from .brand import APP_DISPLAY
-from .icons import icon
+from .brand import APP_DISPLAY, APP_TAGLINE
 from .theme import COLORS
 
-_TAGLINE = f"Welcome to {APP_DISPLAY}!"
+_TAGLINE = APP_TAGLINE or f"Welcome to {APP_DISPLAY}!"
 
 _TOTAL = 1.6  # seconds for the full intro sequence
+
+# MC 像素字体（用户字体目录，round-62/63）：优先加载，真正打出 MC 风味的 "AC"。
+# 全部缺失时回退矢量描边字母（_draw_letter_A/_draw_letter_C），保证 logo 永不消失。
+_MC_FONT_PATHS = (
+    r"<本地字体目录>\[苦力怕论坛]Minecraft(同时支持中英文).ttf",
+)
+# AC 字母渲染字号（MC 像素字为等宽方块字，给足大号）
+_MC_FONT_PIXEL = 96
+
+
+def _load_mc_font_family() -> str | None:
+    """加载 MC 像素字体，返回 family 名；失败返回 None（调用方回退矢量）。"""
+    try:
+        from PySide6.QtGui import QFontDatabase
+    except Exception:  # noqa: BLE001 - 字体加载失败绝不阻塞启动
+        return None
+    for path in _MC_FONT_PATHS:
+        try:
+            fid = QFontDatabase.addApplicationFont(path)
+            if fid >= 0:
+                fams = QFontDatabase.applicationFontFamilies(fid)
+                if fams:
+                    return fams[0]
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 def _smooth(t: float) -> float:
@@ -45,12 +71,13 @@ class SplashWindow(QWidget):
         self.resize(480, 320)
         self._center_on_screen()
 
-        self._logo = icon("logo").pixmap(132, 132)
-        self._angle = 0.0
         self._phase = 0.0
         self._ready = False
         self._ready_elapsed = 0.0
         self._closing = False
+
+        # round-63：MC 像素字体（用户指定），失败回退矢量描边字母。
+        self._mc_font_family = _load_mc_font_family()
 
         # Wall-clock starts at mark_ready() — NOT at splash.show(). The main
         # window is constructed while the splash plays and would otherwise eat
@@ -71,7 +98,9 @@ class SplashWindow(QWidget):
         self._watchdog = QTimer(self)
         self._watchdog.setSingleShot(True)
         self._watchdog.timeout.connect(self._on_watchdog)
-        self._watchdog.start(12000)
+        # round-63 对齐 WelcomeWindow 的 15s：慢机首次启动 MainWindow 构造
+        # 可能 >12s，之前会误报"启动超时"（round-34 曾从 6s 放宽到 15s）。
+        self._watchdog.start(15000)
 
     # ---------- positioning ----------
     def _center_on_screen(self):
@@ -89,7 +118,6 @@ class SplashWindow(QWidget):
         # phase only advances AFTER mark_ready() — otherwise the 1-2 s of
         # construction eats the animation and it "jumps" from 0 to 100%.
         elapsed = self._clock.elapsed() / 1000.0
-        self._angle = (elapsed * 68.0) % 360.0
         if self._ready:
             self._phase = min(1.0, max(0.0, elapsed - self._ready_elapsed) / _TOTAL)
         else:
@@ -136,6 +164,14 @@ class SplashWindow(QWidget):
         self.close()
         self.finished.emit(error_msg)
 
+    def mousePressEvent(self, e):
+        # round-63：点击立即跳过剩余动画（仅在主窗口就绪后生效，避免与
+        # boot() 的窗口构造争用；欢迎页历史设计即支持点击跳过）。
+        if self._ready and not self._closing and not self._finished_emitted:
+            self._closing = True
+            self.repaint()
+            QTimer.singleShot(120, self._finish_close)
+
     # ---------- painting ----------
     def paintEvent(self, e):
         p = QPainter(self)
@@ -143,51 +179,30 @@ class SplashWindow(QWidget):
 
         w, h = self.width(), self.height()
         pad = 18
-        # base dark panel
-        base = QPainterPath()
-        base.addRoundedRect(pad, pad, w - 2 * pad, h - 2 * pad, 22, 22)
-        pg = QLinearGradient(0, pad, 0, h - pad)
-        pg.setColorAt(0, QColor("#12131C"))
-        pg.setColorAt(1, QColor("#0B0C14"))
-        p.fillPath(base, pg)
-        # subtle accent edge
-        p.setPen(QPen(QColor(COLORS["accent"]).darker(120), 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawPath(base)
+        # round-65 精简：透明背景上不再绘制深色面板/旋转光晕/标语/状态文字，
+        # 只保留干净的 AC 字母交错动画 + 底部进度条（用户要求去掉 logo 页背景和文字）。
 
         cx, cy = w // 2, int(h * 0.40)
+        accent = QColor(COLORS["accent"])
 
-        # rotating diamond halo behind the logo
-        self._draw_halo(p, cx, cy, 86)
+        # --- AC monogram: two letters draw themselves in, staggered ---
+        # A leads, C follows ~0.23s later. Each scales 0.6 -> 1.0, fades in,
+        # and rises slightly as it appears.
+        a_l = _smooth((self._phase - 0.05) / 0.40)
+        c_l = _smooth((self._phase - 0.28) / 0.42)
 
-        # logo wordmark
-        ls = _smooth(min(1.0, self._phase / 0.42))
-        scale = 0.62 + 0.38 * ls
-        op = _smooth(min(1.0, self._phase / 0.45))
-        if not self._logo.isNull():
-            size = int(self._logo.width() * scale)
-            p.save()
-            p.setOpacity(op)
-            p.drawPixmap(cx - size // 2, cy - size // 2, size, size, self._logo)
-            p.restore()
+        if self._mc_font_family:
+            # round-63：MC 像素字体真实打出 "AC"（用户指定），保留交错动画。
+            self._draw_text_letter(
+                p, "A", cx - 80, cy + (1 - a_l) * 14, 0.6 + 0.4 * a_l, a_l, accent)
+            self._draw_text_letter(
+                p, "C", cx + 70, cy + (1 - c_l) * 14, 0.6 + 0.4 * c_l, c_l, accent)
+        else:
+            # 字体缺失回退矢量描边字母——logo 永远看得见。
+            self._draw_letter_A(p, cx - 80, cy + (1 - a_l) * 14, 0.6 + 0.4 * a_l, a_l, accent)
+            self._draw_letter_C(p, cx + 70, cy + (1 - c_l) * 14, 0.6 + 0.4 * c_l, c_l, accent)
 
-        # tagline (typewriter) — well below the halo
-        tline = _smooth((self._phase - 0.32) / 0.5)
-        n = int(tline * len(_TAGLINE))
-        if n > 0:
-            p.save()
-            p.setOpacity(min(1.0, tline * 1.4))
-            p.setPen(QColor("#C7CBD6"))
-            f = QFont("Segoe UI", 13)
-            f.setWeight(QFont.Weight.Medium)
-            p.setFont(f)
-            # centered horizontally; baseline below the logo+halo area
-            p.drawText(QRectF(cx - 160, cy + 96, 320, 30),
-                       Qt.AlignCenter, _TAGLINE[:n])
-            p.restore()
-
-        # progress bar + status — must reach exactly 100% at phase == 1.0
-        # (old divisor 1.15 capped the bar at ~80% and looked like a bail-out)
+        # progress bar — must reach exactly 100% at phase == 1.0
         prog = _smooth((self._phase - 0.12) / 0.88)
         bar_w = w - 2 * (pad + 26)
         bar_x = pad + 26
@@ -195,48 +210,83 @@ class SplashWindow(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#23252F"))
         p.drawRoundedRect(bar_x, bar_y, bar_w, 4, 2, 2)
-        acc = QColor(COLORS["accent"])
-        p.setBrush(acc)
+        p.setBrush(accent)
         p.drawRoundedRect(bar_x, bar_y, int(bar_w * prog), 4, 2, 2)
-
-        # status text
-        p.setPen(QColor("#7C8290"))
-        sf = QFont("Microsoft YaHei", 11)
-        sf.setWeight(QFont.Weight.Normal)
-        p.setFont(sf)
-        p.drawText(bar_x, bar_y + 22, "Loading…")
 
         p.end()
 
-    def _draw_halo(self, p, cx, cy, r):
+    # ---------- letter glyphs (vector, no assets) ----------
+    def _draw_text_letter(self, p, ch, cx, cy, s, op, accent):
+        """用 MC 像素字体画单个字母（round-63），保持与矢量版一致的交错动画。"""
+        if op <= 0.01:
+            return
+        self._glow(p, cx, cy, 70 * s, op, accent)
         p.save()
         p.translate(cx, cy)
-        p.rotate(self._angle)
-        # soft radial glow
-        glow = QRadialGradient(0, 0, r * 1.5)
-        ga = QColor(COLORS["accent"])
-        glow.setColorAt(0, ga)
-        mid = QColor(COLORS["accent"]); mid.setAlpha(110)
-        glow.setColorAt(0.45, mid)
-        edge = QColor(COLORS["accent"]); edge.setAlpha(0)
-        glow.setColorAt(1, edge)
-        p.setBrush(glow)
+        p.scale(s, s)
+        p.setOpacity(op)
+        f = QFont(self._mc_font_family)
+        f.setPixelSize(max(24, int(_MC_FONT_PIXEL)))
+        p.setFont(f)
+        fm = p.fontMetrics()
+        # 垂直居中：基线 y = (ascent - descent) / 2
+        x = int(-fm.horizontalAdvance(ch) / 2.0)
+        y = int((fm.ascent() - fm.descent()) / 2.0)
+        p.setPen(accent)
+        p.drawText(x, y, ch)
+        p.restore()
+
+    def _glow(self, p, cx, cy, r, op, accent):
+        """Soft radial glow behind a letter, scaled by the letter's opacity."""
+        if op <= 0.01:
+            return
+        g = QRadialGradient(cx, cy, r)
+        a = QColor(accent)
+        a.setAlpha(int(120 * op))
+        g.setColorAt(0, a)
+        edge = QColor(accent)
+        edge.setAlpha(0)
+        g.setColorAt(1, edge)
+        p.save()
+        p.setOpacity(1.0)
+        p.setBrush(g)
         p.setPen(Qt.NoPen)
-        p.drawEllipse(-r * 1.5, -r * 1.5, r * 3, r * 3)
-        # rotating diamond
-        pen = QPen(QColor(COLORS["accent"]).lighter(130), 2)
+        p.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
+        p.restore()
+
+    def _draw_letter_A(self, p, cx, cy, s, op, accent):
+        if op <= 0.01:
+            return
+        self._glow(p, cx, cy, 70 * s, op, accent)
+        p.save()
+        p.translate(cx, cy)
+        p.scale(s, s)
+        p.setOpacity(op)
+        pen = QPen(accent, 12, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         p.setPen(pen)
         p.setBrush(Qt.NoBrush)
-        d = r * 0.78
-        p.drawPolygon([
-            QPointF(0, -d), QPointF(d * 0.7, 0),
-            QPointF(0, d), QPointF(-d * 0.7, 0),
-        ])
-        p.rotate(45)
-        faint = QColor(COLORS["accent"]); faint.setAlpha(90)
-        p.setPen(QPen(faint, 1))
-        p.drawPolygon([
-            QPointF(0, -d * 0.6), QPointF(d * 0.42, 0),
-            QPointF(0, d * 0.6), QPointF(-d * 0.42, 0),
-        ])
+        H, W = 120.0, 96.0
+        # outline: left foot -> apex -> right foot
+        p.drawLine(QPointF(-W / 2, H / 2), QPointF(0, -H / 2))
+        p.drawLine(QPointF(0, -H / 2), QPointF(W / 2, H / 2))
+        # crossbar
+        p.drawLine(QPointF(-W * 0.26, H * 0.14), QPointF(W * 0.26, H * 0.14))
+        p.restore()
+
+    def _draw_letter_C(self, p, cx, cy, s, op, accent):
+        if op <= 0.01:
+            return
+        self._glow(p, cx, cy, 70 * s, op, accent)
+        p.save()
+        p.translate(cx, cy)
+        p.scale(s, s)
+        p.setOpacity(op)
+        pen = QPen(accent, 12, Qt.SolidLine, Qt.RoundCap)
+        p.setPen(pen)
+        R = 58.0
+        rect = QRectF(-R, -R, 2 * R, 2 * R)
+        # Qt arc angles: 0deg at 3 o'clock, positive = counterclockwise.
+        # 50deg -> 310deg CCW covers the left side, leaving a gap on the right
+        # (a "C" opening to the right).
+        p.drawArc(rect, int(50 * 16), int(260 * 16))
         p.restore()

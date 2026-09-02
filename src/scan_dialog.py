@@ -1,16 +1,22 @@
-"""Scan dialog — discover & import existing MC instances and Java runtimes.
+"""Scan dialog / panel — discover & import existing MC instances.
 
-Opened from the home page. Runs the (potentially slow) disk scan on a Worker
-thread so the UI never freezes, then shows every instance found across other
-launchers plus all detected Java installs. Each instance row has an "Import"
-button that links it into AC via InstancesManager.import_external().
+Two public classes are provided:
+
+* :class:`ScanPanel` — the scanner UI as a plain QWidget. It can be embedded
+  directly into another page (home / instances) so no modal dialog is needed.
+* :class:`ScanDialog` — a thin frameless dialog wrapper around :class:`ScanPanel`
+  for callers that still want a popup.
+
+The disk scan runs on a Worker thread so the UI never freezes.
 """
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
     QListWidgetItem, QWidget, QProgressBar, QLineEdit,
-    QScrollArea,
+    QScrollArea, QApplication, QProgressDialog, QToolButton,
 )
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, Signal
+
+import time
 
 from .icons import icon
 from .theme import COLORS
@@ -96,21 +102,28 @@ class _InstanceRow(QWidget):
         )
 
 
-class ScanDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(t("scan.title"))
-        self.resize(960, 660)
-        self.setMinimumSize(840, 560)
-        self._imported: set[str] = set()
+class ScanPanel(QWidget):
+    """Reusable scanner widget: search disk for MC instances and import them.
 
-        # ── frameless shell ──
+    Emits :attr:`done` when the user clicks the back/close button. Imported
+    directories are accumulated in :attr:`imported_dirs` so the host page can
+    refresh itself and unlock achievements.
+    """
+
+    done = Signal()
+
+    def __init__(self, parent=None, auto_scan: bool = True):
+        super().__init__(parent)
+        self._imported: set[str] = set()
+        self._build_ui()
+        if auto_scan:
+            QTimer.singleShot(50, self._run_scan)
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
-        self.titlebar = TitleBar(self, title=t("scan.title"), height=38)
-        root.addWidget(self.titlebar)
 
         # ── scrollable content (head, toolbar, cols) ──
         scroll = QScrollArea()
@@ -201,18 +214,15 @@ class ScanDialog(QDialog):
         foot.addStretch(1)
         close_btn = QPushButton(t("common.close"))
         close_btn.setMinimumHeight(34)
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self.done.emit)
         foot.addWidget(close_btn)
         root.addLayout(foot)
 
-        # frameless + DWM shadow + win11 rounded corners
-        self._frameless = FramelessHelper(self)
-        self._frameless.set_titlebar(self.titlebar)
-        from .win_rounded import enable_win11_round_corners
-        enable_win11_round_corners(self)
-
-        # auto-run on open
-        QTimer.singleShot(50, self._run_scan)
+    # ------------------------------------------------------------------ properties
+    @property
+    def imported_dirs(self) -> set[str]:
+        """Directories that were successfully imported during this session."""
+        return set(self._imported)
 
     # ---------- scanning ----------
     def _run_scan(self):
@@ -266,20 +276,32 @@ class ScanDialog(QDialog):
             groups: dict[str, list[ScannedInstance]] = {}
             for inst in instances:
                 groups.setdefault(inst.launcher, []).append(inst)
+            # round-44 折叠按钮：可点击 ▾/▸ 切换显隐，_group_rows 维护映射
+            self._group_rows: dict[str, list] = {}
             for launcher, grp in groups.items():
                 hdr = QListWidgetItem()
-                hlabel = QLabel(f"▾ {launcher}  ({len(grp)})")
-                hlabel.setProperty("cls", "group")
-                hlabel.setMinimumHeight(30)
+                hbtn = QToolButton()  # round-44：折叠按钮可点
+                hbtn.setText(f"▾ {launcher}  ({len(grp)})")
+                hbtn.setProperty("cls", "group")
+                hbtn.setMinimumHeight(30)
+                hbtn.setStyleSheet(
+                    "background: transparent; border: none; padding: 4px 8px;"
+                    "text-align: left; font-weight: 600;")
+                hbtn.setCursor(Qt.PointingHandCursor)
+                row_items: list[QListWidgetItem] = []
+                hbtn.clicked.connect(
+                    lambda _=False, k=launcher: self._toggle_group(k))
                 hdr.setSizeHint(QSize(100, 30))
                 self.inst_list.addItem(hdr)
-                self.inst_list.setItemWidget(hdr, hlabel)
+                self.inst_list.setItemWidget(hdr, hbtn)
                 for inst in grp:
                     row = _InstanceRow(inst, self._import)
                     item = QListWidgetItem()
                     item.setSizeHint(row.sizeHint())
                     self.inst_list.addItem(item)
                     self.inst_list.setItemWidget(item, row)
+                    row_items.append(item)
+                self._group_rows[launcher] = row_items
 
         # update count label
         if hasattr(self, 'search_count'):
@@ -295,6 +317,24 @@ class ScanDialog(QDialog):
         if hasattr(self, '_all_instances'):
             self._rebuild_instance_list(self._all_instances)
 
+    def _toggle_group(self, launcher: str) -> None:
+        """round-44：切换某个 launcher 折叠/展开（▾/▸）。"""
+        items = getattr(self, "_group_rows", {}).get(launcher)
+        if not items:
+            return
+        # 找对应 hdr 行的 QToolButton 切图标
+        for i in range(self.inst_list.count()):
+            it = self.inst_list.item(i)
+            w = self.inst_list.itemWidget(it)
+            if isinstance(w, QToolButton) and w.text().endswith(f"({len(items)})") \
+                    and launcher in w.text():
+                any_visible = any(not it.isHidden() for it in items)
+                target = any_visible  # 当前可见 → 折叠；当前隐藏 → 展开
+                for row in items:
+                    row.setHidden(target)
+                w.setText(("▸ " if target else "▾ ") + w.text()[2:])
+                break
+
     # ---------- import ----------
     def _choose_mode(self, inst: ScannedInstance) -> str | None:
         """Ask the user: take over in place, or copy into AC.
@@ -309,7 +349,7 @@ class ScanDialog(QDialog):
         detail += "\n\n" + f"{t('scan.import_link_hint')}\n\n{t('scan.import_copy_hint')}"
 
         result = _msgbox(
-            self,
+            self.window(),
             t("scan.import_title"),
             t("scan.import_body", launcher=inst.launcher, name=inst.name),
             detail=detail,
@@ -323,6 +363,12 @@ class ScanDialog(QDialog):
         return None
 
     def _do_import(self, inst: ScannedInstance, btn: QPushButton, mode: str) -> bool:
+        self._copy_cancelled = False
+        if mode == "copy":
+            return self._do_import_copy(inst, btn)
+        return self._do_import_link(inst, btn)
+
+    def _do_import_link(self, inst: ScannedInstance, btn: QPushButton) -> bool:
         try:
             instances_manager().import_external(
                 mc_dir=inst.mc_dir,
@@ -333,13 +379,72 @@ class ScanDialog(QDialog):
                 version_id=inst.version_id,
                 kind=inst.kind,
                 needs_convert=inst.needs_convert,
-                mode=mode,
+                mode="link",
                 launcher=inst.launcher,
             )
             return True
+        except Exception as e:  # noqa: BLE001
+            btn.setText(f"Error: {e}")
+            return False
+
+    def _do_import_copy(self, inst: ScannedInstance, btn: QPushButton) -> bool:
+        """Copy into AC with a live progress dialog.
+
+        Returns True on success. On an explicit user cancel we import nothing
+        (never silently fall back to a link); on a genuine copy failure we
+        fall back to an in-place link exactly like before.
+        """
+        progress = QProgressDialog(self.window())
+        progress.setWindowTitle(t("scan.copying_title"))
+        progress.setLabelText(t("scan.copying", name=inst.name))
+        progress.setCancelButtonText(t("common.cancel"))
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)   # show immediately
+        progress.setAutoClose(False)     # we close it ourselves
+        progress.setAutoReset(False)     # don't reset value on setValue
+        progress.setMinimumWidth(420)
+        progress.setValue(0)
+
+        last_refresh = [0.0]
+
+        def on_progress(copied: int, total: int, rel: str) -> bool:
+            now = time.monotonic()
+            # Throttle to ~20 Hz so fast copies don't repaint per file.
+            if now - last_refresh[0] < 0.05 and copied < total:
+                return not progress.wasCanceled()
+            last_refresh[0] = now
+            progress.setMaximum(total or 1)
+            progress.setValue(copied)
+            if rel:
+                progress.setLabelText(t("scan.copying_file", file=rel))
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        try:
+            instances_manager().import_external(
+                mc_dir=inst.mc_dir,
+                name=inst.name,
+                game_version=inst.game_version,
+                loader=inst.loader,
+                loader_version=inst.loader_version,
+                version_id=inst.version_id,
+                kind=inst.kind,
+                needs_convert=inst.needs_convert,
+                mode="copy",
+                launcher=inst.launcher,
+                on_progress=on_progress,
+            )
+            progress.setValue(progress.maximum())
+            progress.close()
+            return True
         except _CopyFailed as e:
-            # Copy failed (locked file / permission) — silently fall back to a
-            # link so the import still succeeds, and tell the user why.
+            progress.close()
+            if progress.wasCanceled():
+                # User pressed Cancel — import nothing, don't silently link.
+                self._copy_cancelled = True
+                warn(self.window(), t("scan.copying_title"), t("scan.copy_aborted"))
+                return False
+            # Genuine copy failure — fall back to an in-place link.
             try:
                 instances_manager().import_external(
                     mc_dir=inst.mc_dir,
@@ -354,7 +459,7 @@ class ScanDialog(QDialog):
                     launcher=inst.launcher,
                 )
                 info(
-                    self, t("scan.import_title"),
+                    self.window(), t("scan.import_title"),
                     t("scan.copy_failed", err=str(e)),
                 )
                 return True
@@ -362,6 +467,7 @@ class ScanDialog(QDialog):
                 btn.setText(f"Error: {e2}")
                 return False
         except Exception as e:  # noqa: BLE001
+            progress.close()
             btn.setText(f"Error: {e}")
             return False
 
@@ -393,7 +499,7 @@ class ScanDialog(QDialog):
         detail = t("scan.import_all_hint") + "\n\n" + \
             f"{t('scan.import_link_hint')}\n\n{t('scan.import_copy_hint')}"
         result = _msgbox(
-            self,
+            self.window(),
             t("scan.import_all_title"),
             t("scan.import_all_body", n=len(pending)),
             detail=detail,
@@ -413,6 +519,8 @@ class ScanDialog(QDialog):
                 ok += 1
             else:
                 fail += 1
+                if getattr(self, "_copy_cancelled", False):
+                    break  # user cancelled mid-copy — stop the rest
             for i in range(self.inst_list.count()):
                 w = self.inst_list.itemWidget(self.inst_list.item(i))
                 if isinstance(w, _InstanceRow) and w.path == inst.mc_dir:
@@ -436,7 +544,7 @@ class ScanDialog(QDialog):
         """Let the user pick a .minecraft folder manually and import it."""
         from .win_rounded import pick_files
         folder = pick_files(
-            self, t("scan.select_folder"), "", dir_only=True,
+            self.window(), t("scan.select_folder"), "", dir_only=True,
         )
         if not folder:
             return
@@ -453,7 +561,7 @@ class ScanDialog(QDialog):
 
         if not _is_mc_dir(mc_dir):
             warn(
-                self, t("scan.import_title"),
+                self.window(), t("scan.import_title"),
                 t("scan.not_mc_dir", path=folder),
             )
             return
@@ -514,3 +622,38 @@ class ScanDialog(QDialog):
             self.summary.setText(t("scan.folder_imported", name=name))
             # Refresh instance list by re-running scan
             self._run_scan()
+
+
+class ScanDialog(QDialog):
+    """Frameless popup wrapper around :class:`ScanPanel`.
+
+    Kept for callers that still need a dialog; the main home/instances pages
+    now embed :class:`ScanPanel` directly instead.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("scan.title"))
+        self.resize(960, 660)
+        self.setMinimumSize(840, 560)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Only the close button — minimize/maximize on a modal dialog can
+        # resize the parent window or leave the dialog in a weird state.
+        self.titlebar = TitleBar(
+            self, title=t("scan.title"), height=38, controls="close"
+        )
+        root.addWidget(self.titlebar)
+
+        self.panel = ScanPanel(self, auto_scan=True)
+        self.panel.done.connect(self.accept)
+        root.addWidget(self.panel, stretch=1)
+
+        # frameless + DWM shadow + win11 rounded corners
+        self._frameless = FramelessHelper(self)
+        self._frameless.set_titlebar(self.titlebar)
+        from .win_rounded import enable_win11_round_corners
+        enable_win11_round_corners(self)

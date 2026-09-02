@@ -11,16 +11,21 @@ config and emits `saved` (MainWindow refreshes UI + navigates home).
 """
 import json, os, sys
 
+from PySide6.QtCore import QSize
+
 from PySide6.QtWidgets import (
+    QApplication,
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QSpinBox, QTextEdit, QGroupBox, QCheckBox, QComboBox,
     QWidget, QTabWidget, QRadioButton, QButtonGroup,
     QSlider,
-    QScrollArea, QListWidget, QFrame,
+    QScrollArea, QListWidget, QListWidgetItem, QStackedWidget, QFrame,
+    QSizePolicy,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent
 
-from .theme import COLORS, RoundedCard
+from .theme import COLORS, RoundedCard, set_accent_color, set_theme_mode, apply_qss
+from . import ui_kit
 from .icons import icon
 from .paths import get_config_path, get_data_dir
 from .launch import find_java
@@ -41,16 +46,24 @@ _DEFAULTS = {
     "res_h": 720,
     "language": "zh-CN",
     "accent_color": "#7C3AED",        # hex
-    "wallpaper_mode": "none",         # none / solid / image / gif / video
+    "wallpaper_mode": "none",      # none / solid / image / version / gif / video
     "wallpaper_color": "#1E1E1E",
     "wallpaper_image": "",
     "wallpaper_opacity": 1.0,          # 0..1
     "wallpaper_video_vol": 0.0,        # 0..1, video wallpaper volume
-    "home_style": "ac_default",        # AC 自有默认模板；pcl_card/hmcl_list/modrinth_modern 为可选模板
+    # round-52 玻璃拟态恢复：半透明卡片（配合系统 Acrylic 透底）
+    "frosted_theme": True,
+    "home_style": "ac_default",        # 固定 AC 默认模板（模板切换已删除 round-32）
     # ---- advanced ----
     "java_auto": True,
     "java_path": "",
     "jvm_args": "",
+    # round-55 启动高级设置（对齐 PCL2「启动游戏/版本设置」）：
+    "jvm_preset": "default",           # default / aikar / custom
+    "game_args": "",                   # 游戏附加参数（--server <ip> 直连等）
+    "version_isolation": "default",    # default / isolated
+    "post_launch_cmd": "",             # 游戏启动后执行命令（shell）
+    "exit_cmd": "",                    # 游戏退出后执行命令（shell）
     "ms_client_id": "",
     "authlib_path": "",
     "launch_sound": True,
@@ -61,6 +74,8 @@ _DEFAULTS = {
     "bgm_enabled": False,
     "bgm_file": "",
     "bgm_vol": 0.4,
+    "bgm_mode": "loop",                 # loop / sequential / shuffle
+    "bgm_files": [],                    # multi-file playlist (replaces bgm_file)
     # ---- UI sound effects ----
     "sfx_enabled": False,
     "sfx_click": "",
@@ -73,12 +88,29 @@ _DEFAULTS = {
     "win_geometry": None,            # [x, y, w, h] or None → use default size
     "win_maximized": False,
     # ---- theme ----
-    "theme_mode": "dark",            # light / dark
+    "theme_mode": "light",           # light / dark
     "theme_pack": "",                # ""=none (built-in) / "control" / user pack id
+    # ---- 液态流光 effect（round-49 新增）----
+    "effect_light_trail": True,      # 卡片流体曳光 + 反射扫光
+    "window_opacity": 1.0,           # 全局透明度 0.5..1.0（1.0=不透）
+    # round-51 透底效果：系统级 Acrylic 真毛玻璃（半透明无边框窗口 + 圆角镂空）
+    "transparent_window": True,      # 开启后窗口透桌面模糊（可读性依赖实色卡片）
+    "page_transition": True,         # 页面切换淡入动画
+    # ---- 退出释放资源（round-50）----
+    "close_after_launch": True,      # 游戏启动并稳定运行后自动关闭启动器
+    "close_after_launch_delay": 5,   # 检测游戏稳定运行的等待秒数
     # ---- download mirror ----
-    "download_mirror": "official",   # official (官方 Mojang, 默认) / bmclapi (国内镜像)
+    # round-46 用户要求"全部优先镜像/速度优先"——默认 BMCLAPI（国内镜像速度快）
+    "download_mirror": "bmclapi",   # official (官方 Mojang) / bmclapi (国内镜像，速度优先)
     # ---- network proxy for downloads ----
     "download_proxy": "",            # ""=system proxy, "none"=direct, or "http://host:port"
+    # round-68 Quilt 加载器显示开关（close → 新建实例页隐藏 Quilt）
+    "show_quilt": True,
+    # round-69 游戏进程优先级（对齐 PCL2「进程优先级」；Windows creationflags）
+    "process_priority": "normal",   # normal / high / realtime
+    # ---- developer mode (gates experimental/test features) ----
+    "dev_mode": False,               # enabled only after key verification
+    "dev_mode_key": "",              # stored only for UI display; real key comes from env/file
 }
 
 
@@ -86,14 +118,63 @@ def load_config() -> dict:
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return {**_DEFAULTS, **data}
-    except (FileNotFoundError, json.JSONDecodeError):
+        # round-34 加固：合法 JSON 但非 dict（如 "[1]"、"\"str\""）→ 用默认值，
+        # 否则 `{**_DEFAULTS, **data}` 抛 TypeError 导致启动崩溃。
+        if isinstance(data, dict):
+            cfg = {**_DEFAULTS, **data}
+        else:
+            return dict(_DEFAULTS)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
         return dict(_DEFAULTS)
+    # round-62 默认合规：PCL2 顶栏导航是实验功能（round-32 已删除设置入口，
+    # 正常玩家无任何 UI 路径切过去）。配置文件里残留 "pcl2" 一律视为脏数据/
+    # 手工编辑/测试脚本残留——除非同时显式开启了开发者模式（dev_mode=True），
+    # 否则强制回退 AC 侧边导航默认值。
+    if cfg.get("nav_layout") != "ac" and not cfg.get("dev_mode", False):
+        cfg["nav_layout"] = "ac"
+        cfg["dev_mode"] = False
+    return cfg
 
 
 def save_config(cfg: dict) -> None:
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    tmp_path = CONFIG_FILE + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, CONFIG_FILE)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
+def _cfg_float(cfg: dict, key: str, default: float) -> float:
+    """round-39 P2-4 加固：非法配置值（None/字符串/缺失）→ 默认值，不抛异常。"""
+    try:
+        return float(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def dev_mode_key() -> str:
+    """Return the developer unlock key from environment or local file.
+
+    The key is intentionally NOT shipped in the repository. Packagers or
+    testers set AC_LAUNCHER_DEV_KEY in the environment, or place it in
+    <data_dir>/.dev_key, to unlock experimental UI options.
+    """
+    env = os.environ.get("AC_LAUNCHER_DEV_KEY", "").strip()
+    if env:
+        return env
+    p = os.path.join(get_data_dir(), ".dev_key")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
 
 
 # ── preset color palette ──────────────────────────────────────────────────
@@ -125,9 +206,30 @@ class SettingsPage(QWidget):
         self._window = None
         self._build_ui()
 
+    def eventFilter(self, obj, event):
+        # Disable mouse-wheel on scroll-sensitive controls so scrolling the
+        # settings page does NOT accidentally bump resolution / memory /
+        # combo-box values. round-66：从仅 QSpinBox 扩展到 QComboBox + QSlider
+        # （此前内存滑条、语言/JVM 预设、透明度等悬停滚轮仍会误调数值）。
+        if event.type() == QEvent.Wheel and isinstance(obj, (QSpinBox, QComboBox, QSlider)):
+            event.ignore()
+            return True
+        return super().eventFilter(obj, event)
+
     # ═══════════════════════════════════════════════════════════════════════
     # UI BUILD
     # ═══════════════════════════════════════════════════════════════════════
+    def _wrap_hint(self, text: str) -> QLabel:
+        """round-52 自适应：创建可换行的次级说明标签。
+
+        长 hint 文本若不换行，会把所在 GroupBox 的 minimumSizeHint 撑到
+        700+px，窄窗口下横向溢出（且横向滚动条被禁用 → 内容被截断）。
+        """
+        lbl = QLabel(text)
+        lbl.setProperty("cls", "sub")
+        lbl.setWordWrap(True)
+        return lbl
+
     def _wrap_scroll(self, content: QWidget) -> QScrollArea:
         """Wrap a tab page in a QScrollArea so overflowing content stays reachable."""
         sa = QScrollArea()
@@ -142,6 +244,9 @@ class SettingsPage(QWidget):
     def _build_ui(self):
         self.cfg = load_config()
         self._custom_color = ""
+        # round-66：对整个设置对话框安装事件过滤器，覆盖窗口内所有
+        # QSpinBox / QComboBox / QSlider —— 滚动页面时悬停不再误调数值。
+        self.installEventFilter(self)
 
         # Reuse the existing layout if reload() already cleared it; otherwise
         # attach a new one. Creating `QVBoxLayout(self)` when the widget
@@ -154,28 +259,48 @@ class SettingsPage(QWidget):
         root.setSpacing(0)
         self._root_layout = root
 
-        # ── page header (text only — main window owns the title bar) ──
-        header = QLabel(t("settings.title"))
-        header.setProperty("cls", "page-header")
-        header.setFixedHeight(48)
-        header.setAlignment(Qt.AlignCenter)
-        root.addWidget(header)
+        # ── page header ──
+        root.addWidget(ui_kit.page_header(
+            t("settings.title"), icon_key="settings"))
 
-        # ── 单一设置滚动页（快速 + 高级合并）──
-        # 两个 QTabWidget tab 会让"同一项"在两处维护、改一处不同步。
-        # 合并成一个 QScrollArea：快速区在上，分隔线，高级区在下。
-        merged = QWidget()
-        ml = QVBoxLayout(merged)
-        ml.setContentsMargins(0, 0, 0, 0)
-        ml.setSpacing(0)
-        ml.addWidget(self._build_quick())
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet(f"color: {COLORS['border']};")
-        ml.addWidget(sep)
-        ml.addWidget(self._build_advanced())
-        ml.addStretch(1)
-        root.addWidget(self._wrap_scroll(merged), stretch=1)
+        # ── round-46 左分区菜单 + 右内容（用户：不要底部滑动）──
+        # round-68 设置简化：左分区从三分区（快速设置/Java/高级设置）
+        # 合并为两分区（设置 / Java 管理）；右：QStackedWidget
+        body = QWidget()
+        bl = QHBoxLayout(body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(0)
+
+        self._sec_list = QListWidget()
+        self._sec_list.setObjectName("settings-sections")
+        self._sec_list.setFixedWidth(168)
+        self._sec_list.setIconSize(QSize(18, 18))
+        self._sec_list.setSpacing(2)
+        self._sec_list.setContentsMargins(8, 12, 8, 12)
+        for key, ico in (("settings", "sliders"), ("java", "java")):
+            it = QListWidgetItem(icon(ico), t(f"settings.sec_{key}"))
+            self._sec_list.addItem(it)
+        bl.addWidget(self._sec_list)
+
+        self._sec_stack = QStackedWidget()
+        # round-46 设置页挤压根治：内容多必然超一屏（快速设置 6+ grp），
+        # 不滚动 = grp 被压扁（用户反馈"挤压问题没解决"）。恢复每页独立
+        # QScrollArea（纵向滚动正常；横向滚动条禁用），内容按 Preferred 排满。
+        for page in (self._build_settings(), self._build_java_group()):
+            wrapper = QWidget()
+            wl = QVBoxLayout(wrapper)
+            wl.setContentsMargins(0, 0, 0, 0)
+            sa = QScrollArea()
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QFrame.NoFrame)
+            sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            sa.setWidget(page)
+            wl.addWidget(sa)
+            self._sec_stack.addWidget(wrapper)
+        bl.addWidget(self._sec_stack, stretch=1)
+        self._sec_list.currentRowChanged.connect(self._sec_stack.setCurrentIndex)
+        self._sec_list.setCurrentRow(0)
+        root.addWidget(body, stretch=1)
 
         # ── footer ──
         footer = QWidget()
@@ -226,6 +351,21 @@ class SettingsPage(QWidget):
             self._build_ui()
         finally:
             self._rebuilding = False
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SETTINGS PANEL（round-68 合并页：原「快速设置」+「高级设置」）
+    # ═══════════════════════════════════════════════════════════════════════
+    def _build_settings(self) -> QWidget:
+        """round-68 设置简化：把原三分区的前两页（快速设置/高级设置）
+        纵向合并为单一「设置」页（放到 QScrollArea 里滚动查看）。
+        Java 相关仍留在独立的「Java 管理」分区（_build_java_group）。"""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._build_quick())
+        lay.addWidget(self._build_advanced())
+        return w
 
     # ═══════════════════════════════════════════════════════════════════════
     # QUICK PANEL
@@ -315,6 +455,8 @@ class SettingsPage(QWidget):
         lay.addWidget(lang_grp)
 
         # ── Appearance: color picker + wallpaper + home style ──
+        # ── 拆分：原来一个外观 grp 塞 4 类内容，按 BlockHelm 风格独立成 4 个 grp ──
+        # 1. 外观（主题色 + 主题模式）
         app_grp = QGroupBox(t("settings.appearance"))
         apl = QVBoxLayout(app_grp)
         apl.setSpacing(12)
@@ -324,18 +466,16 @@ class SettingsPage(QWidget):
         cl.addWidget(QLabel(t("settings.color_label")))
         self.color_btns = []
         current_accent = self.cfg.get("accent_color", "#7C3AED")
+        self._selected_color = current_accent
         for hex_c, name in ACCENT_PRESETS:
             dot = QPushButton()
-            dot.setFixedSize(28, 28)
+            dot.setFixedSize(30, 30)
             dot.setCursor(Qt.PointingHandCursor)
             dot.setToolTip(name)
-            dot.setStyleSheet(
-                f"QPushButton {{ background: {hex_c}; border-radius: 14px; "
-                f"border: 2px solid {'white' if hex_c == current_accent else 'transparent'}; }}"
-                f"QPushButton:hover {{ border: 2px solid #E5E5E5; }}"
-            )
             dot.color_hex = hex_c
+            dot._is_selected = (hex_c == current_accent)
             dot.clicked.connect(lambda checked, h=hex_c: self._pick_color(h))
+            self._apply_dot_style(dot)
             self.color_btns.append(dot)
             cl.addWidget(dot)
         # custom color button
@@ -369,137 +509,166 @@ class SettingsPage(QWidget):
             th_row.addWidget(rb)
         th_row.addStretch(1)
         apl.addLayout(th_row)
-
-        # Live preview: apply theme immediately on toggle (no need to save first)
         self.theme_btns.buttonClicked.connect(self._on_theme_toggle)
 
-        # Theme pack selector (player-customizable token overrides)
+        # round-49 液态流光 effect：流光卡片 / 页面动画 / 全局透明度
+        fx_row = QHBoxLayout()
+        fx_row.setSpacing(18)
+        self.effect_trail_chk = QCheckBox(t("settings.effect_light_trail"))
+        self.effect_trail_chk.setChecked(self.cfg.get("effect_light_trail", True))
+        self.effect_trail_chk.toggled.connect(self._on_effect_trail)
+        fx_row.addWidget(self.effect_trail_chk)
+        self.page_trans_chk = QCheckBox(t("settings.page_transition"))
+        self.page_trans_chk.setChecked(self.cfg.get("page_transition", True))
+        fx_row.addWidget(self.page_trans_chk)
+        # round-51 透底效果开关（系统 Acrylic 半透明窗口）
+        self.transparent_chk = QCheckBox(t("settings.transparent_window"))
+        self.transparent_chk.setChecked(self.cfg.get("transparent_window", True))
+        self.transparent_chk.toggled.connect(self._on_transparent_toggle)
+        fx_row.addWidget(self.transparent_chk)
+        # round-52 玻璃拟态开关（半透明卡片样式）
+        self.frosted_chk = QCheckBox(t("settings.frosted_theme"))
+        self.frosted_chk.setChecked(self.cfg.get("frosted_theme", True))
+        self.frosted_chk.setToolTip(t("settings.frosted_theme_hint"))
+        self.frosted_chk.toggled.connect(self._on_frosted_toggle)
+        fx_row.addWidget(self.frosted_chk)
+        # round-50 退出释放资源：游戏启动后自动关闭启动器
+        self.close_launch_chk = QCheckBox(t("settings.close_after_launch"))
+        self.close_launch_chk.setChecked(self.cfg.get("close_after_launch", True))
+        fx_row.addWidget(self.close_launch_chk)
+        fx_row.addStretch(1)
+        apl.addLayout(fx_row)
+
+        op_row = QHBoxLayout()
+        op_row.setSpacing(8)
+        op_row.addWidget(QLabel(t("settings.window_opacity")))
+        self.win_opacity = QSlider(Qt.Horizontal)
+        self.win_opacity.setRange(50, 100)
+        self.win_opacity.setValue(
+            int(round(self.cfg.get("window_opacity", 1.0) * 100)))
+        self.win_opacity.setFixedWidth(220)
+        self.win_opacity.valueChanged.connect(self._on_opacity_changed)
+        op_row.addWidget(self.win_opacity)
+        self.opacity_lbl = QLabel(f"{self.win_opacity.value()}%")
+        self.opacity_lbl.setProperty("cls", "sub")
+        op_row.addWidget(self.opacity_lbl)
+        op_row.addStretch(1)
+        apl.addLayout(op_row)
+        lay.addWidget(app_grp)
+
+        # 2. 主题包（独立 grp：下拉 + 导入/导出 + 提示）
+        pack_grp = QGroupBox(t("settings.theme_pack_section"))
+        pkl = QVBoxLayout(pack_grp)
+        pkl.setSpacing(10)
         pk_row = QHBoxLayout()
-        pk_row.addWidget(QLabel(t("settings.theme_pack")))
         self.pack_combo = QComboBox()
         self.pack_combo.setMinimumHeight(30)
-        # 限制下拉框宽度防溢出：用 AdjustToContents 按当前文本收缩——
-        # 之前误用 AdjustToMinimumContentsLengthWithIcon（minContentsLength=0）
-        # 会把 combo 收缩到 ~29px，名称被挤成空白（"主题包没显示名称"）。
         self.pack_combo.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.pack_combo.setMaximumWidth(320)
-        pk_row.addWidget(self.pack_combo)
+        pk_row.addWidget(self.pack_combo, stretch=1)
         import_btn = QPushButton(t("settings.theme_pack_import"))
-        import_btn.setMinimumHeight(28)
+        import_btn.setMinimumHeight(30)
         import_btn.clicked.connect(self._import_theme_pack)
         pk_row.addWidget(import_btn)
         export_btn = QPushButton(t("settings.theme_pack_export"))
-        export_btn.setMinimumHeight(28)
+        export_btn.setMinimumHeight(30)
         export_btn.clicked.connect(self._export_theme_pack)
         pk_row.addWidget(export_btn)
-        pk_row.addStretch(1)
-        apl.addLayout(pk_row)
-        self._reload_pack_combo()
-        self.pack_combo.currentIndexChanged.connect(self._on_pack_changed)
+        pkl.addLayout(pk_row)
         pk_hint = QLabel(t("settings.theme_pack_hint"))
         pk_hint.setProperty("cls", "sub")
         pk_hint.setWordWrap(True)
-        apl.addWidget(pk_hint)
+        pkl.addWidget(pk_hint)
+        lay.addWidget(pack_grp)
+        self._reload_pack_combo()
+        self.pack_combo.currentIndexChanged.connect(self._on_pack_changed)
 
-        # Wallpaper mode + browse button
+        # 3. 缓存清理（独立 grp，避免和外观挤一起）
+        cache_grp = QGroupBox(t("settings.cache_section"))
+        cgl = QVBoxLayout(cache_grp)
+        cl_row = QHBoxLayout()
+        cl_btn = QPushButton(t("settings.clear_cache"))
+        cl_btn.setMinimumHeight(30)
+        cl_btn.clicked.connect(self._clear_cache)
+        cl_row.addWidget(cl_btn)
+        cl_hint = QLabel(t("settings.clear_cache_hint"))
+        cl_hint.setProperty("cls", "sub")
+        cl_row.addWidget(cl_hint, stretch=1)
+        cgl.addLayout(cl_row)
+        lay.addWidget(cache_grp)
+
+        # 4. 主页背景（独立 grp：模式 + 浏览 + 不透明度/音量 + hint）
+        wp_grp = QGroupBox(t("settings.wallpaper_section"))
+        wpl = QVBoxLayout(wp_grp)
+        wpl.setSpacing(10)
+
         wp_row = QHBoxLayout()
         wp_row.addWidget(QLabel(t("settings.wallpaper_label")))
         self.wp_modes = QButtonGroup()
-        for mode, label in [
+        # round-52 自适应：6 个 radio 拆成两行（3+3），窄窗口下不再横向溢出。
+        wp_items = [
             ("none", t("settings.wp_none")),
             ("solid", t("settings.wp_solid")),
             ("image", t("settings.wp_image")),
+            ("version", t("settings.wp_version")),
             ("gif", t("settings.wp_gif")),
             ("video", t("settings.wp_video")),
-        ]:
+        ]
+        for mode, label in wp_items[:3]:
             rb = QRadioButton(label)
             rb.setChecked(self.cfg.get("wallpaper_mode", "none") == mode)
             rb.wp_mode = mode
             self.wp_modes.addButton(rb)
             wp_row.addWidget(rb)
-        # Browse button — filters by currently selected mode
+        wp_row.addStretch(1)
+        wpl.addLayout(wp_row)
+        wp_row2 = QHBoxLayout()
+        for mode, label in wp_items[3:]:
+            rb = QRadioButton(label)
+            rb.setChecked(self.cfg.get("wallpaper_mode", "none") == mode)
+            rb.wp_mode = mode
+            self.wp_modes.addButton(rb)
+            wp_row2.addWidget(rb)
         self.wp_browse = QPushButton(t("settings.wp_browse_btn"))
         self.wp_browse.setCursor(Qt.PointingHandCursor)
-        self.wp_browse.setMinimumHeight(28)
+        self.wp_browse.setMinimumHeight(30)
         self.wp_browse.setProperty("cls", "accent")
         self.wp_browse.clicked.connect(self._browse_wallpaper)
-        wp_row.addWidget(self.wp_browse)
-        wp_row.addStretch(1)
-        apl.addLayout(wp_row)
+        wp_row2.addWidget(self.wp_browse)
+        wp_row2.addStretch(1)
+        wpl.addLayout(wp_row2)
 
-        # Wallpaper opacity + video volume
         wp_more = QHBoxLayout()
         self.wp_opacity = QSlider(Qt.Horizontal)
         self.wp_opacity.setRange(0, 100)
-        self.wp_opacity.setValue(int(float(self.cfg.get("wallpaper_opacity", 1.0)) * 100))
+        self.wp_opacity.setMinimumWidth(120)
+        self.wp_opacity.setMaximumWidth(240)
+        self.wp_opacity.setValue(int(_cfg_float(self.cfg, "wallpaper_opacity", 1.0) * 100))
         wp_more.addWidget(QLabel(t("settings.wp_opacity")))
         wp_more.addWidget(self.wp_opacity, stretch=1)
         self.wp_vol = QSlider(Qt.Horizontal)
         self.wp_vol.setRange(0, 100)
-        self.wp_vol.setValue(int(float(self.cfg.get("wallpaper_video_vol", 0.0)) * 100))
+        self.wp_vol.setMinimumWidth(120)
+        self.wp_vol.setMaximumWidth(240)
+        self.wp_vol.setValue(int(_cfg_float(self.cfg, "wallpaper_video_vol", 0.0) * 100))
         wp_more.addWidget(QLabel(t("settings.wp_volume")))
         wp_more.addWidget(self.wp_vol, stretch=1)
-        apl.addLayout(wp_more)
-        apl.addWidget(QLabel(t("settings.wp_hint")))
+        wpl.addLayout(wp_more)
+        # round-52 自适应：长 hint 文本必须换行，否则把 GroupBox 最小宽度撑到
+        # 700+px，窄窗口下横向溢出（无法滚动）。
+        wpl.addWidget(self._wrap_hint(t("settings.wp_hint")))
+        lay.addWidget(wp_grp)
 
-        # Home style
-        hs_row = QHBoxLayout()
-        hs_row.addWidget(QLabel(t("settings.home_style")))
-        self.style_combo = QComboBox()
-        self.style_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.style_combo.setMaximumWidth(280)
-        self.style_combo.addItems([
-            t("style.ac_default"),
-            t("style.pcl_card"),
-            t("style.hmcl_list"),
-            t("style.modrinth_modern"),
-        ])
-        styles_idx = {
-            "ac_default": 0, "pcl_card": 1, "hmcl_list": 2, "modrinth_modern": 3,
-        }
-        # 模板开放策略：只开放 AC 默认（已做完）；PCL2 主页卡 / HMCL /
-        # Modrinth 仍在制作中 → 灰掉不可选（保留入口，后续启用）。
-        cur_style = self.cfg.get("home_style", "ac_default")
-        # 若历史配置指向未开放模板，强制回 AC 默认
-        if cur_style not in styles_idx or cur_style != "ac_default":
-            cur_style = "ac_default"
-        self.style_combo.setCurrentIndex(styles_idx[cur_style])
-        # 灰掉其余项（QComboBox item 级禁用）
-        for i in range(1, self.style_combo.count()):
-            item = self.style_combo.model().item(i)
-            if item is not None:
-                item.setEnabled(False)
-        hs_row.addWidget(self.style_combo, stretch=1)
-        self.style_combo.currentIndexChanged.connect(self._on_style_combo_changed)
-        apl.addLayout(hs_row)
-        _hs_hint = QLabel(t("settings.home_style_hint"))
-        _hs_hint.setProperty("cls", "text-sub")
-        apl.addWidget(_hs_hint)
+        # 主页模板 / 导航布局切换已删除（round-32 用户反馈：切换会导致窗口
+        # 卡在一起）。固定使用 ac_default 主页 + AC 左侧导航。
+        # 保留注释以便追溯：原 style_combo（4 模板）+ nav_combo（2 布局）。
+        # 相关 _on_style_combo_changed / _on_nav_changed 处理函数保留为空实现。
 
-        # ── 导航布局（独立于主页模板；PCL2 为实验态，切换需重启）──
-        nl_row = QHBoxLayout()
-        nl_row.addWidget(QLabel(t("settings.nav_layout")))
-        self.nav_combo = QComboBox()
-        self.nav_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.nav_combo.setMaximumWidth(280)
-        self.nav_combo.addItems([
-            t("style.ac_default"),     # AC 左侧导航（默认）
-            t("style.pcl_card"),       # PCL2 顶栏导航（实验）
-        ])
-        _nav_idx = {
-            "ac": 0, "pcl2": 1,
-        }
-        self.nav_combo.setCurrentIndex(
-            _nav_idx.get(self.cfg.get("nav_layout", "ac"), 0)
-        )
-        nl_row.addWidget(self.nav_combo, stretch=1)
-        apl.addLayout(nl_row)
-        _nl_hint = QLabel(t("settings.nav_layout_hint"))
-        _nl_hint.setProperty("cls", "text-sub")
-        apl.addWidget(_nl_hint)
+        # 开发者模式块已删除（round-32 后续）："实验性功能"（模板/导航切换）
+        # 已被删除，dev_mode 块没有功能可解锁——开放给玩家 = 直接可用，
+        # 密钥输入/启用按钮/状态整体移除。dev_mode / dev_mode_key 字段保留
+        # 以兼容历史 config。
 
         lay.addWidget(app_grp)
 
@@ -621,12 +790,80 @@ class SettingsPage(QWidget):
         opt_hint.setProperty("cls", "sub")
         opt_hint.setWordWrap(True)
         ol.addWidget(opt_hint)
-        self.aikars = QCheckBox(t("settings.aikars"))
-        self.aikars.setChecked(bool(self.cfg.get("jvm_aikars", True)))
-        ol.addWidget(self.aikars)
+        # round-55：Aikars 单勾选 → 三档预设下拉（默认 / Aikar 优化 / 自定义）。
+        # 旧配置 jvm_aikars=True 自动映射到 aikar，不丢用户已有选择。
+        _preset = self.cfg.get("jvm_preset", "") or (
+            "aikar" if self.cfg.get("jvm_aikars", True) else "default")
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel(t("settings.jvm_preset")))
+        self.jvm_preset_combo = QComboBox()
+        self.jvm_preset_combo.addItem(t("settings.jvm_preset_default"), "default")
+        self.jvm_preset_combo.addItem(t("settings.jvm_preset_aikar"), "aikar")
+        self.jvm_preset_combo.addItem(t("settings.jvm_preset_custom"), "custom")
+        _idx = self.jvm_preset_combo.findData(_preset)
+        self.jvm_preset_combo.setCurrentIndex(_idx if _idx >= 0 else 0)
+        preset_row.addWidget(self.jvm_preset_combo, stretch=1)
+        ol.addLayout(preset_row)
         lay.addWidget(opt_grp)
 
-        # Resolution spinboxes
+        # ── 游戏附加参数 + 版本隔离（round-55，对齐 PCL2「启动游戏 / 版本设置」）──
+        ga_grp = QGroupBox(t("settings.game_args"))
+        gal = QVBoxLayout(ga_grp)
+        self.game_args_edit = QLineEdit(self.cfg.get("game_args", ""))
+        self.game_args_edit.setPlaceholderText(t("settings.game_args_hint"))
+        self.game_args_edit.setMinimumWidth(0)
+        self.game_args_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed)
+        gal.addWidget(self.game_args_edit)
+        iso_row = QHBoxLayout()
+        iso_row.addWidget(QLabel(t("settings.version_isolation")))
+        self.version_iso_combo = QComboBox()
+        self.version_iso_combo.addItem(
+            t("settings.version_isolation_default"), "default")
+        self.version_iso_combo.addItem(
+            t("settings.version_isolation_isolated"), "isolated")
+        _idx = self.version_iso_combo.findData(
+            self.cfg.get("version_isolation", "default"))
+        self.version_iso_combo.setCurrentIndex(_idx if _idx >= 0 else 0)
+        iso_row.addWidget(self.version_iso_combo, stretch=1)
+        gal.addLayout(iso_row)
+        gal.addWidget(self._wrap_hint(t("settings.version_isolation_hint")))
+        # round-69 进程优先级（对齐 PCL2「进程优先级」，Windows creationflags 生效）
+        pri_row = QHBoxLayout()
+        pri_row.addWidget(QLabel(t("settings.process_priority")))
+        self.priority_combo = QComboBox()
+        self.priority_combo.addItem(t("settings.priority_normal"), "normal")
+        self.priority_combo.addItem(t("settings.priority_high"), "high")
+        self.priority_combo.addItem(t("settings.priority_realtime"), "realtime")
+        _p = self.cfg.get("process_priority", "normal")
+        _idx = self.priority_combo.findData(_p)
+        self.priority_combo.setCurrentIndex(_idx if _idx >= 0 else 0)
+        pri_row.addWidget(self.priority_combo, stretch=1)
+        gal.addLayout(pri_row)
+        gal.addWidget(self._wrap_hint(t("settings.process_priority_hint")))
+        lay.addWidget(ga_grp)
+
+        # ── 启动后 / 退出后命令（round-55，对齐 PCL2「启动后执行命令」）──
+        hook_grp = QGroupBox(t("settings.hook_cmd"))
+        hl = QVBoxLayout(hook_grp)
+        hl.addWidget(QLabel(t("settings.post_launch_cmd")))
+        self.post_cmd_edit = QLineEdit(self.cfg.get("post_launch_cmd", ""))
+        self.post_cmd_edit.setPlaceholderText(t("settings.hook_ph"))
+        self.post_cmd_edit.setMinimumWidth(0)
+        self.post_cmd_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed)
+        hl.addWidget(self.post_cmd_edit)
+        hl.addWidget(QLabel(t("settings.exit_cmd")))
+        self.exit_cmd_edit = QLineEdit(self.cfg.get("exit_cmd", ""))
+        self.exit_cmd_edit.setPlaceholderText(t("settings.hook_ph"))
+        self.exit_cmd_edit.setMinimumWidth(0)
+        self.exit_cmd_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed)
+        hl.addWidget(self.exit_cmd_edit)
+        hl.addWidget(self._wrap_hint(t("settings.hook_hint")))
+        lay.addWidget(hook_grp)
+
+        # Resolution spinboxes (wheel disabled to avoid accidental changes)
         res_grp = QGroupBox(t("settings.resolution_preset") + " (px)")
         rrow = QHBoxLayout(res_grp)
         self.rw = QSpinBox(); self.rw.setRange(640, 7680)
@@ -640,41 +877,8 @@ class SettingsPage(QWidget):
         rrow.addStretch(1)
         lay.addWidget(res_grp)
 
-        # Java
-        java_grp = QGroupBox(t("settings.java"))
-        jl = QVBoxLayout(java_grp)
-        self.java_auto = QCheckBox(t("settings.java_auto"))
-        self.java_auto.setChecked(bool(self.cfg["java_auto"]))
-        jl.addWidget(self.java_auto)
-        jrow = QHBoxLayout()
-        self.java_path = QLineEdit(self.cfg["java_path"])
-        self.java_path.setPlaceholderText(t("settings.java_path"))
-        browse = QPushButton(t("settings.browse"))
-        browse.clicked.connect(self._browse_java)
-        detect = QPushButton(t("settings.detect"))
-        detect.clicked.connect(self._detect_java)
-        jrow.addWidget(self.java_path)
-        jrow.addWidget(browse)
-        jrow.addWidget(detect)
-        jl.addLayout(jrow)
-
-        # ---- 快速选择：已识别的 Java 列表（每行一键"使用"）----
-        quick_lbl = QLabel(t("settings.java_quick_label"))
-        quick_lbl.setProperty("cls", "sub")
-        jl.addWidget(quick_lbl)
-        self.java_quick_list = QWidget()
-        qlay = QVBoxLayout(self.java_quick_list)
-        qlay.setContentsMargins(0, 0, 0, 0)
-        qlay.setSpacing(4)
-        jl.addWidget(self.java_quick_list)
-        self._refresh_java_quick_list()
-
-        manage_btn = QPushButton(t("settings.java_manage"))
-        manage_btn.setProperty("cls", "accent")
-        manage_btn.setMinimumHeight(30)
-        manage_btn.clicked.connect(self._open_java_manager)
-        jl.addWidget(manage_btn)
-        lay.addWidget(java_grp)
+        # Java —— round-46 独立分区（用户：Java 管理反人类，别埋在高级设置里）
+        # Java 由设置页左菜单独立分区展示（_build_ui 中 _build_java_group()）
 
         # Download mirror (BMCLAPI)
         mirror_grp = QGroupBox(t("settings.mirror"))
@@ -683,6 +887,7 @@ class SettingsPage(QWidget):
         self.mirror_btns.setExclusive(True)
         mrow = QHBoxLayout()
         for key, label in [
+            ("auto", t("settings.mirror_auto")),
             ("official", t("settings.mirror_official")),
             ("bmclapi", t("settings.mirror_bmclapi")),
         ]:
@@ -693,7 +898,8 @@ class SettingsPage(QWidget):
             mrow.addWidget(rb)
         mrow.addStretch(1)
         ml.addLayout(mrow)
-        ml.addWidget(QLabel(t("settings.mirror_hint")))
+        # round-52 自适应：长 hint 文本换行，避免撑大 GroupBox 最小宽度。
+        ml.addWidget(self._wrap_hint(t("settings.mirror_hint")))
         lay.addWidget(mirror_grp)
 
         # Network proxy (for downloads behind a corporate / GFW proxy)
@@ -719,9 +925,15 @@ class SettingsPage(QWidget):
             self.cfg.get("download_proxy", "") if "://" in str(self.cfg.get("download_proxy", "")) else ""
         )
         self.proxy_edit.setPlaceholderText(t("settings.proxy_ph"))
+        # round-52 自适应：placeholder 长文本会撑大 minimumSizeHint 导致窄窗口
+        # 横向溢出。禁止按 placeholder 撑宽 + 弹性伸缩，输入框随窗口收缩。
+        self.proxy_edit.setMinimumWidth(0)
+        self.proxy_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.proxy_edit.textChanged.connect(lambda _: self._on_proxy_toggle())
         pl.addWidget(self.proxy_edit)
-        pl.addWidget(QLabel(t("settings.proxy_hint")))
+        # round-52 自适应：长 hint 文本必须换行，否则撑大 GroupBox 最小宽度。
+        pl.addWidget(self._wrap_hint(t("settings.proxy_hint")))
         lay.addWidget(proxy_grp)
         self._on_proxy_toggle()  # sync proxy_edit enabled state to the radio
 
@@ -771,7 +983,7 @@ class SettingsPage(QWidget):
         vol_row = QHBoxLayout()
         self.sound_vol = QSlider(Qt.Horizontal)
         self.sound_vol.setRange(0, 100)
-        self.sound_vol.setValue(int(float(self.cfg.get("launch_sound_vol", 0.8)) * 100))
+        self.sound_vol.setValue(int(_cfg_float(self.cfg, "launch_sound_vol", 0.8) * 100))
         vol_row.addWidget(QLabel(t("settings.sound_volume")))
         vol_row.addWidget(self.sound_vol, stretch=1)
         sl.addLayout(vol_row)
@@ -837,7 +1049,7 @@ class SettingsPage(QWidget):
         bv_row = QHBoxLayout()
         self.bgm_vol = QSlider(Qt.Horizontal)
         self.bgm_vol.setRange(0, 100)
-        self.bgm_vol.setValue(int(float(self.cfg.get("bgm_vol", 0.4)) * 100))
+        self.bgm_vol.setValue(int(_cfg_float(self.cfg, "bgm_vol", 0.4) * 100))
         bv_row.addWidget(QLabel(t("settings.bgm_volume")))
         bv_row.addWidget(self.bgm_vol, stretch=1)
         bl.addLayout(bv_row)
@@ -879,7 +1091,7 @@ class SettingsPage(QWidget):
         sv_row = QHBoxLayout()
         self.sfx_vol = QSlider(Qt.Horizontal)
         self.sfx_vol.setRange(0, 100)
-        self.sfx_vol.setValue(int(float(self.cfg.get("sfx_vol", 0.6)) * 100))
+        self.sfx_vol.setValue(int(_cfg_float(self.cfg, "sfx_vol", 0.6) * 100))
         sv_row.addWidget(QLabel(t("settings.sfx_volume")))
         sv_row.addWidget(self.sfx_vol, stretch=1)
         xl.addLayout(sv_row)
@@ -914,6 +1126,22 @@ class SettingsPage(QWidget):
         ll.addWidget(QLabel(t("settings.authlib_hint")))
         lay.addWidget(login_grp)
 
+        # round-68 Quilt 加载器显示开关（对齐 PCL-CE「不显示 Quilt 加载器」：
+        # 关闭后新建实例页不再出现 Quilt 卡片/版本）
+        loader_grp = QGroupBox(t("settings.loader"))
+        lg = QVBoxLayout(loader_grp)
+        lg.setSpacing(8)
+        self.show_quilt_chk = QCheckBox(t("settings.show_quilt"))
+        self.show_quilt_chk.setChecked(bool(self.cfg.get("show_quilt", True)))
+        lg.addWidget(self.show_quilt_chk)
+        lg.addWidget(self._wrap_hint(t("settings.show_quilt_hint")))
+        # round-71 非 ASCII 路径警告开关（对齐 PCL-CE「不再提示」语义）
+        self.warn_non_ascii_chk = QCheckBox(t("settings.warn_non_ascii_path"))
+        self.warn_non_ascii_chk.setChecked(bool(self.cfg.get("warn_non_ascii_path", True)))
+        lg.addWidget(self.warn_non_ascii_chk)
+        lg.addWidget(self._wrap_hint(t("settings.warn_non_ascii_path_hint")))
+        lay.addWidget(loader_grp)
+
         # Diagnostics
         diag_grp = QGroupBox(t("diag.title"))
         dgl = QVBoxLayout(diag_grp)
@@ -947,18 +1175,34 @@ class SettingsPage(QWidget):
     def _clear_bgm_files(self):
         self.bgm_list.clear()
 
+    def _apply_dot_style(self, dot: QPushButton):
+        """Apply a visible selection ring: dark border guarantees visibility on any theme.
+
+        Uses a dark (#1F2937) 3px border for selected state — visible on both light
+        and dark themes regardless of the accent color.
+        """
+        if dot._is_selected:
+            dot.setStyleSheet(
+                f"QPushButton {{ background: {dot.color_hex}; border-radius: 12px; "
+                f"border: 3px solid #1F2937; }}"
+                f"QPushButton:hover {{ border: 3px solid #1F2937; }}"
+            )
+        else:
+            dot.setStyleSheet(
+                f"QPushButton {{ background: {dot.color_hex}; border-radius: 12px; "
+                f"border: 2px solid transparent; }}"
+                f"QPushButton:hover {{ border: 2px solid #9CA3AF; }}"
+            )
+
     def _pick_color(self, hex_color: str):
         """Preset color dot clicked — apply immediately."""
         from .theme import set_accent_color, apply_qss
         from .achievements import achievements as _ach
         _ach.unlock("first_theme")
+        self._selected_color = hex_color
         for dot in self.color_btns:
-            active = dot.color_hex == hex_color
-            dot.setStyleSheet(
-                f"QPushButton {{ background: {dot.color_hex}; border-radius: 14px; "
-                f"border: 2px solid {'white' if active else 'transparent'}; }}"
-                f"QPushButton:hover {{ border: 2px solid {'white' if active else '#E5E5E5'}; }}"
-            )
+            dot._is_selected = (dot.color_hex == hex_color)
+            self._apply_dot_style(dot)
         # Apply accent color globally so user sees the change instantly
         set_accent_color(hex_color)
         app = QApplication.instance()
@@ -969,15 +1213,11 @@ class SettingsPage(QWidget):
         from .theme import set_accent_color, apply_qss
         c = dark_color(self, self._custom_color or "#3B82F6")
         if c:
-            # Update UI state (mark custom as active)
-            for dot in self.color_btns:
-                dot.setStyleSheet(
-                    f"QPushButton {{ background: {dot.color_hex}; border-radius: 14px; "
-                    f"border: 2px solid transparent; }}"
-                    f"QPushButton:hover {{ border: 2px solid #E5E5E5; }}"
-                )
-            # Apply globally + remember it's a custom color (not in presets)
+            self._selected_color = c
             self._custom_color = c
+            for dot in self.color_btns:
+                dot._is_selected = False
+                self._apply_dot_style(dot)
             set_accent_color(c)
             app = QApplication.instance()
             if app:
@@ -1005,8 +1245,9 @@ class SettingsPage(QWidget):
         filt = filters.get(mode, filters["image"])
         title = title_map.get(mode, t("settings.wp_browse_image"))
 
-        # If user has "none" or "solid" selected, default to image picker
-        if mode in ("none", "solid"):
+        # "version" mode also browses for a still image, but keeps the mode
+        # so the image acts as an override on top of the version theme.
+        if mode in ("none", "solid", "version"):
             mode = "image"
             filt = filters["image"]
             title = title_map["image"]
@@ -1014,17 +1255,18 @@ class SettingsPage(QWidget):
         path = pick_files(self, title, "", filt)
         if path:
             self.cfg["wallpaper_image"] = path
-            # Auto-detect mode from file extension (in case user picked wrong mode)
-            self.cfg["wallpaper_mode"] = guess_mode(path)
-            for rb in self.wp_modes.buttons():
-                if rb.wp_mode == self.cfg["wallpaper_mode"]:
-                    rb.setChecked(True)
+            # In version mode keep the mode; otherwise auto-detect from extension.
+            if checked and getattr(checked, "wp_mode", None) != "version":
+                self.cfg["wallpaper_mode"] = guess_mode(path)
+                for rb in self.wp_modes.buttons():
+                    if rb.wp_mode == self.cfg["wallpaper_mode"]:
+                        rb.setChecked(True)
             # Preview immediately on home page
             try:
                 from .main_window import MainWindow
                 parent = self.parent()
                 if isinstance(parent, MainWindow) and hasattr(parent, 'home'):
-                    parent.home._apply_wallpaper()
+                    parent.home._apply_wallpaper(version_id=parent._current_version_id())
             except Exception:
                 pass
 
@@ -1100,6 +1342,73 @@ class SettingsPage(QWidget):
             info(self, t("settings.reset_tutorial"),
                 "新手教程已重置。下次启动时将重新显示。")
 
+    def _build_java_group(self) -> QWidget:
+        """round-46：Java 设置独立分区（设置页左菜单「Java」）。
+
+        从旧 _build_advanced 里提取：Java 管理单独成区，不再埋在高级设置。
+        卡片化美化：顶部自动/手动+路径 + 已知 Java 列表卡片。
+        """
+        # 顶层卡片容器（外边距+背景）
+        wrap = QWidget()
+        vl = QVBoxLayout(wrap)
+        vl.setContentsMargins(24, 20, 24, 24)
+        vl.setSpacing(14)
+
+        # 卡片 1：Java 运行时选择（自动/手动模式 + 路径）
+        card_sel = QGroupBox(t("settings.java"))
+        sl = QVBoxLayout(card_sel)
+        sl.setContentsMargins(16, 18, 16, 16)
+        sl.setSpacing(10)
+
+        self.java_auto = QCheckBox(t("settings.java_auto"))
+        self.java_auto.setChecked(bool(self.cfg["java_auto"]))
+        sl.addWidget(self.java_auto)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.java_path = QLineEdit(self.cfg["java_path"])
+        self.java_path.setPlaceholderText(t("settings.java_path"))
+        browse = QPushButton(t("settings.browse"))
+        browse.setProperty("cls", "secondary")
+        browse.clicked.connect(self._browse_java)
+        detect = QPushButton(t("settings.detect"))
+        detect.setProperty("cls", "secondary")
+        detect.clicked.connect(self._detect_java)
+        row.addWidget(self.java_path, stretch=1)
+        row.addWidget(browse)
+        row.addWidget(detect)
+        sl.addLayout(row)
+        vl.addWidget(card_sel)
+
+        # 卡片 2：已识别的 Java 列表
+        card_list = QGroupBox(t("settings.java_quick_label"))
+        ll = QVBoxLayout(card_list)
+        ll.setContentsMargins(16, 18, 16, 16)
+        ll.setSpacing(8)
+        self.java_quick_list = QWidget()
+        qlay = QVBoxLayout(self.java_quick_list)
+        qlay.setContentsMargins(0, 0, 0, 0)
+        qlay.setSpacing(4)
+        ll.addWidget(self.java_quick_list)
+        # round-46 用户反馈"设置打开慢"：scan_javas() 扫注册表可能 1-2 秒，
+        # 改为 Worker 后台线程执行，完成后更新 UI。
+        self._java_scan_worker = Worker(scan_javas)
+        self._java_scan_worker.finished.connect(self._on_java_scan_done)
+        self._java_scan_worker.start()
+        vl.addWidget(card_list, stretch=1)
+
+        # 底部：管理按钮
+        manage_row = QHBoxLayout()
+        manage_btn = QPushButton(t("settings.java_manage"))
+        manage_btn.setProperty("cls", "accent")
+        manage_btn.setMinimumHeight(34)
+        manage_btn.clicked.connect(self._open_java_manager)
+        manage_row.addStretch(1)
+        manage_row.addWidget(manage_btn)
+        vl.addLayout(manage_row)
+
+        return wrap
+
     def _browse_java(self):
         path = pick_files(
             self, t("settings.java_browse_title"), "", "Java (*.exe)"
@@ -1109,8 +1418,20 @@ class SettingsPage(QWidget):
             self.java_auto.setChecked(False)
             self._refresh_java_quick_list()
 
+    def _on_java_scan_done(self, entries: list):
+        """Slot called on main thread when the background Java scan finishes."""
+        self._refresh_java_quick_list_with(entries)
+
     def _refresh_java_quick_list(self):
-        """Rebuild the "快速选择" Java list from scan_javas().
+        """Rebuild the "快速选择" Java list — called when user triggers a manual
+        refresh (e.g. after browsing for a Java). Uses a Worker to avoid blocking.
+        """
+        self._java_scan_worker = Worker(scan_javas)
+        self._java_scan_worker.finished.connect(self._on_java_scan_done)
+        self._java_scan_worker.start()
+
+    def _refresh_java_quick_list_with(self, entries: list):
+        """Populate the Java quick list from pre-scanned entries (on main thread).
 
         Each row: Java major + version + path + "使用" button. One click
         sets the path + disables auto-select. Mirrors PCL2's quick-pick UX.
@@ -1123,10 +1444,6 @@ class SettingsPage(QWidget):
             w = item.widget()
             if w:
                 w.deleteLater()
-        try:
-            entries = scan_javas()
-        except Exception:  # noqa: BLE001 - never let a scan break the settings page
-            entries = []
         if not entries:
             empty = QLabel(t("settings.java_quick_empty"))
             empty.setProperty("cls", "sub")
@@ -1223,6 +1540,49 @@ class SettingsPage(QWidget):
         set_theme_mode(mode)
         apply_qss()
 
+    def _on_frosted_toggle(self, on: bool):
+        """Live 玻璃拟态开关（round-52）：半透明卡片 / 实色卡片即时切换。"""
+        try:
+            from .theme import set_frosted
+            set_frosted(on)
+            apply_qss()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_effect_trail(self, on: bool):
+        """Live-toggle 流光卡片 / 页面动画（round-49）。"""
+        from .effects import set_effects_enabled
+        try:
+            win = self._window
+            set_effects_enabled(on)
+            if win is not None and hasattr(win, "home"):
+                win.home.rebuild()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_opacity_changed(self, val: int):
+        """Live 应用全局透明度（round-49）。"""
+        from .effects import set_window_opacity
+        try:
+            self.opacity_lbl.setText(f"{val}%")
+            win = self._window
+            if win is not None:
+                set_window_opacity(win, val / 100.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_transparent_toggle(self, on: bool):
+        """Live 透底效果开关（round-51）：切系统 Acrylic + 半透明背景。"""
+        try:
+            from .theme import set_app_background_translucent, apply_qss
+            set_app_background_translucent(on)
+            apply_qss()
+            win = self._window
+            if win is not None and hasattr(win, "_apply_transparent_window"):
+                win._apply_transparent_window()
+        except Exception:  # noqa: BLE001
+            pass
+
     # ── theme packs (direction C: player-customizable token overrides) ──
     def _reload_pack_combo(self):
         from .theme import list_theme_packs, get_active_theme_pack_id
@@ -1270,6 +1630,30 @@ class SettingsPage(QWidget):
             if p.get("id") == pack.get("id"):
                 self.pack_combo.setCurrentIndex(i)
                 break
+
+    def _clear_cache(self):
+        """清理下载/图标缓存（不删配置与实例数据）。round-42。"""
+        from .paths import get_data_dir
+        import shutil
+        freed = 0
+        for sub in ("cache/icons", "cache"):
+            p = os.path.join(get_data_dir(), sub)
+            if os.path.isdir(p):
+                for name in os.listdir(p):
+                    fp = os.path.join(p, name)
+                    try:
+                        if os.path.isfile(fp):
+                            freed += os.path.getsize(fp)
+                            os.remove(fp)
+                        elif os.path.isdir(fp):
+                            freed += sum(
+                                os.path.getsize(os.path.join(r, f))
+                                for r, _, ns in os.walk(fp) for f in ns)
+                            shutil.rmtree(fp, ignore_errors=True)
+                    except OSError:
+                        pass
+        info(self, t("settings.clear_cache"),
+             t("settings.clear_cache_done", mb=freed / 1024 / 1024))
 
     def _export_theme_pack(self):
         from .theme import find_theme_pack, export_theme_pack
@@ -1338,8 +1722,11 @@ class SettingsPage(QWidget):
     def _preview_sound(self):
         from .core.sound import SoundPlayer, ensure_default_exists
         f = self.sound_file.text().strip() or ensure_default_exists()
-        p = SoundPlayer(self)
-        p.play(f, self.sound_vol.value() / 100.0)
+        # round-40 P3 泄漏修复：复用实例而不是每次新建 QMediaPlayer
+        # （之前反复点预览累积未释放的 SoundPlayer）
+        if getattr(self, "_preview_player", None) is None:
+            self._preview_player = SoundPlayer(self)
+        self._preview_player.play(f, self.sound_vol.value() / 100.0)
 
     def _reset_sound(self):
         self.sound_file.clear()
@@ -1358,7 +1745,23 @@ class SettingsPage(QWidget):
         if rb and hasattr(rb, "lang_code"):
             set_language(rb.lang_code)
             self.cfg["language"] = rb.lang_code
+            # round-46 用户反馈"英文切不回中文"：原逻辑只在内存改 cfg，
+            # 重启后 load_config 读旧值 → 看似切不回去。改为切语言即时落盘。
+            try:
+                save_config(self.cfg)
+            except Exception:
+                pass
             self._rebuild()
+            # round-44 E2：切语言即时同步主窗口 retranslate（否则
+            # 「设置页英文 / 主页中文」割裂，需要手动重启才会统一）。
+            try:
+                win = self.parent()
+                while win is not None and not hasattr(win, "retranslate_ui"):
+                    win = win.parent()
+                if win is not None and win is not self:
+                    win.retranslate_ui()
+            except Exception:
+                pass
 
     def _rebuild(self):
         """Tear down and rebuild the whole dialog so every string reflects
@@ -1402,8 +1805,10 @@ class SettingsPage(QWidget):
         except RuntimeError:
             return default
 
-    def _sync_ui_to_cfg(self):
-        """Read all current control values back into self.cfg (no save).
+    def _sync_ui_to_cfg(self, target=None):
+        """Read all current control values back into ``target`` (default
+        ``self.cfg``). Used for both saving and for dirty-checking (pass a
+        copy so the original cfg stays intact for comparison).
 
         Every widget read is funneled through ``self._safe`` so a C++-deleted
         reference (which can occur during a teardown/rebuild race when the
@@ -1411,123 +1816,220 @@ class SettingsPage(QWidget):
         flight) cannot crash the whole save. The previous value in ``cfg``
         is kept as the fallback for any field whose control has gone away.
         """
+        if target is None:
+            target = self.cfg
         checked_ram = self._safe(self.ram_btns.checkedButton, None)
         if checked_ram:
-            self.cfg["ram_mb"] = getattr(checked_ram, "val", self.cfg["ram_mb"])
+            target["ram_mb"] = getattr(checked_ram, "val", target["ram_mb"])
         else:
-            self.cfg["ram_mb"] = self._safe(self.ram.value, self.cfg["ram_mb"])
-            self.cfg["launcher_ram_mb"] = self._safe(
-                self.launcher_ram.value, self.cfg["launcher_ram_mb"])
-            self.cfg["jvm_aikars"] = self._safe(
-                self.aikars.isChecked, bool(self.cfg["jvm_aikars"]))
+            target["ram_mb"] = self._safe(self.ram.value, target["ram_mb"])
+            target["launcher_ram_mb"] = self._safe(
+                self.launcher_ram.value, target["launcher_ram_mb"])
+        # round-55 JVM 预设（三档下拉）替代 Aikars 单勾选；旧 key 同步写回保持兼容
+        target["jvm_preset"] = self._safe(
+            lambda: self.jvm_preset_combo.currentData() or "default",
+            target.get("jvm_preset", "default"))
+        target["jvm_aikars"] = target["jvm_preset"] == "aikar"
+        # round-55 游戏附加参数 / 版本隔离 / 启动后、退出后命令
+        target["game_args"] = self._safe(
+            lambda: self.game_args_edit.text().strip(), target.get("game_args", ""))
+        target["version_isolation"] = self._safe(
+            lambda: self.version_iso_combo.currentData() or "default",
+            target.get("version_isolation", "default"))
+        target["post_launch_cmd"] = self._safe(
+            lambda: self.post_cmd_edit.text().strip(), target.get("post_launch_cmd", ""))
+        target["exit_cmd"] = self._safe(
+            lambda: self.exit_cmd_edit.text().strip(), target.get("exit_cmd", ""))
         checked_mode = self._safe(self.mode_btns.checkedButton, None)
         if checked_mode:
-            self.cfg["window_mode"] = getattr(checked_mode, "mode_key", self.cfg["window_mode"])
+            target["window_mode"] = getattr(checked_mode, "mode_key", target["window_mode"])
         checked_res = self._safe(self.res_btns.checkedButton, None)
         if checked_res:
-            self.cfg["res_w"], self.cfg["res_h"] = getattr(
-                checked_res, "res_val", (self.cfg["res_w"], self.cfg["res_h"]))
+            target["res_w"], target["res_h"] = getattr(
+                checked_res, "res_val", (target["res_w"], target["res_h"]))
         else:
-            self.cfg["res_w"] = self._safe(self.rw.value, self.cfg["res_w"])
-            self.cfg["res_h"] = self._safe(self.rh.value, self.cfg["res_h"])
+            target["res_w"] = self._safe(self.rw.value, target["res_w"])
+            target["res_h"] = self._safe(self.rh.value, target["res_h"])
         checked_lang = self._safe(self.lang_btns.checkedButton, None)
         if checked_lang:
-            self.cfg["language"] = getattr(checked_lang, "lang_code", self.cfg["language"])
+            target["language"] = getattr(checked_lang, "lang_code", target["language"])
         checked_wp = self._safe(self.wp_modes.checkedButton, None)
         if checked_wp:
-            self.cfg["wallpaper_mode"] = getattr(checked_wp, "wp_mode", self.cfg["wallpaper_mode"])
-        self.cfg["wallpaper_opacity"] = self._safe(
-            lambda: self.wp_opacity.value() / 100.0, self.cfg["wallpaper_opacity"])
-        self.cfg["wallpaper_video_vol"] = self._safe(
-            lambda: self.wp_vol.value() / 100.0, self.cfg["wallpaper_video_vol"])
-        # 只开放 AC 默认模板；其余仍在制作中，强制写回 ac_default
-        self.cfg["home_style"] = "ac_default"
-        _nav_keys = ["ac", "pcl2"]
-        idx = self._safe(self.nav_combo.currentIndex, 0)
-        idx = max(0, min(idx, len(_nav_keys) - 1))
-        self.cfg["nav_layout"] = _nav_keys[idx]
+            target["wallpaper_mode"] = getattr(checked_wp, "wp_mode", target["wallpaper_mode"])
+        target["wallpaper_opacity"] = self._safe(
+            lambda: self.wp_opacity.value() / 100.0, target["wallpaper_opacity"])
+        target["wallpaper_video_vol"] = self._safe(
+            lambda: self.wp_vol.value() / 100.0, target["wallpaper_video_vol"])
+        # 主页模板 / 导航布局切换已删除（round-32）——固定 ac_default + AC 侧边导航；
+        # 但保留已存值（如 dev 配置中的 pcl2），避免 is_dirty 误判 / 保存时悄悄改回。
+        target["home_style"] = "ac_default"
+        target["nav_layout"] = target.get("nav_layout", "ac")
         checked_theme = self._safe(self.theme_btns.checkedButton, None)
         if checked_theme:
-            self.cfg["theme_mode"] = getattr(checked_theme, "theme_mode_val", self.cfg["theme_mode"])
-        self.cfg["theme_pack"] = self._safe(
-            lambda: self.pack_combo.currentData() or "", self.cfg["theme_pack"])
-        self.cfg["java_auto"] = self._safe(
-            self.java_auto.isChecked, bool(self.cfg["java_auto"]))
-        self.cfg["java_path"] = self._safe(self.java_path.text, self.cfg["java_path"])
-        self.cfg["jvm_args"] = self._safe(self.jvm.toPlainText, self.cfg["jvm_args"])
+            target["theme_mode"] = getattr(checked_theme, "theme_mode_val", target["theme_mode"])
+        target["frosted_theme"] = self._safe(
+            lambda: self.frosted_chk.isChecked(), bool(target.get("frosted_theme", True)))
+        target["theme_pack"] = self._safe(
+            lambda: self.pack_combo.currentData() or "", target["theme_pack"])
+        target["java_auto"] = self._safe(
+            self.java_auto.isChecked, bool(target["java_auto"]))
+        target["java_path"] = self._safe(self.java_path.text, target["java_path"])
+        target["jvm_args"] = self._safe(self.jvm.toPlainText, target["jvm_args"])
         checked_mirror = self._safe(self.mirror_btns.checkedButton, None)
         if checked_mirror:
-            self.cfg["download_mirror"] = getattr(checked_mirror, "mirror_key", self.cfg["download_mirror"])
+            target["download_mirror"] = getattr(checked_mirror, "mirror_key", target["download_mirror"])
         checked_proxy = self._safe(self.proxy_btns.checkedButton, None)
         if checked_proxy:
             key = getattr(checked_proxy, "proxy_key", "custom")
-            self.cfg["download_proxy"] = self._safe(
-                lambda: self.proxy_edit.text().strip() if key == "custom" else key,
-                self.cfg["download_proxy"],
+            # round-58：'system' 与默认值 '' 语义等价（见 _proxy_is / proxy_dict），
+            # 写回时归一化为 ''，避免未改动时 is_dirty 误判弹出"未保存"对话框。
+            target["download_proxy"] = self._safe(
+                lambda: self.proxy_edit.text().strip() if key == "custom" else
+                ("" if key == "system" else key),
+                target["download_proxy"],
             )
-        self.cfg["authlib_path"] = self._safe(
-            lambda: self.authlib.text().strip(), self.cfg["authlib_path"])
-        self.cfg["launch_sound"] = self._safe(
-            self.sound_on.isChecked, bool(self.cfg["launch_sound"]))
+        target["authlib_path"] = self._safe(
+            lambda: self.authlib.text().strip(), target["authlib_path"])
+        target["launch_sound"] = self._safe(
+            self.sound_on.isChecked, bool(target["launch_sound"]))
         _rev = {
             t("settings.sound_trigger_game"): "game",
             t("settings.sound_trigger_app"): "app",
             t("settings.sound_trigger_both"): "both",
             t("settings.sound_trigger_off"): "off",
         }
-        self.cfg["launch_sound_trigger"] = _rev.get(
+        target["launch_sound_trigger"] = _rev.get(
             self._safe(self.sound_trig.currentText, t("settings.sound_trigger_game")),
             "game",
         )
-        self.cfg["launch_sound_file"] = self._safe(
-            lambda: self.sound_file.text().strip(), self.cfg["launch_sound_file"])
-        self.cfg["launch_sound_vol"] = self._safe(
-            lambda: self.sound_vol.value() / 100.0, self.cfg["launch_sound_vol"])
-        self.cfg["bgm_enabled"] = self._safe(
-            self.bgm_on.isChecked, bool(self.cfg["bgm_enabled"]))
+        target["launch_sound_file"] = self._safe(
+            lambda: self.sound_file.text().strip(), target["launch_sound_file"])
+        target["launch_sound_vol"] = self._safe(
+            lambda: self.sound_vol.value() / 100.0, target["launch_sound_vol"])
+        target["bgm_enabled"] = self._safe(
+            self.bgm_on.isChecked, bool(target["bgm_enabled"]))
         _mode_rev = {v: k for k, v in {
             "loop": t("settings.bgm_mode_loop"),
             "sequential": t("settings.bgm_mode_sequential"),
             "shuffle": t("settings.bgm_mode_shuffle"),
         }.items()}
-        self.cfg["bgm_mode"] = _mode_rev.get(
+        target["bgm_mode"] = _mode_rev.get(
             self._safe(self.bgm_mode.currentText, t("settings.bgm_mode_loop")),
             "loop",
         )
         # 多文件列表（替代单文件字段）
         try:
-            self.cfg["bgm_files"] = [
+            target["bgm_files"] = [
                 self.bgm_list.item(i).text() for i in range(self.bgm_list.count())
             ]
         except RuntimeError:
             pass  # bgm_list torn down — keep previous cfg["bgm_files"]
         if self.cfg.get("bgm_files"):
-            self.cfg["bgm_file"] = self.cfg["bgm_files"][0]
+            target["bgm_file"] = target["bgm_files"][0]
         else:
-            self.cfg["bgm_file"] = ""
-        self.cfg["bgm_vol"] = self._safe(
-            lambda: self.bgm_vol.value() / 100.0, self.cfg["bgm_vol"])
-        self.cfg["sfx_enabled"] = self._safe(
-            self.sfx_on.isChecked, bool(self.cfg["sfx_enabled"]))
+            target["bgm_file"] = ""
+        target["bgm_vol"] = self._safe(
+            lambda: self.bgm_vol.value() / 100.0, target["bgm_vol"])
+        target["sfx_enabled"] = self._safe(
+            self.sfx_on.isChecked, bool(target["sfx_enabled"]))
         if hasattr(self, "sfx_files"):
             for _key, _le in self.sfx_files.items():
-                self.cfg[f"sfx_{_key}"] = self._safe(
+                target[f"sfx_{_key}"] = self._safe(
                     lambda le=_le: le.text().strip(), self.cfg.get(f"sfx_{_key}", ""))
-        self.cfg["sfx_vol"] = self._safe(
-            lambda: self.sfx_vol.value() / 100.0, self.cfg["sfx_vol"])
-        self.cfg["splash_enabled"] = self._safe(
-            self.splash_on.isChecked, bool(self.cfg["splash_enabled"]))
-        if hasattr(self, '_custom_color') and self._custom_color:
-            self.cfg["accent_color"] = self._custom_color
-        else:
-            for dot in self.color_btns:
-                try:
-                    style = dot.styleSheet()
-                except RuntimeError:
-                    continue
-                if "border: 2px solid white" in style or "border: 2px solid #FFFFFF" in style:
-                    self.cfg["accent_color"] = dot.color_hex
-                    break
+        target["sfx_vol"] = self._safe(
+            lambda: self.sfx_vol.value() / 100.0, target["sfx_vol"])
+        target["splash_enabled"] = self._safe(
+            self.splash_on.isChecked, bool(target["splash_enabled"]))
+        if hasattr(self, '_selected_color') and self._selected_color:
+            target["accent_color"] = self._selected_color
+        # round-49 液态流光 effect 设置
+        target["effect_light_trail"] = self._safe(
+            self.effect_trail_chk.isChecked, bool(target["effect_light_trail"]))
+        target["page_transition"] = self._safe(
+            self.page_trans_chk.isChecked, bool(target["page_transition"]))
+        target["window_opacity"] = self._safe(
+            lambda: self.win_opacity.value() / 100.0, target["window_opacity"])
+        # round-51 透底效果
+        target["transparent_window"] = self._safe(
+            self.transparent_chk.isChecked, bool(target["transparent_window"]))
+        # round-50 退出释放资源
+        target["close_after_launch"] = self._safe(
+            self.close_launch_chk.isChecked, bool(target["close_after_launch"]))
+        # round-68 Quilt 加载器显示开关
+        target["show_quilt"] = self._safe(
+            self.show_quilt_chk.isChecked, bool(target.get("show_quilt", True)))
+        # round-71 非 ASCII 路径警告开关
+        target["warn_non_ascii_path"] = self._safe(
+            self.warn_non_ascii_chk.isChecked, bool(target.get("warn_non_ascii_path", True)))
+        # round-69 进程优先级
+        target["process_priority"] = self._safe(
+            lambda: self.priority_combo.currentData() or "normal",
+            target.get("process_priority", "normal"))
+
+    # ── dirty detection + unsaved-changes prompt ──
+    def is_dirty(self) -> bool:
+        """True if the current UI differs from the config snapshot loaded at
+        build time (i.e. the user has unsaved edits)."""
+        import copy, json
+        if not hasattr(self, "cfg"):
+            return False
+        snap = copy.deepcopy(self.cfg)
+        try:
+            self._sync_ui_to_cfg(snap)
+        except Exception:
+            # During a teardown/rebuild race, reads may fail — treat as not dirty
+            # so we never block navigation spuriously.
+            return False
+        a = json.dumps(self.cfg, sort_keys=True, ensure_ascii=False)
+        b = json.dumps(snap, sort_keys=True, ensure_ascii=False)
+        return a != b
+
+    def ask_save_dialog(self) -> str:
+        """Prompt what to do about unsaved changes. Returns one of:
+        ``"save"`` / ``"discard"`` / ``"cancel"``."""
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        try:
+            from .win_rounded import enable_dark_titlebar
+            enable_dark_titlebar(msg)
+        except Exception:
+            pass
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle(t("settings.title"))
+        msg.setText(t("settings.unsaved_title", default="有未保存的更改"))
+        msg.setInformativeText(
+            t("settings.unsaved_msg", default="是否保存这些更改？"))
+        save = msg.addButton(
+            t("settings.save", default="保存"), QMessageBox.AcceptRole)
+        discard = msg.addButton(
+            t("common.discard", default="不保存"), QMessageBox.DestructiveRole)
+        cancel = msg.addButton(
+            t("common.cancel", default="取消"), QMessageBox.RejectRole)
+        msg.setDefaultButton(save)
+        msg.setEscapeButton(cancel)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is save:
+            return "save"
+        if clicked is discard:
+            return "discard"
+        return "cancel"
+
+    def discard_changes(self):
+        """Revert live-applied theme/accent/wallpaper to the last saved config
+        (the user chose not to keep their edits)."""
+        from .theme import set_accent_color, set_theme_mode, apply_qss
+        disk = load_config()
+        set_theme_mode(disk.get("theme_mode", "light"))
+        set_accent_color(disk.get("accent_color", "#7C3AED"))
+        apply_qss()
+        self.cfg = disk
+        try:
+            win = self._window
+            if win is not None and hasattr(win, "home"):
+                win.home._apply_wallpaper(version_id=win._current_version_id())
+        except Exception:
+            pass
 
     # ── save ──
     def _save(self):
@@ -1542,23 +2044,41 @@ class SettingsPage(QWidget):
             pass
 
         # ── Apply changes immediately ──
-        from .theme import set_accent_color, apply_qss, set_theme_mode
+        # round-52 玻璃拟态：半透明卡片样式即时生效（配合系统 Acrylic）。
+        from .theme import set_frosted as _set_frosted
+        _set_frosted(self.cfg.get("frosted_theme", True))
 
-        # Accent color
-        set_accent_color(self.cfg.get("accent_color", "#7C3AED"))
-        apply_qss()
-
-        # Theme mode (light/dark)
+        # Theme mode (light/dark) —— 先设模式，再设强调色/主题包，避免强
+        # 调色被重置（round-49 已让 set_theme_mode 自动保留自定义 accent，
+        # 顺序在此仅为可读性）。
         set_theme_mode(self.cfg.get("theme_mode", "light"))
+
+        # Accent color（无主题包时生效；有主题包时由下方的包覆盖其 accent）
+        set_accent_color(self.cfg.get("accent_color", "#7C3AED"))
+
+        # Theme pack（若已配置）：最后套用，保证包的修饰色/圆角在其它选项
+        # 保存后仍生效，且包的 accent 优先于自定义 accent。
+        _pack_id = self.cfg.get("theme_pack", "")
+        if _pack_id:
+            from .theme import find_theme_pack, apply_theme_pack
+            apply_theme_pack(find_theme_pack(_pack_id))
+
         apply_qss()
+
+        # round-49 全局透明度（透底）即时生效
+        try:
+            from .effects import set_window_opacity, set_effects_enabled
+            set_effects_enabled(self.cfg.get("effect_light_trail", True))
+            set_window_opacity(self._window, self.cfg.get("window_opacity", 1.0))
+        except Exception:  # noqa: BLE001
+            pass
 
         # Wallpaper — refresh home page background
         try:
             win = self._window
             if win is not None and hasattr(win, 'home'):
-                win.home._apply_wallpaper()
-                # Re-render home page with the (possibly) new style
-                win.apply_home_style(self.cfg.get("home_style", "ac_default"))
+                win.home._apply_wallpaper(version_id=win._current_version_id())
+                # 主页模板切换已删除（round-32）——固定 ac_default，无需 rebuild
                 # NOTE: window_mode / resolution are GAME settings — applied at
                 # launch time inside launch.py (resolutionWidth/Height +
                 # options.txt `fullscreen`), NOT to the launcher window. Do not
@@ -1570,20 +2090,14 @@ class SettingsPage(QWidget):
 
         self.saved.emit()
 
-    def _on_style_combo_changed(self, idx: int):
-        """Live-apply the home style while the settings page is open.
+    def _refresh_dev_mode_ui(self):
+        """No-op：开发者模式块已删除（round-32 后续）。保留防历史引用。"""
+        pass
 
-        Only the AC default template is currently open — other entries are
-        disabled in the combo, so a non-zero idx should never arrive; guard
-        anyway so a stray signal can't force an unfinished template.
-        """
-        if idx != 0:
-            # 未开放模板：强制回到 AC 默认（不应发生，纯防御）
-            self.style_combo.blockSignals(True)
-            self.style_combo.setCurrentIndex(0)
-            self.style_combo.blockSignals(False)
-            return
-        self.cfg["home_style"] = "ac_default"
-        win = self._window
-        if win is not None and hasattr(win, "apply_home_style"):
-            win.apply_home_style("ac_default")
+    def _on_dev_toggle(self):
+        """No-op：开发者模式块已删除（round-32 后续）。保留防历史引用。"""
+        pass
+
+    def _on_style_combo_changed(self, idx: int):
+        """No-op：主页模板切换已删除（round-32，切换会导致窗口卡在一起）。"""
+        pass

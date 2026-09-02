@@ -13,9 +13,12 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QScrollArea, QLineEdit, QComboBox, QDialog,
 )
-from PySide6.QtCore import Signal, QSize, QTimer
+from PySide6.QtCore import Signal, QSize, QTimer, Qt
+from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
 
 from .theme import COLORS, RoundedCard
+from .effects import LightTrailCard  # round-50 商店卡流光
+from . import ui_kit
 from .icons import icon
 from .i18n import t, version_type_name, loader_name
 from .win_rounded import info, confirm
@@ -28,6 +31,32 @@ from .net_api import (
 )
 from .worker import Worker
 from .async_image import ImageLoader, make_version_pixmap
+from .store_detail import StoreDetailDialog  # round-66 资源详情页（版本/翻译）
+
+
+def _letter_fallback(title: str, size: int = 48) -> QPixmap:
+    """Generate a colored letter icon as fallback when mod CDN fails.
+    Uses the first character of the title on a themed background."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    # Round background
+    p.setPen(Qt.NoPen)
+    # Hash the title to get a consistent color
+    hue = hash(title) % 360
+    color = QColor()
+    color.setHsv(hue, 140, 180)
+    p.setBrush(color)
+    p.drawRoundedRect(0, 0, size, size, size * 0.18, size * 0.18)
+    # First letter
+    letter = title[0].upper() if title else "?"
+    f = QFont("Microsoft YaHei", size // 2, QFont.Bold)
+    p.setFont(f)
+    p.setPen(QColor(255, 255, 255, 230))
+    p.drawText(pm.rect(), Qt.AlignCenter, letter)
+    p.end()
+    return pm
 
 TYPE_COLOR = {
     "release": COLORS["success"], "snapshot": COLORS["warn"],
@@ -54,45 +83,51 @@ class VersionsPage(QWidget):
         self.mgr = manager()
         self._versions: list[dict] = []
         self._img = ImageLoader(self)
+        self._workers: list = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
 
-        head = QHBoxLayout()
-        self.title_lbl = QLabel(t("versions.title"))
-        self.title_lbl.setProperty("cls", "big")
-        head.addWidget(self.title_lbl)
-        head.addStretch(1)
-
-        self.filter = QComboBox()
-        for key, lbl in [
-            ("all", t("versions.filter_all")),
-            ("release", t("versions.filter_release")),
-            ("snapshot", t("versions.filter_snapshot")),
-            ("april", t("versions.filter_april")),
-            ("legacy", t("versions.filter_legacy")),
-        ]:
-            self.filter.addItem(lbl, key)
-        self.filter.setMinimumHeight(36)
-        self.filter.setMinimumWidth(120)
-        self.filter.currentIndexChanged.connect(self._apply_filter)
-        head.addWidget(self.filter)
+        # 对照模板 Versions.svg：过滤标签用 pill（激活=紫 / 非激活=白卡），
+        # 替代下拉框，一眼看到所有版本分类。复用 ui_kit.ChipGroup，
+        # 激活态由 QSS ``:checked`` 驱动，无需手动描样式。
+        self._filter_key = "all"
+        self.filter = ui_kit.ChipGroup(
+            [("all", t("versions.filter_all")),
+             ("release", t("versions.filter_release")),
+             ("snapshot", t("versions.filter_snapshot")),
+             ("april", t("versions.filter_april")),
+             ("legacy", t("versions.filter_legacy"))],
+            on_change=self._on_filter_pill, spacing=6, min_h=32)
+        self.filter.set("all")
 
         self.search = QLineEdit()
         self.search.setPlaceholderText(t("versions.filter_placeholder"))
         self.search.setMinimumHeight(36)
-        self.search.setMinimumWidth(200)
+        # round-52 自适应：search 用 stretch 弹性伸展而非固定 180 最小宽度，
+        # 窄窗口下 header 不溢出（filter 保持固定宽度）。
+        self.search.setMinimumWidth(0)
         self.search.textChanged.connect(self._apply_filter)
-        head.addWidget(self.search)
 
-        self.refresh_btn = QPushButton(t("versions.refresh"))
-        self.refresh_btn.setMinimumHeight(36)
-        self.refresh_btn.setIcon(icon("refresh"))
-        self.refresh_btn.setIconSize(QSize(16, 16))
-        self.refresh_btn.clicked.connect(self._load)
-        head.addWidget(self.refresh_btn)
-        root.addLayout(head)
+        self.refresh_btn = ui_kit.make_button(
+            t("versions.refresh"), icon_key="refresh",
+            on_click=self._load, min_h=36)
+
+        self._header = ui_kit.page_header(
+            t("versions.title"), action=self.refresh_btn, icon_key="versions")
+        self.title_lbl = self._header.title_lbl
+        root.addWidget(self._header)
+
+        # 过滤 pill 单独一行（对照 Versions.svg）。放独立行而非塞进 header，
+        # 避免窄窗口下 5 个 pill + 搜索 + 刷新挤在一行溢出（round-52 约束）。
+        fil_row = QHBoxLayout()
+        fil_row.setSpacing(10)
+        fil_row.addWidget(self.filter)
+        fil_row.addStretch(1)
+        self.search.setMaximumWidth(320)
+        fil_row.addWidget(self.search, stretch=1)
+        root.addLayout(fil_row)
 
         self.status = QLabel(t("versions.loading"))
         self.status.setProperty("cls", "sub")
@@ -115,15 +150,31 @@ class VersionsPage(QWidget):
         self.status.setText(t("versions.fetching"))
         self._load_gen += 1
         gen = self._load_gen
-        self._worker = Worker(fetch_versions)
-        self._worker.finished.connect(
-            lambda data: self._on_loaded(data) if gen == self._load_gen else None
-        )
-        self._worker.error.connect(
-            lambda e: self.status.setText(t("versions.error", e=e))
-            if gen == self._load_gen else None
-        )
-        self._worker.start()
+        old = getattr(self, "_worker", None)
+        if old is not None and old.isRunning():
+            self._workers.append(old)
+        worker = Worker(fetch_versions)
+        self._worker = worker
+
+        def _on_fin(data):
+            try:
+                self._workers.remove(worker)
+            except ValueError:
+                pass
+            if gen == self._load_gen:
+                self._on_loaded(data)
+
+        def _on_err(e):
+            try:
+                self._workers.remove(worker)
+            except ValueError:
+                pass
+            if gen == self._load_gen:
+                self.status.setText(t("versions.error", e=e))
+
+        worker.finished.connect(_on_fin)
+        worker.error.connect(_on_err)
+        worker.start()
 
     def _on_loaded(self, data):
         _, versions = data
@@ -134,9 +185,14 @@ class VersionsPage(QWidget):
     def _fmt_date(self, rt: str) -> str:
         return rt[:10] if rt else ""
 
+    def _on_filter_pill(self, key: str) -> None:
+        """Pill filter clicked (round-53: combo 下拉框 → pill 标签栏)."""
+        self._filter_key = key
+        self._apply_filter()
+
     def _apply_filter(self):
         q = self.search.text().strip().lower()
-        only_group = self.filter.currentData()
+        only_group = self._filter_key
         installed = {i.game_version for i in self.mgr.list()}
         # 彻底清空 layout：takeAt 会把包括 stretch 在内的所有项从 layout
         # 移除（避免 stretch 无限堆积），widget 再单独 deleteLater 异步销毁。
@@ -179,7 +235,8 @@ class VersionsPage(QWidget):
         self._vbox.addStretch(1)
 
     def _make_card(self, v: dict, is_installed: bool) -> QFrame:
-        card = RoundedCard(radius=12)
+        # round-50 版本列表流光：低强度慢速，视觉整洁
+        card = LightTrailCard(radius=12, strength=0.4, speed=0.55)
         card.setMinimumHeight(76)
         lay = QHBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
@@ -244,9 +301,12 @@ class VersionsPage(QWidget):
         self.title_lbl.setText(t("versions.title"))
         self.refresh_btn.setText(t("versions.refresh"))
         self.search.setPlaceholderText(t("versions.filter_placeholder"))
-        # Rebuild filter combo items
-        current_filter = self.filter.currentData()
-        self.filter.clear()
+        # Rebuild filter chip labels in place — self.filter is a
+        # ui_kit.ChipGroup (not a QComboBox), so plain label updates via
+        # set_text() keep the current selection while following the new
+        # i18n strings (round-64 fix: previous code called currentData()/
+        # addItem()/findData(), which ChipGroup doesn't have → AttributeError
+        # on every save / language switch once the versions page was built).
         for key, lbl in [
             ("all", t("versions.filter_all")),
             ("release", t("versions.filter_release")),
@@ -254,11 +314,7 @@ class VersionsPage(QWidget):
             ("april", t("versions.filter_april")),
             ("legacy", t("versions.filter_legacy")),
         ]:
-            self.filter.addItem(lbl, key)
-        # restore selection
-        idx = self.filter.findData(current_filter)
-        if idx >= 0:
-            self.filter.setCurrentIndex(idx)
+            self.filter.set_text(key, lbl)
 
 
 # ---------------------------------------------------------------- Store
@@ -282,38 +338,50 @@ class StorePage(QWidget):
         self._category = "mod"
         self._source = "modrinth"
         self._img = ImageLoader(self)
-        self._fallback = icon("store").pixmap(48, 48)
+        # Keep in-flight workers referenced until they finish. Overwriting
+        # self._worker used to drop the only strong ref to a still-running
+        # QThread, so Python GC deleted it mid-flight →
+        # "QThread destroyed while still running" crash on fast category
+        # switching (resource center). See _track().
+        self._workers: list = []
+        # Debounce: rapid category/source clicks collapse into one fetch.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(180)
+        self._search_timer.timeout.connect(self._search)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
 
-        # 顶部标题栏（标题 + 源切换 + 分类）—— 第一行
-        head = QHBoxLayout()
-        head.setSpacing(12)
-        self.title_lbl = QLabel(t("store.title"))
-        self.title_lbl.setProperty("cls", "big")
-        head.addWidget(self.title_lbl)
-        head.addStretch(1)
-        # 下载源切换（Modrinth 默认；CurseForge 免注册）
+        # 第一行：标题 + 源切换
         self.source_combo = QComboBox()
-        self.source_combo.setMinimumHeight(32)
-        self.source_combo.setMinimumWidth(100)
+        self.source_combo.setMinimumHeight(36)
+        self.source_combo.setMinimumWidth(120)
         self.source_combo.addItem(t("store.source_modrinth"), "modrinth")
         self.source_combo.addItem(t("store.source_curseforge"), "curseforge")
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
-        head.addWidget(self.source_combo)
-        # 分类下拉（对齐 PCL2 下载分类：模组/整合包/光影/资源包/数据包/OptiFine）
-        self.category_combo = QComboBox()
-        self.category_combo.setMinimumHeight(32)
-        self.category_combo.setMinimumWidth(110)
-        for pt, key in STORE_CATEGORIES:
-            self.category_combo.addItem(t(key), pt)
-        self.category_combo.currentIndexChanged.connect(self._on_category_changed)
-        head.addWidget(self.category_combo)
-        root.addLayout(head)
 
-        # 第二行：目标实例 + 搜索框 + 搜索按钮（搜索框随窗口伸缩）
+        self._header = ui_kit.page_header(
+            t("store.title"), action=self.source_combo, icon_key="store")
+        self.title_lbl = self._header.title_lbl
+        root.addWidget(self._header)
+
+        # 第二行：分类标签栏（像 PCL2 下载页一样横向排开，一眼看到所有类型）
+        # 复用 ui_kit.ChipGroup，激活态纯 QSS 驱动。
+        self.category_chips = ui_kit.ChipGroup(
+            [(pt, t(key)) for pt, key in STORE_CATEGORIES],
+            on_change=self._set_category, spacing=8, min_h=34)
+        self._cat_btns = self.category_chips.buttons
+        self._cat_btns["optifine"].setToolTip(t("store.optifine_what"))
+        self._cat_row = QHBoxLayout()
+        self._cat_row.setSpacing(8)
+        self._cat_row.addStretch(1)
+        self._cat_row.addWidget(self.category_chips)
+        self._cat_row.addStretch(1)
+        root.addLayout(self._cat_row)
+
+        # 第三行：目标实例 + 搜索框 + 搜索按钮
         head2 = QHBoxLayout()
         head2.setSpacing(10)
         self.target_lbl = QLabel(t("store.target_label"))
@@ -321,19 +389,19 @@ class StorePage(QWidget):
         head2.addWidget(self.target_lbl)
         self.inst_combo = QComboBox()
         self.inst_combo.setMinimumHeight(32)
-        self.inst_combo.setMinimumWidth(200)
+        # round-52 自适应：去掉 200 硬性最小宽度，combo 弹性伸展，窄窗口不溢出。
+        self.inst_combo.setMinimumWidth(0)
         self.inst_combo.currentIndexChanged.connect(self._on_target_changed)
-        head2.addWidget(self.inst_combo)
+        head2.addWidget(self.inst_combo, stretch=1)
         self.search = QLineEdit()
         self.search.setPlaceholderText(t("store.search_placeholder"))
         self.search.setMinimumHeight(34)
-        self.search.returnPressed.connect(self._search)
-        head2.addWidget(self.search, stretch=1)
-        self.search_btn = QPushButton(t("store.search"))
-        self.search_btn.setMinimumHeight(34)
-        self.search_btn.setIcon(icon("search"))
-        self.search_btn.setIconSize(QSize(16, 16))
-        self.search_btn.clicked.connect(self._search)
+        self.search.setMinimumWidth(0)
+        self.search.returnPressed.connect(self._search_timer.start)
+        head2.addWidget(self.search, stretch=2)
+        self.search_btn = ui_kit.make_button(
+            t("store.search"), icon_key="search",
+            on_click=self._search_timer.start, min_h=36)
         head2.addWidget(self.search_btn)
         root.addLayout(head2)
 
@@ -345,6 +413,7 @@ class StorePage(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self._load_gen = 0  # guards against stale search results
+        self._loading_more = False  # 防止滚动到底部时连续触发多次
         self._content = QWidget()
         self._vbox = QVBoxLayout(self._content)
         self._vbox.setContentsMargins(0, 0, 0, 0)
@@ -352,14 +421,27 @@ class StorePage(QWidget):
         self.scroll.setWidget(self._content)
         root.addWidget(self.scroll, stretch=1)
 
-        more = QPushButton(t("store.more"))
-        more.clicked.connect(self._more)
-        root.addWidget(more)
+        # 滚动到底自动加载下一页；保留一个极小的"加载更多"按钮作为退化兜底
+        self.scroll.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        self.more_btn = QPushButton(t("store.more"))
+        self.more_btn.clicked.connect(self._more)
+        self.more_btn.setVisible(False)
+        root.addWidget(self.more_btn)
 
+        # 默认选中第一个分类
+        self._set_category("mod", initial=True)
         QTimer.singleShot(0, self._sync_target)
         self._search()
 
     # ---- category selection ----
+    def _set_category(self, category: str, initial: bool = False):
+        """Switch the visible resource category. Active pill is painted by the
+        ``chip:checked`` QSS via ChipGroup, so no manual styling here."""
+        self._category = category
+        self.category_chips.set(category)
+        if not initial:
+            self._search_timer.start()
+
     def _on_category_changed(self, _index: int):
         self._category = self.category_combo.currentData()
         self._search()
@@ -377,7 +459,7 @@ class StorePage(QWidget):
         )
         if self._source == "curseforge":
             self.status.setText(t("store.cf_hint"))
-        self._search()
+        self._search_timer.start()
 
     # ---- target instance selection ----
     def _target(self) -> object | None:
@@ -413,9 +495,57 @@ class StorePage(QWidget):
     def _search(self):
         self._query = self.search.text().strip()
         self._offset = 0
+        self._loading_more = False
+        # Invalidate any in-flight icon loads — the list is about to be wiped,
+        # so stale replies must not touch widgets that are being deleted.
+        self._img.bump()
         self._load(reset=True)
 
+    def _track(self, worker, gen, reset):
+        """Start `worker`, keeping the previously-running worker referenced until
+        it finishes so Python GC cannot delete a still-running QThread (which
+        used to crash the app on fast category switching)."""
+        old = getattr(self, "_worker", None)
+        if old is not None and old is not worker and old.isRunning():
+            self._workers.append(old)
+        self._worker = worker
+
+        def _on_fin(m):
+            self._retire(worker)
+            if gen == self._load_gen:
+                self._on_loaded(m, reset)
+
+        def _on_err(e):
+            self._retire(worker)
+            if gen == self._load_gen:
+                self.status.setText(t("store.error", e=e))
+                self._loading_more = False
+
+        worker.finished.connect(_on_fin)
+        worker.error.connect(_on_err)
+        worker.start()
+
+    def _retire(self, worker):
+        try:
+            self._workers.remove(worker)
+        except ValueError:
+            pass
+
+    def _on_scroll(self, value: int):
+        """Auto-load next page when the user scrolls near the bottom."""
+        if self._loading_more:
+            return
+        vbar = self.scroll.verticalScrollBar()
+        if vbar.maximum() <= 0:
+            return
+        # 提前 120px 触发，避免到底才加载的顿挫感
+        if value >= vbar.maximum() - 120:
+            self._more()
+
     def _more(self):
+        if self._loading_more:
+            return
+        self._loading_more = True
         self._offset += 20
         self._load(reset=False)
 
@@ -429,16 +559,9 @@ class StorePage(QWidget):
         self.status.setText(t("store.fetching"))
         self._load_gen += 1
         gen = self._load_gen
-        self._worker = Worker(search_mods, self._query, self._offset,
-                              project_type=self._category)
-        self._worker.finished.connect(
-            lambda m: self._on_loaded(m, reset) if gen == self._load_gen else None
-        )
-        self._worker.error.connect(
-            lambda e: self.status.setText(t("store.error", e=e))
-            if gen == self._load_gen else None
-        )
-        self._worker.start()
+        worker = Worker(search_mods, self._query, self._offset,
+                        project_type=self._category)
+        self._track(worker, gen, reset)
 
     def _load_curseforge(self, reset: bool):
         """CurseForge 源：有 key → 官方 API 搜索；无 key → 链接/slug 解析（免 key 通道）。"""
@@ -451,20 +574,14 @@ class StorePage(QWidget):
             worker_fn = curseforge_link_search
         self._load_gen += 1
         gen = self._load_gen
-        self._worker = Worker(worker_fn, self._query)
-        self._worker.finished.connect(
-            lambda m: self._on_loaded(m, reset) if gen == self._load_gen else None
-        )
-        self._worker.error.connect(
-            lambda e: self.status.setText(t("store.error", e=e))
-            if gen == self._load_gen else None
-        )
-        self._worker.start()
+        worker = Worker(worker_fn, self._query)
+        self._track(worker, gen, reset)
 
     def _load_optifine(self, reset: bool):
         """OptiFine 分类：按目标实例的 MC 版本列出可用构建（BMCLAPI）。"""
         inst = self._target()
         if inst is None or not inst.game_version:
+            self._loading_more = False
             self.status.setText(t("store.optifine_no_instance"))
             if reset:
                 while self._vbox.count():
@@ -476,17 +593,11 @@ class StorePage(QWidget):
         self.status.setText(t("store.optifine_fetching", mc=inst.game_version))
         self._load_gen += 1
         gen = self._load_gen
-        self._worker = Worker(fetch_optifine_versions, inst.game_version)
-        self._worker.finished.connect(
-            lambda m: self._on_loaded(m, reset) if gen == self._load_gen else None
-        )
-        self._worker.error.connect(
-            lambda e: self.status.setText(t("store.error", e=e))
-            if gen == self._load_gen else None
-        )
-        self._worker.start()
+        worker = Worker(fetch_optifine_versions, inst.game_version)
+        self._track(worker, gen, reset)
 
     def _on_loaded(self, mods: list[dict], reset: bool):
+        self._loading_more = False
         self._mods = mods if reset else self._mods + mods
         if reset:
             while self._vbox.count():
@@ -499,7 +610,8 @@ class StorePage(QWidget):
             self._vbox.addWidget(self._make_card(m))
 
     def _make_card(self, m: dict) -> QFrame:
-        card = RoundedCard(radius=12)
+        # round-50 商店卡流光：低强度慢速，视觉整洁
+        card = LightTrailCard(radius=12, strength=0.4, speed=0.55)
         card.setMinimumHeight(84)
         lay = QHBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
@@ -507,7 +619,9 @@ class StorePage(QWidget):
 
         thumb = QLabel()
         thumb.setFixedSize(48, 48)
-        self._img.load(m.get("icon_url", ""), 48, thumb, self._fallback)
+        # 使用首字母彩色图标作为 fallback（PCL2 风格），比通用 store 图标更有辨识度
+        fallback = _letter_fallback(m["title"], 48)
+        self._img.load(m.get("icon_url", ""), 48, thumb, fallback)
         lay.addWidget(thumb)
 
         info = QVBoxLayout()
@@ -539,7 +653,25 @@ class StorePage(QWidget):
         dl.setIcon(icon("download"))
         dl.setIconSize(QSize(16, 16))
         lay.addWidget(dl)
+
+        # round-66：modrinth 源卡片点击 → 详情页（全部版本 / 翻译 / 按版本下载）。
+        # 下载/安装按钮会消费鼠标事件，不会误触卡片的点击打开。
+        if self._source == "modrinth" and self._category != "optifine":
+            card.setCursor(Qt.PointingHandCursor)
+            card.mousePressEvent = lambda _e, m=m: self._open_detail(m)
         return card
+
+    def _open_detail(self, m: dict):
+        """打开资源详情页：列出全部版本（可按 MC 版本过滤）、获取中文翻译、
+        选择任意版本下载到目标实例对应子目录。"""
+        inst = self._target()
+        if inst is None:
+            info(self, t("common.hint"), t("store.download_hint"))
+            return
+        dlg = StoreDetailDialog(
+            self, m, self._category, inst,
+            _TYPE_SUBDIR.get(self._category, "mods"))
+        dlg.exec()
 
     def _download(self, project_id: str, slug: str, optifine_filename: str = "",
                   cf_file: dict | None = None):
@@ -555,7 +687,9 @@ class StorePage(QWidget):
             return
         self.status.setText(t("store.downloading", slug=slug))
         sub = _TYPE_SUBDIR.get(self._category, "mods")
-        dest = os.path.join(inst.mc_dir, sub)
+        # round-57 修：隔离/自定义目录下游戏真实的 mods/shaders/resourcepacks
+        # 在 <game_dir>/<sub>，之前固定 inst.mc_dir 会让下载的模组游戏里不生效。
+        dest = os.path.join(inst.game_dir, sub)
         if self._source == "curseforge":
             from .net_api import download_cfwidget_file
             self._dworker = Worker(download_cfwidget_file, cf_file, dest)
@@ -563,7 +697,13 @@ class StorePage(QWidget):
             # OptiFine 是 mod：下载 jar 到 mods/（需 Forge/Fabric 前置生效）
             self._dworker = Worker(download_optifine_to, optifine_filename, dest)
         else:
-            self._dworker = Worker(download_mod_to, project_id, dest)
+            # round-37：传入实例的 MC 版本 + 加载器，让 Modrinth 过滤兼容版本
+            # 并自动拉取 required 依赖树（download_mod_to 已支持依赖解析）
+            self._dworker = Worker(
+                download_mod_to, project_id, dest,
+                getattr(inst, "game_version", "") or "",
+                getattr(inst, "loader", "") or "",
+            )
         self._dworker.finished.connect(lambda p: self.status.setText(t("store.downloaded", file=os.path.basename(p))))
         self._dworker.error.connect(lambda e: self.status.setText(t("store.download_fail", e=e)))
         self._dworker.start()
@@ -585,7 +725,8 @@ class StorePage(QWidget):
         self._pworker.start()
 
     def _on_pack_downloaded(self, path: str):
-        from .pages_instances import _MrpackDialog, _parse_mrpack_info
+        from .pages_instances import _MrpackDialog
+        from .modpack_import import _parse_mrpack_info
         import minecraft_launcher_lib
         try:
             raw = minecraft_launcher_lib.mrpack.get_mrpack_information(path)
@@ -603,6 +744,7 @@ class StorePage(QWidget):
         self.target_lbl.setText(t("store.target_label"))
         self.search.setPlaceholderText(t("store.search_placeholder"))
         self.search_btn.setText(t("store.search"))
+        self.more_btn.setText(t("store.more"))
         # rebuild source combo, keep selection
         keep = self.source_combo.currentData()
         self.source_combo.blockSignals(True)
@@ -613,14 +755,8 @@ class StorePage(QWidget):
         if idx >= 0:
             self.source_combo.setCurrentIndex(idx)
         self.source_combo.blockSignals(False)
-        # rebuild category combo, keep selection
-        keep = self.category_combo.currentData()
-        self.category_combo.blockSignals(True)
-        self.category_combo.clear()
+        # rebuild category tab labels
         for pt, key in STORE_CATEGORIES:
-            self.category_combo.addItem(t(key), pt)
-        idx = self.category_combo.findData(keep)
-        if idx >= 0:
-            self.category_combo.setCurrentIndex(idx)
-        self.category_combo.blockSignals(False)
+            if pt in self._cat_btns:
+                self._cat_btns[pt].setText(t(key))
         self._sync_target()

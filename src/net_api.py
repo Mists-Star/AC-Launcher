@@ -8,7 +8,15 @@ from __future__ import annotations
 
 import os
 import time
+import hashlib
 import requests
+
+from .mod_names import cn_name  # round-45 资源中心 mod 中文名
+
+def _t_err(key, default, **kw):
+    from .i18n import t as _t
+    return _t(key, default=default, **kw)
+
 
 VERSION_MANIFEST_URL = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
 MODRINTH_SEARCH_URL = "https://api.modrinth.com/v2/search"
@@ -37,30 +45,351 @@ APRIL_FOOLS_IDS = {
 }
 
 _cache: dict[str, tuple[float, object]] = {}
-_CACHE_TTL = 300  # seconds
+_CACHE_TTL = 1800  # seconds (round-47: 300→1800，版本清单极少变化，30分钟足够)
+_DISK_CACHE_TTL = 86400  # keep disk cache for 24h so startup feels instant
 
 
-def _cached(key: str):
-    if key in _cache:
-        ts, val = _cache[key]
-        if time.time() - ts < _CACHE_TTL:
-            return val
+_CACHE_DISK_PATH: str | None = None
+
+
+def _disk_cache_path() -> str:
+    """数据目录缓存文件路径（模块级缓存——AC_DEV_TEMP 下 get_data_dir()
+    每次 mkdtemp 返回不同目录，不缓存会导致读/写路径不一致）。"""
+    global _CACHE_DISK_PATH
+    if _CACHE_DISK_PATH is None:
+        from .paths import get_data_dir
+        _CACHE_DISK_PATH = os.path.join(get_data_dir(), "cache", "net_api_cache.json")
+    os.makedirs(os.path.dirname(_CACHE_DISK_PATH), exist_ok=True)
+    return _CACHE_DISK_PATH
+
+
+def _load_disk_cache():
+    """Load persisted cache entries that are still fresh."""
+    path = _disk_cache_path()
+    if not os.path.exists(path):
+        return
+    try:
+        import json as _json
+        with open(path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        now = time.time()
+        for k, v in data.items():
+            if not isinstance(v, (list, tuple)) or len(v) != 2:
+                continue
+            ts, val = v
+            if now - ts < _DISK_CACHE_TTL:
+                _cache[k] = (ts, val)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _save_disk_cache():
+    """Persist current in-memory cache to disk."""
+    path = _disk_cache_path()
+    try:
+        import json as _json
+        now = time.time()
+        # drop expired entries before writing
+        with _CACHE_LOCK:
+            data = {
+                k: (ts, v) for k, (ts, v) in _cache.items()
+                if now - ts < _DISK_CACHE_TTL
+            }
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# round-34 加固：模块级缓存加锁——多 Worker 并发（store 页 + 版本页同时
+# 拉取）时迭代/写入同一 dict 会 RuntimeError。
+import threading as _threading
+_CACHE_LOCK = _threading.Lock()
+
+
+def _cached(key: str, ttl: float = _CACHE_TTL):
+    now = time.time()
+    with _CACHE_LOCK:
+        if key in _cache:
+            ts, val = _cache[key]
+            if now - ts < ttl:
+                return val
+    # round-40 P2-8 性能：不再每次 miss 读整个磁盘缓存文件——
+    # _load_disk_cache() 在模块 import 时已把 24h 内的磁盘缓存全部读入
+    # _cache（ts 不变），_cache 里过期 = 磁盘里同样过期，无需再 revive。
+    # round-65：调用方可按 key 放宽 TTL（如版本清单走磁盘 24h 语义）。
     return None
 
 
 def _store(key: str, val) -> None:
-    _cache[key] = (time.time(), val)
+    with _CACHE_LOCK:
+        _cache[key] = (time.time(), val)
+    _save_disk_cache()
+
+
+# Load any previously-cached results on module import so the store page / version
+# list can render instantly on the first run after an app restart.
+_load_disk_cache()
 
 
 class NetError(Exception):
     pass
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 通用下载器（round-37 轴心2：断点续传）
+# ── HTTP Range 续传：本地存在 <dest>.part 时从断点续传，服务器 206 追加、
+#    416 说明已完整。所有下载函数统一走这里（mod/modpack/cf/optifine/java）。
+# ══════════════════════════════════════════════════════════════════════════
+_CHUNK = 65536
+
+
+def download_file(
+    url: str,
+    dest: str,
+    *,
+    resume: bool = True,
+    progress=None,
+    headers: dict | None = None,
+    timeout: int = 60,
+    cancel=None,
+) -> str:
+    """下载 ``url`` 到 ``dest``，支持断点续传 + 进度回调。
+
+    Args:
+        resume:    True 时若有 <dest>.part 残留则从断点续传（默认）
+        progress:  callable(sofar, total)——total 未知时为 0
+        cancel:    callable() -> bool；返回 True 时中断（round-40 P2-10：
+                   队列 shutdown 用它在 chunk 边界安全中断，.part 留下次续传）
+    返回 dest。失败抛 NetError。
+    """
+    dest_tmp = dest + ".part"
+    start = 0
+    if resume and os.path.exists(dest_tmp):
+        start = os.path.getsize(dest_tmp)
+    hdrs = dict(_HEADERS)
+    if headers:
+        hdrs.update(headers)
+    if start:
+        hdrs["Range"] = f"bytes={start}-"
+    try:
+        r = requests.get(
+            url, headers=hdrs, timeout=timeout, stream=True, proxies=_proxies())
+        if start and r.status_code == 416:
+            # Range 不满足 = 本地 .part 已等于完整大小 → 直接收尾
+            os.replace(dest_tmp, dest)
+            return dest
+        r.raise_for_status()
+        resume_ok = bool(start and r.status_code == 206)
+        total = start + int(r.headers.get("Content-Length", 0) or 0)
+        sofar = start
+        mode = "ab" if resume_ok else "wb"
+        with open(dest_tmp, mode) as f:
+            for chunk in r.iter_content(_CHUNK):
+                if not chunk:
+                    continue
+                if cancel is not None and cancel():
+                    raise NetError(_t_err("err.download_cancel", default="下载已取消"))  # .part 保留，下次断点续传
+                f.write(chunk)
+                sofar += len(chunk)
+                if progress:
+                    try:
+                        progress(sofar, total)
+                    except Exception:
+                        pass
+    except requests.RequestException as e:
+        raise NetError(f"下载失败：{e}") from e
+    os.replace(dest_tmp, dest)
+    return dest
+
+
+_ParallelChunk = tuple[int, int]  # (byte_start, byte_end) inclusive
+
+
+def parallel_download_file(
+    url: str,
+    dest: str,
+    *,
+    threads: int | None = None,
+    progress=None,
+    headers: dict | None = None,
+    timeout: int = 30,
+    chunk_mb: int = 16,
+    cancel=None,
+) -> str:
+    """分块多线程下载单文件（HTTP Range），失败自动回退到单流 ``download_file``。
+
+    round-48 落地「下载多线程化」核心部分：跑一次性大文件（安装器 jar、
+    Minecraft jar 等）时把文件切成多段，用 ``threads`` 个线程并行拉取，再拼回
+    一个预建的 ``.part`` 文件；全部完成才 ``os.replace`` 到目标（原子）。
+
+    - 服务器不支持 Range（返回 200 而非 206）→ 无缝回退单流断点续传。
+    - 任一分块重试耗尽仍失败 → 清理 .part 并回退单流（保证能下载完）。
+    - ``progress(sofar, total)`` 与 ``download_file`` 同签名；``cancel()`` 为真立即中断。
+    返回 dest。
+    """
+    import time as _time
+
+    hdrs = dict(_HEADERS)
+    if headers:
+        hdrs.update(headers)
+
+    # 1) 探测：带 Range bytes=0-0 的 GET，206 说明支持分块，0 响应体极小
+    probe = dict(hdrs)
+    probe["Range"] = "bytes=0-0"
+    try:
+        r = requests.get(url, headers=probe, timeout=timeout, stream=True, proxies=_proxies())
+    except requests.RequestException:
+        return download_file(url, dest, resume=True, progress=progress,
+                             headers=headers, timeout=timeout, cancel=cancel)
+    if r.status_code != 206:
+        r.close()
+        return download_file(url, dest, resume=True, progress=progress,
+                             headers=headers, timeout=timeout, cancel=cancel)
+    cr = r.headers.get("Content-Range", "")
+    r.close()
+    try:
+        total = int(cr.rsplit("/", 1)[-1]) if "/" in cr else 0
+    except ValueError:
+        total = 0
+    if total <= 0:
+        return download_file(url, dest, resume=True, progress=progress,
+                             headers=headers, timeout=timeout, cancel=cancel)
+
+    # 2) 智能容量：分块数不超过「每块至少 chunk_mb」，也不超过整数个并发上限
+    ncpu = os.cpu_count() or 4
+    cap = threads or min(ncpu, 8)
+    n = max(1, min(cap, total // (chunk_mb * 1024 * 1024) + 1, total))
+    step = max(total // n, 1)
+    ranges: list[_ParallelChunk] = []
+    lo = 0
+    while lo < total:
+        hi = min(lo + step - 1, total - 1)
+        ranges.append((lo, hi))
+        lo = hi + 1
+
+    # 3) 预建 .part（对齐长度），各线程写自己段
+    part = dest + ".part"
+    if os.path.exists(dest):
+        os.remove(dest)
+    with open(part, "wb") as f:
+        f.truncate(total)
+
+    lock = _threading.Lock()
+    done = [0]
+
+    def _tick(nbytes: int) -> None:
+        with lock:
+            done[0] += nbytes
+            d = done[0]
+        if progress:
+            try:
+                progress(d, total)
+            except Exception:
+                pass
+
+    def _worker(seg: _ParallelChunk) -> None:
+        s, e = seg
+        for attempt in range(3):
+            try:
+                h = dict(hdrs)
+                h["Range"] = f"bytes={s}-{e}"
+                rr = requests.get(url, headers=h, timeout=timeout, stream=True, proxies=_proxies())
+                try:
+                    if rr.status_code not in (206, 200):
+                        rr.raise_for_status()
+                    seg_written = 0
+                    with open(part, "r+b") as fh:
+                        fh.seek(s)
+                        for chunk in rr.iter_content(_CHUNK):
+                            if not chunk:
+                                continue
+                            if cancel is not None and cancel():
+                                raise NetError(_t_err("err.download_cancel", default="下载已取消"))
+                            fh.write(chunk)
+                            seg_written += len(chunk)
+                            _tick(len(chunk))
+                    # 校验本段实际写满（.part 已 truncate 到全长，未写区域是零填充，
+                    # 所以必须以「写入字节数」判定，不能用 read 长度）
+                    if seg_written >= e - s + 1:
+                        return
+                    raise NetError("段长度不足，重试")
+                finally:
+                    rr.close()
+            except NetError:
+                raise
+            except Exception:
+                if attempt == 2:
+                    raise
+                _time.sleep(0.5 * (attempt + 1))
+
+    # 4) 并行执行；任一失败 → 清残件回退单流（保证完成）
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(n, len(ranges))) as ex:
+            list(ex.map(_worker, ranges))
+    except Exception:
+        os.remove(part) if os.path.exists(part) else None
+        return download_file(url, dest, resume=False, progress=progress,
+                             headers=headers, timeout=timeout, cancel=cancel)
+    os.replace(part, dest)
+    return dest
+
+
+# round-42 自动选源：进程级缓存测速结果（10 分钟）
+_AUTO_MIRROR: str | None = None
+_AUTO_MIRROR_AT: float = 0.0
+
+
+def _pick_auto_mirror() -> str:
+    """测速选择官方/Bmclapi manifest 端点（对齐 HMCL AutoDownloadProvider）。
+
+    round-44 性能：HEAD 测速（之前 GET 拉整个 ~1MB manifest ×2，慢网上
+    新建实例的版本列表要等 10s+ 才出来——「版本加载不出来」的根因之一）。
+    round-46 优化：HEAD 超时从 5s 降到 3s，两个请求并行（最快 1.5s 出结果）。
+    """
+    global _AUTO_MIRROR, _AUTO_MIRROR_AT
+    import time as _time
+    now = _time.time()
+    if _AUTO_MIRROR and now - _AUTO_MIRROR_AT < 600:
+        return _AUTO_MIRROR
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _test(url):
+        try:
+            t0 = _time.time()
+            r = requests.head(url, headers=_HEADERS, timeout=3, proxies=_proxies())
+            if r.status_code >= 400:
+                return None
+            return url, _time.time() - t0
+        except Exception:
+            return None
+
+    best, best_t = VERSION_MANIFEST_URL, None
+    urls = [VERSION_MANIFEST_URL, MANIFEST_BMCLAPI]
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = {ex.submit(_test, url): url for url in urls}
+        for fut in as_completed(futures, timeout=4):
+            res = fut.result()
+            if res:
+                url, dt = res
+                if best_t is None or dt < best_t:
+                    best, best_t = url, dt
+
+    _AUTO_MIRROR = best
+    _AUTO_MIRROR_AT = now
+    return best
+
+
 def _manifest_url() -> str:
     """Pick the version-manifest endpoint per the download_mirror setting."""
     try:
         from .settings_dialog import load_config
-        if load_config().get("download_mirror", "bmclapi") == "bmclapi":
+        mode = load_config().get("download_mirror", "bmclapi")
+        if mode == "auto":
+            return _pick_auto_mirror()
+        if mode == "bmclapi":
             return MANIFEST_BMCLAPI
     except Exception:  # noqa: BLE001 - config may be unavailable in some contexts
         pass
@@ -85,9 +414,16 @@ def fetch_versions() -> tuple[str, list[dict]]:
 
     Ordered: latest release first, then other releases, then snapshots/old.
     """
-    cached = _cached("versions")
+    cached = _cached("versions", _DISK_CACHE_TTL)
     if cached is not None:
-        return cached
+        # round-57 修：磁盘缓存来自历史版本（schema 曾为 list[str]）或损坏时
+        # 直接返回会让新代码 v.get("id") 崩溃（新建实例一刷新版本列表必炸）。
+        # 仅当是 (latest, [{id,...}...]) 结构才信任；否则走网络重新拉取。
+        if isinstance(cached, tuple) and len(cached) == 2:
+            latest, versions = cached
+            if isinstance(versions, list) and all(
+                    isinstance(v, dict) and v.get("id") for v in versions):
+                return cached
     try:
         r = requests.get(
             _manifest_url(), headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
@@ -96,18 +432,20 @@ def fetch_versions() -> tuple[str, list[dict]]:
         r.raise_for_status()
         data = r.json()
     except requests.RequestException as e:
-        raise NetError(f"无法获取版本列表：{e}") from e
+        raise NetError(_t_err("err.fetch_versions", default="无法获取版本列表：{err}", err=e)) from e
 
     latest = data.get("latest", {}).get("release", "")
-    versions = [
-        {
+    # round-38：脏 manifest 缺 id 的条目跳过（v["id"] 会 KeyError 崩整个列表）
+    versions = []
+    for v in data.get("versions", []):
+        if not isinstance(v, dict) or not v.get("id"):
+            continue
+        versions.append({
             "id": v["id"],
             "type": v.get("type", "release"),
             "releaseTime": v.get("releaseTime", ""),
             "april": v["id"] in APRIL_FOOLS_IDS,
-        }
-        for v in data.get("versions", [])
-    ]
+        })
     # order: releases first (stable), then snapshots, then legacy
     order = {"release": 0, "snapshot": 1, "old_beta": 2, "old_alpha": 3}
 
@@ -120,42 +458,252 @@ def fetch_versions() -> tuple[str, list[dict]]:
     return result
 
 
-def get_mod_download(project_id: str) -> tuple[str, str]:
-    """Resolve the latest version's primary file (filename, download url)."""
+def _modrinth_versions(project_id: str, mc_version: str = "", loader: str = "") -> list[dict]:
+    """Fetch the version list of a Modrinth project, optionally filtered by
+    game version + loader (server-side filter params).
+
+    round-40 秒加载：结果缓存（300s 内存 + 磁盘）——依赖解析/下载时重复
+    调用同一 project 不再每次网络请求。
+    """
+    key = f"mv:{project_id}:{mc_version}:{loader}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    base = MODRINTH_SEARCH_URL.replace("/search", "")
+    params = {}
+    if mc_version:
+        params["game_versions"] = f'["{mc_version}"]'
+    if loader and loader not in ("vanilla", ""):
+        params["loaders"] = f'["{loader}"]'
     try:
         r = requests.get(
-            f"{MODRINTH_SEARCH_URL.replace('/search', '')}/project/{project_id}/version",
-            headers=_HEADERS, timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
+            f"{base}/project/{project_id}/version",
+            params=params, headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
+            proxies=_proxies(),
         )
         r.raise_for_status()
         versions = r.json()
     except requests.RequestException as e:
-        raise NetError(f"无法获取模组版本：{e}") from e
-    if not versions:
-        raise NetError("该模组没有可下载的文件")
-    # versions are newest-first on Modrinth
-    files = versions[0].get("files", [])
+        raise NetError(_t_err("err.mod_versions", default="无法获取模组版本：{err}", err=e)) from e
+    versions = versions if isinstance(versions, list) else []
+    _store(key, versions)
+    return versions
+
+
+def _version_primary_file(version: dict, project_id: str) -> tuple[str, str]:
+    """(filename, url) of a version's primary file. Raises NetError if none."""
+    files = version.get("files", [])
+    if not files:
+        raise NetError("该模组版本没有可下载的文件")
     primary = next((f for f in files if f.get("primary")), files[0])
     return primary.get("filename", f"{project_id}.jar"), primary.get("url", "")
 
 
-def download_mod_to(project_id: str, dest_dir: str) -> str:
-    """Download the latest primary file of a mod into dest_dir. Returns path."""
-    filename, url = get_mod_download(project_id)
-    if not url:
-        raise NetError("没有可用的下载链接")
-    os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, filename)
+# round-41：Modrinth project 信息查询（slug→id/title/最新版本）——缓存。
+def get_project_info(slug_or_id: str) -> dict | None:
+    """Fetch a Modrinth project by slug or id (cached 300s+disk). None if 404."""
+    if not slug_or_id:
+        return None
     try:
-        r = requests.get(url, headers=_HEADERS, timeout=60, stream=True, proxies=_proxies())
+        from .i18n import get_language
+        _lang = get_language()
+    except Exception:
+        _lang = "zh-CN"
+    key = "proj:" + str(slug_or_id) + ":" + _lang
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    base = MODRINTH_SEARCH_URL.replace("/search", "")
+    try:
+        r = requests.get(
+            f"{base}/project/{slug_or_id}",
+            headers=_HEADERS, timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
+        )
+        if r.status_code == 404:
+            _store(key, None)
+            return None
         r.raise_for_status()
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(8192):
-                if chunk:
-                    f.write(chunk)
+        info = r.json()
     except requests.RequestException as e:
-        raise NetError(f"下载失败：{e}") from e
-    return dest
+        raise NetError(_t_err("err.project_info", default="无法获取项目信息：{err}", err=e)) from e
+    # round-45 中文界面：title 用内置映射中文名
+    if isinstance(info, dict) and _lang != "en-US":
+        info["title"] = cn_name(info.get("slug", slug_or_id), info.get("title", ""))
+    _store(key, info)
+    return info
+
+
+def get_mod_download(project_id: str) -> tuple[str, str]:
+    """Resolve the latest version's primary file (filename, download url)."""
+    versions = _modrinth_versions(project_id)
+    if not versions:
+        raise NetError("该模组没有可下载的文件")
+    return _version_primary_file(versions[0], project_id)
+
+
+# ── Mod 依赖树解析（round-37 轴心1，对齐 BlockHelm/PCL2/HMCL）───────────
+# Modrinth version dict 带 `dependencies: [{project_id, dependency_type}]`。
+# 下载 mod 时递归拉取 required 依赖（本体 + 所有缺的依赖文件），
+# optional 跳过、incompatible 跳过、已下载过的依赖去重。
+
+_MOD_DEP_MAX_DEPTH = 5
+
+
+def resolve_mod_dependencies(
+    project_id: str,
+    mc_version: str = "",
+    loader: str = "",
+    version_id: str = "",
+    _seen: set | None = None,
+    _depth: int = 0,
+) -> list[dict]:
+    """递归解析 required 依赖，返回去重后的文件清单。
+
+    每项: {"project_id", "filename", "url", "optional"(bool)}
+    本体在第一位；递归深度 >5 或循环依赖由 _seen 截断。
+
+    round-66：新增 ``version_id`` —— 指定某一版本 id 解析本体及该版本的依赖
+    树（资源中心"选择所有版本下载"）；为空时仍取最新匹配版本，行为不变。
+    """
+    if _seen is None:
+        _seen = set()
+    out: list[dict] = []
+    if project_id in _seen or _depth > _MOD_DEP_MAX_DEPTH:
+        return out
+    _seen.add(project_id)
+    try:
+        versions = _modrinth_versions(project_id, mc_version, loader)
+    except NetError:
+        return out  # 网络错误 / 项目不存在：跳过该节点，不中断整棵依赖树
+    if not versions:
+        return out
+    target = versions[0]
+    if version_id:
+        target = next((v for v in versions if v.get("id") == version_id), None)
+        if target is None:
+            return out
+    try:
+        filename, url = _version_primary_file(target, project_id)
+    except NetError:
+        return out
+    out.append({
+        "project_id": project_id,
+        "filename": filename,
+        "url": url,
+        "optional": False,
+    })
+    for dep in target.get("dependencies", []):
+        dtype = dep.get("dependency_type", "")
+        dpid = dep.get("project_id", "")
+        if not dpid or dtype in ("optional", "incompatible"):
+            continue
+        if dpid in _seen:
+            continue
+        out.extend(
+            resolve_mod_dependencies(dpid, mc_version, loader, "", _seen, _depth + 1))
+    return out
+
+
+def download_mod_to(
+    project_id: str,
+    dest_dir: str,
+    mc_version: str = "",
+    loader: str = "",
+) -> str:
+    """Download a mod + its required dependency tree into dest_dir.
+
+    round-37：依赖树自动拉取（Modrinth required dependencies 递归解析）。
+    返回本体文件路径（保持旧签名兼容——UI 只需显示主文件）。
+    """
+    files = resolve_mod_dependencies(project_id, mc_version, loader)
+    if not files:
+        raise NetError("没有可下载的文件")
+    os.makedirs(dest_dir, exist_ok=True)
+    primary_path = ""
+    for item in files:
+        if not item["url"]:
+            continue
+        dest = os.path.join(dest_dir, item["filename"])
+        # round-37：统一断点续传下载器（中断后 .part 续传）
+        try:
+            download_file(item["url"], dest)
+        except NetError as e:
+            raise NetError(f"下载失败（{item['filename']}）：{e}") from e
+        if item["project_id"] == project_id:
+            primary_path = dest
+    return primary_path
+
+
+def download_mod_version_to(
+    project_id: str,
+    version_id: str,
+    dest_dir: str,
+    mc_version: str = "",
+    loader: str = "",
+) -> str:
+    """Download a specific version of a mod + its dependency tree (round-66).
+
+    资源中心详情页"选择版本下载"入口：与 `download_mod_to` 行为一致，
+    但解析给定的 Modrinth version id 而非最新匹配版本。
+    """
+    files = resolve_mod_dependencies(
+        project_id, mc_version, loader, version_id=version_id)
+    if not files:
+        raise NetError("没有可下载的文件（或该版本不存在）")
+    os.makedirs(dest_dir, exist_ok=True)
+    primary_path = ""
+    for item in files:
+        if not item["url"]:
+            continue
+        dest = os.path.join(dest_dir, item["filename"])
+        try:
+            download_file(item["url"], dest)
+        except NetError as e:
+            raise NetError(f"下载失败（{item['filename']}）：{e}") from e
+        if item["project_id"] == project_id:
+            primary_path = dest
+    return primary_path
+
+
+# ── 模组翻译（round-66）───────────────────────────────────────────────
+# 资源中心详情页"获取翻译"：免费 Google gtx 接口（无需 API key），
+# 把项目简介 / README 翻译成目标语言。结果本地缓存 24h（md5 摘要键）。
+
+_TRANSLATE_API = "https://translate.googleapis.com/translate_a/single"
+_TRANSLATE_TTL = 24 * 3600
+
+
+def translate_text(text: str, target: str = "zh-CN") -> str:
+    """Translate a chunk of text to ``target`` (默认中文)。
+
+    免费 gtx 端点无 key 即用；超长截断到 5000 字符；失败抛 NetError。
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if len(text) > 5000:
+        text = text[:5000]
+    key = "tr:" + hashlib.md5((target + text[:200]).encode("utf-8")).hexdigest()
+    cached = _cached(key, _TRANSLATE_TTL)
+    if cached is not None:
+        return cached
+    try:
+        r = requests.get(
+            _TRANSLATE_API,
+            params={"client": "gtx", "sl": "auto", "tl": target,
+                    "dt": "t", "q": text},
+            headers=_HEADERS, timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
+        )
+        r.raise_for_status()
+        data = r.json()
+        out = "".join(seg[0] for seg in data[0] if seg and seg[0])
+    except requests.RequestException as e:
+        raise NetError(
+            _t_err("err.translate", default="翻译失败：{err}", err=e)) from e
+    if not out:
+        raise NetError(_t_err("err.translate_empty", default="翻译结果为空"))
+    _store(key, out)
+    return out
 
 
 # 资源中心支持的 Modrinth project_type（对齐 PCL2 下载分类：模组/整合包/光影/资源包/数据包）
@@ -266,16 +814,7 @@ def download_curseforge_mod(project_id: str, dest_dir: str) -> str:
         raise NetError("该模组没有直接下载链接")
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, filename)
-    try:
-        r = requests.get(url, headers=_HEADERS, timeout=120, stream=True, proxies=_proxies())
-        r.raise_for_status()
-        with open(dest, "wb") as out:
-            for chunk in r.iter_content(8192):
-                if chunk:
-                    out.write(chunk)
-    except requests.RequestException as e:
-        raise NetError(f"下载失败：{e}") from e
-    return dest
+    return download_file(url, dest, timeout=120)
 
 
 # ---- CurseForge 免 key 通道（cfwidget 详情 + forgecdn 直链）----
@@ -309,7 +848,7 @@ def curseforge_link_search(query: str, limit: int = 8) -> list[dict]:
         r = requests.get(CFWIDGET_URL.format(slug=slug), headers=_HEADERS,
                          timeout=_REQUEST_TIMEOUT, proxies=_proxies())
         if r.status_code != 200:
-            raise NetError(f"CurseForge 未找到「{slug}」（或链接无效）")
+            raise NetError(_t_err("err.curseforge_missing", default="CurseForge 未找到「{slug}」（或链接无效）", slug=slug))
         d = r.json()
     except requests.RequestException as e:
         raise NetError(f"无法获取 CurseForge 信息：{e}") from e
@@ -317,12 +856,12 @@ def curseforge_link_search(query: str, limit: int = 8) -> list[dict]:
     # 取最新文件（cfwidget files 按上传时间倒序）
     files = d.get("files") or []
     if not files:
-        raise NetError("该 mod 没有可下载的文件")
+        raise NetError(_t_err("err.curseforge_no_file", default="该 mod 没有可下载的文件"))
     f = files[0]
     hits = [{
         "project_id": str(d.get("id", "")),
         "slug": slug,
-        "title": d.get("title", slug),
+        "title": cn_name(slug, d.get("title", slug)),
         "description": (d.get("summary") or "")[:160],
         "downloads": d.get("downloads", 0),
         "icon_url": d.get("thumbnail", ""),
@@ -344,17 +883,7 @@ def download_cfwidget_file(cf_file: dict, dest_dir: str) -> str:
         raise NetError("缺少文件 ID")
     url = FORGECDN_URL.format(a=fid // 1000, b=fid % 1000, name=name)
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, name)
-    try:
-        r = requests.get(url, headers=_HEADERS, timeout=120, stream=True, proxies=_proxies())
-        r.raise_for_status()
-        with open(dest, "wb") as out:
-            for chunk in r.iter_content(8192):
-                if chunk:
-                    out.write(chunk)
-    except requests.RequestException as e:
-        raise NetError(f"下载失败：{e}") from e
-    return dest
+    return download_file(url, os.path.join(dest_dir, name), timeout=120)
 
 
 def fetch_liteloader_builds(mc_version: str) -> list[dict]:
@@ -485,19 +1014,17 @@ def download_optifine_to(filename: str, dest_dir: str) -> str:
 
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, f2)
-    try:
-        dl = s.get(
-            OPTIFINE_DOWNLOADX.format(file=f2, token=token),
-            timeout=120, stream=True,
-        )
-        dl.raise_for_status()
-        with open(dest, "wb") as out:
-            for chunk in dl.iter_content(8192):
-                if chunk:
-                    out.write(chunk)
-    except requests.RequestException as e:
-        raise NetError(f"下载 OptiFine 失败：{e}") from e
-    return dest
+    # round-37：走通用断点续传下载器（session 带 OptiFine cookie/token）
+    # round-48：改走分块多线程，单文件大 jar 并行更快；Cookie 头透传
+    from urllib.parse import quote as _q
+    cookie_hdr = "; ".join(
+        f"{_q(str(k), safe='')}={_q(str(v), safe='')}" for k, v in s.cookies.items())
+    return parallel_download_file(
+        OPTIFINE_DOWNLOADX.format(file=f2, token=token),
+        dest,
+        timeout=120,
+        headers={"Cookie": cookie_hdr},
+    )
 
 
 def search_mods(query: str = "", offset: int = 0, limit: int = 20,
@@ -507,7 +1034,13 @@ def search_mods(query: str = "", offset: int = 0, limit: int = 20,
     ``project_type`` ∈ {mod, modpack, shader, resourcepack, datapack}.
     Returns list of hit dicts (same shape for every type).
     """
-    key = f"mods:{query}:{offset}:{limit}:{project_type}"
+    # round-45：语言进缓存 key——中文界面 title 已替换为中文名
+    try:
+        from .i18n import get_language
+        _lang = get_language()
+    except Exception:
+        _lang = "zh-CN"
+    key = f"mods:{query}:{offset}:{limit}:{project_type}:{_lang}"
     cached = _cached(key)
     if cached is not None:
         return cached
@@ -527,13 +1060,15 @@ def search_mods(query: str = "", offset: int = 0, limit: int = 20,
         r.raise_for_status()
         data = r.json()
     except requests.RequestException as e:
-        raise NetError(f"无法搜索资源：{e}") from e
+        raise NetError(_t_err("err.search_mods", default="无法搜索资源：{err}", err=e)) from e
 
     hits = [
         {
             "project_id": h.get("project_id", ""),
             "slug": h.get("slug", ""),
-            "title": h.get("title", ""),
+            # round-45 中文名：内置映射优先（学 PCL2），英文界面显示原名
+            "title": (cn_name(h.get("slug", ""), h.get("title", ""))
+                      if _lang != "en-US" else h.get("title", "")),
             "description": h.get("description", ""),
             "downloads": h.get("downloads", 0),
             "icon_url": h.get("icon_url", ""),
@@ -553,117 +1088,7 @@ def download_modpack_to(project_id: str, dest_dir: str) -> str:
     """
     filename, url = get_mod_download(project_id)
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, filename)
-    try:
-        r = requests.get(url, headers=_HEADERS, timeout=120, stream=True, proxies=_proxies())
-        r.raise_for_status()
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(8192):
-                if chunk:
-                    f.write(chunk)
-    except requests.RequestException as e:
-        raise NetError(f"下载整合包失败：{e}") from e
-    return dest
-
-
-
-# --------------------------------------------------------------------------
-# Extra loaders (direction: PCL CE loader coverage, 2026-08-01)
-#   Legacy Fabric  - meta.legacyfabric.net (official meta API)
-#   Cleanroom      - Forge continuation fork (1.12.2 on Java 21 + LWJGL3),
-#                    official GitHub Releases provide an installer jar
-# --------------------------------------------------------------------------
-LEGACY_FABRIC_LOADER_API = "https://meta.legacyfabric.net/v2/versions/loader"
-LEGACY_FABRIC_GAME_API = "https://meta.legacyfabric.net/v2/versions/game"
-
-
-def fetch_legacy_fabric_loaders(mc_version):
-    key = "legacyfab:" + str(mc_version)
-    cached = _cached(key)
-    if cached is not None:
-        return cached
-    try:
-        r = requests.get(
-            LEGACY_FABRIC_LOADER_API + "/" + str(mc_version),
-            headers=_HEADERS, timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
-        )
-        r.raise_for_status()
-        data = r.json()
-    except requests.RequestException as e:
-        raise NetError("Cannot fetch Legacy Fabric builds: " + str(e)) from e
-    out = []
-    for item in data:
-        loader = item.get("loader", {})
-        version = loader.get("version", "")
-        if not version:
-            continue
-        out.append({
-            "title": version,
-            "description": "Legacy Fabric · MC " + str(mc_version),
-            "_loader_version": version,
-            "downloads": 0,
-            "author": "Legacy Fabric",
-        })
-    _store(key, out)
-    return out
-
-
-def fetch_legacy_fabric_games():
-    key = "legacyfab:games"
-    cached = _cached(key)
-    if cached is not None:
-        return cached
-    try:
-        r = requests.get(
-            LEGACY_FABRIC_GAME_API,
-            headers=_HEADERS, timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
-        )
-        r.raise_for_status()
-        versions = [v["version"] for v in r.json()]
-    except requests.RequestException as e:
-        raise NetError("Cannot fetch Legacy Fabric game versions: " + str(e)) from e
-    _store(key, versions)
-    return versions
-
-
-CLEANROOM_RELEASES_API = "https://api.github.com/repos/CleanroomMC/Cleanroom/releases"
-
-
-def fetch_cleanroom_builds():
-    key = "cleanroom:releases"
-    cached = _cached(key)
-    if cached is not None:
-        return cached
-    try:
-        r = requests.get(
-            CLEANROOM_RELEASES_API,
-            params={"per_page": 20},
-            headers={**_HEADERS, "Accept": "application/vnd.github+json"},
-            timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
-        )
-        r.raise_for_status()
-        data = r.json()
-    except requests.RequestException as e:
-        raise NetError("Cannot fetch Cleanroom builds: " + str(e)) from e
-    out = []
-    for rel in data:
-        tag = rel.get("tag_name", "")
-        installer = ""
-        for a in rel.get("assets", []):
-            if a.get("name", "").endswith("-installer.jar"):
-                installer = a.get("browser_download_url", "")
-                break
-        if not installer:
-            continue
-        out.append({
-            "title": tag,
-            "description": "Cleanroom · 1.12.2 on Java 21",
-            "_installer_url": installer,
-            "downloads": 0,
-            "author": "CleanroomMC",
-        })
-    _store(key, out)
-    return out
+    return download_file(url, os.path.join(dest_dir, filename), timeout=120)
 
 
 

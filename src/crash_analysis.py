@@ -182,11 +182,14 @@ def analyze_instance(inst) -> list[CrashFinding]:
     for kind, sev, tkey, rkey, fkey, rep, _rx in _RULES:
         if kind not in seen_kinds:
             continue
+        # round-71 展示打码：崩溃证据也可能含 accessToken/用户名，展示前过滤
+        from .log_mask import mask_launch_text
+        detail = mask_launch_text("\n".join(evidence.get(kind, [])))
         findings.append(CrashFinding(
             kind=kind, severity=sev,
             title=tkey, reason=rkey, suggestion=fkey,
             repairable=rep,
-            detail="\n".join(evidence.get(kind, [])),
+            detail=detail,
         ))
     # severity ordering: critical first
     findings.sort(key=lambda f: 0 if f.severity == SEV_CRITICAL else 1)
@@ -202,17 +205,23 @@ def scan_mod_manifests(inst) -> list[dict]:
     Returns list of {mod_id, name, version, depends: [dep_id, ...]}.
     Recognises Fabric (fabric.mod.json) and Forge/NeoForge
     (META-INF/mods.toml) manifests.
+
+    round-40 P2-14 性能：jar 超过 _MAX_SCAN_JARS 时跳过深扫（读 jar 元数据很
+    慢，mod 上百个时 UI 线程会卡死）——调用方对空结果提示「mod 过多已跳过」。
     """
     import zipfile
+
+    _MAX_SCAN_JARS = 60
 
     mods_dir = getattr(inst, "mods_dir", None) or os.path.join(
         getattr(inst, "mc_dir", ""), "mods")
     out: list[dict] = []
     if not os.path.isdir(mods_dir):
         return out
-    for name in sorted(os.listdir(mods_dir)):
-        if not name.lower().endswith(".jar"):
-            continue
+    jars = sorted(n for n in os.listdir(mods_dir) if n.lower().endswith(".jar"))
+    if len(jars) > _MAX_SCAN_JARS:
+        return []  # mod 极多时跳过，避免 UI 线程卡死
+    for name in jars:
         path = os.path.join(mods_dir, name)
         try:
             with zipfile.ZipFile(path) as z:

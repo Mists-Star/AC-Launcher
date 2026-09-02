@@ -11,7 +11,7 @@ import os
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QScrollArea, QProgressBar,
+    QScrollArea, QProgressBar, QWidget,
 )
 from PySide6.QtCore import Qt, QSize
 

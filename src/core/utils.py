@@ -59,3 +59,24 @@ def write_json(path: str, data) -> None:
 def ensure_dir(path: str) -> str:
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def safe_extract_zip(zf, dest_dir: str) -> None:
+    """Extract a zipfile with zip-slip protection (round-35).
+
+    恶意 zip 可用 ``../../`` 或绝对路径把文件写到解压目录之外（zip-slip）。
+    逐成员校验解析后的目标路径必须仍在 dest_dir 内，否则跳过并记日志。
+    """
+    import posixpath
+    dest_abs = os.path.abspath(dest_dir)
+    for member in zf.infolist():
+        # 统一用 posix 规则解析，拒绝绝对路径与 .. 逃逸
+        rel = posixpath.normpath(member.filename.replace("\\", "/"))
+        if rel.startswith("..") or rel.startswith("/") or ":" in rel.split("/")[0]:
+            print(f"[safe_extract] 跳过越界 zip 条目: {member.filename!r}")
+            continue
+        target = os.path.abspath(os.path.join(dest_abs, rel))
+        if not (target == dest_abs or target.startswith(dest_abs + os.sep)):
+            print(f"[safe_extract] 跳过越界 zip 条目: {member.filename!r}")
+            continue
+        zf.extract(member, dest_abs)

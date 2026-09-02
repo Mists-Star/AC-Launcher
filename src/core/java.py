@@ -64,6 +64,15 @@ def _major_from_path(path: str) -> int:
     return 0
 
 
+# round-40 P2-5 性能：scan_javas 进程级缓存（60s TTL）——之前每次启动游戏
+# 都全盘扫 Java（含 discover_javas 整盘 os.walk），慢盘卡数秒。PCL2/HMCL 均
+# 缓存扫描结果。deep=True 全盘扫更慢，TTL 更长。
+_SCAN_CACHE: list | None = None
+_SCAN_CACHE_AT: float = 0.0
+_SCAN_TTL_DEEP = 300.0   # deep 全盘扫：5 分钟复用
+_SCAN_TTL_FAST = 30.0    # 浅扫：30s 复用
+
+
 def scan_javas(deep: bool = True) -> list[dict]:
     """Return list of installed JREs: {path, name, version, major, is_64bit}.
 
@@ -73,6 +82,13 @@ def scan_javas(deep: bool = True) -> list[dict]:
          bundled runtimes and (when ``deep``) a whole-disk sweep that finds
          *portable* unzipped JDKs the standard scanner can never see.
     """
+    global _SCAN_CACHE, _SCAN_CACHE_AT
+    import time as _time
+    now = _time.time()
+    ttl = _SCAN_TTL_DEEP if deep else _SCAN_TTL_FAST
+    if _SCAN_CACHE is not None and now - _SCAN_CACHE_AT < ttl:
+        return _SCAN_CACHE
+
     out: list[dict] = []
     seen: set[str] = set()
 
@@ -107,6 +123,8 @@ def scan_javas(deep: bool = True) -> list[dict]:
     except Exception:  # noqa: BLE001 - never let discovery break a launch
         pass
 
+    _SCAN_CACHE = out
+    _SCAN_CACHE_AT = _time.time()
     return out
 
 
@@ -163,9 +181,11 @@ def select_java(game_version: str, *, java_auto: bool = True, user_path: str = "
     Priority:
       1. explicit user path (when auto is off)
       2. an installed JRE whose major exactly matches the requirement
-      3. the nearest installed JRE with major > requirement
-      4. the highest installed JRE
-      5. bare "java" (system PATH)
+      3. the nearest installed JRE inside the compatible range (need..need+max_ok)
+      4. None → 调用方提示"需要安装 Java X"（绝不 fallback 到任意高版本/裸 java）
+
+    round-46 修复：老版本（如 1.8.9 需 Java 8）用高版本（17/21）启动会直接
+    崩溃 exit 1。兼容区间：need=8→仅 8；16→16-17；17→17-21；21→21-24。
     """
     if not java_auto and user_path:
         return user_path if os.path.isfile(user_path) else None
@@ -175,9 +195,15 @@ def select_java(game_version: str, *, java_auto: bool = True, user_path: str = "
     exact = [j for j in javas if j["major"] == need]
     if exact:
         return exact[0]["path"]
-    higher = sorted((j for j in javas if j["major"] > need), key=lambda x: x["major"])
-    if higher:
-        return higher[0]["path"]
-    if javas:
-        return sorted(javas, key=lambda x: -x["major"])[0]["path"]
-    return "java"
+    # 兼容上限（借鉴 BlockHelm：老版本拒绝高版本，新版本接受小范围更高）
+    max_ok = {8: 8, 16: 17, 17: 21, 21: 24}.get(need, need + 3)
+    compat = sorted(
+        (j for j in javas if need <= j["major"] <= max_ok),
+        key=lambda x: x["major"])
+    if compat:
+        # 优先 64 位，其次最低可用（离 need 最近）
+        c64 = [j for j in compat if j.get("is_64bit", True)]
+        pick = (c64 or compat)[0]
+        return pick["path"]
+    # 没有任何兼容 Java → None（调用方给出明确安装提示），不再 fallback
+    return None

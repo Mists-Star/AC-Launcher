@@ -32,10 +32,17 @@ from ..paths import get_data_dir
 DEFAULT_PEER = "tcp://public.easytier.cn:11010"
 
 # Release download base (GitHub) — Windows x86_64.
-EASYTIER_RELEASE_URL = (
-    "https://github.com/EasyTier/EasyTier/releases/latest/download/"
-    "easytier-windows-x86_64-v2.2.0.zip"
-)
+# Primary URL + mirrors for regions where GitHub is blocked.
+EASYTIER_VERSION = "v2.6.4"
+EASYTIER_FILENAME = f"easytier-windows-x86_64-{EASYTIER_VERSION}.zip"
+EASYTIER_RELEASE_URLS = [
+    f"https://github.com/EasyTier/EasyTier/releases/download/{EASYTIER_VERSION}/{EASYTIER_FILENAME}",
+    f"https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/{EASYTIER_VERSION}/{EASYTIER_FILENAME}",
+    f"https://v6.gh-proxy.org/https://github.com/EasyTier/EasyTier/releases/download/{EASYTIER_VERSION}/{EASYTIER_FILENAME}",
+    f"https://cdn.gh-proxy.org/https://github.com/EasyTier/EasyTier/releases/download/{EASYTIER_VERSION}/{EASYTIER_FILENAME}",
+    f"https://edgeone.gh-proxy.org/https://github.com/EasyTier/EasyTier/releases/download/{EASYTIER_VERSION}/{EASYTIER_FILENAME}",
+]
+EASYTIER_RELEASE_URL = EASYTIER_RELEASE_URLS[0]
 EASYTIER_DOCS_URL = "https://easytier.cn"
 
 _BIN_DIR = os.path.join(get_data_dir(), "easytier")
@@ -78,39 +85,50 @@ def docs_url() -> str:
 def download_easytier(dest_dir: str, progress=None) -> str:
     """Download + unzip easytier-core into dest_dir. Returns the exe path.
 
-    ``progress`` may be a callable (fraction: float) for a progress bar.
-    Raises on failure so the UI can show an error.
+    Tries multiple mirrors (GitHub direct → ghproxy mirrors) for regions where
+    GitHub is blocked. Raises on failure so the UI can show an error.
     """
     os.makedirs(dest_dir, exist_ok=True)
     import io
     import zipfile
 
-    url = EASYTIER_RELEASE_URL
-    req = urllib.request.Request(url, headers={"User-Agent": "AC-Launcher/0.2"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        data = io.BytesIO()
-        got = 0
-        while True:
-            chunk = resp.read(65536)
-            if not chunk:
-                break
-            data.write(chunk)
-            got += len(chunk)
-            if total and progress:
-                progress(got / total)
-    data.seek(0)
-    with zipfile.ZipFile(data) as z:
-        z.extractall(dest_dir)
-    exe = os.path.join(dest_dir, "easytier-core.exe")
-    if not os.path.isfile(exe):
-        # zip may nest one folder deep
-        for name in os.listdir(dest_dir):
-            cand = os.path.join(dest_dir, name, "easytier-core.exe")
-            if os.path.isfile(cand):
-                exe = cand
-                break
-    return exe
+    last_error = None
+    for url in EASYTIER_RELEASE_URLS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "AC-Launcher/0.2"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                data = io.BytesIO()
+                got = 0
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    data.write(chunk)
+                    got += len(chunk)
+                    if total and progress:
+                        progress(got / total)
+            data.seek(0)
+            with zipfile.ZipFile(data) as z:
+                from .utils import safe_extract_zip
+                safe_extract_zip(z, dest_dir)
+            exe = os.path.join(dest_dir, "easytier-core.exe")
+            if not os.path.isfile(exe):
+                # zip may nest one folder deep
+                for name in os.listdir(dest_dir):
+                    cand = os.path.join(dest_dir, name, "easytier-core.exe")
+                    if os.path.isfile(cand):
+                        exe = cand
+                        break
+            if os.path.isfile(exe):
+                return exe
+            else:
+                last_error = "下载成功但解压后未找到 easytier-core.exe"
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    raise RuntimeError(f"EasyTier 下载失败（所有镜像均不可用）：{last_error}")
 
 
 # ------------------------------------------------------------------ running
@@ -126,11 +144,14 @@ def start_node(network_name: str, network_secret: str,
     if not exe:
         return {"ok": False, "error": "easytier-core 未安装"}
 
-    cmd = [exe, "-d", "--network-name", network_name,
-           "--network-secret", network_secret,
-           "-p", peer]
+    # round-39 P2-7 安全：network_secret 走环境变量 ET_NETWORK_SECRET
+    # （easytier-core 官方支持），不落在命令行/进程列表（之前 --network-secret
+    # 直接暴露给 tasklist / 其他进程可读）。
+    cmd = [exe, "-d", "--network-name", network_name, "-p", peer]
     if hostname:
         cmd += ["--hostname", hostname]
+    env = dict(os.environ)
+    env["ET_NETWORK_SECRET"] = network_secret
     # Hide the console window on Windows.
     creationflags = 0
     if os.name == "nt":
@@ -148,6 +169,7 @@ def start_node(network_name: str, network_secret: str,
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=env,
                 creationflags=creationflags,
             )
     except Exception as e:  # noqa: BLE001

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from .theme import COLORS, RoundedCard
 from .icons import icon
 from .i18n import t
+from . import ui_kit
 from .core.sound import music
 from .win_rounded import pick_files, pick_folder, info
 from .settings_dialog import load_config, save_config
@@ -41,28 +42,20 @@ class MusicPage(QWidget):
         root.setSpacing(16)
 
         # ── header ──
-        head = QHBoxLayout()
-        title = QLabel(t("music.title"))
-        title.setProperty("cls", "big")
-        head.addWidget(title)
-        head.addStretch(1)
-        root.addLayout(head)
+        self.clear_btn = ui_kit.make_button(
+            t("music.clear"), kind="secondary", on_click=self._clear, min_h=36)
+        root.addWidget(ui_kit.page_header(
+            t("music.title"), action=self.clear_btn, icon_key="music"))
 
         # ── controls row ──
         ctl = QHBoxLayout()
         ctl.setSpacing(10)
-        self.add_btn = QPushButton(icon("add"), t("music.add_files"))
-        self.add_btn.setMinimumHeight(36)
-        self.add_btn.clicked.connect(self._add_files)
+        self.add_btn = ui_kit.make_button(
+            t("music.add_files"), icon_key="add", on_click=self._add_files, min_h=36)
         ctl.addWidget(self.add_btn)
-        self.folder_btn = QPushButton(icon("folder"), t("music.add_folder"))
-        self.folder_btn.setMinimumHeight(36)
-        self.folder_btn.clicked.connect(self._add_folder)
+        self.folder_btn = ui_kit.make_button(
+            t("music.add_folder"), icon_key="folder", on_click=self._add_folder, min_h=36)
         ctl.addWidget(self.folder_btn)
-        self.clear_btn = QPushButton(t("music.clear"))
-        self.clear_btn.setMinimumHeight(36)
-        self.clear_btn.clicked.connect(self._clear)
-        ctl.addWidget(self.clear_btn)
         ctl.addStretch(1)
         ctl.addWidget(QLabel(t("music.mode")))
         self.mode_combo = QComboBox()
@@ -70,9 +63,13 @@ class MusicPage(QWidget):
         self.mode_combo.setMinimumWidth(110)
         for mode, key in [("loop", "music.mode_loop"), ("sequential", "music.mode_sequential"), ("shuffle", "music.mode_shuffle")]:
             self.mode_combo.addItem(t(key), mode)
-        self.mode_combo.setCurrentIndex(
-            max(0, ["loop", "sequential", "shuffle"].index(self._cfg.get("bgm_mode", "loop")))
-        )
+        # round-34 加固：bgm_mode 非法值（脏配置）时 .index() 会 ValueError
+        try:
+            _mode_idx = ["loop", "sequential", "shuffle"].index(
+                self._cfg.get("bgm_mode", "loop"))
+        except ValueError:
+            _mode_idx = 0
+        self.mode_combo.setCurrentIndex(max(0, _mode_idx))
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         ctl.addWidget(self.mode_combo)
         root.addLayout(ctl)
@@ -91,26 +88,35 @@ class MusicPage(QWidget):
         self.now_lbl = QLabel(t("music.none"))
         self.now_lbl.setProperty("cls", "sub")
         nl.addWidget(self.now_lbl, stretch=1)
-        self.prev_btn = QPushButton("⏮")
-        self.prev_btn.setFixedSize(38, 38)
+        self.prev_btn = QPushButton(icon("skip_prev"), "")
+        self.prev_btn.setFixedSize(40, 40)
+        self.prev_btn.setProperty("cls", "accent")
+        self.prev_btn.setCursor(Qt.PointingHandCursor)
+        self.prev_btn.setToolTip(t("music.prev"))
         self.prev_btn.clicked.connect(lambda: (self._player.prev(), self._sync_ui()))
         nl.addWidget(self.prev_btn)
         self.play_btn = QPushButton(icon("play"), "")
         self.play_btn.setFixedSize(44, 44)
         self.play_btn.setProperty("cls", "accent")
+        self.play_btn.setCursor(Qt.PointingHandCursor)
+        self.play_btn.setToolTip(t("music.play"))
         self.play_btn.clicked.connect(self._toggle_play)
         nl.addWidget(self.play_btn)
-        self.next_btn = QPushButton("⏭")
-        self.next_btn.setFixedSize(38, 38)
+        self.next_btn = QPushButton(icon("skip_next"), "")
+        self.next_btn.setFixedSize(40, 40)
+        self.next_btn.setProperty("cls", "accent")
+        self.next_btn.setCursor(Qt.PointingHandCursor)
+        self.next_btn.setToolTip(t("music.next"))
         self.next_btn.clicked.connect(lambda: (self._player.next(), self._sync_ui()))
         nl.addWidget(self.next_btn)
         nl.addSpacing(8)
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setValue(int(float(self._cfg.get("bgm_vol", 0.4)) * 100))
-        self.vol_slider.setFixedWidth(140)
+        self.vol_slider.setMinimumWidth(120)
+        self.vol_slider.setMaximumWidth(200)
         self.vol_slider.valueChanged.connect(self._on_vol)
-        nl.addWidget(self.vol_slider)
+        nl.addWidget(self.vol_slider, stretch=1)
         root.addWidget(now)
 
         self._rebuild_list()
@@ -173,6 +179,10 @@ class MusicPage(QWidget):
     def _play_row(self, row: int):
         if 0 <= row < len(self._tracks):
             self._player.mode = self.mode_combo.currentData()
+            # round-52 修复：MusicPlayer.files 是独立于页面 _tracks 的内部列表，
+            # 必须先 set_playlist 同步，否则 play_index 因 files 为空而静默失败
+            # （点击播放无效、index 恒为 -1、无任何声音）。
+            self._player.set_playlist(self._tracks)
             self._player.play_index(row, self.vol_slider.value() / 100.0)
             self._sync_ui()
 
@@ -200,6 +210,9 @@ class MusicPage(QWidget):
         else:
             self.now_lbl.setText(t("music.none"))
         self.list.setCurrentRow(idx if 0 <= idx < len(self._tracks) else -1)
+        # round-66：播放/暂停按钮图标随状态切换（此前固定显示播放图标，
+        # 点击后无任何视觉反馈）。
+        self.play_btn.setIcon(icon("pause" if self._player.is_playing() else "play"))
 
     def retranslate_ui(self):
         self._rebuild_list()
