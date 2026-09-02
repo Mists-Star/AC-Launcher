@@ -1,9 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
 # AC Launcher — PyInstaller build spec.
 # Build: venv\Scripts\pyinstaller.exe AC_PiTest.spec --noconfirm
+# 唯一交付目录：dist_beta/AC_Launcher/（PyInstaller 直接写入，无需 robocopy 同步）
 import os
+import sys
+from pathlib import Path
 
 block_cipher = None
+
+# round-45 开源清理：libssl/libcrypto 从当前构建机 Python 的 DLLs 目录推导
+# （不再硬编码本机路径，开源后任意机器可构建）。用 sys.base_prefix：
+# venv 里 sys.executable 指向 venv/Scripts/python.exe（无 DLLs），
+# sys.base_prefix 才是真实 Python 安装根。
+_PY_DLLS = Path(sys.base_prefix) / "DLLs"
+
+# COLLECT 默认输出到 ./dist/，我们改成 ./dist_beta 作为唯一交付目录
+# 注意：PyInstaller 在 COLLECT 前会清空 distpath 下同名目录以保留 COLLECT 树
+# 之外的 launcher_config.json 时，需要 PyInstaller 的 --noconfirm 不会清 distBeta。
+# 实测：当前 COLLECT 只清空 .dist/AC_Launcher 内部目录，dist_beta/AC_Launcher 不受影响。
+DIST_DIR = os.path.abspath("dist_beta")
 
 # Collect src/ as a package so relative imports (src.core.*, src.pages_*) work.
 datas = [
@@ -31,7 +46,7 @@ _src_modules = [
     "src.core.java", "src.core.java_install", "src.core.mirror",
     "src.core.sound", "src.core.utils", "src.crash_analysis",
     "src.crash_dialog", "src.diagnostics", "src.diagnostics_dialog",
-    "src.frameless", "src.i18n", "src.icons", "src.instances",
+    "src.frameless", "src.i18n", "src.icons", "src.icons_rc", "src.instances",
     "src.java_manager_dialog", "src.launch", "src.lobby", "src.lobby_dialog",
     "src.login_dialog", "src.main_window", "src.music_page", "src.net_api",
     "src.onboarding", "src.pages_browse", "src.pages_instances", "src.paths",
@@ -48,8 +63,8 @@ a = Analysis(
         # load can find them. PyInstaller normally only places them in
         # _internal/, which is not on the DLL search path used by Python's
         # dynamic-load of _ssl.pyd at runtime → "SSL module is not available".
-        ("C:/Users/<user>/.workbuddy/binaries/python/versions/3.13.12/DLLs/libssl-3-x64.dll", "."),
-        ("C:/Users/<user>/.workbuddy/binaries/python/versions/3.13.12/DLLs/libcrypto-3-x64.dll", "."),
+        (str(_PY_DLLS / "libssl-3-x64.dll"), "."),
+        (str(_PY_DLLS / "libcrypto-3-x64.dll"), "."),
     ],
     datas=datas,
     hiddenimports=_src_modules + [
@@ -124,4 +139,5 @@ coll = COLLECT(
     upx=False,
     upx_exclude=[],
     name="AC_Launcher",
+    # 唯一交付目录：dist_beta/ 通过 build.py 的 --distpath 指定。
 )

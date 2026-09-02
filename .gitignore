@@ -48,6 +48,7 @@ _make_ico*
 _build_main.log
 
 # AC Launcher build artifacts (PyInstaller variants)
+dist_beta/
 dist_pi/
 dist_fix/
 dist_noupx/
@@ -65,3 +66,13 @@ dist_build_tmp/
 nuitka-crash-report.xml
 pyarmor.bug.log
 launcher_config.json
+
+# 诊断/截图/运行锁残留（不进仓库）
+_diag_*.py
+_audit_*.py
+_check_*.py
+_*_tmp.py
+_shot*
+_shots/
+ac.lock
+_*.png
