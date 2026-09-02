@@ -76,3 +76,5 @@ _shot*
 _shots/
 ac.lock
 _*.png
+# MC 原版纹理（本地资源，版权属 Mojang，不入库）
+assets/mc_textures/

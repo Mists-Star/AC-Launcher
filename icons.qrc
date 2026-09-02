@@ -1,0 +1,47 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file>assets/icons/ac_launcher_icon.svg</file>
+    <file>assets/icons/ac_launcher_icon_white.svg</file>
+    <file>assets/icons/account.svg</file>
+    <file>assets/icons/achievements.svg</file>
+    <file>assets/icons/add.svg</file>
+    <file>assets/icons/check.svg</file>
+    <file>assets/icons/console.svg</file>
+    <file>assets/icons/crash.svg</file>
+    <file>assets/icons/delete.svg</file>
+    <file>assets/icons/dialog_info.svg</file>
+    <file>assets/icons/dialog_question.svg</file>
+    <file>assets/icons/dialog_success.svg</file>
+    <file>assets/icons/dialog_warning.svg</file>
+    <file>assets/icons/download.svg</file>
+    <file>assets/icons/export.svg</file>
+    <file>assets/icons/external.svg</file>
+    <file>assets/icons/folder.svg</file>
+    <file>assets/icons/home.svg</file>
+    <file>assets/icons/import.svg</file>
+    <file>assets/icons/instances.svg</file>
+    <file>assets/icons/java.svg</file>
+    <file>assets/icons/language.svg</file>
+    <file>assets/icons/lobby.svg</file>
+    <file>assets/icons/login.svg</file>
+    <file>assets/icons/logo.svg</file>
+    <file>assets/icons/microsoft.svg</file>
+    <file>assets/icons/modpack.svg</file>
+    <file>assets/icons/mods.svg</file>
+    <file>assets/icons/moon.svg</file>
+    <file>assets/icons/music.svg</file>
+    <file>assets/icons/play.svg</file>
+    <file>assets/icons/refresh.svg</file>
+    <file>assets/icons/repair.svg</file>
+    <file>assets/icons/resourcepack.svg</file>
+    <file>assets/icons/search.svg</file>
+    <file>assets/icons/server.svg</file>
+    <file>assets/icons/settings.svg</file>
+    <file>assets/icons/shader.svg</file>
+    <file>assets/icons/skin.svg</file>
+    <file>assets/icons/store.svg</file>
+    <file>assets/icons/sun.svg</file>
+    <file>assets/icons/tools.svg</file>
+    <file>assets/icons/versions.svg</file>
+  </qresource>
+</RCC>
