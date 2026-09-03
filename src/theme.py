@@ -53,6 +53,10 @@ THEME_LIGHT = {
 
     # shadow
     "shadow_card":  "0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.05)",
+
+    # slider knob: white heart both themes (contrast against accent ring);
+    # kept tokenized so theme packs can override it.
+    "slider_knob": "#FFFFFF",
 }
 
 THEME_DARK = {
@@ -92,6 +96,9 @@ THEME_DARK = {
 
     # shadow
     "shadow_card":  "0 1px 3px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.35)",
+
+    # slider knob: white heart both themes (contrast against accent ring)
+    "slider_knob": "#FFFFFF",
 }
 
 # Active token table (default: LIGHT — matches user's Ardot white-bg design)
@@ -173,8 +180,8 @@ def _to_translucent(hex_color: str, alpha: int) -> str:
 
 
 # Active design tokens (override-able via theme packs)
-RADII = {"card": 12, "big": 16, "btn": 10, "small": 6}
-FONTS = {"sm": 12, "md": 14, "lg": 16, "xl": 20}
+RADII = {"card": 12, "big": 16, "btn": 10, "small": 6, "icon": 8}
+FONTS = {"xs": 11, "sm": 12, "md": 14, "lg": 16, "xl": 20}
 FONT_FAMILY_BASE = '"Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
 FONT_FAMILY = FONT_FAMILY_BASE
 # Currently applied theme pack id ("" = none)
@@ -255,23 +262,26 @@ R_CARD = 12
 R_BIG = 16
 R_BTN = 10
 R_SMALL = 6
+R_ICON = 8
 
 FONT_FAMILY = '"Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
-F_SM, F_MD, F_LG, F_XL = 12, 14, 16, 20
+F_XS, F_SM, F_MD, F_LG, F_XL = 11, 12, 14, 16, 20
 
 
 def _sync_radii() -> None:
     """Recompute module-level R_* constants from the RADII dict."""
-    global R_CARD, R_BIG, R_BTN, R_SMALL
+    global R_CARD, R_BIG, R_BTN, R_SMALL, R_ICON
     R_CARD = RADII.get("card", 12)
     R_BIG = RADII.get("big", 16)
     R_BTN = RADII.get("btn", 10)
     R_SMALL = RADII.get("small", 6)
+    R_ICON = RADII.get("icon", 8)
 
 
 def _sync_fonts() -> None:
     """Recompute module-level F_* / FONT_FAMILY from the FONTS dict."""
-    global F_SM, F_MD, F_LG, F_XL, FONT_FAMILY
+    global F_XS, F_SM, F_MD, F_LG, F_XL, FONT_FAMILY
+    F_XS = FONTS.get("xs", 11)
     F_SM = FONTS.get("sm", 12)
     F_MD = FONTS.get("md", 14)
     F_LG = FONTS.get("lg", 16)
@@ -562,7 +572,7 @@ QPushButton[cls="danger"] {
     border: 1px solid $danger;
     color: $danger;
 }
-QPushButton[cls="danger"]:hover { background: rgba(239,68,68,0.08); }
+QPushButton[cls="danger"]:hover { background: $danger_hover; }
 /* secondary outline button (visible on both light and dark themes) */
 QPushButton[cls="secondary"] {
     background: transparent;
@@ -576,7 +586,7 @@ QPushButton[cls="secondary"]:hover {
 }
 QPushButton[cls="secondary"]:pressed {
     background: $accent;
-    color: #FFFFFF;
+    color: $text_on_accent;
 }
 /* segmented control button (新手 / 进阶) */
 QPushButton[cls="seg"] {
@@ -589,7 +599,7 @@ QPushButton[cls="seg"]:first { border-top-left-radius: ${r_small}px; border-bott
 QPushButton[cls="seg"]:last { border-top-right-radius: ${r_small}px; border-bottom-right-radius: ${r_small}px; }
 QPushButton[cls="seg"]:checked {
     background: $accent;
-    color: #FFFFFF;
+    color: $text_on_accent;
     border-color: $accent;
     font-weight: 600;
 }
@@ -661,7 +671,7 @@ QSlider::handle:horizontal {
     width: 10px;
     height: 10px;
     margin: -2px 0;
-    background: #FFFFFF;
+    background: $slider_knob;
     border: 2px solid $accent;
     border-radius: 7px;
 }
@@ -696,7 +706,7 @@ QListWidget::item:selected {
 /* 左侧导航分组标题（不可选灰字，功能区分化） */
 [cls="nav-group"] {
     color: $text_sub;
-    font-size: 12px;
+    font-size: ${f_xs}px;
     font-weight: 700;
     letter-spacing: 1px;
     background: transparent;
@@ -810,10 +820,11 @@ QRadioButton {
 QRadioButton::indicator {
     width: 18px; height: 18px;
     /* round-46 用户反馈"白色块看不见"：$border 在白主题下太浅（#E5E7EB），
-     * radio 圆圈在白背景几乎透明。改用 $text_sub（深灰）作为未选边框，可见。 */
+     * radio 圆圈在白背景几乎透明。改用 $text_sub（深灰）作为未选边框，可见。
+     * 未选圆心随主题（light 白 / dark 深色），选中后换 accent。 */
     border: 2px solid $text_sub;
     border-radius: 9px;
-    background: #FFFFFF;
+    background: $bg_frost;
 }
 QRadioButton::indicator:checked {
     background: $accent;
@@ -905,7 +916,7 @@ QStatusBar {
 [cls="surface"] {
     background: $glassy;
     border: 1px solid $border;
-    border-radius: 12px;
+    border-radius: ${r_card}px;
 }
 QPushButton[cls="surface"] {
     text-align: left;
@@ -917,7 +928,7 @@ QPushButton[cls="surface"]:hover {
 [cls="row"] {
     background: $glassy;
     border: 1px solid $border;
-    border-radius: 10px;
+    border-radius: ${r_btn}px;
 }
 QPushButton[cls="row"] {
     text-align: left;
@@ -929,32 +940,32 @@ QPushButton[cls="row"]:hover {
 QPushButton[cls="icon-btn"] {
     background: transparent;
     border: none;
-    border-radius: 8px;
+    border-radius: ${r_icon}px;
 }
 QPushButton[cls="icon-btn"]:hover {
     background: $bg_hover;
 }
 [cls="tile"] {
     background: $accent_soft;
-    border-radius: 12px;
+    border-radius: ${r_card}px;
 }
 [cls="pill"] {
     background: $bg_input;
     color: $text_sub;
     border: 1px solid $border;
-    border-radius: 9px;
+    border-radius: ${r_small}px;
     padding: 2px 10px;
-    font-size: 11px;
+    font-size: ${f_xs}px;
 }
 [cls="loader-card"] {
     background: $glassy;
     border: 1px solid $border;
-    border-radius: 10px;
+    border-radius: ${r_small}px;
 }
 [cls="loader-card-on"] {
     background: $accent_soft;
     border: 2px solid $accent;
-    border-radius: 10px;
+    border-radius: ${r_small}px;
 }
 [cls="pcl2-top"] {
     background: $bg_panel;
@@ -964,9 +975,9 @@ QPushButton[cls="pcl2-pill"] {
     background: transparent;
     color: $text_sub;
     border: none;
-    border-radius: 8px;
+    border-radius: ${r_icon}px;
     padding: 6px 18px;
-    font-size: 13px;
+    font-size: ${f_md}px;
 }
 QPushButton[cls="pcl2-pill"]:hover {
     background: $bg_hover;
@@ -981,17 +992,21 @@ QPushButton[cls="chip"] {
     background: $bg_card;
     color: $text_sub;
     border: 1px solid $border;
-    border-radius: 10px;
+    border-radius: ${r_btn}px;
     padding: 4px 15px;
-    font-size: 13px;
+    font-size: ${f_md}px;
 }
 QPushButton[cls="chip"]:hover {
     background: $bg_hover;
     color: $text_main;
 }
+QPushButton[cls="chip"]:pressed {
+    background: $accent_soft;
+    color: $accent;
+}
 QPushButton[cls="chip"]:checked {
     background: $accent;
-    color: #FFFFFF;
+    color: $text_on_accent;
     border-color: $accent;
     font-weight: 600;
 }
@@ -1006,7 +1021,11 @@ def build_qss() -> str:
     if cached is not None:
         return cached
     subst = dict(COLORS)
+    # 兜底：text_on_accent 只在 set_accent_color/set_theme_mode 里写入，默认
+    # 冷启动（未自定义 accent）时 COLORS 可能缺失 → QSS 出现字面 $text_on_accent。
+    subst.setdefault("text_on_accent", "#FFFFFF")
     subst["font_family"] = FONT_FAMILY
+    subst["f_xs"] = F_XS
     subst["f_sm"] = F_SM
     subst["f_md"] = F_MD
     subst["f_lg"] = F_LG
@@ -1015,6 +1034,11 @@ def build_qss() -> str:
     subst["r_big"] = R_BIG
     subst["r_btn"] = R_BTN
     subst["r_small"] = R_SMALL
+    subst["r_icon"] = R_ICON
+    # round-xx 主题一致性：danger 按钮 hover 底 = danger 色 8% 透明度
+    # （原 QSS 硬编码 rgba(239,68,68,0.08)，换成 danger token 派生，
+    #  自定义主题包改 danger 时 hover 底随之联动）。
+    subst["danger_hover"] = _to_translucent(COLORS.get("danger", "#EF4444"), 20)
     # 透底模式（round-51）：应用层底色转半透明，让系统 Acrylic 的桌面模糊
     # 透出来；关闭时保持实色（round-32 默认）。
     if _app_bg_translucent:
@@ -1204,9 +1228,9 @@ class AcSliderStyle(QProxyStyle):
         sp = QRectF(g.left(), g.top(), max(6.0, hx - g.left()), g.height())
         p.setBrush(QColor(COLORS.get("accent", "#7C3AED")))
         p.drawRoundedRect(sp, 3, 3)
-        # handle：圆形 12px（accent 边 + 白心）
+        # handle：圆形 12px（accent 边 + 白心，白心走 slider_knob token）
         hr = 6.0
-        p.setBrush(QColor("#FFFFFF"))
+        p.setBrush(QColor(COLORS.get("slider_knob", "#FFFFFF")))
         pen = p.pen()
         from PySide6.QtGui import QPen
         p.setPen(QPen(QColor(COLORS.get("accent", "#7C3AED")), 2))

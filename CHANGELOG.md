@@ -1,6 +1,132 @@
 # AC Launcher 更新日志
 
-## v1.0.4-beta（2026-08-30）— 日志打码 · 非 ASCII 路径警告（round-70/71）
+> **版本策略（2026-09-02 起）**：正式发布前不再使用 `v1.x` 前缀，改为纯
+> `round-NN` 内部迭代号。对外版本号只有在按《RELEASE\_1.0.0\_CHECKLIST.md》
+> 全部完工、完成首个 release 时才一次性打上 `v1.0.0`。
+
+## round-77（2026-09-03）— 日志终端：搜索高亮 · 导出到文件
+
+> 落地《RELEASE\_1.0.0\_CHECKLIST》B 段第 1 项（对齐 Zaphyrous 日志面板——9-02 对标报告点名的真实差距：无关键词搜索高亮与导出文件）。
+
+* **搜索并高亮全部匹配**：console 页新增搜索行（header 下方）。输入即高亮所有匹配片段
+  （`accent_soft` 主题底色、大小写不敏感），右侧实时显示「n 处匹配」；**Enter 跳下一个
+  匹配**（到底自动从头再来一轮），搜索框带清除按钮
+
+* **过滤 / 搜索职责分离**：过滤行 = 只展示匹配行（保持原有语义）；搜索行 = 全量保留 +
+  高亮 + 跳转。两行独立，互不影响
+
+* **渲染防抖**：`_render` 内容未变化时不再重建 QPlainTextEdit 文本——避免 1s poll 每次
+  重置选区、打断搜索选中（此前每次 tail 都会 `setPlainText` 全量重建）
+
+* **导出到文件**：「导出…」按钮把当前视图（过滤后的展示结果）存为 `.txt`，默认文件名
+  `<实例名>_<yyyyMMdd-HHmmss>.txt`；日志为空时 toast 拦截不落盘；成功 toast（复用
+  round-76 弹窗收敛）、磁盘/编码失败保留模态 warn
+
+* **i18n**：新增 `console.search_placeholder / search_count / export / export_title /
+  export_done_title / export_done / export_fail / export_empty` 8 键（中英对称）
+
+### 🔍 验证
+
+* compileall 0 错误；`_diag_console_search_tmp.py` 11 项断言全过（计数/高亮片段数/
+  清空复位/Enter 跳转选中/过滤联动/导出落盘内容一致/toast 触发/空日志拦截）
+
+* `_diag_all.py` 全量回归绿（新脚本自动纳入 glob 集）；`_audit_i18n.py` ZH\_NOT\_EN /
+  EN\_NOT\_ZH 均为空
+
+## round-76（2026-09-03）— 弹窗收敛：通用 toast 浮窗 · 模态 info 大批收敛
+
+* **通用轻提示浮窗** **`show_toast`**（main\_window）：右下角滑入 → 停留 → 淡出，
+  中性主题色（accent 左侧竖条 + 玻璃底 + 随主题 text\_main/text\_sub，无硬编码色），
+  与成就 toast（MC 棕金风）并存互不干扰；复用 `_active_toasts` 防 GC
+
+* **`win_rounded.toast`** **辅助**：主窗口上下文 → 浮窗；窗口外/对话框内自动回退模态 info
+
+* **收敛 10 处模态 info → toast**：
+
+  * 实例备份完成 / 无快照提示 / 恢复完成 / 克隆提示
+
+  * 实例应用整合包完成
+
+  * 整合包导入完成（modpack.done）
+
+  * 模组：未选实例提示 / 已是最新 / 批量更新完成 / 添加模组提示
+
+  * 资源中心：创建实例成功 / 未选实例下载提示（×2）
+
+* **保留模态的 info**（决策/错误/引导性质，3 处 + 对话框上下文）：
+  新实例向导提示、选错包格式错误、坏包提示
+
+* **顺带修 bug**：`_copy_mod_name` 里 `from .toast import toast` 引用不存在的模块
+  （round-74 并行编辑覆盖时残留——右键"复制文件名"触发即崩溃），改为 `win_rounded.toast`
+
+### 🔍 验证
+
+* compileall 0 错误；offscreen 冒烟通过（show\_toast 存在、QSS 无遗留 token、模块导入全通）；
+  残留检索确认无 `from .toast import`、剩余 info 仅 3 处合理保留
+
+## round-75（2026-09-03）— 交互反馈：整合包导入进度 · 按压反馈补齐
+
+* **整合包导入进度感**：`_import_pack_path`（按钮/拖拽共用入口）导入期间在主窗口状态条
+  挂上转圈进度条 + 「正在导入，请稍候…」文案，成功或报错都恢复就绪——解决大包导入
+  几十秒内"点了没反应"的错觉；复用已有 `modpack.importing` i18n 键（无重复新增）
+
+* **按压反馈补齐**：`icon-btn` / `chip` / `pcl2-pill` 补 `:pressed` 状态
+  （icon-btn → `$border_light`；chip/pcl2-pill → `$accent_soft` + accent 字），
+  与基础/accent/danger/secondary/seg 的既有按压体系对齐
+
+### 🔍 验证
+
+* compileall 0 错误；offscreen 冒烟通过；build\_qss 无遗留 `$token`；i18n 键中英对称
+
+## round-74（2026-09-02）— 主题一致性 QSS 层 · 模组右键菜单
+
+* **模组右键菜单**：模组管理页 `ModCard` 新增右键（对齐 Prism/CurseForge 鼠标流）——「打开所在文件夹」（explorer `/select` 直接定位文件，排查冲突更快）/「复制文件名」（写进剪贴板 + 状态条轻提示，查 Modrinth 时即贴即搜）；新增 `mods.open_folder` / `mods.copy_name` / `mods.copy_name_done` 中英键
+
+* **字号层级扩展**：`FONTS` 新增 `xs`(11) 档，`F_XS/F_XL` 五个档位常量；QSS 模板内散落的 `11px`（pill/导航分组）/`13px`（chip/pcl2-pill）全部改走 `$f_xs/$f_md` token——改字号档位或主题包覆盖 `fonts` 时全 UI 联动
+
+* **圆角 token 化**：`RADII` 新增 `icon`(8) 档；`[cls=surface/row/tile/pill/loader-card/icon-btn]` 的硬编码 `8/9/10/12px` 圆角统一走 `$r_card/$r_btn/$r_small/$r_icon`
+
+* **颜色 token 化**：seg/chip checked、secondary pressed 的 `#FFFFFF` 改 `$text_on_accent`（accent 亮度自适应文字色，不再固定白字）；radio 未选圆心 `#FFFFFF` 改 `$bg_frost`（dark 下随主题深色）；slider 白心新增 `slider_knob` token（浅/深主题同为白，主题包可覆盖，QSS 与 `AcSliderStyle` 自绘共用）；danger 按钮 hover 底的 `rgba(239,68,68,0.08)` 改为 `$danger_hover`（由 danger token 派生，自定义主题包改 danger 时联动）
+
+* **build\_qss 兜底**：`text_on_accent` 冷启动缺失时默认白字，杜绝 QSS 出现字面 `$text_on_accent`
+
+* **main\_window 主题切换按钮**：`_style_theme_toggle` 的 dark 三元色值改为读 `COLORS` token（`bg_btn/border/text_main/bg_hover`）、字号走 `F_MD`——"控制中枢"等任意主题包自适应，不再锁死 light/dark 两套灰
+
+### 🔍 验证
+
+* `build_qss()` 冒烟：QSS 生成无遗留 `$token`；`F_XS/R_ICON/F_MD` 常量正确；全量 `compileall` 0 错误
+
+## round-73（2026-09-02）— README 重写 · 版本号回归 · 批量下载队列
+
+* **README 重写**：以 round-72 现实为准（功能矩阵 / 技术栈 / DPAPI 隐私承诺 / 零遥测 / 自检命令 / 路线图），告别"轻量浅色主题"初版旧文案
+
+* **版本号体系回归**：新增 `_diag_version_parse_tmp.py`——验证 26.1/26.2 新版本号、26w 快照、愚人节分流、classic legacy、缺日期条目全部正常；结论：type+日期排序天然免疫语义化版本号，不变式固化防回归
+
+* **批量下载队列**：新增 `src/batch_download.py`（`BatchDownloader`）：4\~8 worker 线程池 + 任务队列 + **失败记录继续** + 线程安全进度/取消 + 存在即跳过 & sha1 复核；接入 CurseForge 整合包文件下载（原逐个顺序下载、失败中断整批 → 并发批下载、失败汇总）；新增 `modpack.curse_batch_fail` 中英键
+
+* 修复 `_diag_all.py` 审计发现的 i18n 中英不对称（`modpack.curse_batch_fail` 英文表先落、中文表补回）
+
+### 🔍 验证
+
+* `_diag_batch_tmp.py` 6 用例 + `_diag_version_parse_tmp.py` 5 用例新增并通过；`_diag_all.py` **21 脚本 + i18n 审计全绿**；全量编译 0 错误
+
+## round-72（2026-09-02）— 下载器加固：退避重试 · 毒 .part 清理 · 完整性校验
+
+### ⬇ 下载引擎加固（借鉴 PCL-CE `LoaderDownload.cs` / `FileDownloader.cs`）
+
+* `download_file` 重构为「单次尝试 + 有限退避重试」两层：网络类失败（连接/超时/5xx/内容不完整）最多重试 3 次，抖动退避 0.8s/1.6s ± 0.3s（对齐 PCL retry<4 + Sleep 300\~500+retry\*300），重试期间 `.part` 断点续传；**4xx 确定性失败立即抛错、不重试，并删除可能被污染的** **`.part`**（防毒化后续续传）
+
+* 新增下载完整性校验：`Content-Length` 已知但实际写不满 → 判定内容不完整按瞬时错误重试（PCL `FileChecker` actualSize 的简化版）
+
+* `.part` 临时后缀 + `os.replace` 原子收尾此前已有（round-37/48），本轮补上缺失的「重试 + 失败清理」两环；所有下载入口（mod/modpack/cf/optifine/java）统一收益
+
+### 🔍 验证
+
+* 新增 `_diag_retry_tmp.py` 5 用例（假传输 monkeypatch）：瞬时失败重试至成功（恰 3 次请求）/ 404 立即失败 + 毒 .part 清理 / 内容不完整重试 / 416 直接原子收尾 / 架构常数约定——全过
+
+* 真实网络下载（version\_manifest 274KB）端到端通过；`_diag_all.py` 19 脚本 + i18n 审计全部 exit=0；全量编译 0 错误
+
+## round-70/71（2026-08-30）— 日志打码 · 非 ASCII 路径警告
 
 ### 🛡 round-71 日志打码（借鉴 PCL-CE `McLogFilter.cs`）
 
@@ -32,7 +158,7 @@
 
 * `_diag_all.py` 18 脚本 + i18n 审计（ZH\_NOT\_EN/EN\_NOT\_ZH 为空）全部 exit=0；全量编译 0 错误
 
-## v1.0.4-beta（2026-08-30）— Quilt 加载器 · 设置简化 · 进程优先级（round-68/69）
+## round-68/69（2026-08-30）— Quilt 加载器 · 设置简化 · 进程优先级
 
 ### ✨ round-68 Quilt 加载器
 
@@ -68,7 +194,7 @@
 
 * `_diag_all.py` 16 脚本 + i18n 审计（ZH\_NOT\_EN/EN\_NOT\_ZH 为空）全部 exit=0；全量编译 0 错误
 
-## v1.0.3-beta（2026-08-30）— 性能优化（round-61）
+## round-61（2026-08-30）— 性能优化
 
 ### ⚡ 性能
 
@@ -82,7 +208,7 @@
 
 * 全量编译 0 错误；离屏功能验证（壁纸无媒体静默通过、滚动视口掩码正确）；`_diag_all.py` 全量回归 11 脚本 + i18n 审计全部 exit=0
 
-## v1.0.2-beta（2026-08-30）— 启动高级设置（对齐 PCL2）+ 玻璃拟态 + 拖拽修复
+## 2026-08-30 — 启动高级设置（对齐 PCL2）+ 玻璃拟态 + 拖拽修复
 
 ### ✨ 新增：启动高级设置（round-55，对齐 PCL2「启动游戏 / 版本设置」）
 
@@ -112,7 +238,7 @@
 
 * 功能单测：`--server` 解析（含 `=` 写法）、版本隔离三种目录解析、Aikar 参数注入均 PASS
 
-## v1.0.1-beta（2026-08-03）— 导入体验修复
+## 2026-08-03 — 导入体验修复
 
 ### 🛠️ 修复
 
@@ -140,7 +266,7 @@
 
 * 启动崩溃（窗口消失）个案在排查，可能与 PCL2 实例或新建实例连点有关
 
-## v1.0.0-beta（2026-08-03）— 首个公开测试版
+## 2026-08-03 — 首个公开测试版
 
 ### ✨ 核心功能
 

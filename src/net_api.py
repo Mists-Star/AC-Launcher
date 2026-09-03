@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import time
+import random
 import hashlib
 import requests
 
@@ -143,27 +144,32 @@ class NetError(Exception):
 # ══════════════════════════════════════════════════════════════════════════
 _CHUNK = 65536
 
+# round-72 借鉴 PCL-CE LoaderDownload：每文件最多尝试 3 次，网络类失败带
+# 抖动退避重试（分段里说明 PCL 是 retry<4 + Sleep(300~500+retry*300)）。
+_MAX_DOWNLOAD_RETRIES = 3
 
-def download_file(
+
+class _TransientDownloadError(NetError):
+    """网络抖动 / 内容不完整：值得清空重试或续传；4xx 等确定性错误不抛它。"""
+
+
+def _download_once(
     url: str,
     dest: str,
+    dest_tmp: str,
     *,
-    resume: bool = True,
+    resume: bool,
     progress=None,
     headers: dict | None = None,
     timeout: int = 60,
     cancel=None,
 ) -> str:
-    """下载 ``url`` 到 ``dest``，支持断点续传 + 进度回调。
+    """单次下载尝试：写 <dest>.part → 校验 size → os.replace 原子收尾。
 
-    Args:
-        resume:    True 时若有 <dest>.part 残留则从断点续传（默认）
-        progress:  callable(sofar, total)——total 未知时为 0
-        cancel:    callable() -> bool；返回 True 时中断（round-40 P2-10：
-                   队列 shutdown 用它在 chunk 边界安全中断，.part 留下次续传）
-    返回 dest。失败抛 NetError。
+    返回 dest。确定性错误（4xx）抛 NetError 并清掉可能被污染的 .part；
+    瞬时错误（网络/5xx/超时/内容不完整）抛 ``_TransientDownloadError`` 保留
+    .part 供上层续传。
     """
-    dest_tmp = dest + ".part"
     start = 0
     if resume and os.path.exists(dest_tmp):
         start = os.path.getsize(dest_tmp)
@@ -198,9 +204,60 @@ def download_file(
                     except Exception:
                         pass
     except requests.RequestException as e:
-        raise NetError(f"下载失败：{e}") from e
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status is not None and 400 <= status < 500:
+            # 服务器明确拒绝（404/403…）：URL 作废，保留 .part 只会毒化后续续传
+            try:
+                os.remove(dest_tmp)
+            except OSError:
+                pass
+            raise NetError(f"下载失败：{e}") from e
+        # 网络抖动 / 5xx / 超时：.part 保留，上层带退避重试续传
+        raise _TransientDownloadError(f"下载失败：{e}") from e
+    if total and sofar != total:
+        # Content-Length 已知但没写满 = 连接被掐断，内容不完整 → 当瞬时错误重试
+        raise _TransientDownloadError(f"下载不完整：{sofar}/{total}")
     os.replace(dest_tmp, dest)
     return dest
+
+
+def download_file(
+    url: str,
+    dest: str,
+    *,
+    resume: bool = True,
+    progress=None,
+    headers: dict | None = None,
+    timeout: int = 60,
+    cancel=None,
+) -> str:
+    """下载 ``url`` 到 ``dest``，支持断点续传 + 进度回调 + 有限退避重试。
+
+    Args:
+        resume:    True 时若有 <dest>.part 残留则从断点续传（默认）
+        progress:  callable(sofar, total)——total 未知时为 0
+        cancel:    callable() -> bool；返回 True 时中断（round-40 P2-10：
+                   队列 shutdown 用它在 chunk 边界安全中断，.part 留下次续传）
+
+    网络类失败最多重试 ``_MAX_DOWNLOAD_RETRIES`` 次（抖动退避，对齐 PCL-CE）；
+    重试期间 .part 断点续传，最终仍失败抛 NetError（.part 保留可再续传）。
+    返回 dest。
+    """
+    dest_tmp = dest + ".part"
+    last: Exception | None = None
+    for attempt in range(_MAX_DOWNLOAD_RETRIES):
+        if attempt:
+            # PCL 风格抖动退避：0.8s / 1.6s ± 0.3s，网络抖动让开高峰期
+            time.sleep(0.4 * (2 ** attempt) + random.random() * 0.3)
+        try:
+            return _download_once(
+                url, dest, dest_tmp,
+                resume=(attempt > 0 or resume),   # 重试一律走续传，启用即可
+                progress=progress, headers=headers,
+                timeout=timeout, cancel=cancel)
+        except _TransientDownloadError as e:
+            last = e
+    raise last if isinstance(last, NetError) else NetError(f"下载失败，已重试 {_MAX_DOWNLOAD_RETRIES} 次")
 
 
 _ParallelChunk = tuple[int, int]  # (byte_start, byte_end) inclusive

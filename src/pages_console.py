@@ -8,15 +8,17 @@
 import os
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QFont, QTextCursor, QDesktopServices
+from PySide6.QtGui import (QFont, QTextCursor, QDesktopServices,
+                           QTextCharFormat, QColor)
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit,
-    QLineEdit, QApplication,
+    QLineEdit, QApplication, QFileDialog, QLabel, QTextEdit,
 )
 
-from .theme import COLORS
+from .theme import COLORS, F_SM
 from .i18n import t
 from . import ui_kit
+from .win_rounded import toast, warn
 
 _MONO = "Consolas", "Cascadia Mono", "Courier New"
 # 超过该行数后只保留尾部，避免超大日志拖垮 UI 线程。
@@ -58,6 +60,25 @@ class ConsolePage(QWidget):
             ])
         self._sub = self._header.desc_lbl
         root.addWidget(self._header)
+
+        # ── 搜索行（round-77，对齐 Zaphyrous 日志面板）：搜索并高亮全部匹配，
+        #    Enter 跳下一个；右侧「导出…」把当前（过滤后的）视图存成 .txt ──
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText(t("console.search_placeholder"))
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._render)
+        self._search.returnPressed.connect(self._find_next)
+        search_row.addWidget(self._search, stretch=1)
+        self._count_lbl = QLabel("")
+        self._count_lbl.setStyleSheet(
+            f"color: {COLORS['text_sub']}; font-size: {F_SM}px;")
+        search_row.addWidget(self._count_lbl)
+        search_row.addWidget(ui_kit.make_button(
+            t("console.export"), kind="secondary", icon_key="export",
+            on_click=self._export, min_h=32))
+        root.addLayout(search_row)
 
         # ── 过滤行 ──
         self._filter = QLineEdit()
@@ -143,12 +164,73 @@ class ConsolePage(QWidget):
             lines = [ln for ln in lines if q in ln.lower()]
         if len(lines) > _MAX_LINES:
             lines = lines[-_MAX_LINES:]
-        self._view.setPlainText("\n".join(lines) + ("\n" if lines else ""))
+        text = "\n".join(lines) + ("\n" if lines else "")
+        # 内容没变化时不重建文本——否则每次 poll（1s）会重置选区、打断搜索选中
+        if self._view.toPlainText() != text:
+            self._view.setPlainText(text)
+        self._apply_search_highlights()
         if self._autoscroll:
             cur = self._view.textCursor()
             cur.movePosition(QTextCursor.End)
             self._view.setTextCursor(cur)
             self._view.ensureCursorVisible()
+
+    def _apply_search_highlights(self) -> None:
+        """搜索词高亮全部匹配片段 + 更新匹配计数（round-77）。"""
+        q = self._search.text().strip()
+        if not q:
+            self._view.setExtraSelections([])
+            self._count_lbl.setText("")
+            return
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(COLORS.get("accent_soft", "#EDE9FE")))
+        cur = QTextCursor(self._view.document())
+        hits = []
+        while True:
+            cur = self._view.document().find(q, cur)
+            if cur.isNull():
+                break
+            e = QTextEdit.ExtraSelection()
+            e.cursor = QTextCursor(cur)  # 拷贝；原 cursor 会被 find 复用
+            e.format = fmt
+            hits.append(e)
+        self._view.setExtraSelections(hits)
+        self._count_lbl.setText(t("console.search_count", n=len(hits)))
+
+    def _find_next(self) -> None:
+        """Enter：跳到下一个匹配；到底后从头再来一轮。"""
+        q = self._search.text().strip()
+        if not q:
+            return
+        if not self._view.find(q):
+            cur = self._view.textCursor()
+            cur.movePosition(QTextCursor.Start)
+            self._view.setTextCursor(cur)
+            self._view.find(q)
+
+    def _export(self) -> None:
+        """把当前视图（过滤后的展示结果）导出为 .txt 文件（round-77）。"""
+        text = self._view.toPlainText()
+        if not text.strip():
+            toast(self, t("console.export"), t("console.export_empty"))
+            return
+        from datetime import datetime
+        base = self._game_name or "console"
+        base = "".join(c for c in base if c not in '<>:"/\\|?*').strip() or "console"
+        default = f"{base}_{datetime.now():%Y%m%d-%H%M%S}.txt"
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("console.export_title"), default,
+            "Text Files (*.txt);;All Files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", errors="replace") as f:
+                f.write(text)
+        except OSError as e:
+            warn(self, t("console.export"), t("console.export_fail", err=str(e)))
+            return
+        toast(self, t("console.export_done_title"),
+              t("console.export_done", path=path))
 
     # ── 工具按钮 ──
     def _toggle_autoscroll(self):

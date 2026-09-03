@@ -298,5 +298,19 @@ def warn(parent, title: str, text: str, detail: str = "", **kw) -> None:
 
 
 def info(parent, title: str, text: str, detail: str = "", **kw) -> None:
-    """Themed info dialog (OK only)."""
+    """Themed modal info dialog (data loss / step-by-step guidance)."""
     _msgbox(parent, title, text, detail, icon="info", buttons=("OK",))
+
+
+def toast(parent, title: str, text: str = "", duration: int = 3200) -> None:
+    """Non-blocking light toast (round-75 弹窗收敛).
+
+    Delegates to the main window's floating toast when available; falls back
+    to a modal info box for windowless/standalone contexts.
+    """
+    win = parent.window() if parent is not None else None
+    show = getattr(win, "show_toast", None)
+    if show is not None:
+        show(title, text, duration=duration)
+    else:
+        info(parent, title, text)

@@ -196,22 +196,45 @@ def import_curseforge_zip(
     os.makedirs(inst.mods_dir, exist_ok=True)
     files = [f for f in info["files"] if f.get("required", True)]
     total = len(files)
-    for i, f in enumerate(files, start=1):
-        if progress is not None and not progress(
-            f"CurseForge file {f.get('projectID', '?')}", i, total
-        ):
-            break
+    # round-73：单个文件逐个顺序下载 + 一个失败就中断整批 → 改为并发批下载，
+    # 失败记录继续（对齐 MCLauncher 20-worker 队列 / PCL LoaderDownload）。
+    from .batch_download import BatchDownloader, BatchItem
+
+    batch: list[BatchItem] = []
+    for f in files:
         pid = str(f.get("projectID", ""))
-        fid = f.get("fileID", "")
         if not pid:
             continue
-        try:
+        fid = f.get("fileID", "")
+        label = f"CurseForge #{pid}/{fid}"
+
+        def _task(pid=pid):
             download_curseforge_mod(pid, inst.mods_dir)
-        except NetError as e:
-            # API key missing is fatal for CurseForge modpacks; surface it.
-            raise NetError(
-                f"{t('modpack.curse_mod_fail', pid=pid, fid=fid)}: {e}"
-            ) from e
+
+        batch.append(BatchItem(name=label, task=_task))
+
+    failures: list[str] = []
+
+    def _on_progress(done, total_dl):
+        if progress is not None:
+            progress(f"{done}/{total_dl}", done, total)
+
+    def _on_finish(items) -> None:
+        failed = [it for it in items if not it.ok and not it.cancelled]
+        failures.extend(f"{it.name}: {it.detail}" for it in failed)
+
+    # 失败继续但整包级别仍要收敛：任一失败 → NetError 汇总（保留原语义：
+    # CurseForge API key 缺失时明确提示）
+    dl = BatchDownloader(batch, workers=4,
+                         on_progress=_on_progress, on_finish=_on_finish)
+    dl.start()
+    dl.join()
+    if failures:
+        raise NetError(
+            f"{t('modpack.curse_batch_fail', n=len(failures))}\n" +
+            "\n".join(failures[:5])
+            + ("" if len(failures) <= 5 else f"\n… 另有 {len(failures)-5} 个失败")
+        ) from None
     mgr._save()
     return inst
 

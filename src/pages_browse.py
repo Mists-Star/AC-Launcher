@@ -21,7 +21,7 @@ from .effects import LightTrailCard  # round-50 商店卡流光
 from . import ui_kit
 from .icons import icon
 from .i18n import t, version_type_name, loader_name
-from .win_rounded import info, confirm
+from .win_rounded import info, confirm, toast
 from .instances import manager
 from .pages_instances import NewInstanceDialog
 from .net_api import (
@@ -677,7 +677,7 @@ class StorePage(QWidget):
                   cf_file: dict | None = None):
         inst = self._target()
         if inst is None:
-            info(self, t("common.hint"), t("store.download_hint"))
+            toast(self, t("common.hint"), t("store.download_hint"))
             return
         reply = confirm(
             self, t("store.download_confirm_title"),

@@ -27,7 +27,7 @@ from .effects import LightTrailCard  # round-50 卡片混合：实例详情卡�
 from . import ui_kit
 from .icons import icon
 from .frameless import FramelessHelper, TitleBar
-from .win_rounded import enable_win11_round_corners, confirm, pick_files, info, warn
+from .win_rounded import enable_win11_round_corners, confirm, pick_files, info, warn, toast
 from .i18n import t, loader_name
 from .instances import manager, Instance, LOADERS
 from .net_api import fetch_versions
@@ -1466,7 +1466,7 @@ class InstancesPage(QWidget):
 
     def _duplicate(self, inst: Instance):
         """克隆实例（Worker 复制目录，防大实例卡 UI）。"""
-        from .win_rounded import text_input, warn, info
+        from .win_rounded import text_input, warn, toast
         from .worker import Worker
         name, ok = text_input(
             self, t("instances.duplicate_title"),
@@ -1483,27 +1483,27 @@ class InstancesPage(QWidget):
     # ── 实例备份 / 回滚（N1，对齐 Prism 一键备份 / 更新坏了一键回滚）──
     def _backup(self, inst: Instance):
         """创建一份完整快照（后台 Worker，防大实例卡 UI）。"""
-        from .win_rounded import info, warn
+        from .win_rounded import toast, warn
         from .core.backup import create_backup
         from .worker import Worker
         self._backup_worker = Worker(create_backup, inst)
         self._backup_worker.finished.connect(
-            lambda _s: info(self, t("instances.backup_title"),
-                            t("instances.backup_done")))
+            lambda _s: toast(self, t("instances.backup_title"),
+                             t("instances.backup_done")))
         self._backup_worker.error.connect(
             lambda e: warn(self, t("instances.backup_title"), str(e)))
         self._backup_worker.start()
 
     def _restore(self, inst: Instance):
         """选一份历史快照，回滚覆盖当前 mods / config / 存档。"""
-        from .win_rounded import info, warn, confirm
+        from .win_rounded import toast, warn, confirm
         from .worker import Worker
         from .core.backup import list_backups, load_manifest, restore_backup
 
         snaps = list_backups(inst)
         if not snaps:
-            info(self, t("instances.restore_title"),
-                 t("instances.restore_none"))
+            toast(self, t("instances.restore_title"),
+                  t("instances.restore_none"))
             return
 
         pick = self._pick_backup(inst, snaps)
@@ -1520,8 +1520,8 @@ class InstancesPage(QWidget):
 
         self._restore_worker = Worker(restore_backup, inst, pick)
         self._restore_worker.finished.connect(
-            lambda _m: (info(self, t("instances.restore_title"),
-                             t("instances.restore_done")),
+            lambda _m: (toast(self, t("instances.restore_title"),
+                              t("instances.restore_done")),
                         self._refresh(), self._render_detail()))
         self._restore_worker.error.connect(
             lambda e: warn(self, t("instances.restore_title"), str(e)))
@@ -1807,9 +1807,9 @@ class InstancesPage(QWidget):
             self._refresh()
         except Exception:
             pass
-        from .win_rounded import info
-        info(self, t("instances.apply_pack_title"),
-             t("instances.apply_pack_done", ver=launch_version or ""))
+        from .win_rounded import toast
+        toast(self, t("instances.apply_pack_title"),
+              t("instances.apply_pack_done", ver=launch_version or ""))
 
     def _on_pack_error(self, msg: str):
         from .win_rounded import warn
@@ -2025,7 +2025,7 @@ class InstancesPage(QWidget):
 
         def _done(inst):
             progress.close()
-            info(self, t("modpack.title"), t("modpack.done"))
+            toast(self, t("modpack.title"), t("modpack.done"))
             self._refresh()
             if inst and getattr(inst, "id", None):
                 self.mgr.set_current(inst.id)
@@ -2106,17 +2106,38 @@ class InstancesPage(QWidget):
             return
         from .win_rounded import QProgressDialog, QApplication
         from .worker import Worker
+        # round-74 交互反馈：导入动辄几十秒，给主窗口状态条转圈 + 文案，
+        # 避免"点了没反应"的错觉；结束（成功或报错）都恢复。
+        win = self.window()
+        bar = getattr(win, "_progress", None)
+        stat = win.statusBar() if win is not None else None
+        if bar is not None:
+            bar.setMaximum(0)
+            bar.setVisible(True)
+        if stat is not None:
+            stat.showMessage(t("modpack.importing"))
+
+        def _finish(*_a):
+            if bar is not None:
+                bar.setVisible(False)
+            if stat is not None:
+                stat.showMessage(t("status.ready"), 3000)
+
         if fmt == "curseforge":
             self._pack_worker = Worker(import_curseforge_zip, path, self.mgr)
+            self._pack_worker.finished.connect(_finish)
             self._pack_worker.finished.connect(self._on_pack_imported)
             self._pack_worker.error.connect(
                 lambda e: warn(self, t("modpack.title"), str(e)))
+            self._pack_worker.error.connect(_finish)
             self._pack_worker.start()
         elif fmt == "zip":
             self._pack_worker = Worker(import_zip_as_instance, path, self.mgr)
+            self._pack_worker.finished.connect(_finish)
             self._pack_worker.finished.connect(self._on_pack_imported)
             self._pack_worker.error.connect(
                 lambda e: warn(self, t("modpack.title"), str(e)))
+            self._pack_worker.error.connect(_finish)
             self._pack_worker.start()
 
     def _on_pack_imported(self, inst):
@@ -2202,6 +2223,8 @@ def _mod_loader_hint(path: str) -> str:
 class ModCard(RoundedCard):
     toggled = Signal(str, bool)  # path, enabled
     removed = Signal(str)
+    open_folder = Signal(str)
+    copy_name = Signal(str)
 
     def __init__(self, path: str, enabled: bool, parent=None):
         super().__init__(radius=12, parent=parent)
@@ -2267,6 +2290,20 @@ class ModCard(RoundedCard):
         del_btn.setMinimumHeight(32)
         del_btn.clicked.connect(lambda: self.removed.emit(path))
         lay.addWidget(del_btn)
+
+        # round-74 右键菜单（对齐 Prism/CurseForge 鼠标流）：
+        # 「打开所在文件夹」排查冲突、「复制文件名」查 Modrinth 时快速粘贴。
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(
+            lambda _pos: self._show_menu())
+
+    def _show_menu(self):
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QCursor
+        m = QMenu(self)
+        m.addAction(t("mods.open_folder"), lambda: self.open_folder.emit(self.path))
+        m.addAction(t("mods.copy_name"), lambda: self.copy_name.emit(self.path))
+        m.exec(QCursor.pos())
 
 
 class ModsPage(QWidget):
@@ -2343,7 +2380,7 @@ class ModsPage(QWidget):
     def _check_updates(self):
         inst = self._target()
         if inst is None:
-            info(self, t("common.hint"), t("mods.no_instance"))
+            toast(self, t("common.hint"), t("mods.no_instance"))
             return
         self.update_btn.setEnabled(False)
         self.update_btn.setText(t("mods.checking_updates"))
@@ -2367,7 +2404,7 @@ class ModsPage(QWidget):
             msg = t("mods.up_to_date")
             if unknown:
                 msg = t("mods.up_to_date_unknown", n=len(unknown))
-            info(self, t("mods.check_updates"), msg)
+            toast(self, t("mods.check_updates"), msg)
             return
         detail = "\n".join(
             f"• {u['title']}: {u['local_version']} → {u['latest_version']}" for u in updates[:30])
@@ -2393,7 +2430,8 @@ class ModsPage(QWidget):
     def _on_updates_done(self, ok_count):
         self.update_btn.setEnabled(True)
         self.update_btn.setText(t("mods.check_updates"))
-        info(self, t("mods.check_updates"), t("mods.update_done", n=ok_count or 0))
+        toast(self, t("mods.check_updates"),
+              t("mods.update_done", n=ok_count or 0))
         self._render_mods()
 
     def _on_updates_error(self, msg: str):
@@ -2470,6 +2508,8 @@ class ModsPage(QWidget):
             card = ModCard(path, enabled)
             card.toggled.connect(self._toggle)
             card.removed.connect(self._remove)
+            card.open_folder.connect(self._open_mods_folder)
+            card.copy_name.connect(self._copy_mod_name)
             self._vbox.addWidget(card)
 
     def _toggle(self, path: str, enabled: bool):
@@ -2491,10 +2531,27 @@ class ModsPage(QWidget):
         except OSError as e:
             warn(self, t("mods.fail_title"), str(e))
 
+    def _open_mods_folder(self, path: str):
+        """资源管理器定位到该 mod 文件（explorer /select）——排查冲突定位更快。"""
+        try:
+            import subprocess
+            subprocess.Popen(
+                ["explorer", "/select,", os.path.normpath(path)])
+        except OSError:
+            from .win_rounded import warn as _warn
+            _warn(self, t("mods.fail_title"), str(path))
+
+    def _copy_mod_name(self, path: str):
+        """复制文件名（含 .jar/.disabled 后缀原样）到剪贴板 + 轻提示。"""
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(os.path.basename(path))
+        from .win_rounded import toast as _toast
+        _toast(self, t("mods.copy_name"), t("mods.copy_name_done"))
+
     def _add(self):
         inst = self._target()
         if inst is None:
-            info(self, t("common.hint"), t("mods.add_hint"))
+            toast(self, t("common.hint"), t("mods.add_hint"))
             return
         files = pick_files(self, t("mods.add_title"), "", t("mods.add_filter"), multi=True)
         if not files:

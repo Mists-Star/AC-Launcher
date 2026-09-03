@@ -18,7 +18,8 @@ from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject, QProperty
 from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QColor, QPixmap, QLinearGradient, QCursor
 from PySide6.QtSvg import QSvgRenderer
 
-from .theme import COLORS, RoundedCard, set_theme_mode, get_theme_mode, on_theme_change
+from .theme import (COLORS, RoundedCard, set_theme_mode, get_theme_mode,
+                    on_theme_change, F_MD)
 from .effects import (
     LightTrailCard, set_effects_enabled, set_window_opacity, fade_page_transition,
 )
@@ -1818,6 +1819,122 @@ class MainWindow(QMainWindow):
             self._active_toasts = [toast]
         toast._anim_in = anim_in  # 保活动画对象
 
+    def show_toast(self, title: str, msg: str = "", duration: int = 3200):
+        """通用轻提示浮窗（round-75 弹窗收敛）。
+
+        右下角滑入 → 停留 duration → 淡出。中性主题色（accent 竖条 + 玻璃底 +
+        随主题 text_main/text_sub），与成就 toast（MC 棕金风）并存互不干扰。
+        供置顶层的非关键操作结果使用，替代模态 info：导入完成 / 备份完成 /
+        更新完成等，避免"被弹窗打断"。
+        """
+        from PySide6.QtGui import QPainter, QColor
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QPoint
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel
+
+        W, H = 320, (76 if msg else 56)
+        _c = COLORS
+
+        class _Toast(QWidget):
+            """自绘：玻璃底 + accent 左侧竖条 + 圆角描边（随主题，无硬编码色）。"""
+
+            def paintEvent(self, e):
+                p = QPainter(self)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                r = self.rect()
+                from PySide6.QtGui import QPainterPath
+                path = QPainterPath()
+                path.addRoundedRect(1.5, 1.5, r.width() - 3, r.height() - 3, 12, 12)
+                p.fillPath(path, QColor(_c.get("bg_panel", "#FFFFFF")))
+                p.setPen(QColor(_c.get("border", "#E5E7EB")))
+                _p = p.pen()
+                _p.setWidth(1)
+                p.setPen(_p)
+                p.drawPath(path)
+                # 左侧 accent 竖条
+                p.setBrush(QColor(_c.get("accent", "#7C3AED")))
+                p.setPen(Qt.NoPen)
+                p.drawRoundedRect(4, 8, 4, r.height() - 16, 2, 2)
+
+        toast = _Toast()
+        toast.setFixedSize(W, H)
+        toast.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
+        )
+        toast.setAttribute(Qt.WA_TranslucentBackground, True)
+
+        outer = QHBoxLayout(toast)
+        outer.setContentsMargins(22, 12, 16, 12)
+        outer.setSpacing(10)
+        right = QVBoxLayout()
+        right.setSpacing(2)
+        t_lbl = QLabel(title)
+        t_lbl.setStyleSheet(
+            f"color: {_c.get('text_main', '#1A1A2E')};"
+            f" font-size: {F_MD}px; font-weight: 700;"
+        )
+        t_lbl.setWordWrap(True)
+        right.addWidget(t_lbl)
+        if msg:
+            m_lbl = QLabel(msg)
+            m_lbl.setStyleSheet(
+                f"color: {_c.get('text_sub', '#6B7280')};"
+                f" font-size: {F_SM}px;"
+            )
+            m_lbl.setWordWrap(True)
+            right.addWidget(m_lbl)
+        right.addStretch(1)
+        outer.addLayout(right, stretch=1)
+
+        # 右下角，与成就 toast 同槽位（新提示覆盖旧的，成就已在动画中的不受影响）
+        win_pos = self.mapToGlobal(self.rect().topRight())
+        margin_right = 24
+        margin_bottom = 48
+        end_x = win_pos.x() - W - margin_right
+        end_y = win_pos.y() + self.height() - H - margin_bottom
+        start_x = win_pos.x() + 10
+        toast.move(start_x, end_y)
+        toast.show()
+        toast.raise_()
+
+        anim_in = QPropertyAnimation(toast, b"pos")
+        anim_in.setDuration(260)
+        anim_in.setStartValue(toast.pos())
+        anim_in.setEndValue(QPoint(end_x, end_y))
+        anim_in.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def _after_in():
+            QTimer.singleShot(max(800, duration), _fade_out)
+
+        def _fade_out():
+            try:
+                anim_out = QPropertyAnimation(toast, b"windowOpacity")
+                anim_out.setDuration(260)
+                anim_out.setStartValue(1.0)
+                anim_out.setEndValue(0.0)
+                anim_out.setEasingCurve(QEasingCurve.Type.InCubic)
+                anim_out.finished.connect(_dismiss)
+                anim_out.start()
+                toast._anim_out = anim_out
+            except Exception:
+                _dismiss()
+
+        def _dismiss():
+            try:
+                if toast in self._active_toasts:
+                    self._active_toasts.remove(toast)
+                toast.deleteLater()
+            except Exception:
+                pass
+
+        anim_in.finished.connect(_after_in)
+        anim_in.start()
+        try:
+            self._active_toasts.append(toast)
+        except AttributeError:
+            self._active_toasts = [toast]
+        toast._anim_in = anim_in
+
     def _play_app_chime(self):
         """Signature chime on app start (no-op if disabled / trigger != app)."""
         try:
@@ -2043,14 +2160,16 @@ class MainWindow(QMainWindow):
         return b
 
     def _style_theme_toggle(self, b: QPushButton) -> None:
-        dark = get_theme_mode() == "dark"
-        bg = "#2A2A2E" if dark else "#FFFFFF"
-        brd = "#3A3A40" if dark else "#E5E7EB"
-        fg = "#E5E5E5" if dark else "#1A1A2E"
-        hover = "#3F3F47" if dark else "#F5F6F8"
+        # round-74 主题一致性：色值不再按 dark 布尔写死，直接读 COLORS token，
+        # 任何主题包（含"控制中枢"等自定义色）都自适应；字号走 F_MD 层级。
+        c = COLORS
+        bg = c.get("bg_btn", "#FFFFFF" if get_theme_mode() == "light" else "#33333A")
+        brd = c.get("border", "#E5E7EB")
+        fg = c.get("text_main", "#1A1A2E")
+        hover = c.get("bg_hover", "#F0F1F3")
         b.setStyleSheet(
             f"QPushButton {{ background:{bg}; color:{fg}; border:1px solid {brd};"
-            f" border-radius:17px; padding:3px 14px; font-size:13px; font-weight:600; }}"
+            f" border-radius:17px; padding:3px 14px; font-size:{F_MD}px; font-weight:600; }}"
             f"QPushButton:hover {{ background:{hover}; }}"
         )
 
