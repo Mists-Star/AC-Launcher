@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- LabyMod：蓝紫渐变圆角方块 -->
+  <defs>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4F6BFF"/><stop offset="1" stop-color="#8B4BFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="16" fill="url(#g3)"/>
+  <path d="M20 14 h26 v10 h-16 v6 h14 v10 h-14 v10 h-10 Z"
+        fill="#FFFFFF"/>
+</svg>

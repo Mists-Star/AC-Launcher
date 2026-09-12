@@ -37,14 +37,14 @@ MICROSOFT_CLIENT_ID = "00000000402b12d1"
 # Minecraft 必须用标准 XboxLive.signin scope，而不是 Minecraft 第一方专用的
 # `service::user.auth.xboxlive.com::MBI_SSL`（那只认 MC 官方客户端
 # 00000000402b12d1，自建应用用它会被拒为 invalid_scope / 127）。
-# HMCL/PCL2 用自建 Azure 应用时均为：XboxLive.signin offline_access。
+# 各主流启动器用自建 Azure 应用时均为：XboxLive.signin offline_access。
 MICROSOFT_SCOPE = "XboxLive.signin offline_access"
 
 # 2026-08 微软登录可用性：
 # Microsoft 已撤回所有免注册的公共 client_id。
 # 老的 login.live.com/oauth20_authorize.srf 报 "client does not exist"。
 # 新的 Microsoft Identity Platform (login.microsoftonline.com) 需要玩家在 Azure
-# 注册应用 + admin consent 后才能登录正版服（HMCL 已要求玩家这么做）。
+# 注册应用 + admin consent 后才能登录正版服（主流启动器均已要求玩家这么做）。
 # 因此微软登录按钮在 settings 里配置了有效 Azure client_id 后才会显示。
 # 离线模式和外置登录（LittleSkin 等）始终可用。
 def get_active_client_id(cfg: dict | None = None) -> str | None:
@@ -157,12 +157,12 @@ def validate_client_id(client_id: str) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# Microsoft login — Device Code flow (OAuth 2.0 RFC 8628), PCL2/HMCL 同款。
+# Microsoft login — Device Code flow (OAuth 2.0 RFC 8628)，主流同款。
 #
 # 关键：端点必须用 /consumers/（个人 Microsoft 账户租户），不能用 /common/！
 # ba522940（Xbox 第一方应用）是 consumers 租户的应用，用 /common/ 会报
 # AADSTS700011 "scope not configured for this tenant"。
-# 参考 HMCL OAuth.java：deviceCodeURL/tokenURL 均为
+# 参考主流实现：deviceCodeURL/tokenURL 均为
 # https://login.microsoftonline.com/consumers/oauth2/v2.0/{devicecode,token}
 # --------------------------------------------------------------------------
 _DEVICE_CODE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
@@ -217,7 +217,7 @@ def _mc_login(xsts_token: str, uhs: str) -> dict:
     Uses ``login_with_xbox`` (the XSTS-token endpoint), NOT ``login_with_mc_profile``
     (which expects a username+password Mojang account). Adding
     ``ensureLegacyEnabled: true`` keeps the Mojang-session-server path working
-    for old launchers / chat reporting — same payload HMCL sends.
+    for old launchers / chat reporting — same payload mainstream launchers send.
     """
     r = requests.post(
         _MC_AUTH_URL,

@@ -111,7 +111,7 @@ _custom_accent: str | None = None
 
 # ── 玻璃拟态（round-52 恢复；round-32 曾拍板删除）─────────────────────
 # 曾经做过：半透明卡片+渐变底（round-23~28）、系统 Acrylic 透桌面
-# （round-30~31，BlockHelm 方案）。round-32 暂时移除；round-51 先恢复
+# （round-30~31，常用方案）。round-32 暂时移除；round-51 先恢复
 # 系统 Acrylic（transparent_window 透底），round-52 恢复应用层半透明
 # 卡片（$glassy token）。开启时容器走 bg_frost 半透明、按钮仍实色。
 _frosted = False
@@ -287,6 +287,24 @@ def _sync_fonts() -> None:
     F_LG = FONTS.get("lg", 16)
     F_XL = FONTS.get("xl", 20)
     FONT_FAMILY = '"Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
+
+
+def set_font_family(family: str) -> None:
+    """全局界面字体（round-87 玩家可改字体）。empty = 恢复默认优先列表
+    （Segoe UI → 微软雅黑 → 苹方）。改字体后必须失效 QSS 缓存（build_qss
+    的缓存 key 不含字体），并同步 QApplication 默认字体兜底原生控件。
+    """
+    global FONT_FAMILY, _QSS_CACHE
+    _QSS_CACHE = {}
+    if family:
+        FONT_FAMILY = f'"{family}", "Microsoft YaHei", "PingFang SC", sans-serif'
+    else:
+        FONT_FAMILY = FONT_FAMILY_BASE
+    app = QApplication.instance()
+    if app is not None:
+        from PySide6.QtGui import QFont
+        base = family or FONT_FAMILY_BASE.split('"')[1]  # 默认为 "Segoe UI"
+        app.setFont(QFont(base))
 
 # --------------------------------------------------------------------------
 # Theme packs — player-customizable token overrides (direction C, 2026-08-01)
@@ -855,6 +873,11 @@ QGroupBox::title {
     padding: 0 8px;
     color: $accent;
 }
+/* round-79e 折叠分组：隐藏 checkable 勾选框（折叠箭头用标题前缀 ▸/▾） */
+QGroupBox::indicator {
+    width: 0px;
+    height: 0px;
+}
 
 /* ---- text edit (JVM args) ---- */
 QTextEdit {
@@ -961,6 +984,9 @@ QPushButton[cls="icon-btn"]:hover {
     background: $glassy;
     border: 1px solid $border;
     border-radius: ${r_small}px;
+}
+[cls="loader-card"]:hover {
+    border: 1px solid $accent;
 }
 [cls="loader-card-on"] {
     background: $accent_soft;

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- 草方块：Minecraft 官方渐变绿顶 + 棕土侧 -->
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7AC74F"/><stop offset="1" stop-color="#5E9F44"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 6 L54 18 L32 30 L10 18 Z" fill="url(#g1)"/>
+  <path d="M10 18 L32 30 L32 58 L10 46 Z" fill="#7A5230"/>
+  <path d="M54 18 L32 30 L32 58 L54 46 Z" fill="#9B6B3F"/>
+</svg>

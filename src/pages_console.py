@@ -105,8 +105,8 @@ class ConsolePage(QWidget):
                  token: str = "") -> None:
         """游戏启动时调用：重置视图并开始 tail 该日志文件。
 
-        ``token`` 为当前登录令牌（可选，round-71 借鉴 PCL-CE McLogFilter 的
-        展示层打码）：console 里出现 accessToken / 用户名时打码，避免玩家
+        ``token`` 为当前登录令牌（可选，round-71 借鉴主流实现做展示层打码）：
+        console 里出现 accessToken / 用户名时打码，避免玩家
         录屏/截图分享日志时泄漏凭证。磁盘日志原样保留，崩溃分析不受影响。
         """
         self._log_path = log_path

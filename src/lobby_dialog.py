@@ -1,7 +1,6 @@
 """
 LobbyDialog — out-of-game lobby UI (join / create / members / copy code).
 
-Matches the PCL/HMCL lobby pattern:
   · Join: paste/enter a U/NNNN-AAAA-SSSS-EEEE code → join
   · Create: pick an instance → generate a lobby with invite code
   · Active lobby: member list, copy code, leave
@@ -9,7 +8,7 @@ Matches the PCL/HMCL lobby pattern:
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QComboBox, QGroupBox, QListWidget, QListWidgetItem,
-    QWidget, QProgressBar, QPushButton,
+    QWidget, QProgressBar, QPushButton, QCheckBox,
 )
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -17,7 +16,7 @@ from .theme import COLORS
 from .i18n import t
 from . import ui_kit
 from .frameless import FramelessHelper, TitleBar
-from .win_rounded import warn
+from .win_rounded import warn, enable_win11_round_corners
 from .lobby import (
     create_lobby, join_lobby, leave_lobby,
 )
@@ -26,14 +25,16 @@ from .core import easytier
 
 # 第三方虚拟局域网联机工具官网（round-64 多工具选择：玩家未安装时自行挑选）
 # · EasyTier   —— 开源虚拟局域网内核，启动器内置下载（easytier.py）
-# · 陶瓦 Terracotta —— 基于 EasyTier 的 P2P 联机工具（HMCL 内置同款，Burning_TNT 开源）
+# · 陶瓦 Terracotta —— 基于 EasyTier 的 P2P 联机工具（Burning_TNT 开源）
 # · MCTier    —— 免安装联机工具，内置语音/聊天/文件传输/屏幕共享（官网 mctier.pmhs.top）
 TERRACOTTA_URL = "https://github.com/burningtnt/Terracotta/releases"
 MCTIER_URL = "https://mctier.pmhs.top"
 
 
 class _ToolPicker(QDialog):
-    """联机工具选择器：EasyTier 内置一键下载 / 陶瓦 / MCTier 打开官网。
+    """联机工具选择器（round-78 完善）：EasyTier 推荐位——accent 整行大按钮 +
+    「推荐」徽标 + 说明自动下载并接回联机；陶瓦 / MCTier 降为官网备选。
+    可勾选「记住选择」：下次未安装时直接自动下载 EasyTier，不再弹窗。
 
     exec() 返回码：1=EasyTier，2=Terracotta，3=MCTier，0=取消。
     """
@@ -42,10 +43,18 @@ class _ToolPicker(QDialog):
         super().__init__(parent)
         self.setWindowTitle(t("lobby.tool_title"))
         self.setModal(True)
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(460)
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(22, 18, 22, 18)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.titlebar = TitleBar(
+            self, title=t("lobby.tool_title"), height=38, controls="close")
+        root.addWidget(self.titlebar)
+
+        panel = QWidget()
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(20, 10, 20, 16)
         lay.setSpacing(8)
 
         ti = QLabel(t("lobby.tool_title"))
@@ -58,28 +67,62 @@ class _ToolPicker(QDialog):
         lay.addWidget(body)
         lay.addSpacing(4)
 
+        # ── EasyTier：推荐位 ──
+        et_row = QHBoxLayout()
+        et_row.setSpacing(8)
+        et_btn = ui_kit.make_button(
+            t("lobby.tool_easytier"), kind="accent",
+            on_click=lambda: self.done(1), min_h=44)
+        et_row.addWidget(et_btn, stretch=1)
+        badge = QLabel(t("lobby.tool_recommend"))
+        badge.setStyleSheet(
+            f"background: {COLORS.get('accent_soft', '#EDE9FE')}; "
+            f"color: {COLORS.get('accent', '#7C3AED')}; "
+            f"border-radius: 10px; font-size: 11px; font-weight: 600; "
+            f"padding: 3px 9px;")
+        badge.setAlignment(Qt.AlignCenter)
+        et_row.addWidget(badge)
+        lay.addLayout(et_row)
+        ed_lbl = QLabel(t("lobby.tool_easytier_desc"))
+        ed_lbl.setStyleSheet(f"color: {COLORS['text_sub']}; font-size: 11px;")
+        ed_lbl.setWordWrap(True)
+        lay.addWidget(ed_lbl)
+
+        # ── 备选：陶瓦 / MCTier（官网跳转，需自行安装、不接回启动器托管）──
         for code, name, desc in [
-            (1, t("lobby.tool_easytier"), t("lobby.tool_easytier_desc")),
             (2, t("lobby.tool_terracotta"), t("lobby.tool_terracotta_desc")),
             (3, t("lobby.tool_mctier"), t("lobby.tool_mctier_desc")),
         ]:
-            btn = QPushButton(name)
-            btn.setProperty("cls", "surface")
-            btn.setMinimumHeight(44)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(lambda _=False, c=code: self.done(c))
+            btn = ui_kit.make_button(
+                name, kind="secondary",
+                on_click=lambda c=code: self.done(c), min_h=40)
             lay.addWidget(btn)
             dl = QLabel(desc)
             dl.setStyleSheet(f"color: {COLORS['text_sub']}; font-size: 11px;")
             dl.setWordWrap(True)
             lay.addWidget(dl)
 
+        lay.addSpacing(6)
+        self._remember = QCheckBox(t("lobby.tool_remember"))
+        self._remember.setStyleSheet(f"color: {COLORS['text_main']};")
+        lay.addWidget(self._remember)
+
         lay.addSpacing(8)
-        cancel = QPushButton(t("lobby.tool_cancel"))
-        cancel.setProperty("cls", "secondary")
-        cancel.setCursor(Qt.PointingHandCursor)
-        cancel.clicked.connect(lambda: self.done(0))
+        cancel = ui_kit.make_button(
+            t("lobby.tool_cancel"), kind="secondary",
+            on_click=lambda: self.done(0), min_h=36)
         lay.addWidget(cancel)
+
+        root.addWidget(panel, stretch=1)
+
+        # ── frameless + DWM shadow + win11 rounded corners ──
+        self._frameless = FramelessHelper(self)
+        self._frameless.set_titlebar(self.titlebar)
+        enable_win11_round_corners(self)
+
+    def remember_checked(self) -> bool:
+        """「记住选择」是否被勾选（勾选 → 下次自动下载 EasyTier）。"""
+        return bool(self._remember.isChecked())
 
 
 class LobbyDialog(QDialog):
@@ -236,10 +279,7 @@ class LobbyDialog(QDialog):
             _ach.unlock("first_join")
             self._start_easytier(lob)
         else:
-            warn(
-                self, t("lobby.title"),
-                t("lobby.join_error", e="未找到该编号的大厅"),
-            )
+            warn(self, t("lobby.title"), t("lobby.not_found"))
 
     def _do_create(self):
         name = f"{self._player_name} 的大厅"
@@ -291,15 +331,32 @@ class LobbyDialog(QDialog):
             self.et_status.setText(t("lobby.et_ready_noip"))
 
     def _choose_tool_prompt(self, lob):
-        """弹出联机工具选择器：EasyTier 内置下载 / 陶瓦 / MCTier 打开官网。
+        """未安装联机工具时的引导（round-78 完善）：
 
-        无论选择哪个，大厅簿记仍可继续使用；只有 EasyTier 会由启动器自动
-        下载并接回虚拟局域网启动流程。
+        设置里选了「自动 EasyTier」→ 不再弹窗，直接自动下载；
+        否则弹选择器：EasyTier 推荐位，勾选「记住选择」后写入偏好。
+        无论选择哪个，大厅簿记仍可继续使用；只有 EasyTier 会由启动器
+        自动下载并接回虚拟局域网启动流程。
         """
+        try:
+            from .settings_dialog import load_config
+            pref = load_config().get("lobby_tool", "ask")
+        except Exception:  # noqa: BLE001 - 配置读取失败按默认每次询问
+            pref = "ask"
+        if pref == "easytier":
+            self._download_easytier()
+            return
         pick = _ToolPicker(self)
         code = pick.exec()
         if code == 1:
-            # EasyTier：内置下载，完成后 _on_et_downloaded 会自动重新拉起
+            if pick.remember_checked():
+                try:
+                    from .settings_dialog import save_config, load_config as _lc
+                    cfg = _lc()
+                    cfg["lobby_tool"] = "easytier"
+                    save_config(cfg)
+                except Exception:  # noqa: BLE001 - 记不住也不阻塞联机
+                    pass
             self._download_easytier()
         elif code in (2, 3):
             url = TERRACOTTA_URL if code == 2 else MCTIER_URL

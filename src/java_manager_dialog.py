@@ -21,7 +21,8 @@ from PySide6.QtCore import Qt, QTimer
 
 from .i18n import t
 from .theme import COLORS, RoundedCard
-from .win_rounded import enable_dark_titlebar, confirm, warn, info
+from .win_rounded import enable_win11_round_corners, confirm, warn, info
+from .frameless import FramelessHelper, TitleBar
 from .core import java_install
 from .core.java import scan_javas
 from .onboarding import _JavaInstallThread
@@ -50,9 +51,10 @@ class _JavaDetectedRow(RoundedCard):
         top.addWidget(name_lbl)
 
         if self.major:
+            from .ui_kit import accent_text
             badge = QLabel(f"Java {self.major}")
             badge.setStyleSheet(
-                f"QLabel {{ background:{COLORS['accent']}22; color:{COLORS['accent']};"
+                f"QLabel {{ background:{COLORS['accent']}22; color:{accent_text()};"
                 f" border-radius:4px; padding:1px 6px; font-size:11px; }}")
             top.addWidget(badge)
 
@@ -61,8 +63,16 @@ class _JavaDetectedRow(RoundedCard):
         top.addWidget(tag)
         top.addStretch(1)
 
-        self.status = QLabel()
-        self.status.setProperty("cls", "sub")
+        self.status = QWidget()
+        stl = QHBoxLayout(self.status)
+        stl.setContentsMargins(0, 0, 0, 0)
+        stl.setSpacing(5)
+        self._st_icon = QLabel()
+        self._st_icon.setFixedSize(13, 13)
+        self._st_text = QLabel()
+        self._st_text.setProperty("cls", "sub")
+        stl.addWidget(self._st_icon)
+        stl.addWidget(self._st_text)
         top.addWidget(self.status)
         lay.addLayout(top)
 
@@ -79,13 +89,18 @@ class _JavaDetectedRow(RoundedCard):
         is_current = bool(self.dlg.current_path) and \
             os.path.normcase(self.path) == os.path.normcase(self.dlg.current_path)
         if is_current:
-            self.status.setText(t("javamgr.in_use"))
-            self.status.setStyleSheet(f"color:{COLORS['accent']};")
+            from .ui_kit import accent_text, state_pix
+            # 自绘圆点标记「使用中」，不用文本 ●（round-89）
+            self._st_icon.setPixmap(state_pix("dot", accent_text(), 8))
+            self._st_text.setText(t("javamgr.in_use"))
+            self._st_text.setStyleSheet(f"color:{accent_text()};")
             use_btn = QPushButton(t("javamgr.use_this"))
             use_btn.setEnabled(False)
         else:
-            self.status.setText(t("javamgr.installed"))
-            self.status.setStyleSheet(f"color:{COLORS['text_sub']};")
+            from .ui_kit import state_pix
+            self._st_icon.setPixmap(state_pix("done", COLORS["success"], 11))
+            self._st_text.setText(t("javamgr.installed"))
+            self._st_text.setStyleSheet(f"color:{COLORS['text_sub']};")
             use_btn = QPushButton(t("javamgr.use_this"))
             use_btn.clicked.connect(self._use)
         use_btn.setMinimumHeight(28)
@@ -158,8 +173,17 @@ class JavaManagerDialog(QDialog):
         self._rows: list[_JavaDetectedRow] = []
         self._last_javas: list[dict] | None = []
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 16, 16, 16)
+        # ── AC 无边框窗口：自定义标题栏 + 圆角 ──
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.titlebar = TitleBar(
+            self, title=t("javamgr.title"), height=38, controls="close")
+        root.addWidget(self.titlebar)
+
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(16, 12, 16, 16)
         lay.setSpacing(10)
 
         # current launch Java
@@ -258,12 +282,17 @@ class JavaManagerDialog(QDialog):
         btns.addWidget(close_btn)
         lay.addLayout(btns)
 
+        root.addWidget(body, stretch=1)
+
+        # ── frameless + DWM shadow + win11 rounded corners ──
+        self._frameless = FramelessHelper(self)
+        self._frameless.set_titlebar(self.titlebar)
+        enable_win11_round_corners(self)
+
         # fill the version combo (network best-effort)
         self._populate_majors()
         # auto-scan on open, like the old instance scanner did
         QTimer.singleShot(50, self._run_scan)
-        # dark native title bar (standard QDialog, not frameless)
-        enable_dark_titlebar(self)
 
     # ---------- version combo ----------
     def _populate_majors(self):

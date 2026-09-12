@@ -5,7 +5,7 @@ Contains:
 - _InstRow          compact row for the new left-side instance list
 - _LoaderCard       loader picker card in NewInstanceDialog
 - NewInstanceDialog create-instance wizard (version + loader + java)
-- InstancesPage     Prism-style split view: list | details
+- InstancesPage     split view: list | details
 - ModCard / ModsPage  per-instance mod toggling
 - _parse_mrpack_info / _MrpackDialog  Modrinth pack import
 """
@@ -17,10 +17,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QScrollArea, QDialog, QFormLayout, QLineEdit, QComboBox,
     QSizePolicy, QGridLayout, QCheckBox, QProgressBar,
-    QStackedWidget, QButtonGroup, QSplitter, QGraphicsOpacityEffect,
+    QStackedWidget, QButtonGroup, QSplitter, QGraphicsOpacityEffect, QMenu,
 )
 from PySide6.QtCore import Qt, Signal, QSize, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QIcon, QTransform
 
 from .theme import COLORS, RoundedCard
 from .effects import LightTrailCard  # round-50 卡片混合：实例详情卡流光
@@ -29,7 +29,7 @@ from .icons import icon
 from .frameless import FramelessHelper, TitleBar
 from .win_rounded import enable_win11_round_corners, confirm, pick_files, info, warn, toast
 from .i18n import t, loader_name
-from .instances import manager, Instance, LOADERS
+from .instances import manager, Instance, LOADERS, detect_format, launcher_label
 from .net_api import fetch_versions
 from .settings_dialog import load_config
 from .worker import Worker, ProgressWorker
@@ -72,6 +72,40 @@ def _badge_style(color: str) -> str:
         f"color: {color}; background: {color}1F; border-radius: 9px; "
         f"padding: 2px 10px; font-size: 11px; font-weight: 600;"
     )
+
+
+# round-82 启动格式徽章配色（与来源 launcher 徽章区分，见 detect_format）。
+FORMAT_BADGE = {
+    "auto":      "#8B5CF6",   # 自适应紫
+    "vanilla":   "#22C55E",   # 原版绿
+    "iso":       "#F59E0B",   # 隔离橙
+    "multimc":   "#3B82F6",   # 整合蓝
+    "curseforge": "#EC4899",  # CurseForge 粉
+    "modrinth":  "#14B8A6",   # Modrinth 青
+    "custom":    "#6B7280",   # 自定义灰
+}
+
+_fmt_keys = {  # format 值 → i18n key（label/tooltip 共用前缀）
+    "auto": "instances.fmt_auto",
+    "vanilla": "instances.fmt_vanilla",
+    "iso": "instances.fmt_iso",
+    "multimc": "instances.fmt_multimc",
+    "curseforge": "instances.fmt_curseforge",
+    "modrinth": "instances.fmt_modrinth",
+    "custom": "instances.fmt_custom",
+}
+
+
+def _fmt_badge(inst) -> "QLabel":
+    """构造格式徽章：自适应时显示实时探测结果，tooltip 说明"格式=磁盘布局"。"""
+    from PySide6.QtWidgets import QLabel
+    fmt = detect_format(inst)
+    key = _fmt_keys.get(fmt, "instances.fmt_auto")
+    b = QLabel(t(key))
+    b.setStyleSheet(_badge_style(FORMAT_BADGE.get(fmt, FORMAT_BADGE["auto"])))
+    b.setToolTip(t("instances.fmt_tooltip"))
+    b.setCursor(Qt.PointingHandCursor)
+    return b
 
 
 def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
@@ -189,17 +223,28 @@ class InstanceCard(LightTrailCard):
         ld_badge = QLabel(loader_name(inst.loader))
         ld_badge.setStyleSheet(_badge_style(loader_color))
         meta.addWidget(ld_badge)
+        meta.addWidget(_fmt_badge(inst))
         meta.addStretch(1)
         info.addLayout(meta)
         lay.addLayout(info, stretch=1)
 
         # ── right: current tag / actions ──
         if is_current:
-            tag = QLabel("✓ " + t("instances.current"))
+            tag = QWidget()
+            tag.setAttribute(Qt.WA_StyledBackground, True)
             tag.setStyleSheet(
-                f"color: {COLORS['success']}; background: #22C55E1A; "
-                f"font-weight: 600; border-radius: 10px; padding: 4px 12px;"
-            )
+                f"background: #22C55E1A; border-radius: 10px;")
+            tl = QHBoxLayout(tag)
+            tl.setContentsMargins(10, 4, 12, 4)
+            tl.setSpacing(6)
+            from .ui_kit import state_pix
+            ti = QLabel()
+            ti.setPixmap(state_pix("done", COLORS["success"], 14))
+            ti.setFixedSize(15, 15)
+            tt = QLabel(t("instances.current"))
+            tt.setStyleSheet(f"color: {COLORS['success']}; font-weight: 600;")
+            tl.addWidget(ti)
+            tl.addWidget(tt)
             lay.addWidget(tag)
         else:
             b = QPushButton(t("instances.set_current"))
@@ -227,7 +272,7 @@ class InstanceCard(LightTrailCard):
 
 
 class _InstRow(LightTrailCard):
-    """Compact row for the left instance list (Prism style)."""
+    """Compact row for the left instance list (common style)."""
 
     clicked = Signal(str)
 
@@ -263,9 +308,10 @@ class _InstRow(LightTrailCard):
         col.addWidget(sub)
         lay.addLayout(col, stretch=1)
 
-        self._cur_tag = QLabel("✓")
-        self._cur_tag.setStyleSheet(
-            f"color: {COLORS['success']}; font-weight: 700; font-size: 14px;")
+        self._cur_tag = QLabel()
+        from .ui_kit import state_pix
+        self._cur_tag.setPixmap(state_pix("done", COLORS["success"], 14))
+        self._cur_tag.setFixedSize(16, 16)
         self._cur_tag.setVisible(is_current)
         lay.addWidget(self._cur_tag)
 
@@ -284,14 +330,18 @@ class _InstRow(LightTrailCard):
         super().mousePressEvent(e)
 
     def contextMenuEvent(self, e):
-        # round-42 右键菜单（对齐 Prism 鼠标流）：on_menu(inst, global_pos)
+        # round-42 右键菜单（对齐主流鼠标流）：on_menu(inst, global_pos)
         if self._on_menu is not None:
             self._on_menu(self.inst, e.globalPos())
         e.accept()
 
 
 class _LoaderCard(QFrame):
-    """Clickable loader picker card — card-style selection (UI 大改 Step B)."""
+    """Clickable loader picker card — card-style selection (UI 大改 Step B).
+
+    round-88：左侧显示加载器官方风格图标（assets/icons/loader_*.svg，
+    缺失时回退彩色圆点），中间标题+描述，右侧选中对勾。
+    """
 
     def __init__(self, dlg: "NewInstanceDialog", loader_id: str, color: str, parent=None):
         super().__init__(parent)
@@ -299,30 +349,41 @@ class _LoaderCard(QFrame):
         self.loader_id = loader_id
         self._color = color
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(74)
-        lay = QVBoxLayout(self)
+        self.setMinimumHeight(66)
+        lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(4)
+        lay.setSpacing(12)
 
-        top = QHBoxLayout()
-        dot = QLabel()
-        dot.setFixedSize(12, 12)
-        dot.setStyleSheet(f"background: {color}; border-radius: 6px;")
-        top.addWidget(dot)
+        from .icons import pixmap as _pix
+        ic = _pix(f"loader_{loader_id}", 40)
+        self._logo = QLabel()
+        if not ic.isNull():
+            self._logo.setPixmap(ic)
+        else:
+            # 图标缺失时回退彩色圆点，绝不留空框
+            self._logo.setStyleSheet(f"background:{color}; border-radius:7px;")
+        self._logo.setFixedSize(40, 40)
+        self._logo.setScaledContents(True)
+        lay.addWidget(self._logo, 0, Qt.AlignVCenter)
+
+        mid = QVBoxLayout()
+        mid.setSpacing(3)
         name = QLabel(loader_name(loader_id))
         name.setProperty("cls", "title")
-        top.addWidget(name)
-        top.addStretch(1)
-        self._check = QLabel("✓")
-        self._check.setStyleSheet(f"color: {COLORS['accent']}; font-weight: 700;")
-        self._check.setVisible(False)
-        top.addWidget(self._check)
-        lay.addLayout(top)
-
+        mid.addWidget(name)
         desc = QLabel(t(_LOADER_DESC.get(loader_id, "new_instance.ld_vanilla")))
         desc.setProperty("cls", "sub")
         desc.setWordWrap(True)
-        lay.addWidget(desc)
+        mid.addWidget(desc)
+        lay.addLayout(mid, 1)
+
+        # round-91 自绘对勾（Windows 下文本 ✓ 可能被 Segoe UI Emoji 渲染成彩色）
+        from .ui_kit import state_pix
+        self._check = QLabel()
+        self._check.setPixmap(state_pix("done", COLORS["accent"], 15))
+        self._check.setFixedSize(16, 16)
+        self._check.setVisible(False)
+        lay.addWidget(self._check, 0, Qt.AlignTop)
 
         self._apply_style(False)
 
@@ -351,7 +412,7 @@ class NewInstanceDialog(QDialog):
     ``created`` / ``cancelled`` signals.  When ``embedded=False`` it behaves
     like a normal modal dialog.
 
-    This mirrors mainstream launchers (PCL2 / HMCL) and prevents players from
+    This mirrors mainstream launchers and prevents players from
     choosing loaders that do not exist for the selected Minecraft version.
     """
 
@@ -610,9 +671,20 @@ class NewInstanceDialog(QDialog):
         info.addWidget(date)
         lay.addLayout(info, stretch=1)
 
-        selected = QLabel("✓ " + t("instances.current") if ver_id == self._selected_version else "")
-        if selected.text():
-            selected.setStyleSheet(f"color: {COLORS['success']}; font-weight: 600;")
+        if ver_id == self._selected_version:
+            from .ui_kit import state_pix
+            selected = QWidget()
+            selected.setAttribute(Qt.WA_StyledBackground, True)
+            sel_lay = QHBoxLayout(selected)
+            sel_lay.setContentsMargins(0, 0, 0, 0)
+            sel_lay.setSpacing(5)
+            si = QLabel()
+            si.setPixmap(state_pix("done", COLORS["success"], 13))
+            si.setFixedSize(14, 14)
+            st = QLabel(t("instances.current"))
+            st.setStyleSheet(f"color: {COLORS['success']}; font-weight: 600;")
+            sel_lay.addWidget(si)
+            sel_lay.addWidget(st)
             lay.addWidget(selected)
 
         btn = QPushButton(t("versions.install"))
@@ -826,11 +898,20 @@ class NewInstanceDialog(QDialog):
     def _update_compatible_loaders(self):
         allowed = set(self._compatible_loaders(self._selected_version))
         visible_any = False
+        cols = 3
+        idx = 0
         for loader_id, card in self._loader_cards.items():
             ok = loader_id in allowed
             card.setVisible(ok)
             if ok:
+                # round-88：隐藏掉不兼容的卡后，把剩余可见卡重新按 3 列
+                # 连续铺排（QGridLayout 的 addWidget 会自动从旧格位移出），
+                # 避免留下空洞、"选项消失后剩余的不对齐"。
+                self._loader_grid.addWidget(card, idx // cols, idx % cols)
+                idx += 1
                 visible_any = True
+        self._loader_grid.invalidate()
+        self._loader_grid.activate()
         self._no_loader_hint.setVisible(not visible_any)
         # if currently selected loader became incompatible, reset to vanilla
         if self._loader not in allowed:
@@ -1034,7 +1115,7 @@ class NewInstanceDialog(QDialog):
 
 
 class InstancesPage(QWidget):
-    """Instance manager — Prism-style split: compact list on the left, a
+    """Instance manager — split view: compact list on the left, a
     details panel for the selected instance on the right.
 
     Left  : scrollable list of compact rows (icon + name + version pill).
@@ -1060,6 +1141,7 @@ class InstancesPage(QWidget):
         self._closing_new = False
         self._closing_scan = False
         self._empty_btn = None
+        self._list_panel_visible = True
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
@@ -1118,18 +1200,40 @@ class InstancesPage(QWidget):
 
         self._left_panel = QWidget()
         self._left_panel.setMinimumWidth(220)
-        self._left_panel.setMaximumWidth(400)
+        self._left_panel.setMaximumWidth(420)
         left_lay = QVBoxLayout(self._left_panel)
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.setSpacing(8)
 
+        # 列表标题行：标题 + 折叠按钮（◀ 收起列表 → 右侧详情全宽）
+        self._list_head = QHBoxLayout()
         self.list_lbl = QLabel(t("instances.list_title"))
         self.list_lbl.setProperty("cls", "group")
-        left_lay.addWidget(self.list_lbl)
+        self._list_head.addWidget(self.list_lbl)
+        self._list_head.addStretch(1)
+        # round-91 折叠箭头自绘（初始即用 chev，不再用文本 ◀，避免字体/emoji 渲染不一致）
+        self.fold_btn = QPushButton("")
+        self.fold_btn.setToolTip(t("instances.fold_list"))
+        self.fold_btn.setCursor(Qt.PointingHandCursor)
+        self.fold_btn.setFixedSize(24, 22)
+        from .ui_kit import state_pix
+        self.fold_btn.setIcon(
+            QIcon(state_pix("chev", COLORS["text_sub"], 14)
+                  .transformed(QTransform().rotate(180))))
+        self.fold_btn.setIconSize(QSize(14, 14))
+        self.fold_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {COLORS['text_sub']}; "
+            f"border: none; border-radius: 6px; font-size: 12px; }}"
+            f"QPushButton:hover {{ background: {COLORS['bg_hover']}; }}"
+        )
+        self.fold_btn.clicked.connect(self._toggle_panel)
+        self._list_head.addWidget(self.fold_btn)
+        left_lay.addLayout(self._list_head)
 
         self.list_scroll = QScrollArea()
         self.list_scroll.setWidgetResizable(True)
         self.list_scroll.setFrameShape(QFrame.NoFrame)
+        self.list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list_content = QWidget()
         self._list_vbox = QVBoxLayout(self._list_content)
         self._list_vbox.setContentsMargins(0, 0, 0, 0)
@@ -1141,6 +1245,7 @@ class InstancesPage(QWidget):
         self.detail_scroll = QScrollArea()
         self.detail_scroll.setWidgetResizable(True)
         self.detail_scroll.setFrameShape(QFrame.NoFrame)
+        self.detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.detail_content = QWidget()
         self.detail_lay = QVBoxLayout(self.detail_content)
         self.detail_lay.setContentsMargins(0, 0, 0, 0)
@@ -1271,11 +1376,21 @@ class InstancesPage(QWidget):
         nm.setStyleSheet(f"font-size: 20px; color: {COLORS['text_main']};")
         name_row.addWidget(nm)
         if inst.id == self.mgr.current_id:
-            tag = QLabel("✓ " + t("instances.current"))
+            from .ui_kit import state_pix
+            tag = QWidget()
+            tag.setAttribute(Qt.WA_StyledBackground, True)
             tag.setStyleSheet(
-                f"color: {COLORS['success']}; background: #22C55E1A; "
-                f"font-weight: 600; border-radius: 10px; padding: 4px 12px;"
-            )
+                f"background: #22C55E1A; border-radius: 10px;")
+            tl = QHBoxLayout(tag)
+            tl.setContentsMargins(8, 3, 10, 3)
+            tl.setSpacing(6)
+            ti = QLabel()
+            ti.setPixmap(state_pix("done", COLORS["success"], 13))
+            ti.setFixedSize(14, 14)
+            tt = QLabel(t("instances.current"))
+            tt.setStyleSheet(f"color: {COLORS['success']}; font-weight: 600;")
+            tl.addWidget(ti)
+            tl.addWidget(tt)
             name_row.addWidget(tag)
         name_row.addStretch(1)
         # launch button (jumps home & selects)
@@ -1288,7 +1403,7 @@ class InstancesPage(QWidget):
         name_row.addWidget(launch_btn)
         lay.addLayout(name_row)
 
-        # badges: version pill · loader badge · java
+        # badges: version pill · loader badge · format badge (round-82) · java
         meta = QHBoxLayout()
         meta.setSpacing(8)
         ver_pill = QLabel(inst.game_version or "?")
@@ -1298,6 +1413,7 @@ class InstancesPage(QWidget):
         ld_badge = QLabel(loader_name(inst.loader))
         ld_badge.setStyleSheet(_badge_style(loader_color))
         meta.addWidget(ld_badge)
+        meta.addWidget(_fmt_badge(inst))
         if inst.loader_version:
             lv = QLabel(inst.loader_version)
             lv.setStyleSheet(_badge_style(loader_color))
@@ -1318,7 +1434,7 @@ class InstancesPage(QWidget):
         grid.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         grid.addRow(QLabel(t("instances.detail_path")), self._mono(inst.mc_dir))
         grid.addRow(QLabel(t("instances.detail_source")),
-                    QLabel(inst.launcher or "AC"))
+                    QLabel(launcher_label(inst.launcher, show_original=True)))
         if inst.created_at:
             grid.addRow(QLabel(t("instances.detail_created")),
                         QLabel(inst.created_at))
@@ -1327,6 +1443,9 @@ class InstancesPage(QWidget):
         lay.addLayout(grid)
 
         # ── actions ──
+        # round-84 简洁化：一行只放高频操作（打开文件夹/实例设置/设为当前/删除），
+        # 低频操作（打开存档/应用整合包/崩溃分析）收进「⋯ 更多」下拉菜单——
+        # 避免按钮挤满一行把详情面板撑出横向滚动条。
         actions = QHBoxLayout()
         actions.setSpacing(8)
         open_btn = QPushButton(t("instances.open_folder"))
@@ -1335,14 +1454,6 @@ class InstancesPage(QWidget):
         open_btn.setIconSize(QSize(15, 15))
         open_btn.clicked.connect(lambda: self._open_folder(inst))
         actions.addWidget(open_btn)
-
-        # round-42：打开存档目录（对齐 Prism Saves 页入口）
-        saves_btn = QPushButton(t("instances.open_saves"))
-        saves_btn.setMinimumHeight(34)
-        saves_btn.setIcon(icon("folder"))
-        saves_btn.setIconSize(QSize(15, 15))
-        saves_btn.clicked.connect(lambda: self._open_saves(inst))
-        actions.addWidget(saves_btn)
 
         # round-42：实例级设置覆盖（内存/JVM 参数/分组）
         inst_set_btn = QPushButton(t("instances.instance_settings"))
@@ -1360,22 +1471,29 @@ class InstancesPage(QWidget):
         cur_btn.clicked.connect(lambda: self._set_current(inst.id))
         actions.addWidget(cur_btn)
 
-        # round-38 中轴：把整合包应用到已有实例（二次安装/升级）
-        pack_btn = QPushButton(t("instances.apply_pack"))
-        pack_btn.setMinimumHeight(34)
-        pack_btn.setIcon(icon("download"))
-        pack_btn.setIconSize(QSize(15, 15))
-        pack_btn.clicked.connect(lambda: self._apply_mrpack_to(inst))
-        actions.addWidget(pack_btn)
-
-        crash_btn = QPushButton(t("instances.crash_analyze"))
-        crash_btn.setMinimumHeight(34)
-        crash_btn.setIcon(icon("repair"))
-        crash_btn.setIconSize(QSize(15, 15))
-        crash_btn.clicked.connect(lambda: self._analyze_crash(inst))
-        actions.addWidget(crash_btn)
-
         actions.addStretch(1)
+
+        # ── 更多操作（⋯）──
+        more_btn = QPushButton("⋯")
+        more_btn.setToolTip(t("instances.more_actions"))
+        more_btn.setMinimumHeight(34)
+        more_btn.setMinimumWidth(34)
+        more_btn.setCursor(Qt.PointingHandCursor)
+        more_btn.setProperty("cls", "surface")
+        _more_menu = QMenu(more_btn)
+        for key, ico, slot in [
+            # round-42：打开存档目录
+            (t("instances.open_saves"), "folder", (lambda: self._open_saves(inst))),
+            # round-38 中轴：把整合包应用到已有实例（二次安装/升级）
+            (t("instances.apply_pack"), "download", (lambda: self._apply_mrpack_to(inst))),
+            (t("instances.crash_analyze"), "repair", (lambda: self._analyze_crash(inst))),
+        ]:
+            a = _more_menu.addAction(icon(ico), key)
+            a.triggered.connect(
+                lambda _c=False, f=slot: f())
+        more_btn.setMenu(_more_menu)
+        actions.addWidget(more_btn)
+
         del_btn = QPushButton(t("instances.delete"))
         del_btn.setProperty("cls", "danger")
         del_btn.setMinimumHeight(34)
@@ -1430,13 +1548,31 @@ class InstancesPage(QWidget):
             row.set_selected(rid == inst_id)
         self._render_detail()
 
+    # ── 左侧列表折叠：收起后面板隐藏 → 右侧详情全宽 ──
+    def _toggle_panel(self):
+        self._list_panel_visible = not self._list_panel_visible
+        self._left_panel.setVisible(self._list_panel_visible)
+        # round-89 折叠箭头自绘（不用文本 ▶/◀）
+        from .ui_kit import state_pix
+        if not self._list_panel_visible:
+            self.fold_btn.setIcon(QIcon(state_pix("chev", COLORS["text_main"], 14)))
+        else:
+            self.fold_btn.setIcon(QIcon(state_pix("chev", COLORS["text_main"], 14)
+                                        .transformed(QTransform().rotate(180))))
+        self.fold_btn.setIconSize(QSize(14, 14))
+        if self._list_panel_visible:
+            self._splitter.setSizes(
+                [self._splitter.width() // 3, self._splitter.width() * 2 // 3])
+        else:
+            self._splitter.setSizes([0, self._splitter.width()])
+
     def selected_instance(self) -> Instance | None:
         """当前选中的实例（供快捷键/外部调用）。round-42。"""
         if self._selected_id:
             return self.mgr.get(self._selected_id)
         return None
 
-    # ── 右键菜单（round-42，对齐 Prism 鼠标流）──
+    # ── 右键菜单（round-42，对齐主流鼠标流）──
     def _show_row_menu(self, inst: Instance, pos):
         from PySide6.QtWidgets import QMenu
         m = QMenu(self)
@@ -1480,7 +1616,7 @@ class InstancesPage(QWidget):
             lambda e: warn(self, t("instances.duplicate_title"), str(e)))
         self._dup_worker.start()
 
-    # ── 实例备份 / 回滚（N1，对齐 Prism 一键备份 / 更新坏了一键回滚）──
+    # ── 实例备份 / 回滚（N1，对齐主流一键备份 / 更新坏了一键回滚）──
     def _backup(self, inst: Instance):
         """创建一份完整快照（后台 Worker，防大实例卡 UI）。"""
         from .win_rounded import toast, warn
@@ -1661,19 +1797,20 @@ class InstancesPage(QWidget):
         jvm = QLineEdit(inst.jvm_args or "")
         jvm.setPlaceholderText(_t("instances.setting_jvm_hint"))
         lay.addWidget(jvm)
-        # round-55 JVM 预设（对齐 PCL2「JVM 参数」预设；空 = 跟随全局）
+        # round-55 JVM 预设（对齐主流「JVM 参数」预设；空 = 跟随全局）
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel(_t("instances.jvm_preset")))
         jvm_preset = QComboBox()
         jvm_preset.addItem(_t("instances.jvm_preset_follow"), "")
         jvm_preset.addItem(_t("instances.jvm_preset_default"), "default")
+        jvm_preset.addItem(_t("instances.jvm_preset_auto"), "auto")
         jvm_preset.addItem(_t("instances.jvm_preset_aikar"), "aikar")
         jvm_preset.addItem(_t("instances.jvm_preset_custom"), "custom")
         idx = jvm_preset.findData((inst.jvm_preset or ""))
         jvm_preset.setCurrentIndex(idx if idx >= 0 else 0)
         preset_row.addWidget(jvm_preset, stretch=1)
         lay.addLayout(preset_row)
-        # round-53 渲染器（对齐 HMCL 版本设置→渲染器 / PCL2 启动设置）
+        # round-53 渲染器（对齐主流版本设置→渲染器 / 启动设置）
         renderer_row = QHBoxLayout()
         renderer_row.addWidget(QLabel(_t("instances.setting_renderer_title")))
         renderer = QComboBox()
@@ -1692,6 +1829,38 @@ class InstancesPage(QWidget):
         game_args.setPlaceholderText(_t("instances.game_args_hint"))
         ga_row.addWidget(game_args, stretch=1)
         lay.addLayout(ga_row)
+        # round-82 启动格式（磁盘布局）：自适应默认，可手动覆盖/强制
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel(_t("instances.fmt_title")))
+        fmt_combo = QComboBox()
+        for _k, _v in (("auto", "auto"), ("vanilla", "vanilla"), ("iso", "iso"),
+                       ("multimc", "multimc"), ("curseforge", "curseforge"),
+                       ("modrinth", "modrinth"), ("custom", "custom")):
+            fmt_combo.addItem(_t(f"instances.fmt_{_k}"), _v)
+        _cur_fmt = (inst.format or "auto").strip()
+        _fmt_vals = {"auto", "vanilla", "iso", "multimc", "curseforge", "modrinth", "custom"}
+        _idx = fmt_combo.findData(_cur_fmt if _cur_fmt in _fmt_vals else "auto")
+        fmt_combo.setCurrentIndex(_idx if _idx >= 0 else 0)
+        fmt_hint = QLabel()
+        fmt_hint.setStyleSheet(
+            f"color: {COLORS['text_sub']}; font-size: 11px; margin-left: 6px;")
+
+        def _update_fmt_hint(data: str) -> None:
+            try:
+                if (data or "auto") == "auto":
+                    _det = detect_format(inst)
+                    fmt_hint.setText(_t("instances.fmt_detected",
+                                        name=_t(f"instances.fmt_{_det}")))
+                else:
+                    fmt_hint.setText(_t("instances.fmt_forced", name=_t(f"instances.fmt_{data}")))
+            except Exception:  # noqa: BLE001
+                fmt_hint.setText("")
+
+        fmt_combo.currentIndexChanged.connect(
+            lambda _i: _update_fmt_hint(fmt_combo.currentData()))
+        fmt_row.addWidget(fmt_combo)
+        fmt_row.addWidget(fmt_hint, stretch=1)
+        lay.addLayout(fmt_row)
         # round-55 版本隔离（空 = 跟随全局；custom 时填自定义目录）
         iso_row = QHBoxLayout()
         iso_row.addWidget(QLabel(_t("instances.isolation")))
@@ -1709,7 +1878,7 @@ class InstancesPage(QWidget):
         iso_combo.currentIndexChanged.connect(
             lambda _i: game_dir_edit.setVisible(iso_combo.currentData() == "custom"))
         lay.addWidget(game_dir_edit)
-        # round-53 实验性性能（对齐 PCL2 性能高级设置）
+        # round-53 实验性性能（对齐主流性能高级设置）
         lay.addWidget(QLabel(_t("instances.setting_perf_title")))
         g1gc = QCheckBox(_t("instances.perf_g1gc"))
         g1gc.setChecked(bool(getattr(inst, "perf_g1gc", True)))
@@ -1747,12 +1916,14 @@ class InstancesPage(QWidget):
         btn_row.addWidget(cancel)
         btn_row.addWidget(ok)
         root.addLayout(btn_row)
+        _update_fmt_hint(fmt_combo.currentData())  # 打开即显示当前识别
         if dlg.exec() != 1:
             return
         inst.ram_mb = mem.value()
         inst.jvm_args = jvm.text().strip()
         inst.jvm_preset = jvm_preset.currentData() or ""
         inst.renderer = renderer.currentData() or "auto"
+        inst.format = fmt_combo.currentData() or ""   # round-82 格式（auto → 存空）
         inst.game_args = game_args.text().strip()
         inst.isolation = iso_combo.currentData() or ""
         inst.game_dir_override = game_dir_edit.text().strip()
@@ -2042,7 +2213,7 @@ class InstancesPage(QWidget):
         worker.error.connect(_err)
         worker.start()
 
-    # ── 拖拽导入（round-42，对齐 MultiMC/Prism：拖 .mrpack/.zip 进窗口即导入）──
+    # ── 拖拽导入（round-42，对齐主流整合构建：拖 .mrpack/.zip 进窗口即导入）──
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             for u in e.mimeData().urls():
@@ -2291,7 +2462,7 @@ class ModCard(RoundedCard):
         del_btn.clicked.connect(lambda: self.removed.emit(path))
         lay.addWidget(del_btn)
 
-        # round-74 右键菜单（对齐 Prism/CurseForge 鼠标流）：
+        # round-74 右键菜单（对齐主流/CurseForge 鼠标流）：
         # 「打开所在文件夹」排查冲突、「复制文件名」查 Modrinth 时快速粘贴。
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(
@@ -2376,7 +2547,7 @@ class ModsPage(QWidget):
     def _on_target_changed(self, _index: int):
         self._render_mods()
 
-    # ── 检查更新 / 批量更新（round-41，对齐 Prism/CF App）──
+    # ── 检查更新 / 批量更新（round-41，对齐主流/CF App）──
     def _check_updates(self):
         inst = self._target()
         if inst is None:
@@ -2661,7 +2832,7 @@ class _MrpackDialog(QDialog):
             game_version=self.info.get("mc_version") or "1.21.4",
             loader=self.info.get("loader") or "vanilla")
         inst.version_id = self.info.get("launch_version") or ""
-        self.mgr._save()
+        self.mgr._persist(inst)
         self._inst = inst
         from .core import install
         self._worker = Worker(
@@ -2685,7 +2856,7 @@ class _MrpackDialog(QDialog):
         self.bar.setVisible(False)
         self.status.setText(t("mrpack.error", e=e))
         # round-40 P2-11：安装失败时移除刚创建的空实例（含空目录），
-        # 避免"脏实例"永久留在列表（PCL2/HMCL 均为成功后才注册）。
+        # 避免"脏实例"永久留在列表（各主流启动器均为成功后才注册）。
         try:
             inst = getattr(self, "_inst", None)
             if inst is not None:

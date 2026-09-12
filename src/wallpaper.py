@@ -111,7 +111,12 @@ def draw_version_wallpaper(version_id: str | None, size: QSize) -> QPixmap | Non
     pm = QPixmap(size)
     w, h = size.width(), size.height()
     theme = VERSION_THEMES.get(_theme_for_version(version_id), VERSION_THEMES["overworld"])
-    accent = QColor("#7C3AED")
+    # round-91 光晕主色跟随自定义 accent（内置紫主题下与原先 #7C3AED 一致）
+    try:
+        from .theme import COLORS
+        accent = QColor(COLORS.get("accent", "#7C3AED"))
+    except Exception:
+        accent = QColor("#7C3AED")
 
     # Theme-aware surface: dark builds stay near-black, light builds go airy.
     try:

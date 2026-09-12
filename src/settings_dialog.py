@@ -11,7 +11,8 @@ config and emits `saved` (MainWindow refreshes UI + navigates home).
 """
 import json, os, sys
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, Qt, Signal, QEvent
+from PySide6.QtGui import QFontDatabase, QFont
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -20,9 +21,9 @@ from PySide6.QtWidgets import (
     QWidget, QTabWidget, QRadioButton, QButtonGroup,
     QSlider,
     QScrollArea, QListWidget, QListWidgetItem, QStackedWidget, QFrame,
-    QSizePolicy,
+    QSizePolicy, QStyledItemDelegate, QStyleOptionViewItem,
 )
-from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtCore import QObject as _QObject
 
 from .theme import COLORS, RoundedCard, set_accent_color, set_theme_mode, apply_qss
 from . import ui_kit
@@ -36,6 +37,11 @@ from .core.java import scan_javas, java_major
 from .win_rounded import info, warn, pick_files, dark_color, enable_dark_titlebar
 
 CONFIG_FILE = get_config_path("launcher_config.json")
+# round-83 设置导出/导入：这些键永不写入/还原备份文件（密钥/脏开关）。
+_SENSITIVE_CFG_KEYS = frozenset({
+    "dev_mode_key",        # 开发者模式密钥
+    "win_geometry",        # 窗口几何是本机 UI 态，跨机还原会飘出屏幕
+})
 _DEFAULTS = {
     # ---- quick ----
     "ram_mb": 4096,
@@ -58,7 +64,7 @@ _DEFAULTS = {
     "java_auto": True,
     "java_path": "",
     "jvm_args": "",
-    # round-55 启动高级设置（对齐 PCL2「启动游戏/版本设置」）：
+    # round-55 启动高级设置（对齐主流「启动游戏/版本设置」）：
     "jvm_preset": "default",           # default / aikar / custom
     "game_args": "",                   # 游戏附加参数（--server <ip> 直连等）
     "version_isolation": "default",    # default / isolated
@@ -99,6 +105,9 @@ _DEFAULTS = {
     # ---- 退出释放资源（round-50）----
     "close_after_launch": True,      # 游戏启动并稳定运行后自动关闭启动器
     "close_after_launch_delay": 5,   # 检测游戏稳定运行的等待秒数
+    # round-83 系统托盘（关窗藏托盘）：True = 点关闭按钮只是隐藏到托盘，
+    # 游戏进程/下载任务不受影响；False = 恢复「关闭即退出」。
+    "tray_minimize": True,
     # ---- download mirror ----
     # round-46 用户要求"全部优先镜像/速度优先"——默认 BMCLAPI（国内镜像速度快）
     "download_mirror": "bmclapi",   # official (官方 Mojang) / bmclapi (国内镜像，速度优先)
@@ -106,11 +115,16 @@ _DEFAULTS = {
     "download_proxy": "",            # ""=system proxy, "none"=direct, or "http://host:port"
     # round-68 Quilt 加载器显示开关（close → 新建实例页隐藏 Quilt）
     "show_quilt": True,
-    # round-69 游戏进程优先级（对齐 PCL2「进程优先级」；Windows creationflags）
+    # round-78 联机工具偏好（round-64 三选一弹窗完善）：ask=每次弹选择器；
+    # easytier=未安装时自动内置下载，不再询问（可在设置里改回 ask）
+    "lobby_tool": "ask",
+    # round-69 游戏进程优先级（对齐主流「进程优先级」；Windows creationflags）
     "process_priority": "normal",   # normal / high / realtime
     # ---- developer mode (gates experimental/test features) ----
     "dev_mode": False,               # enabled only after key verification
     "dev_mode_key": "",              # stored only for UI display; real key comes from env/file
+    # round-80 设置折叠（常见做法）：记录被玩家收起的分组标题（i18n 当前语言标题）
+    "collapsed_groups": [],
 }
 
 
@@ -126,7 +140,7 @@ def load_config() -> dict:
             return dict(_DEFAULTS)
     except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
         return dict(_DEFAULTS)
-    # round-62 默认合规：PCL2 顶栏导航是实验功能（round-32 已删除设置入口，
+    # round-62 默认合规：顶部导航是实验功能（round-32 已删除设置入口，
     # 正常玩家无任何 UI 路径切过去）。配置文件里残留 "pcl2" 一律视为脏数据/
     # 手工编辑/测试脚本残留——除非同时显式开启了开发者模式（dev_mode=True），
     # 否则强制回退 AC 侧边导航默认值。
@@ -159,6 +173,104 @@ def _cfg_float(cfg: dict, key: str, default: float) -> float:
         return default
 
 
+class _FoldMgr(_QObject):
+    """round-80 自研折叠分组（另一种方法，不用 checkable 勾选框）。
+
+    常见「可折叠卡片」：标题栏整条可点击，标题前缀用 ▸/▾ 指示
+    折叠状态，点击即收起/展开组内内容控件。折叠状态即时写入配置并持久化
+    （key: collapsed_groups -> 收起的分组标题列表）。
+
+    绑定用事件过滤器 + title 前缀，完全不动现有分组创建/布局代码——
+    只需要在分组建完后对根布局跑一次 apply()。标题作为持久化 key 会随
+    语言切换而变化，切换后旧 key 匹配不上会退回默认折叠，可接受。
+    """
+
+    # 标题栏点击带：字体行高 + 上下留白
+    _STRIP = 12
+
+    def __init__(self, get_cfg, save_cfg):
+        _QObject.__init__(self)
+        self._get_cfg = get_cfg
+        self._save_cfg = save_cfg
+        try:
+            self._folded: set = set(get_cfg().get("collapsed_groups", []) or [])
+        except Exception:  # noqa: BLE001 - 折叠配置损坏不影响界面
+            self._folded = set()
+
+    # ── 绑定 ──────────────────────────────────────────────
+    def apply(self, layout, default_collapsed: bool) -> None:
+        """把根布局里的顶层 QGroupBox 全部绑定为可折叠。
+
+        ``default_collapsed`` 仅在玩家从未碰过该分组时生效（未出现在
+        配置里）；一旦玩家手动切换过，以玩家状态为准。
+        """
+        for i in range(layout.count()):
+            it = layout.itemAt(i)
+            w = it.widget() if it else None
+            if isinstance(w, QGroupBox):
+                self._bind(w, default_collapsed)
+
+    def _bind(self, box: QGroupBox, default_collapsed: bool) -> None:
+        plain = box.title()
+        if plain.startswith(("▸ ", "▾ ")):
+            plain = plain[2:].strip()
+        box.setProperty("fold_plain", plain)
+        if plain in self._folded:
+            folded = True
+        elif default_collapsed:
+            # 玩家从未操作过 → 默认收起（仅内存标记；首次手动展开时才会
+            # 写入配置，避免首启就塞满一大串 collapsed_groups）
+            folded = True
+        else:
+            folded = False
+        box.setProperty("folded", folded)
+        box.installEventFilter(self)
+        self._render(box)
+
+    # ── 事件：点标题栏切换 ────────────────────────────────
+    def eventFilter(self, obj, ev):
+        if not isinstance(obj, QGroupBox):
+            return False
+        # 用 MouseButtonPress：避免从标题栏起手拖动滚动时，松手在条带内
+        # 误触发折叠；press 阶段即接受事件，标题行不再参与滚动拖动。
+        if ev.type() == QEvent.MouseButtonPress and obj.isEnabled():
+            strip = obj.fontMetrics().height() + self._STRIP
+            if 0 < ev.position().y() <= strip:
+                self._toggle(obj)
+                return True               # 点击已消费，不再进入滚动等
+        return False
+
+    def _toggle(self, box: QGroupBox) -> None:
+        folded = not bool(box.property("folded"))
+        box.setProperty("folded", folded)
+        self._render(box)
+        plain = box.property("fold_plain") or ""
+        try:
+            cfg = self._get_cfg()
+            if not isinstance(cfg.get("collapsed_groups"), list):
+                cfg["collapsed_groups"] = []
+            lst = set(cfg["collapsed_groups"])
+            if folded:
+                lst.add(plain)
+            else:
+                lst.discard(plain)
+            cfg["collapsed_groups"] = sorted(lst)
+            self._folded = lst
+            self._save_cfg(cfg)
+        except Exception:  # noqa: BLE001 - 持久化失败不影响折叠交互
+            pass
+
+    def _render(self, box: QGroupBox) -> None:
+        """标题加 ▸/▾ 前缀；折叠时隐藏全部内容子控件，仅剩标题一行。"""
+        folded = bool(box.property("folded"))
+        plain = box.property("fold_plain") or box.title()
+        box.setTitle(("▸ " if folded else "▾ ") + plain)
+        for ch in box.children():
+            # 布局对象是 QObject 不是 QWidget，自动跳过；内容控件全部隐藏
+            if isinstance(ch, QWidget) and isinstance(ch, QGroupBox) is False:
+                ch.setVisible(not folded)
+
+
 def dev_mode_key() -> str:
     """Return the developer unlock key from environment or local file.
 
@@ -188,6 +300,25 @@ ACCENT_PRESETS = [
     ("#EC4899", "玫粉"),
     ("#14B8A6", "青碧"),
 ]
+
+# round-91 字体下拉：不再枚举候选列表，改为自动检测系统全部已安装字体
+# （QFontDatabase.families()），每项用自身字形预览（_FontItemDelegate）。
+class _FontItemDelegate(QStyledItemDelegate):
+    """全量字体下拉的列表项 delegate：每项用其字体族名渲染，即时预览效果。
+
+    普通 QComboBox 只列名字，全系统几百个字体时来回切换看不出差别；
+    此 delegate 在弹层列表里把每个字体以自身字形渲染，所见即所得。
+    「跟随系统默认」首项 data 为空字符串，走默认字体（不套字体族）。
+    """
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        fam = index.data(Qt.UserRole) or ""
+        if fam:
+            opt.font.setFamily(fam)
+            opt.font.setPointSize(11)
+        super().paint(painter, opt, index)
 
 
 class SettingsPage(QWidget):
@@ -219,6 +350,15 @@ class SettingsPage(QWidget):
     # ═══════════════════════════════════════════════════════════════════════
     # UI BUILD
     # ═══════════════════════════════════════════════════════════════════════
+    def _sync_font_btn(self, *_):
+        """round-91 字体下拉按钮文字用当前选中的字体族渲染。
+
+        列表项预览由 _FontItemDelegate 负责；按钮（折叠态）文字也同步成
+        该字体字形，「跟随系统默认」恢复 QFont()。
+        """
+        fam = self.font_combo.currentData() or ""
+        self.font_combo.setFont(QFont(fam, 11) if fam else QFont())
+
     def _wrap_hint(self, text: str) -> QLabel:
         """round-52 自适应：创建可换行的次级说明标签。
 
@@ -231,12 +371,18 @@ class SettingsPage(QWidget):
         return lbl
 
     def _wrap_scroll(self, content: QWidget) -> QScrollArea:
-        """Wrap a tab page in a QScrollArea so overflowing content stays reachable."""
+        """Wrap a tab page in a QScrollArea so overflowing content stays reachable.
+
+        round-90 UI 原则：不出现底部横条滚动。横向溢出改由内容自身收缩
+        （sizePolicy=Ignored：忽略内容固有宽度、强制贴合视口宽），长文本
+        文本自动换行、QGroupBox 标题自动省略，右侧内容永远完整可见。
+        纵向仍然保留滚动。
+        """
         sa = QScrollArea()
         sa.setWidgetResizable(True)
-        # 水平滚动条：需要时出现（AsNeeded）。之前 ScrollBarAlwaysOff 会隐藏
-        # 被超宽内容（长文本 QComboBox / 未换行 hint）撑出屏幕的选项。
-        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content.setMinimumWidth(0)
+        content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         sa.setWidget(content)
         sa.setFrameShape(QScrollArea.NoFrame)
         return sa
@@ -294,6 +440,11 @@ class SettingsPage(QWidget):
             sa.setWidgetResizable(True)
             sa.setFrameShape(QFrame.NoFrame)
             sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            # round-90 横溢出修复：不出现底部横条（UI 原则），改为内容
+            # 强制收缩到视口宽度（sizePolicy=Ignored 忽略内容固有宽度），
+            # 长文本/QGroupBox 标题由 Qt 自动换行/省略，右侧永远完整可见。
+            page.setMinimumWidth(0)
+            page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             sa.setWidget(page)
             wl.addWidget(sa)
             self._sec_stack.addWidget(wrapper)
@@ -358,13 +509,44 @@ class SettingsPage(QWidget):
     def _build_settings(self) -> QWidget:
         """round-68 设置简化：把原三分区的前两页（快速设置/高级设置）
         纵向合并为单一「设置」页（放到 QScrollArea 里滚动查看）。
-        Java 相关仍留在独立的「Java 管理」分区（_build_java_group）。"""
+        Java 相关仍留在独立的「Java 管理」分区（_build_java_group）。
+        round-80 折叠简化：quick 分组默认展开，advanced 分组默认收起，
+        点击标题栏切换，状态即时持久化。"""
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        lay.addWidget(self._build_quick())
-        lay.addWidget(self._build_advanced())
+        quick = self._build_quick()
+        adv = self._build_advanced()
+        # round-83 设置导出/导入：备份/还原全局设置（跳过敏感字段）。
+        # 独立成组不参与折叠——玩家找"备份"时永远能直接看到。
+        lay.addWidget(quick)
+        bk_grp = QGroupBox(t("settings.cfg_backup"))
+        bkl = QVBoxLayout(bk_grp)
+        bkl.setSpacing(8)
+        bk_hint = QLabel(t("settings.cfg_backup_hint"))
+        bk_hint.setProperty("cls", "sub")
+        bk_hint.setWordWrap(True)
+        bkl.addWidget(bk_hint)
+        bk_row = QHBoxLayout()
+        ex_b = QPushButton(t("settings.cfg_export_btn"))
+        im_b = QPushButton(t("settings.cfg_import_btn"))
+        ex_b.clicked.connect(self._export_settings)
+        im_b.clicked.connect(self._import_settings)
+        bk_row.addWidget(ex_b)
+        bk_row.addWidget(im_b)
+        bk_row.addStretch(1)
+        bkl.addLayout(bk_row)
+        lay.addWidget(bk_grp)
+        # round-80 折叠绑定：标题栏点击切换，▸/▾ 前缀指示状态。
+        # 默认收起只发生在玩家从未碰过该分组时；手动切换后以玩家为准。
+        # 注意：必须用 self 持有引用——事件过滤器被 GC 会悬垂崩溃。
+        self._fold_mgr = _FoldMgr(load_config, save_config)
+        self._fold_mgr.apply(quick.layout(), default_collapsed=False)
+        self._fold_mgr.apply(adv.layout(), default_collapsed=True)
+        lay.addWidget(adv)
+        # round-86 关于/守则置底：放在所有设置项最后（备份组、高级折叠组之后）
+        lay.addWidget(self._build_about())
         return w
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -418,21 +600,29 @@ class SettingsPage(QWidget):
         res_grp = QGroupBox(t("settings.resolution_preset"))
         resl = QVBoxLayout(res_grp)
         self.res_btns = QButtonGroup()
-        res_row = QHBoxLayout()
-        for rw, rh, label in [
-            (1280, 720, t("settings.res_hd")),
-            (1920, 1080, t("settings.res_fhd")),
-            (2560, 1440, t("settings.res_2k")),
+        # round-79b：预设从 3 档扩到 8 档（16:9 / 16:10 / 超宽 / 4K），
+        # 每行 4 个分两行排，避免一行挤爆对话框宽度。
+        for row_res in [
+            [(1280, 720, t("settings.res_hd")),
+             (1600, 900, t("settings.res_900p")),
+             (1920, 1080, t("settings.res_fhd")),
+             (1920, 1200, t("settings.res_16x10_fhd"))],
+            [(2560, 1440, t("settings.res_2k")),
+             (2560, 1600, t("settings.res_16x10_2k")),
+             (3440, 1440, t("settings.res_ultrawide")),
+             (3840, 2160, t("settings.res_4k"))],
         ]:
-            btn = QRadioButton(label)
-            btn.setChecked(
-                int(self.cfg.get("res_w", 1280)) == rw
-                and int(self.cfg.get("res_h", 720)) == rh
-            )
-            btn.res_val = (rw, rh)
-            self.res_btns.addButton(btn)
-            res_row.addWidget(btn)
-        resl.addLayout(res_row)
+            res_row = QHBoxLayout()
+            for rw, rh, label in row_res:
+                btn = QRadioButton(label)
+                btn.setChecked(
+                    int(self.cfg.get("res_w", 1280)) == rw
+                    and int(self.cfg.get("res_h", 720)) == rh
+                )
+                btn.res_val = (rw, rh)
+                self.res_btns.addButton(btn)
+                res_row.addWidget(btn)
+            resl.addLayout(res_row)
         lay.addWidget(res_grp)
 
         # ── Language ──
@@ -442,7 +632,8 @@ class SettingsPage(QWidget):
         lang_row = QHBoxLayout()
         for code, label in [
             ("zh-CN", t("settings.lang_zh")),
-            ("en-US", t("settings.lang_en")),
+            # round-79：英文标“实验性”（未全量中文化）
+            ("en-US", t("settings.lang_en_lab")),
         ]:
             btn = QRadioButton(label)
             btn.setChecked(self.cfg.get("language", "zh-CN") == code)
@@ -454,8 +645,30 @@ class SettingsPage(QWidget):
             b.toggled.connect(self._on_lang_toggle)
         lay.addWidget(lang_grp)
 
+        # ── Interface font (round-87 玩家可改全局字体；round-91 全量字体) ──
+        font_grp = QGroupBox(t("settings.font_family"))
+        fntl = QVBoxLayout(font_grp)
+        fntl.setSpacing(8)
+        self.font_combo = QComboBox()
+        # 自动检测系统全部已安装字体（字母序，中文系统返回中文字体名）
+        _families = list(QFontDatabase.families()) if QFontDatabase is not None else []
+        _families = sorted({f for f in _families if f}, key=str.lower)
+        self.font_combo.addItem(t("settings.font_default"), "")   # 跟随系统默认
+        for _fam in _families:
+            self.font_combo.addItem(_fam, _fam)
+        # round-91 列表项各用自身字形预览；按钮文字跟随当前选中字体
+        self.font_combo.setItemDelegate(_FontItemDelegate(self.font_combo))
+        self.font_combo.currentIndexChanged.connect(self._sync_font_btn)
+        _cur_font = self.cfg.get("font_family", "") or ""
+        _fi = self.font_combo.findData(_cur_font)
+        self.font_combo.setCurrentIndex(_fi if _fi >= 0 else 0)
+        self._sync_font_btn()
+        fntl.addWidget(self.font_combo)
+        fntl.addWidget(self._wrap_hint(t("settings.font_family_hint")))
+        lay.addWidget(font_grp)
+
         # ── Appearance: color picker + wallpaper + home style ──
-        # ── 拆分：原来一个外观 grp 塞 4 类内容，按 BlockHelm 风格独立成 4 个 grp ──
+        # ── 拆分：原来一个外观 grp 塞 4 类内容，按常见风格独立成 4 个 grp ──
         # 1. 外观（主题色 + 主题模式）
         app_grp = QGroupBox(t("settings.appearance"))
         apl = QVBoxLayout(app_grp)
@@ -536,6 +749,16 @@ class SettingsPage(QWidget):
         self.close_launch_chk = QCheckBox(t("settings.close_after_launch"))
         self.close_launch_chk.setChecked(self.cfg.get("close_after_launch", True))
         fx_row.addWidget(self.close_launch_chk)
+        # round-83 系统托盘：关窗最小化到托盘（无窗口图标全托给托盘常驻）
+        self.tray_chk = QCheckBox(t("settings.tray_minimize"))
+        self.tray_chk.setChecked(self.cfg.get("tray_minimize", True))
+        self.tray_chk.setToolTip(t("settings.tray_minimize_hint"))
+        fx_row.addWidget(self.tray_chk)
+        # round-79b 窗口置顶（B 节补完）：阅读/写关卡时固定在最前
+        self.topmost_chk = QCheckBox(t("settings.always_on_top"))
+        self.topmost_chk.setChecked(self.cfg.get("topmost", False))
+        self.topmost_chk.toggled.connect(self._on_topmost_toggle)
+        fx_row.addWidget(self.topmost_chk)
         fx_row.addStretch(1)
         apl.addLayout(fx_row)
 
@@ -672,7 +895,19 @@ class SettingsPage(QWidget):
 
         lay.addWidget(app_grp)
 
-        # ── About + Legal ──
+        # round-86 关于/守则类已移出 quick 折叠组，置底到设置页最下方
+        # （见 _build_about），保证隐私/守则/免责永远在页面最底下。
+        lay.addStretch(1)
+        return w
+
+    # round-86 关于/守则独立成组，置于设置页最底部：无论快速/高级怎么折叠，
+    # 隐私协议/用户守则/免责声明永远在页面最底下（用户的排版直觉）。
+    def _build_about(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(24, 20, 24, 24)
+        lay.setSpacing(18)
+
         about_grp = QGroupBox(t("settings.about"))
         al = QVBoxLayout(about_grp)
         ver_row = QHBoxLayout()
@@ -783,7 +1018,7 @@ class SettingsPage(QWidget):
         ll.addWidget(hint)
         lay.addWidget(lr_grp)
 
-        # ── JVM 启动优化（GC 调优，对应 PCL2 的优化参数）──
+        # ── JVM 启动优化（GC 调优，对应主流优化参数）──
         opt_grp = QGroupBox(t("settings.jvm_opts"))
         ol = QVBoxLayout(opt_grp)
         opt_hint = QLabel(t("settings.jvm_opts_hint"))
@@ -798,6 +1033,7 @@ class SettingsPage(QWidget):
         preset_row.addWidget(QLabel(t("settings.jvm_preset")))
         self.jvm_preset_combo = QComboBox()
         self.jvm_preset_combo.addItem(t("settings.jvm_preset_default"), "default")
+        self.jvm_preset_combo.addItem(t("settings.jvm_preset_auto"), "auto")
         self.jvm_preset_combo.addItem(t("settings.jvm_preset_aikar"), "aikar")
         self.jvm_preset_combo.addItem(t("settings.jvm_preset_custom"), "custom")
         _idx = self.jvm_preset_combo.findData(_preset)
@@ -806,7 +1042,7 @@ class SettingsPage(QWidget):
         ol.addLayout(preset_row)
         lay.addWidget(opt_grp)
 
-        # ── 游戏附加参数 + 版本隔离（round-55，对齐 PCL2「启动游戏 / 版本设置」）──
+        # ── 游戏附加参数 + 版本隔离（round-55，对齐主流「启动游戏 / 版本设置」）──
         ga_grp = QGroupBox(t("settings.game_args"))
         gal = QVBoxLayout(ga_grp)
         self.game_args_edit = QLineEdit(self.cfg.get("game_args", ""))
@@ -828,7 +1064,7 @@ class SettingsPage(QWidget):
         iso_row.addWidget(self.version_iso_combo, stretch=1)
         gal.addLayout(iso_row)
         gal.addWidget(self._wrap_hint(t("settings.version_isolation_hint")))
-        # round-69 进程优先级（对齐 PCL2「进程优先级」，Windows creationflags 生效）
+        # round-69 进程优先级（对齐主流「进程优先级」，Windows creationflags 生效）
         pri_row = QHBoxLayout()
         pri_row.addWidget(QLabel(t("settings.process_priority")))
         self.priority_combo = QComboBox()
@@ -843,7 +1079,7 @@ class SettingsPage(QWidget):
         gal.addWidget(self._wrap_hint(t("settings.process_priority_hint")))
         lay.addWidget(ga_grp)
 
-        # ── 启动后 / 退出后命令（round-55，对齐 PCL2「启动后执行命令」）──
+        # ── 启动后 / 退出后命令（round-55，对齐主流「启动后执行命令」）──
         hook_grp = QGroupBox(t("settings.hook_cmd"))
         hl = QVBoxLayout(hook_grp)
         hl.addWidget(QLabel(t("settings.post_launch_cmd")))
@@ -900,7 +1136,38 @@ class SettingsPage(QWidget):
         ml.addLayout(mrow)
         # round-52 自适应：长 hint 文本换行，避免撑大 GroupBox 最小宽度。
         ml.addWidget(self._wrap_hint(t("settings.mirror_hint")))
+        # round-79b 下载源测速（B 节补完）：一键探测并自动勾选最快源
+        st_row = QHBoxLayout()
+        self.mirror_test_btn = QPushButton(t("settings.mirror_speedtest"))
+        self.mirror_test_btn.setProperty("cls", "secondary")
+        self.mirror_test_btn.clicked.connect(self._on_mirror_speedtest)
+        st_row.addWidget(self.mirror_test_btn)
+        self.mirror_test_lbl = QLabel("")
+        self.mirror_test_lbl.setProperty("cls", "sub")
+        st_row.addWidget(self.mirror_test_lbl, stretch=1)
+        ml.addLayout(st_row)
         lay.addWidget(mirror_grp)
+
+        # 联机工具（round-78：未安装虚拟局域网工具时的 3 选 1 弹窗完善——
+        # 可选「每次询问」或「自动用内置 EasyTier」；默认每次询问）
+        lobby_grp = QGroupBox(t("settings.lobby_tool"))
+        lg = QVBoxLayout(lobby_grp)
+        self.lobby_tool_btns = QButtonGroup()
+        self.lobby_tool_btns.setExclusive(True)
+        lt_row = QHBoxLayout()
+        for key, label in [
+            ("ask", t("settings.lobby_tool_ask")),
+            ("easytier", t("settings.lobby_tool_easytier")),
+        ]:
+            rb = QRadioButton(label)
+            rb.setChecked(self.cfg.get("lobby_tool", "ask") == key)
+            rb.lobby_key = key
+            self.lobby_tool_btns.addButton(rb)
+            lt_row.addWidget(rb)
+        lt_row.addStretch(1)
+        lg.addLayout(lt_row)
+        lg.addWidget(self._wrap_hint(t("settings.lobby_tool_hint")))
+        lay.addWidget(lobby_grp)
 
         # Network proxy (for downloads behind a corporate / GFW proxy)
         proxy_grp = QGroupBox(t("settings.proxy"))
@@ -1126,7 +1393,7 @@ class SettingsPage(QWidget):
         ll.addWidget(QLabel(t("settings.authlib_hint")))
         lay.addWidget(login_grp)
 
-        # round-68 Quilt 加载器显示开关（对齐 PCL-CE「不显示 Quilt 加载器」：
+        # round-68 Quilt 加载器显示开关（对齐主流「不显示 Quilt 加载器」：
         # 关闭后新建实例页不再出现 Quilt 卡片/版本）
         loader_grp = QGroupBox(t("settings.loader"))
         lg = QVBoxLayout(loader_grp)
@@ -1135,7 +1402,7 @@ class SettingsPage(QWidget):
         self.show_quilt_chk.setChecked(bool(self.cfg.get("show_quilt", True)))
         lg.addWidget(self.show_quilt_chk)
         lg.addWidget(self._wrap_hint(t("settings.show_quilt_hint")))
-        # round-71 非 ASCII 路径警告开关（对齐 PCL-CE「不再提示」语义）
+        # round-71 非 ASCII 路径警告开关（对齐主流「不再提示」语义）
         self.warn_non_ascii_chk = QCheckBox(t("settings.warn_non_ascii_path"))
         self.warn_non_ascii_chk.setChecked(bool(self.cfg.get("warn_non_ascii_path", True)))
         lg.addWidget(self.warn_non_ascii_chk)
@@ -1418,6 +1685,48 @@ class SettingsPage(QWidget):
             self.java_auto.setChecked(False)
             self._refresh_java_quick_list()
 
+    def _on_mirror_speedtest(self):
+        """round-79b：测速选优——后台 HEAD 两源，完成自动勾选最快源。"""
+        if getattr(self, "_mirror_testing", False):
+            return
+        self._mirror_testing = True
+        self.mirror_test_btn.setEnabled(False)
+        self.mirror_test_lbl.setText(t("settings.mirror_speedtesting"))
+        from . import net_api
+        self._mirror_worker = Worker(net_api.mirror_latencies)
+        self._mirror_worker.finished.connect(self._finish_mirror_test)
+        self._mirror_worker.start()
+
+    def _finish_mirror_test(self, res: dict):
+        """round-79b：测速完成——展示结果并勾选最快源。"""
+        try:
+            o = res.get("official")
+            b = res.get("bmclapi")
+
+            def _fmt(v):
+                return f"{v:.0f}ms" if v is not None else "\u2014"
+
+            best = None
+            for key, ms in (("official", o), ("bmclapi", b)):
+                if ms is not None and (best is None or ms < best[1]):
+                    best = (key, ms)
+            text = ("  ·  ").join([
+                f"{t('settings.mirror_lbl_official')} {_fmt(o)}",
+                f"{t('settings.mirror_lbl_bmclapi')} {_fmt(b)}",
+            ])
+            if best:
+                for rb in self.mirror_btns.buttons():
+                    if getattr(rb, "mirror_key", None) == best[0]:
+                        rb.setChecked(True)
+                        break
+                text += f"   \u2192  {t('settings.mirror_recommend')}"
+            self.mirror_test_lbl.setText(text)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self.mirror_test_btn.setEnabled(True)
+            self._mirror_testing = False
+
     def _on_java_scan_done(self, entries: list):
         """Slot called on main thread when the background Java scan finishes."""
         self._refresh_java_quick_list_with(entries)
@@ -1434,7 +1743,7 @@ class SettingsPage(QWidget):
         """Populate the Java quick list from pre-scanned entries (on main thread).
 
         Each row: Java major + version + path + "使用" button. One click
-        sets the path + disables auto-select. Mirrors PCL2's quick-pick UX.
+        sets the path + disables auto-select. Mirrors mainstream launchers' quick-pick UX.
         """
         from PySide6.QtWidgets import QFrame
         # Tear down previous rows
@@ -1481,12 +1790,21 @@ class SettingsPage(QWidget):
             info.addWidget(p_lbl)
             # 未知版本的 Java：提示玩家不建议使用（可能是精简 JDK/破损/AI 生成）
             if not known:
-                warn_lbl = QLabel(t("javamgr.not_recommended"))
-                warn_lbl.setStyleSheet(
-                    f"font-size:11px; color:{COLORS['danger']};"
-                )
-                warn_lbl.setWordWrap(True)
-                info.addWidget(warn_lbl)
+                from .ui_kit import state_pix
+                warn_box = QWidget()
+                wl = QHBoxLayout(warn_box)
+                wl.setContentsMargins(0, 0, 0, 0)
+                wl.setSpacing(6)
+                wi = QLabel()
+                wi.setPixmap(state_pix("warn", COLORS["danger"], 14))
+                wi.setFixedSize(15, 15)
+                wt = QLabel(t("javamgr.not_recommended"))
+                wt.setStyleSheet(
+                    f"font-size:11px; color:{COLORS['danger']};")
+                wt.setWordWrap(True)
+                wl.addWidget(wi, 0, Qt.AlignTop)
+                wl.addWidget(wt, 1)
+                info.addWidget(warn_box)
             rl.addLayout(info, stretch=1)
             use_btn = QPushButton(t("javamgr.use_this"))
             use_btn.setMinimumHeight(28)
@@ -1548,6 +1866,15 @@ class SettingsPage(QWidget):
             apply_qss()
         except Exception:  # noqa: BLE001
             pass
+
+    def _on_topmost_toggle(self, on: bool):
+        """Live 窗口置顶开关（round-79b）：即时让主窗置顶/取消置顶。"""
+        win = self._window
+        if win is not None:
+            try:
+                win.apply_topmost(on)
+            except Exception:  # noqa: BLE001 - 个别平台不支持时不打扰
+                pass
 
     def _on_effect_trail(self, on: bool):
         """Live-toggle 流光卡片 / 页面动画（round-49）。"""
@@ -1630,6 +1957,66 @@ class SettingsPage(QWidget):
             if p.get("id") == pack.get("id"):
                 self.pack_combo.setCurrentIndex(i)
                 break
+
+    def _export_settings(self):
+        """round-83 设置导出：收集当前 UI 值 → JSON（跳过敏感字段）保存。"""
+        from .win_rounded import pick_folder, warn, info
+        dlg_dir = pick_folder(self, t("settings.cfg_export_title"))
+        if not dlg_dir:
+            return
+        try:
+            from . import _SENSITIVE_CFG_KEYS
+            self._sync_ui_to_cfg()
+        except Exception:  # noqa: BLE001 - 收集失败仍可导出已持久化档
+            pass
+        target = dict(self.cfg)
+        for k in _SENSITIVE_CFG_KEYS:
+            target.pop(k, None)
+        import time as _time
+        dest = os.path.join(dlg_dir, f"ac-config-{_time.strftime('%Y%m%d-%H%M%S')}.json")
+        try:
+            with open(dest, "w", encoding="utf-8") as f:
+                json.dump(target, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            warn(self, t("settings.cfg_export_fail"), str(e))
+            return
+        info(self, t("settings.cfg_export"), t("settings.cfg_export_done", path=dest))
+
+    def _import_settings(self):
+        """round-83 设置导入：读 JSON → 仅合并已知键 → 写回并重建设置页/外观。"""
+        from .win_rounded import pick_files, warn, info
+        from . import _SENSITIVE_CFG_KEYS
+        path = pick_files(self, t("settings.cfg_import_title"), "", "配置文件 (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("bad config payload")
+        except Exception as e:  # noqa: BLE001
+            warn(self, t("settings.cfg_import_fail"), str(e))
+            return
+        # 只取已知键（防脏 json 塞入未知字段污染 cfg）；敏感键一律不还原
+        n = 0
+        for k in _DEFAULTS:
+            if k in _SENSITIVE_CFG_KEYS:
+                continue
+            if k in data and data[k] is not None:
+                self.cfg[k] = data[k]
+                n += 1
+        save_config(self.cfg)
+        # 重建设置页（控件取新值）并即时套用外观
+        try:
+            self._rebuild()
+            from .theme import set_theme_mode, set_accent_color, apply_qss, set_frosted
+            set_frosted(self.cfg.get("frosted_theme", True))
+            set_theme_mode(self.cfg.get("theme_mode", "light"))
+            set_accent_color(self.cfg.get("accent_color", "#7C3AED"))
+            apply_qss()
+        except Exception:  # noqa: BLE001 - 外观失败不阻断导入本身
+            pass
+        info(self, t("settings.cfg_import"), t("settings.cfg_import_done", n=n))
 
     def _clear_cache(self):
         """清理下载/图标缓存（不删配置与实例数据）。round-42。"""
@@ -1853,6 +2240,10 @@ class SettingsPage(QWidget):
         checked_lang = self._safe(self.lang_btns.checkedButton, None)
         if checked_lang:
             target["language"] = getattr(checked_lang, "lang_code", target["language"])
+        # round-87 全局字体（"" = 跟随系统默认）
+        target["font_family"] = self._safe(
+            lambda: self.font_combo.currentData() or "",
+            target.get("font_family", ""))
         checked_wp = self._safe(self.wp_modes.checkedButton, None)
         if checked_wp:
             target["wallpaper_mode"] = getattr(checked_wp, "wp_mode", target["wallpaper_mode"])
@@ -1878,6 +2269,9 @@ class SettingsPage(QWidget):
         checked_mirror = self._safe(self.mirror_btns.checkedButton, None)
         if checked_mirror:
             target["download_mirror"] = getattr(checked_mirror, "mirror_key", target["download_mirror"])
+        checked_lobby = self._safe(self.lobby_tool_btns.checkedButton, None)
+        if checked_lobby:
+            target["lobby_tool"] = getattr(checked_lobby, "lobby_key", target.get("lobby_tool", "ask"))
         checked_proxy = self._safe(self.proxy_btns.checkedButton, None)
         if checked_proxy:
             key = getattr(checked_proxy, "proxy_key", "custom")
@@ -1955,6 +2349,12 @@ class SettingsPage(QWidget):
         # round-50 退出释放资源
         target["close_after_launch"] = self._safe(
             self.close_launch_chk.isChecked, bool(target["close_after_launch"]))
+        # round-83 系统托盘（关窗藏托盘）
+        target["tray_minimize"] = self._safe(
+            self.tray_chk.isChecked, bool(target.get("tray_minimize", True)))
+        # round-79b 窗口置顶
+        target["topmost"] = self._safe(
+            self.topmost_chk.isChecked, bool(target.get("topmost", False)))
         # round-68 Quilt 加载器显示开关
         target["show_quilt"] = self._safe(
             self.show_quilt_chk.isChecked, bool(target.get("show_quilt", True)))
@@ -2022,6 +2422,9 @@ class SettingsPage(QWidget):
         disk = load_config()
         set_theme_mode(disk.get("theme_mode", "light"))
         set_accent_color(disk.get("accent_color", "#7C3AED"))
+        # round-87 放弃修改时字体也还原
+        from .theme import set_font_family
+        set_font_family(disk.get("font_family", ""))
         apply_qss()
         self.cfg = disk
         try:
@@ -2055,6 +2458,10 @@ class SettingsPage(QWidget):
 
         # Accent color（无主题包时生效；有主题包时由下方的包覆盖其 accent）
         set_accent_color(self.cfg.get("accent_color", "#7C3AED"))
+
+        # round-87 全局字体：先于 apply_qss，让 build_qss 用新字体重建
+        from .theme import set_font_family
+        set_font_family(self.cfg.get("font_family", ""))
 
         # Theme pack（若已配置）：最后套用，保证包的修饰色/圆角在其它选项
         # 保存后仍生效，且包的 accent 优先于自定义 accent。

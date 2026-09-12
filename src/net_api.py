@@ -144,8 +144,8 @@ class NetError(Exception):
 # ══════════════════════════════════════════════════════════════════════════
 _CHUNK = 65536
 
-# round-72 借鉴 PCL-CE LoaderDownload：每文件最多尝试 3 次，网络类失败带
-# 抖动退避重试（分段里说明 PCL 是 retry<4 + Sleep(300~500+retry*300)）。
+# round-72 借鉴主流实现做分片下载：每文件最多尝试 3 次，网络类失败带
+# 抖动退避重试（分段里说明 retry<4 + Sleep(300~500+retry*300)）。
 _MAX_DOWNLOAD_RETRIES = 3
 
 
@@ -239,7 +239,7 @@ def download_file(
         cancel:    callable() -> bool；返回 True 时中断（round-40 P2-10：
                    队列 shutdown 用它在 chunk 边界安全中断，.part 留下次续传）
 
-    网络类失败最多重试 ``_MAX_DOWNLOAD_RETRIES`` 次（抖动退避，对齐 PCL-CE）；
+    网络类失败最多重试 ``_MAX_DOWNLOAD_RETRIES`` 次（抖动退避，对齐主流）；
     重试期间 .part 断点续传，最终仍失败抛 NetError（.part 保留可再续传）。
     返回 dest。
     """
@@ -247,7 +247,7 @@ def download_file(
     last: Exception | None = None
     for attempt in range(_MAX_DOWNLOAD_RETRIES):
         if attempt:
-            # PCL 风格抖动退避：0.8s / 1.6s ± 0.3s，网络抖动让开高峰期
+            # 主流风格抖动退避：0.8s / 1.6s ± 0.3s，网络抖动让开高峰期
             time.sleep(0.4 * (2 ** attempt) + random.random() * 0.3)
         try:
             return _download_once(
@@ -398,8 +398,42 @@ _AUTO_MIRROR: str | None = None
 _AUTO_MIRROR_AT: float = 0.0
 
 
+def mirror_latencies(timeout: float = 3.0) -> dict:
+    """round-79b：下载源测速（官方 manifest / BMCLAPI HEAD 延迟）。
+
+    供设置页「测速选优」使用；与 _pick_auto_mirror 共用端点，但独立于
+    进程级缓存——显式测速永远实时重测。返回 {"official": ms|None,
+    "bmclapi": ms|None}，None 表示不可达。
+    """
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _test(url):
+        try:
+            t0 = _time.time()
+            r = requests.head(url, headers=_HEADERS, timeout=timeout, proxies=_proxies())
+            if r.status_code >= 400:
+                return None
+            return (_time.time() - t0) * 1000.0
+        except Exception:  # noqa: BLE001 - 单项失败返回 None 由 UI 呈现
+            return None
+
+    out: dict = {}
+    urls = (VERSION_MANIFEST_URL, MANIFEST_BMCLAPI)
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fs = {ex.submit(_test, u): u for u in urls}
+        for f in as_completed(fs, timeout=timeout + 1.5):
+            try:
+                ms = f.result()
+            except Exception:  # noqa: BLE001
+                ms = None
+            u = fs[f]
+            out["official" if u == VERSION_MANIFEST_URL else "bmclapi"] = ms
+    return out
+
+
 def _pick_auto_mirror() -> str:
-    """测速选择官方/Bmclapi manifest 端点（对齐 HMCL AutoDownloadProvider）。
+    """测速选择官方/Bmclapi manifest 端点（对齐主流做法）。
 
     round-44 性能：HEAD 测速（之前 GET 拉整个 ~1MB manifest ×2，慢网上
     新建实例的版本列表要等 10s+ 才出来——「版本加载不出来」的根因之一）。
@@ -515,14 +549,17 @@ def fetch_versions() -> tuple[str, list[dict]]:
     return result
 
 
-def _modrinth_versions(project_id: str, mc_version: str = "", loader: str = "") -> list[dict]:
+def _modrinth_versions(project_id: str, mc_version: str = "", loader: str = "",
+                       limit: int | None = None, offset: int = 0) -> list[dict]:
     """Fetch the version list of a Modrinth project, optionally filtered by
     game version + loader (server-side filter params).
 
     round-40 秒加载：结果缓存（300s 内存 + 磁盘）——依赖解析/下载时重复
-    调用同一 project 不再每次网络请求。
+    调用同一 project 不再每次网络请求。round-85 新增 ``limit``/``offset``
+    分页：详情页按页拉取（默认 50），避免大项目（如 Fabric API 上千版本）
+    一次拉全量 JSON 导致卡顿；``limit=None`` 保持旧全量行为（更新检查用）。
     """
-    key = f"mv:{project_id}:{mc_version}:{loader}"
+    key = f"mv:{project_id}:{mc_version}:{loader}:{limit}:{offset}"
     cached = _cached(key)
     if cached is not None:
         return cached
@@ -532,6 +569,10 @@ def _modrinth_versions(project_id: str, mc_version: str = "", loader: str = "") 
         params["game_versions"] = f'["{mc_version}"]'
     if loader and loader not in ("vanilla", ""):
         params["loaders"] = f'["{loader}"]'
+    if limit:
+        params["limit"] = limit
+    if offset:
+        params["offset"] = offset
     try:
         r = requests.get(
             f"{base}/project/{project_id}/version",
@@ -598,7 +639,7 @@ def get_mod_download(project_id: str) -> tuple[str, str]:
     return _version_primary_file(versions[0], project_id)
 
 
-# ── Mod 依赖树解析（round-37 轴心1，对齐 BlockHelm/PCL2/HMCL）───────────
+# ── Mod 依赖树解析（round-37 轴心1，对齐主流做法）───────────
 # Modrinth version dict 带 `dependencies: [{project_id, dependency_type}]`。
 # 下载 mod 时递归拉取 required 依赖（本体 + 所有缺的依赖文件），
 # optional 跳过、incompatible 跳过、已下载过的依赖去重。
@@ -763,7 +804,7 @@ def translate_text(text: str, target: str = "zh-CN") -> str:
     return out
 
 
-# 资源中心支持的 Modrinth project_type（对齐 PCL2 下载分类：模组/整合包/光影/资源包/数据包）
+# 资源中心支持的 Modrinth project_type（对齐主流下载分类：模组/整合包/光影/资源包/数据包）
 STORE_CATEGORIES = [
     ("mod",          "store.category_mod"),
     ("modpack",      "store.category_modpack"),
@@ -877,7 +918,7 @@ def download_curseforge_mod(project_id: str, dest_dir: str) -> str:
 # ---- CurseForge 免 key 通道（cfwidget 详情 + forgecdn 直链）----
 # 搜索被 CF 官网 Cloudflare 全量拦截且无公开代理，但"已知 mod → 下载"完全可用：
 #   cfwidget.com 返回 mod 详情与文件列表（文件 id/文件名/大小），
-#   edge.forgecdn.net/files/<id//1000>/<id%1000>/<file> 是公开直链（PCL2 同款）。
+#   edge.forgecdn.net/files/<id//1000>/<id%1000>/<file> 是公开直链（同款做法）。
 CFWIDGET_URL = "https://api.cfwidget.com/minecraft/mc-mods/{slug}"
 FORGECDN_URL = "https://edge.forgecdn.net/files/{a}/{b}/{name}"
 
@@ -1123,7 +1164,7 @@ def search_mods(query: str = "", offset: int = 0, limit: int = 20,
         {
             "project_id": h.get("project_id", ""),
             "slug": h.get("slug", ""),
-            # round-45 中文名：内置映射优先（学 PCL2），英文界面显示原名
+            # round-45 中文名：内置映射优先（学主流），英文界面显示原名
             "title": (cn_name(h.get("slug", ""), h.get("title", ""))
                       if _lang != "en-US" else h.get("title", "")),
             "description": h.get("description", ""),
@@ -1150,7 +1191,7 @@ def download_modpack_to(project_id: str, dest_dir: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Extra loaders (direction: PCL CE loader coverage, 2026-08-01)
+# Extra loaders (direction: mainstream launcher loader coverage, 2026-08-01)
 #   Legacy Fabric  - meta.legacyfabric.net (official meta API)
 #   Cleanroom      - Forge continuation fork (1.12.2 on Java 21 + LWJGL3),
 #                    official GitHub Releases provide an installer jar

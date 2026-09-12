@@ -1,4 +1,4 @@
-"""Mod pre-flight conflict scan（N5，对齐 PCL2/Prism 导入/启动前的模组冲突预检）。
+"""Mod pre-flight conflict scan（N5，导入/启动前的模组冲突预检）。
 
 纯静态、无网络：读实例 ``mods/`` 下每个 .jar 的依赖元数据（Fabric/Quilt
 ``*.mod.json``、Forge/NeoForge ``META-INF/mods.toml``），交叉比对已装模组，

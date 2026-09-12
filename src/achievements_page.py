@@ -48,13 +48,25 @@ class _AchCard(RoundedCard):
         lay.addWidget(desc)
         lay.addStretch(1)
         if unlocked:
-            badge = QLabel("✓ " + t("ach.unlocked"))
+            from .ui_kit import state_pix
+            badge = QWidget()
+            badge.setAttribute(Qt.WA_StyledBackground, True)
             badge.setStyleSheet(
-                f"background: {COLORS['success']}22; color: {COLORS['success']};"
-                f" border-radius: 8px; padding: 2px 10px; font-size: 11px; font-weight: 600;"
+                f"background: {COLORS['success']}22;"
+                f" border-radius: 8px;"
             )
-            badge.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            lay.addWidget(badge)
+            bh = QHBoxLayout(badge)
+            bh.setContentsMargins(10, 2, 12, 2)
+            bh.setSpacing(5)
+            bi = QLabel()
+            bi.setPixmap(state_pix("done", COLORS["success"], 13))
+            bi.setFixedSize(14, 14)
+            bt = QLabel(t("ach.unlocked"))
+            bt.setStyleSheet(
+                f"color: {COLORS['success']}; font-size: 11px; font-weight: 600;")
+            bh.addWidget(bi)
+            bh.addWidget(bt)
+            lay.addWidget(badge, alignment=Qt.AlignLeft)
         else:
             hint = QLabel(t("ach.locked"))
             hint.setStyleSheet(

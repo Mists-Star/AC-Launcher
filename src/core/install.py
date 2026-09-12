@@ -30,7 +30,7 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
     ``proxy`` is the download_proxy setting ("none"/"system"/custom URL) so a
     user behind a proxy can still fetch game files.
     """
-    # round-42 auto 源：测速决定是否走 bmclapi 重写（对齐 HMCL auto provider）
+    # round-42 auto 源：测速决定是否走 bmclapi 重写（对齐主流做法）
     if mirror == "auto":
         try:
             from ..net_api import _pick_auto_mirror
@@ -173,7 +173,7 @@ def apply_mrpack_to_instance(mrpack_path: str, inst, *, mirror: str = "official"
                              proxy: str = "", callback=None) -> str:
     """把整合包应用到**已有实例**（中轴：二次安装/升级，round-38）。
 
-    对齐 PCL2/HMCL 的"对现有实例更新整合包"：
+    对齐主流做法的"对现有实例更新整合包"：
     1. 备份会被覆盖的 mods/config/options.txt → data/backups/<inst_id>_<ts>/
     2. install_mrpack 覆盖安装（mll 原生支持已有目录升级：解压 overrides、
        下载 base game + loader + 全部 mod）

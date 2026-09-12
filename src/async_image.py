@@ -200,7 +200,7 @@ _TYPE_THEME: dict[str, tuple[str, str]] = {
     "old_alpha": ("#94A3B8", "#64748B"),  # slate
 }
 
-# round-53：版本图标改为 MC 风格 3D 等距方块（对齐官方启动器/HMCL 的方块
+# round-53：版本图标改为 MC 风格 3D 等距方块（对齐官方启动器/主流启动器的方块
 # 图标）。每种版本类型配一组「顶面/左面/右面」的经典 MC 贴图配色：
 #   release → 草方块；snapshot → 紫珀块；april → 樱花木；old_beta → 铁砧；
 #   old_alpha / 未知 → 圆石。

@@ -65,7 +65,7 @@ def _major_from_path(path: str) -> int:
 
 
 # round-40 P2-5 性能：scan_javas 进程级缓存（60s TTL）——之前每次启动游戏
-# 都全盘扫 Java（含 discover_javas 整盘 os.walk），慢盘卡数秒。PCL2/HMCL 均
+# 都全盘扫 Java（含 discover_javas 整盘 os.walk），慢盘卡数秒。各主流启动器均
 # 缓存扫描结果。deep=True 全盘扫更慢，TTL 更长。
 _SCAN_CACHE: list | None = None
 _SCAN_CACHE_AT: float = 0.0
@@ -195,7 +195,7 @@ def select_java(game_version: str, *, java_auto: bool = True, user_path: str = "
     exact = [j for j in javas if j["major"] == need]
     if exact:
         return exact[0]["path"]
-    # 兼容上限（借鉴 BlockHelm：老版本拒绝高版本，新版本接受小范围更高）
+    # 兼容上限（借鉴主流做法：老版本拒绝高版本，新版本接受小范围更高）
     max_ok = {8: 8, 16: 17, 17: 21, 21: 24}.get(need, need + 3)
     compat = sorted(
         (j for j in javas if need <= j["major"] <= max_ok),

@@ -1,4 +1,4 @@
-"""Shared ``libraries`` pool — "共享 libraries 去重" (round-48, 对齐 MultiMC).
+"""Shared ``libraries`` pool — "共享 libraries 去重" (round-48).
 
 minecraft-launcher-lib resolves every install/launch library path as
 ``<minecraft_directory>/libraries/<maven-path>/<artifact>.jar``. Individually

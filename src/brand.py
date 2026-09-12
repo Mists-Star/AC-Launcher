@@ -5,7 +5,7 @@ later is a one-file edit.
 
 Name: AC Launcher / Absolute Controller
   - English full name : Absolute Controller
-  - Short brand / abbreviation : AC   (like PCL -> "PCL Launcher")
+  - Short brand / abbreviation : AC   (like "AC" -> "AC Launcher")
   - Chinese full name : 绝对控制器
   - Window title / about : AC Launcher
 

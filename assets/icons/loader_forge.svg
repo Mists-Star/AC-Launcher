@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Forge：官方铁砧徽标 -->
+  <rect x="3" y="3" width="58" height="58" rx="14" fill="#EFEDE7"/>
+  <g fill="#8E9096">
+    <path d="M17 20 h30 l7 8 h-44 Z"/>
+    <path d="M17 28 h30 v3 h-30 Z"/>
+    <rect x="24" y="31" width="16" height="9" rx="1.5"/>
+    <rect x="14" y="40" width="36" height="5" rx="2"/>
+    <rect x="14" y="45" width="36" height="4" rx="2"/>
+  </g>
+</svg>

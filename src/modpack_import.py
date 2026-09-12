@@ -137,7 +137,7 @@ def import_mrpack(path: str, mgr, mirror: str = "bmclapi") -> object:
             loader = "neoforge"
     inst = mgr.add(name=name, game_version=mc_version or "1.21.4", loader=loader)
     inst.version_id = launch_version or ""
-    mgr._save()
+    mgr._persist(inst)
     install.install_mrpack(path, inst.mc_dir, mirror=mirror)
     return inst
 
@@ -197,7 +197,7 @@ def import_curseforge_zip(
     files = [f for f in info["files"] if f.get("required", True)]
     total = len(files)
     # round-73：单个文件逐个顺序下载 + 一个失败就中断整批 → 改为并发批下载，
-    # 失败记录继续（对齐 MCLauncher 20-worker 队列 / PCL LoaderDownload）。
+    # 失败记录继续（对齐 MCLauncher 20-worker 队列 / 主流 LoaderDownload）。
     from .batch_download import BatchDownloader, BatchItem
 
     batch: list[BatchItem] = []
@@ -235,7 +235,7 @@ def import_curseforge_zip(
             "\n".join(failures[:5])
             + ("" if len(failures) <= 5 else f"\n… 另有 {len(failures)-5} 个失败")
         ) from None
-    mgr._save()
+    mgr._persist(inst)
     return inst
 
 
@@ -275,7 +275,7 @@ def import_zip_as_instance(path: str, mgr) -> object:
         inst = mgr.add(name=name, game_version=game_version, loader=loader)
         # copy contents into AC instance dir
         _copy_tree(mc_dir, inst.mc_dir)
-        mgr._save()
+        mgr._persist(inst)
         return inst
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -292,7 +292,7 @@ def import_folder_as_instance(folder: str, mgr) -> object:
     loader = _guess_loader_from_dir(folder)
     inst = mgr.add(name=name, game_version=game_version, loader=loader)
     _copy_tree(folder, inst.mc_dir)
-    mgr._save()
+    mgr._persist(inst)
     return inst
 
 

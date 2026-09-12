@@ -1,6 +1,6 @@
 """Download & install any Minecraft-supported Java runtime, no admin rights.
 
-Source: Eclipse Adoptium (Temurin) — the same builds HMCL / Prism hand out.
+Source: Eclipse Adoptium (Temurin) — the same builds mainstream launchers hand out.
 We fetch the portable ZIP and unpack it under our own data dir, so nothing
 touches the system, no installer UAC prompt, and several majors can coexist.
 

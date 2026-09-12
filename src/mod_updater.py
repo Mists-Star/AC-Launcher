@@ -1,4 +1,4 @@
-"""Mod 一键更新（round-41，对齐 Prism / CurseForge App 的高频功能）。
+"""Mod 一键更新（round-41，对齐主流启动器的高频功能）。
 
 流程：
 1. 扫描实例 mods 目录的 .jar

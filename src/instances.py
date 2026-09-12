@@ -1,10 +1,12 @@
 """Instance data model + manager.
 
 An *instance* is a self-contained game configuration: one game version, one
-mod loader (or vanilla), and an isolated .minecraft directory. This mirrors how
-PCL2 / HMCL organise things and lets each profile keep its own mods & saves.
+mod loader (or vanilla), and an isolated .minecraft directory. Each profile
+keeps its own mods & saves just like a separate game folder.
 
-State is persisted to data/instances.json (portable, lives beside the exe).
+round-78 storage: per-instance full files under data/instances/<id>.json +
+a summary index data/instances.index.json (portable, live beside the exe).
+Legacy single-file data/instances.json is auto-migrated on first load.
 """
 from __future__ import annotations
 
@@ -47,12 +49,14 @@ class Instance:
     #   ("standard" | "mmc" | "curseforge" | "modrinth"); "" for AC-created.
     kind: str = ""
     # launcher: the source launcher this instance was taken over from
-    #   ("PCL2" | "HMCL" | "Prism" | "MultiMC" | "CurseForge" | "Modrinth" |
+    #   ("PCL-CE" | "HMCL" | "Prism" | "MultiMC" | "CurseForge" | "Modrinth" |
     #    "BakaXL" | "TLauncher" | "Other" | "AC" for AC-created).
     # Drives the source badge on home cards (direction A: 控制中枢叙事).
+    # 品牌码内部保留（用于识别目录布局）；对外展示走 launcher_label()——
+    # 导入实例显示来源名，AC 自建实例不显示来源。
     launcher: str = "AC"
     # needs_convert: True when the imported game dir had no directly-launchable
-    # version json (MultiMC/Prism/CurseForge/Modrinth). Conversion happens at
+    # version json (Integrations/CurseForge/Modrinth). Conversion happens at
     # launch via install_instance.
     needs_convert: bool = False
     created_at: str = ""
@@ -60,26 +64,32 @@ class Instance:
     # launcher setting. Lets one instance force a specific JDK (e.g. older Forge
     # on Java 8, newer vanilla on Java 21) without changing the global default.
     java_path: str = ""
-    # round-42 实例级覆盖（对齐 Prism/HMCL）：0/空 = 用全局设置
+    # round-42 实例级覆盖（对齐主流做法）：0/空 = 用全局设置
     ram_mb: int = 0       # 0 = 全局 ram_mb
     jvm_args: str = ""    # 空 = 全局 jvm_args
-    # round-53 实例级渲染器（对齐 HMCL/PCL2 版本设置 → 渲染器）：
+    # round-53 实例级渲染器（对齐主流版本设置 → 渲染器）：
     #   "auto" = 不动（默认）；"software" = 软件 OpenGL 兜底（老显卡/虚拟机）；
     #   "legacy" = 旧 LWGJL 驱动兼容（关共享上下文，防旧驱动崩）。
     # 仅对 LWJGL2 老版本（≤1.12.2 系）有意义，1.13+ 注入无害（参数被忽略）。
     renderer: str = "auto"
-    # round-53 实例级实验性 GC（对齐 PCL2「性能」高级设置）。默认开 G1GC。
+    # round-53 实例级实验性 GC（对齐主流「性能」高级设置）。默认开 G1GC。
     perf_g1gc: bool = True              # -XX:+UseG1GC 优化参数组
     perf_disable_explicit_gc: bool = False  # -XX:+DisableExplicitGC
-    # round-55 启动高级设置（对齐 PCL2「启动游戏/版本设置」）：空值 = 跟随全局
+    # round-55 启动高级设置（对齐主流「启动游戏/版本设置」）：空值 = 跟随全局
     game_args: str = ""          # 游戏附加参数（追加到游戏启动参数末尾，--server <ip> 直连）
     jvm_preset: str = ""         # "" = 跟随全局；"default"/"aikar"/"custom" 覆盖全局预设
     isolation: str = ""          # "" = 跟随全局；"isolated" = 版本隔离；"custom" = 自定义游戏目录
     game_dir_override: str = ""  # isolation == "custom" 时的自定义游戏目录（绝对路径）
     post_launch_cmd: str = ""    # 游戏进程启动后执行的命令，空 = 跟随全局
     exit_cmd: str = ""           # 游戏进程退出后执行的命令，空 = 跟随全局
-    # round-42 实例分组（对齐 Prism 分组/筛选）：空 = 未分组
+    # round-42 实例分组（对齐主流分组/筛选）：空 = 未分组
     group: str = ""
+    # round-82 启动格式（磁盘布局，驱动版本 json / 游戏目录解析）：
+    #   "" / "auto" = 自适应：启动/展示时实时检测（见 detect_format）；
+    #   "vanilla" 原版共享 .minecraft；"iso" 外来版本隔离（导入）；
+    #   "multimc" 整合布局；"curseforge" CurseForge；"modrinth" Modrinth；
+    #   "custom" 玩家手动强制（仍按标准布局解析，改装目录靠特征兜底自适应）
+    format: str = ""
     # external=True means this instance links to an existing .minecraft on
     # disk (imported from another launcher) — removing it must NOT delete the
     # user's real game files, only the AC metadata entry.
@@ -138,6 +148,15 @@ class Instance:
                 iso = "default"
         if iso == "isolated":
             sub = self.version_id or self.game_version
+            # round-78 其他启动器版本隔离（导入）：mc_dir 本身就是
+            # versions/<id> 隔离目录，真实版本 json 躺在 mc_dir/<sub>.json。
+            # 再套一层 versions/<sub> 会指向不存在的嵌套目录（存档/模组 UI 与
+            # 游戏实际读写路径脱节，启动还会触发假补全）。此时隔离目录即游戏目录。
+            try:
+                if os.path.isfile(os.path.join(self.mc_dir, f"{sub}.json")):
+                    return self.mc_dir
+            except OSError:
+                pass
             return os.path.join(self.mc_dir, "versions", sub)
         if iso == "custom":
             custom = (self.game_dir_override or "").strip()
@@ -189,6 +208,52 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+# 来源启动器 → 中性展示名（品牌码内部保留，界面默认不出现第三方品牌，
+# 作为 launcher_label(show_original=False) 的兜底）。
+LAUNCHER_LABELS = {
+    "PCL-CE": "导入",
+    "HMCL": "导入",
+    "Prism": "导入",
+    "MultiMC": "导入",
+    "PolyMC": "导入",
+    "CurseForge": "导入",
+    "Modrinth": "导入",
+    "BakaXL": "导入",
+    "TLauncher": "导入",
+    "Official": "官方",
+    "Other": "导入",
+}
+
+# 来源启动器 → 原始展示名（round-86：用户允许「从其他启动器导入的实例
+# 显示来源」，launcher_label(show_original=True) 时使用）。
+LAUNCHER_NAMES = {
+    "PCL-CE": "PCL2",
+    "HMCL": "HMCL",
+    "Prism": "Prism Launcher",
+    "MultiMC": "MultiMC",
+    "PolyMC": "PolyMC",
+    "CurseForge": "CurseForge",
+    "Modrinth": "Modrinth App",
+    "BakaXL": "BakaXL",
+    "TLauncher": "TLauncher",
+    "Official": "官方",
+    "Other": "其他",
+}
+
+
+def launcher_label(launcher: str, show_original: bool = False) -> str:
+    """把内部来源启动器品牌码映射为界面展示名。
+
+    - show_original=True（导入实例）：已知来源返回其原始启动器名
+      （如 import from PCL-CE → "PCL2"）；未知码照实显示；AC 返回 ""（无来源）。
+    - show_original=False（默认，中性化兜底）：统一为「导入」/「官方」。
+    """
+    code = launcher or "AC"
+    if show_original:
+        return LAUNCHER_NAMES.get(code, "" if code == "AC" else code)
+    return LAUNCHER_LABELS.get(code, "AC" if code == "AC" else "导入")
+
+
 def _copied_with_progress(
     src: str, dst: str, on_progress: "Callable[[int, int, str], bool]"
 ) -> bool:
@@ -221,11 +286,78 @@ def _copied_with_progress(
     return True
 
 
+# round-82 启动格式（磁盘布局分类）。
+# "auto" = 自适应（启动/展示时实时探测，目录变化自动跟上）；
+# 其余为玩家可手动指定的具体格式。UI 徽章颜色/label 见 pages_instances。
+INSTANCE_FORMATS = (
+    "auto", "vanilla", "iso", "multimc", "curseforge", "modrinth", "custom",
+)
+
+
+def detect_format(inst) -> str:
+    """判定实例的启动格式（round-82）。
+
+    优先级：
+    1. 玩家已手动指定（format 非空且非 auto）→ 直接用；
+    2. 自适应（auto / 空）→ ``_probe_format`` 按磁盘特征实时探测：
+       MMC 布局（mmc-pack.json）> 外来版本隔离（导入，
+       mc_dir 内直接躺 <version>.json）> CurseForge（minecraftinstance.json）
+       > Modrinth（modrinth.json 等）> 兜底原版标准布局。
+
+    返回始终是 INSTANCE_FORMATS 之一；特征全不符时视为原版标准布局——
+    改装/奇怪目录由 versions_root 的 <id>.json 特征兜底自适应（round-78）。
+    """
+    fmt = (getattr(inst, "format", "") or "").strip() or "auto"
+    if fmt != "auto":
+        return fmt if fmt in INSTANCE_FORMATS else "auto"
+    return _probe_format(inst)
+
+
+def _probe_format(inst) -> str:
+    """磁盘特征探测：不修改实例，纯只读判断。"""
+    mc = getattr(inst, "mc_dir", "") or ""
+    if not mc or not os.path.isdir(mc):
+        return "vanilla"
+    parent = os.path.dirname(os.path.normpath(mc))
+    mine = os.path.join(mc, ".minecraft")
+    # 1) MMC 布局：mmc-pack.json 实例根 / .minecraft / 上级实例目录
+    for cand in (os.path.join(mc, "mmc-pack.json"),
+                 os.path.join(mine, "mmc-pack.json"),
+                 os.path.join(parent, "mmc-pack.json")):
+        if os.path.isfile(cand):
+            return "multimc"
+    # 2) 外来版本隔离（其他启动器隔离导入）：mc_dir 就是 versions/<id> 目录
+    #    本身，真实 json 扁平躺在 <mc>/<version>.json（而非 versions/<v>/<v>.json）
+    version = (getattr(inst, "version_id", "") or getattr(inst, "game_version", ""))
+    if version and os.path.isfile(os.path.join(mc, f"{version}.json")):
+        return "iso"
+    # 3) CurseForge：minecraftinstance.json（实例根 / .minecraft / 上级）
+    for cand in (os.path.join(mc, "minecraftinstance.json"),
+                 os.path.join(mine, "minecraftinstance.json"),
+                 os.path.join(parent, "minecraftinstance.json")):
+        if os.path.isfile(cand):
+            return "curseforge"
+    # 4) Modrinth App：modrinth.json / modrinth.index.json / instance.cfg
+    for cand in ("modrinth.json", "modrinth.index.json", "instance.cfg"):
+        if os.path.isfile(os.path.join(mc, cand)):
+            return "modrinth"
+    # 5) 原版标准布局兜底（shared .minecraft / versions 在根下）
+    return "vanilla"
+
+
 class InstancesManager:
+    # round-78 存储升级：单文件 data/instances.json → 拆分
+    #   data/instances/<id>.json     每实例全量（真理源，独占文件，原子写）
+    #   data/instances.index.json    摘要索引（渲染字段，启动秒开；lazy 全量）
+    # 旧版单文件首次启动一次性迁移后改名 .legacy.bak。
     def __init__(self):
-        self._path = os.path.join(get_data_dir(), "instances.json")
+        self._dir = os.path.join(get_data_dir(), "instances")
+        self._index_path = os.path.join(get_data_dir(), "instances.index.json")
+        self._legacy_path = os.path.join(get_data_dir(), "instances.json")
         self._instances: dict[str, Instance] = {}
         self._current: Optional[str] = None
+        # 已从 <id>.json 补齐全量字段的实例（其余仅摘要字段在内存）
+        self._full_ids: set[str] = set()
         self._load()
 
     # ---- persistence ----
@@ -235,67 +367,270 @@ class InstancesManager:
         pick it up without restarting."""
         self._load()
 
+    # ------------------------------------------------------------- 读取
     def _load(self) -> None:
-        if not os.path.exists(self._path):
+        """实例化内存状态（round-78）。
+
+        优先读摘要索引（快）；index 缺失/损坏 → glob 全量重建；
+        旧单文件 → 迁移。索引与文件 diff 时以 <id>.json（真理源）为准：
+        - 文件在、摘要缺 → 补全
+        - 摘要条目文件已丢 → 剔出（避免"幽灵实例"）
+        """
+        self._instances = {}
+        self._full_ids = set()
+        self._current = None
+
+        # 1) 旧格式迁移：新目录还没有任何文件 + 旧单文件存在
+        if not self._has_new_files() and os.path.exists(self._legacy_path):
+            self._migrate_legacy()
             return
+
+        # 2) 摘要索引路径
+        index = self._read_index()
+        if index:
+            for iid, raw in index.get("instances", {}).items():
+                if not iid or self._instances.get(iid):
+                    continue
+                inst = self._from_dict(raw, iid=iid)
+                if inst.id:
+                    self._instances[inst.id] = inst
+            self._current = index.get("current")
+            if os.path.isdir(self._dir):
+                for fn in sorted(os.listdir(self._dir)):
+                    if not fn.endswith(".json"):
+                        continue
+                    iid = fn[:-5]
+                    if iid in self._instances:
+                        # 文件在但摘要缺全量字段：保持摘要（渲染够用）
+                        continue
+                    full = self._read_full(iid)
+                    if full is not None:
+                        self._instances[iid] = full
+                        self._full_ids.add(iid)
+                # 反噬：摘要条目文件已丢 → 剔除
+                for iid in list(self._instances):
+                    if iid not in self._full_ids and not os.path.exists(
+                            os.path.join(self._dir, f"{iid}.json")):
+                        del self._instances[iid]
+            if self._current and self._current not in self._instances:
+                self._current = next(iter(self._instances), None)
+            return
+
+        # 3) 全量重建（index 缺失/损坏）：glob 目录
+        if os.path.isdir(self._dir):
+            for fn in sorted(os.listdir(self._dir)):
+                if not fn.endswith(".json"):
+                    continue
+                iid = fn[:-5]
+                full = self._read_full(iid)
+                if full is not None:
+                    self._instances[iid] = full
+                    self._full_ids.add(iid)
+        self._write_index()
+
+    def _has_new_files(self) -> bool:
+        if not os.path.isdir(self._dir):
+            return False
         try:
-            with open(self._path, "r", encoding="utf-8") as f:
+            return any(fn.endswith(".json") for fn in os.listdir(self._dir))
+        except OSError:
+            return False
+
+    def _migrate_legacy(self) -> None:
+        """旧版单文件 → 每实例 <id>.json；完成后改名备份。"""
+        try:
+            with open(self._legacy_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
             return
+        os.makedirs(self._dir, exist_ok=True)
         for raw in data.get("instances", []):
-            # round-34/40 加固：脏数据（缺 id/name/game_version/非 dict）跳过，
-            # 避免启动期 KeyError 崩整个启动器
             if not (isinstance(raw, dict) and raw.get("id") and raw.get("name")
                     and raw.get("game_version")):
                 continue
-            inst = Instance(
-                id=raw["id"],
-                name=raw["name"],
-                game_version=raw["game_version"],
-                loader=raw.get("loader", "vanilla"),
-                loader_version=raw.get("loader_version", ""),
-                version_id=raw.get("version_id", ""),
-                kind=raw.get("kind", ""),
-                needs_convert=raw.get("needs_convert", False),
-                created_at=raw.get("created_at", ""),
-                java_path=raw.get("java_path", ""),
-                ram_mb=raw.get("ram_mb", 0) or 0,
-                jvm_args=raw.get("jvm_args", "") or "",
-                renderer=raw.get("renderer", "auto") or "auto",
-                perf_g1gc=bool(raw.get("perf_g1gc", True)),
-                perf_disable_explicit_gc=bool(raw.get("perf_disable_explicit_gc", False)),
-                game_args=raw.get("game_args", "") or "",
-                jvm_preset=raw.get("jvm_preset", "") or "",
-                isolation=raw.get("isolation", "") or "",
-                game_dir_override=raw.get("game_dir_override", "") or "",
-                post_launch_cmd=raw.get("post_launch_cmd", "") or "",
-                exit_cmd=raw.get("exit_cmd", "") or "",
-                group=raw.get("group", "") or "",
-                external=raw.get("external", False),
-                _base=raw.get("_base", ""),
-                launcher=raw.get("launcher", "AC"),
-            )
-            self._instances[inst.id] = inst
+            try:
+                self._write_inst_file(raw)  # raw 即全量 dict（含 _base）
+            except OSError:
+                continue
         self._current = data.get("current")
+        self._load()
+        try:
+            os.replace(self._legacy_path, self._legacy_path + ".legacy.bak")
+        except OSError:
+            pass
 
-    def _save(self) -> None:
+    def _read_index(self) -> dict | None:
+        try:
+            with open(self._index_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("instances"), dict):
+                return data
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass
+        return None
+
+    def _read_full(self, iid: str) -> Instance | None:
+        p = os.path.join(self._dir, f"{iid}.json")
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            return None
+        if not (isinstance(raw, dict) and raw.get("id") and raw.get("name")
+                and raw.get("game_version")):
+            return None
+        return self._from_dict(raw, iid=iid)
+
+    def _ensure_full(self, iid: str) -> Optional[Instance]:
+        """按需读 <id>.json 补齐全量字段并缓存（round-78 lazy 读取）。
+
+        摘要对象的高级字段默认"跟随全局"，此方法在有真实需求（启动/
+        备份/设置）前触发，费用为一次小文件读。全量文件丢失时退回摘要。
+        """
+        inst = self._instances.get(iid)
+        if inst is None or iid in self._full_ids:
+            return inst
+        full = self._read_full(iid)
+        if full is not None:
+            self._instances[iid] = full
+            self._full_ids.add(iid)
+            return full
+        return inst
+
+    @staticmethod
+    def _from_dict(raw: dict, iid: str = "") -> Instance:
+        """dict → Instance（round-34/40 加固保留：脏数据缺 id/name/
+        game_version 一律跳过；未知键忽略）。
+
+        摘要文件缺的字段落在默认值上（=「跟随全局」语义），由
+        _ensure_full 补齐为真值。
+        """
+        return Instance(
+            id=raw.get("id") or iid,
+            name=raw.get("name", ""),
+            game_version=raw.get("game_version", ""),
+            loader=raw.get("loader", "vanilla"),
+            loader_version=raw.get("loader_version", ""),
+            version_id=raw.get("version_id", ""),
+            kind=raw.get("kind", ""),
+            needs_convert=raw.get("needs_convert", False),
+            created_at=raw.get("created_at", ""),
+            java_path=raw.get("java_path", ""),
+            ram_mb=raw.get("ram_mb", 0) or 0,
+            jvm_args=raw.get("jvm_args", "") or "",
+            renderer=raw.get("renderer", "auto") or "auto",
+            perf_g1gc=bool(raw.get("perf_g1gc", True)),
+            perf_disable_explicit_gc=bool(raw.get("perf_disable_explicit_gc", False)),
+            game_args=raw.get("game_args", "") or "",
+            jvm_preset=raw.get("jvm_preset", "") or "",
+            isolation=raw.get("isolation", "") or "",
+            game_dir_override=raw.get("game_dir_override", "") or "",
+            post_launch_cmd=raw.get("post_launch_cmd", "") or "",
+            exit_cmd=raw.get("exit_cmd", "") or "",
+            group=raw.get("group", "") or "",
+            # round-82 启动格式：空 / auto = 自适应（实时探测），见 detect_format
+            format=raw.get("format", "") or "",
+            external=raw.get("external", False),
+            _base=raw.get("_base", ""),
+            launcher=raw.get("launcher", "AC"),
+        )
+
+    @staticmethod
+    def _to_dict(inst: Instance) -> dict:
+        """Instance → 持久化 dict（含 _base）。"""
+        return {**asdict(inst), "_base": inst._base}
+
+    # 摘要索引只存「UI 渲染 + 路径派生」字段，启动/右键/详情用 get() 触发
+    # _ensure_full 读全量——索引保持小体积，列表秒开。
+    _SUMMARY_KEYS = (
+        "id", "name", "game_version", "loader", "loader_version",
+        "version_id", "kind", "launcher", "needs_convert", "group",
+        "format",  # round-82 启动格式：摘要即存，懒加载实例也能渲染徽章
+        "external", "created_at", "_base",
+    )
+
+    def _summary(self, inst: Instance) -> dict:
+        d = self._to_dict(inst)
+        return {k: d[k] for k in self._SUMMARY_KEYS if k in d}
+
+    # ------------------------------------------------------------- 写入
+    def _write_inst_file(self, raw: dict) -> None:
+        """原子写单个实例文件（独占文件：一个实例写坏不影响其他实例）。"""
+        os.makedirs(self._dir, exist_ok=True)
+        tmp = os.path.join(self._dir, f".{raw.get('id')}.json.tmp")
+        final = os.path.join(self._dir, f"{raw.get('id')}.json")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(raw, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, final)
+        except Exception:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+    def _write_index(self) -> None:
+        """原子写摘要索引（小：只含渲染字段）。"""
+        os.makedirs(self._dir, exist_ok=True)
         data = {
+            "schema": 2,
             "current": self._current,
-            "instances": [
-                {**asdict(i), "_base": i._base} for i in self._instances.values()
-            ],
+            "instances": {
+                iid: self._summary(inst)
+                for iid, inst in self._instances.items()
+            },
         }
-        os.makedirs(os.path.dirname(self._path), exist_ok=True)
-        with open(self._path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp = self._index_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._index_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+    def _persist(self, inst: Instance | None = None, *, dropped: str = "") -> None:
+        """统一持久化入口：写（inst）或删（dropped）单实例文件 + 重写索引。"""
+        if inst is not None:
+            self._write_inst_file(self._to_dict(inst))
+        elif dropped:
+            p = os.path.join(self._dir, f"{dropped}.json")
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        self._write_index()
+
+    def _save(self, inst: Instance | None = None) -> None:
+        """兼容旧调用点（mgr._save()）：无参时按内存状态全量落盘。
+
+        round-78 拆分存储后旧 `_save()` 语义「整库全量写」仍被部分外部调用
+        （modpack_import、pages_instances 等）依赖，它们改完字段不传实例。
+        这里无参 = 把所有实例全量文件重写一遍 + 重建索引，等价旧行为；
+        传了实例则走单文件原子写，两者都保证磁盘全量文件与内存一致。
+        """
+        if inst is not None:
+            if inst.id in self._instances:
+                self._instances[inst.id] = inst
+            self._persist(inst)
+            return
+        for iid, one in self._instances.items():
+            self._write_inst_file(self._to_dict(one))
+        self._write_index()
 
     # ---- api ----
     def list(self) -> list[Instance]:
         return list(self._instances.values())
 
     def get(self, instance_id: str) -> Optional[Instance]:
-        return self._instances.get(instance_id)
+        return self._ensure_full(instance_id)
 
     def add(
         self,
@@ -317,7 +652,7 @@ class InstancesManager:
         self._instances[inst.id] = inst
         if self._current is None:
             self._current = inst.id
-        self._save()
+        self._persist(inst)
         return inst
 
     @staticmethod
@@ -336,10 +671,10 @@ class InstancesManager:
         (e.g. apply_mrpack_to_instance 更新了 version_id/loader)。round-38。"""
         if inst.id in self._instances:
             self._instances[inst.id] = inst
-            self._save()
+            self._persist(inst)
 
     def duplicate(self, inst_id: str, new_name: str = "") -> Instance | None:
-        """克隆实例（round-42，对齐 Prism Ctrl+D）：复制游戏目录 + 元数据。
+        """克隆实例（round-42，对齐主流 Ctrl+D）：复制游戏目录 + 元数据。
 
         - 目录复制用 copytree（大实例较慢，调用方放 Worker 或提示）
         - 新实例：新 id、名称默认 "原名称 (副本)"、继承 java/ram/jvm/group
@@ -391,7 +726,7 @@ class InstancesManager:
         )
         inst.ensure_dirs()
         self._instances[inst.id] = inst
-        self._save()
+        self._persist(inst)
         return inst
 
     def import_external(
@@ -482,7 +817,7 @@ class InstancesManager:
         self._instances[inst.id] = inst
         if self._current is None:
             self._current = inst.id
-        self._save()
+        self._persist(inst)
         return inst
 
     def remove(self, instance_id: str) -> None:
@@ -499,7 +834,7 @@ class InstancesManager:
                 shutil.rmtree(inst.root, ignore_errors=True)
         if self._current == instance_id:
             self._current = next(iter(self._instances), None)
-        self._save()
+        self._persist(dropped=instance_id)
 
     @property
     def current_id(self) -> Optional[str]:
@@ -511,7 +846,7 @@ class InstancesManager:
     def set_current(self, instance_id: str) -> None:
         if instance_id in self._instances:
             self._current = instance_id
-            self._save()
+            self._persist()  # 只重写索引（current 变）
 
 
 # module-level singleton (one manager per process)

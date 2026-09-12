@@ -247,9 +247,13 @@ class OnboardingDialog(QDialog):
             pass  # just text
 
         elif step_key == "lang":
+            # round-79: checked 必须跟随 cfg 里已保存的语言（之前写死
+            # ONBOARDING_DEFAULTS 导致重渲染后选中点永远回到中文，界面已变
+            # 英文、radio 却显示中文被选）；English 未全面中文化，标“实验性”。
             self.lang_grp, lang_w = _radio_group(
-                [("zh-CN", t("settings.lang_zh")), ("en-US", t("settings.lang_en"))],
-                ONBOARDING_DEFAULTS["language"],
+                [("zh-CN", t("settings.lang_zh")),
+                 ("en-US", t("settings.lang_en_lab"))],
+                self.cfg.get("language", ONBOARDING_DEFAULTS["language"]),
             )
             # Connect each radio button: switch language immediately + re-render
             for rb in self.lang_grp.buttons():
@@ -470,15 +474,15 @@ class OnboardingDialog(QDialog):
                 "instance card, and scan entry. Best for new users."
             ),
             "pcl_card": (
-                "PCL Card — Grid of instance cards with version badges, "
+                "Card Grid — Grid of instance cards with version badges, "
                 "mod count, and quick-action buttons. Visual & information-dense."
             ),
             "hmcl_list": (
-                "HMCL List — Traditional list view with instance details "
-                "in rows. Compact, familiar to HMCL users."
+                "List — Traditional list view with instance details "
+                "in rows. Compact & familiar."
             ),
             "modrinth_modern": (
-                "Modrinth Modern — Sidebar navigation with featured instances, "
+                "Minimal Modern — Sidebar navigation with featured instances, "
                 "horizontal scrolling cards, and modern spacing."
             ),
         }

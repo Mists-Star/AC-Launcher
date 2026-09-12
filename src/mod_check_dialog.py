@@ -13,6 +13,8 @@ from .theme import COLORS
 from .i18n import t, loader_name
 from . import ui_kit
 from .core import mod_check
+from .frameless import FramelessHelper, TitleBar
+from .win_rounded import enable_win11_round_corners
 
 _SEV_COLOR = {
     mod_check.SEV_CRITICAL: "#EF4444",
@@ -53,22 +55,38 @@ class ModCheckDialog(QDialog):
         n_warn = result.get("warning", 0)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 18)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── AC 无边框窗口：自定义标题栏 + 圆角 ──
+        self.titlebar = TitleBar(
+            self, title=t("modcheck.dialog_title"), height=38, controls="close")
+        root.addWidget(self.titlebar)
+
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(20, 12, 20, 16)
+        bl.setSpacing(12)
+        root.addWidget(body, stretch=1)
+
+        # ── frameless + DWM shadow + win11 rounded corners ──
+        self._frameless = FramelessHelper(self)
+        self._frameless.set_titlebar(self.titlebar)
+        enable_win11_round_corners(self)
 
         # header
         if not findings:
-            root.addWidget(ui_kit.page_header(
+            bl.addWidget(ui_kit.page_header(
                 t("modcheck.title"), f"{t('modcheck.ok')} · {t('modcheck.scanned', n=scanned, c=0)}"))
             btn = ui_kit.make_button(t("common.close"), kind="accent",
                                      on_click=self.accept, min_h=36)
             row = QHBoxLayout()
             row.addStretch(1)
             row.addWidget(btn)
-            root.addLayout(row)
+            bl.addLayout(row)
             return
 
-        root.addWidget(ui_kit.page_header(
+        bl.addWidget(ui_kit.page_header(
             t("modcheck.title"),
             t("modcheck.scanned", n=scanned, c=n_crit + n_warn)))
 
@@ -88,14 +106,14 @@ class ModCheckDialog(QDialog):
             col.addWidget(card)
         col.addStretch(1)
         scroll.setWidget(inner)
-        root.addWidget(scroll, stretch=1)
+        bl.addWidget(scroll, stretch=1)
 
         close = ui_kit.make_button(t("common.close"), kind="accent",
                                    on_click=self.accept, min_h=36)
         row = QHBoxLayout()
         row.addStretch(1)
         row.addWidget(close)
-        root.addLayout(row)
+        bl.addLayout(row)
 
 
 class _FindingCard(QFrame):

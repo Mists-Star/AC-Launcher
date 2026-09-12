@@ -381,7 +381,7 @@ class LoginDialog(QDialog):
 
         # Worker runs the entire device-code flow but emits the user_code via
         # the signal as soon as it's issued — UI updates + browser open happen
-        # BEFORE the token polling starts (matches PCL2's feel).
+        # BEFORE the token polling starts (matches the feel of mainstream launchers).
         cid_outer = cid
         cancel_outer = self._ms_cancel
 
@@ -413,7 +413,7 @@ class LoginDialog(QDialog):
         """Slot for the ms_user_code_ready signal — runs on the UI thread."""
         from PySide6.QtWidgets import QApplication
         # Auto-copy the code to clipboard so the player only has to paste it
-        # in the browser (matches PCL2/HMCL behaviour).
+        # in the browser (matches mainstream launcher behaviour).
         QApplication.clipboard().setText(user_code)
         self._pending_user_code = (user_code, verification_uri)
         self._consume_user_code()

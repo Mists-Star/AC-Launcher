@@ -1,8 +1,8 @@
 """Discovery of existing Minecraft instances and Java runtimes on this machine.
 
 Powers the home-page "Scan" feature: find instances managed by other
-launchers (official, HMCL, PCL2, MultiMC/Prism, CurseForge, ATlauncher,
-TLauncher, Modrinth App, …) plus any Java installations, so AC can import
+launchers (official, various third-party launchers, CurseForge,
+Modrinth App, …) plus any Java installations, so AC can import
 them instead of forcing a fresh download.
 
 Pure logic (no Qt) so it can run on a Worker thread and be unit-tested.
@@ -50,11 +50,11 @@ class ScannedInstance:
     saves: int = 0
     # --- cross-launcher metadata -------------------------------------------
     # version_id: the versions/<id> folder name. Empty when the launcher does
-    #   not use the official layout (MultiMC/Prism keep patches instead).
+    #   not use the official layout (integrated launchers keep patches instead).
     version_id: str = ""
     # kind: how the instance is stored on disk.
-    #   standard   — official versions/<id>/<id>.json layout (official/HMCL/PCL2)
-    #   mmc        — MultiMC / Prism / PolyMC component pack (mmc-pack.json)
+    #   standard   — official versions/<id>/<id>.json layout (official/third-party)
+    #   mmc        — integrated component pack (mmc-pack.json)
     #   curseforge — CurseForge App (minecraftinstance.json)
     #   modrinth   — Modrinth App profile (profile.json)
     kind: str = "standard"
@@ -62,7 +62,7 @@ class ScannedInstance:
     #   must resolve/rebuild the version before it can start the game.
     needs_convert: bool = False
     # isolated: this game dir belongs to this instance alone. False means it is
-    #   a shared .minecraft used by several versions (official / HMCL global).
+    #   a shared .minecraft used by several versions (official / third-party global).
     isolated: bool = True
     # loader_version: exact loader build when the metadata states one.
     loader_version: str = ""
@@ -157,7 +157,7 @@ def _base_mc_version(version_id: str, data: dict | None = None) -> str:
         inherits = str(data.get("inheritsFrom", "")).strip()
         if inherits:
             return inherits
-        # PCL2 writes *flattened* jsons with no inheritsFrom; it stamps the real
+        # Some third-party launchers write *flattened* jsons with no inheritsFrom; they stamp the real
         # version into clientVersion instead.
         for key in ("clientVersion", "jar"):
             val = str(data.get(key, "")).strip()
@@ -177,7 +177,7 @@ def _base_mc_version(version_id: str, data: dict | None = None) -> str:
 
 
 # mainClass → loader. The most reliable signal for *flattened* version jsons
-# (PCL2 / HMCL merged manifests have no inheritsFrom and no loader in the id).
+# (merged third-party manifests have no inheritsFrom and no loader in the id).
 _MAINCLASS_LOADERS = (
     ("org.quiltmc.loader", "quilt"),
     ("net.fabricmc.loader", "fabric"),
@@ -232,7 +232,7 @@ def _enum_standard_versions(root: str) -> list[tuple[str, str, str, str]]:
     """List every launchable version inside a standard game directory.
 
     Returns (version_id, base_mc_version, loader, version_dir) tuples. This is
-    the fix for the PCL2 / HMCL case: one ``.minecraft`` routinely holds many
+    the fix for the third-party case: one ``.minecraft`` routinely holds many
     versions, and the old scanner only ever surfaced the newest one.
     """
     vdir = os.path.join(root, "versions")
@@ -263,14 +263,14 @@ def _enum_standard_versions(root: str) -> list[tuple[str, str, str, str]]:
 def _is_isolated_version_dir(version_dir: str) -> bool:
     """True when a launcher put this version's saves/mods inside its own dir.
 
-    Both HMCL (``gameDirType=ISOLATED``) and PCL2 (版本隔离) do this; instead of
+    Launchers with version isolation do this; instead of
     parsing each launcher's private config we just look for the tell-tale
     per-version game folders, which works for every launcher uniformly.
     """
     for marker in ("saves", "mods", "config", "resourcepacks", "options.txt"):
         if os.path.exists(os.path.join(version_dir, marker)):
             return True
-    # HMCL states it explicitly — honour that when present.
+    # Some integrated launchers state it explicitly — honour that when present.
     cfg = os.path.join(version_dir, "hmclversion.cfg")
     if os.path.isfile(cfg):
         try:
@@ -299,7 +299,7 @@ def _detect_version(mc_dir: str):
 
 # ---------- launcher-specific metadata parsers ----------
 
-# mmc-pack.json component uid → our loader id. Source: PrismLauncher meta repo.
+# mmc-pack.json component uid → our loader id. Source: community metadata.
 _MMC_LOADER_UIDS = {
     "net.fabricmc.fabric-loader": "fabric",
     "org.quiltmc.quilt-loader": "quilt",
@@ -310,7 +310,7 @@ _MMC_LOADER_UIDS = {
 
 
 def _read_instance_cfg(path: str) -> dict:
-    """Parse MultiMC/Prism ``instance.cfg`` (a flat INI without a section)."""
+    """Parse MMC-family ``instance.cfg`` (a flat INI without a section)."""
     out: dict[str, str] = {}
     try:
         with open(path, encoding="utf-8", errors="ignore") as f:
@@ -435,11 +435,11 @@ class _Collector:
         self._roots_done.add(key)
         return True
 
-    # -- standard (official / HMCL / PCL2 / TLauncher / custom) ----------
+    # -- standard (official / third-party / custom) ----------
     def add_standard(self, root: str, launcher: str, name_hint: str = "") -> int:
         """Emit ONE ENTRY PER VERSION found in a standard game directory.
 
-        A single ``.minecraft`` managed by PCL2 or HMCL routinely contains a
+        A single ``.minecraft`` managed by many third-party launchers routinely contains a
         dozen versions; treating the folder as one instance (the old
         behaviour) is exactly why most of the user's games never showed up.
         """
@@ -472,7 +472,7 @@ class _Collector:
             count += 1
         return count
 
-    # -- MultiMC / Prism / PolyMC ---------------------------------------
+    # -- MMC-family ---------------------------------------
     def add_mmc(self, inst_dir: str, launcher: str) -> bool:
         cfg_path = os.path.join(inst_dir, "instance.cfg")
         pack_path = os.path.join(inst_dir, "mmc-pack.json")
@@ -480,7 +480,7 @@ class _Collector:
             return False
         cfg = _read_instance_cfg(cfg_path)
         name = cfg.get("name") or os.path.basename(inst_dir)
-        # Prism/MultiMC use "minecraft"; very old MultiMC used ".minecraft".
+        # MMC-family uses "minecraft"; very old versions used ".minecraft".
         game_dir = os.path.join(inst_dir, "minecraft")
         if not os.path.isdir(game_dir):
             alt = os.path.join(inst_dir, ".minecraft")
@@ -490,7 +490,7 @@ class _Collector:
             mc, loader, loader_ver = _read_mmc_pack(pack_path)
         if mc == "unknown":
             mc = cfg.get("IntendedVersion", "unknown")
-        # Prism keeps *patches*, not a Mojang version json — nothing here is
+        # MMC keeps *patches*, not a Mojang version json — nothing here is
         # directly launchable by minecraft-launcher-lib until we rebuild it.
         std = _enum_standard_versions(game_dir)
         needs_convert = not std
@@ -578,7 +578,7 @@ def discover_instances(progress=None) -> list[ScannedInstance]:
             except Exception:  # noqa: BLE001
                 pass
 
-    # ---- 1) MMC-family roots (MultiMC / Prism / PolyMC) ----------------
+    # ---- 1) MMC-family roots ----------------
     tick("MultiMC / Prism")
     for launcher, base in (
         ("MultiMC", os.path.join(appdata, "MultiMC")),
@@ -622,17 +622,17 @@ def discover_instances(progress=None) -> list[ScannedInstance]:
                 if e.is_dir():
                     col.add_standard(e.path, "ATLauncher", e.name)
 
-    # ---- 5) Standard-layout launchers (official / HMCL / PCL2 / TL) -----
+    # ---- 5) Standard-layout launchers (official / third-party) -----
     tick("Official / HMCL / PCL2")
     official = os.path.join(appdata, ".minecraft")
-    # HMCL and PCL2 both default to %APPDATA%/.minecraft; label by whichever
+    # 各启动器都默认 %APPDATA%/.minecraft；按
     # launcher's own config dir exists so the row is meaningful.
     label = "Official"
     if os.path.isdir(os.path.join(appdata, ".hmcl")):
         label = "HMCL"
     elif os.path.isdir(os.path.join(appdata, "PCL")) or \
             os.path.isfile(os.path.join(official, "PCL", "Setup.ini")):
-        label = "PCL2"
+        label = "PCL-CE"
     col.add_standard(official, label)
 
     for root, launcher in (
@@ -643,14 +643,14 @@ def discover_instances(progress=None) -> list[ScannedInstance]:
     ):
         col.add_standard(root, launcher)
 
-    # PCL2 is usually *portable*: the exe sits next to a .minecraft folder.
+    # 第三方启动器通常为*便携版*：exe 与 .minecraft 同目录。
     for pcl_root in (
         os.path.join(appdata, ".pcl2"), os.path.join(profile, ".pcl2"),
         os.path.join(local, "Programs", "pcl2"), os.path.join(local, "pcl2"),
     ):
         if os.path.isdir(pcl_root):
-            col.add_standard(os.path.join(pcl_root, ".minecraft"), "PCL2")
-            col.add_standard(pcl_root, "PCL2")
+            col.add_standard(os.path.join(pcl_root, ".minecraft"), "PCL-CE")
+            col.add_standard(pcl_root, "PCL-CE")
 
     # ---- 6) Disk sweep: portable launchers + stray game dirs ------------
     tick("扫描磁盘")
@@ -669,7 +669,7 @@ def _safe_scandir(path: str):
 
 
 def _scan_mmc_root(instances_dir: str, launcher: str, col: _Collector) -> int:
-    """Import every instance under a MultiMC-family ``instances/`` folder."""
+    """Import every instance under an MMC-family ``instances/`` folder."""
     if not os.path.isdir(instances_dir):
         return 0
     n = 0
@@ -680,7 +680,7 @@ def _scan_mmc_root(instances_dir: str, launcher: str, col: _Collector) -> int:
 
 
 def _looks_like_mmc_root(path: str) -> bool:
-    """A MultiMC/Prism ``instances`` dir: at least one child has instance.cfg."""
+    """An MMC-family ``instances`` dir: at least one child has instance.cfg."""
     for e in _safe_scandir(path)[:60]:
         if e.is_dir() and os.path.isfile(os.path.join(e.path, "instance.cfg")):
             return True
@@ -690,7 +690,7 @@ def _looks_like_mmc_root(path: str) -> bool:
 def _sweep(root: str, col: _Collector, max_depth: int, progress=None) -> None:
     """Depth-capped walk looking for game dirs *and* portable launcher roots.
 
-    Portable installs (PCL2 / Prism / HMCL unzipped anywhere) are the common
+    Portable installs (third-party launchers unzipped anywhere) are the common
     case on Chinese setups, so a name-only lookup in %APPDATA% misses most of
     them. We instead recognise the on-disk markers each launcher leaves.
     """
@@ -721,7 +721,7 @@ def _sweep(root: str, col: _Collector, max_depth: int, progress=None) -> None:
             if low == "appdata" and _is_system_appdata(e.path):
                 continue
 
-            # a) MultiMC / Prism / PolyMC portable root
+            # a) MMC-family portable root
             if low == "instances" and _looks_like_mmc_root(e.path):
                 parent = os.path.basename(os.path.dirname(e.path)).lower()
                 launcher = ("Prism" if "prism" in parent else
@@ -758,7 +758,7 @@ def _guess_launcher(mc_dir: str) -> str:
     """Name the owning launcher from marker files next to the game dir."""
     parent = os.path.dirname(mc_dir)
     checks = [
-        ("PCL2", ("PCL", "Plain Craft Launcher.exe", "PCL.ini")),
+        ("PCL-CE", ("PCL", "Plain Craft Launcher.exe", "PCL.ini")),
         ("HMCL", ("hmcl.json", "HMCL.exe")),
         ("BakaXL", ("BakaXL.exe",)),
         ("TLauncher", ("TLauncher.exe",)),
@@ -768,14 +768,14 @@ def _guess_launcher(mc_dir: str) -> str:
             if os.path.exists(os.path.join(parent, m)) or \
                     os.path.exists(os.path.join(mc_dir, m)):
                 return label
-    # HMCL/PCL2 leave per-version configs inside the game dir
+    # 部分启动器在游戏目录内留下 per-version 配置
     vdir = os.path.join(mc_dir, "versions")
     for e in _safe_scandir(vdir)[:20]:
         if e.is_dir():
             if os.path.isfile(os.path.join(e.path, "hmclversion.cfg")):
                 return "HMCL"
             if os.path.isfile(os.path.join(e.path, "PCL", "Setup.ini")):
-                return "PCL2"
+                return "PCL-CE"
     return "Other"
 
 

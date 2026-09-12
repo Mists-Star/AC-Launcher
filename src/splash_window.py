@@ -193,14 +193,17 @@ class SplashWindow(QWidget):
 
         if self._mc_font_family:
             # round-63：MC 像素字体真实打出 "AC"（用户指定），保留交错动画。
+            # round-79b：MC 像素字是等宽方块——A/C 字形各 60px，原 A 起点 cx-80 /
+            # C 起点 cx+70 让中间空了 90px（"隔太远"）。改为 A 起点 cx-62、C 从
+            # A 右缘后 4px 接上，整组以 cx 居中，凑成贴合 logo 的 "AC"。
             self._draw_text_letter(
-                p, "A", cx - 80, cy + (1 - a_l) * 14, 0.6 + 0.4 * a_l, a_l, accent)
+                p, "A", cx - 62, cy + (1 - a_l) * 14, 0.6 + 0.4 * a_l, a_l, accent)
             self._draw_text_letter(
-                p, "C", cx + 70, cy + (1 - c_l) * 14, 0.6 + 0.4 * c_l, c_l, accent)
+                p, "C", cx + 2, cy + (1 - c_l) * 14, 0.6 + 0.4 * c_l, c_l, accent)
         else:
             # 字体缺失回退矢量描边字母——logo 永远看得见。
-            self._draw_letter_A(p, cx - 80, cy + (1 - a_l) * 14, 0.6 + 0.4 * a_l, a_l, accent)
-            self._draw_letter_C(p, cx + 70, cy + (1 - c_l) * 14, 0.6 + 0.4 * c_l, c_l, accent)
+            self._draw_letter_A(p, cx - 58, cy + (1 - a_l) * 14, 0.6 + 0.4 * a_l, a_l, accent)
+            self._draw_letter_C(p, cx + 58, cy + (1 - c_l) * 14, 0.6 + 0.4 * c_l, c_l, accent)
 
         # progress bar — must reach exactly 100% at phase == 1.0
         prog = _smooth((self._phase - 0.12) / 0.88)

@@ -61,7 +61,8 @@ class _FindingCard(RoundedCard):
         reason.setProperty("cls", "sub")
         reason.setWordWrap(True)
         lay.addWidget(reason)
-        sug = QLabel("💡 " + t(finding.suggestion))
+        # round-91 去掉文本 💡 前缀（Windows 下渲染成彩色 emoji，风格突兀）；用 QHBox 自带圆点色块即表达建议层级
+        sug = QLabel(t(finding.suggestion))
         sug.setProperty("cls", "sub")
         sug.setWordWrap(True)
         lay.addWidget(sug)

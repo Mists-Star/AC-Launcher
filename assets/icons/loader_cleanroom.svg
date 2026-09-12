@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Cleanroom：洁净室盾牌 -->
+  <rect x="3" y="3" width="58" height="58" rx="14" fill="#12B3A6"/>
+  <path d="M32 8 L50 16 v16 c0 12 -8 20 -18 26 C22 52 14 44 14 32 V16 Z"
+        fill="#E8FAF8" stroke="#0E8F85" stroke-width="2"/>
+  <path d="M24 32 l6 6 12 -12" stroke="#0E8F85" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

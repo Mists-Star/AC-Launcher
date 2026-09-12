@@ -1,6 +1,6 @@
 """Windows 系统级毛玻璃（Acrylic / Mica）—— 真毛玻璃，透出用户桌面。
 
-实现参考：BlockHelm Launcher `NativeBackdrop.cs`（GPL-3.0，2026-08-13 研究）。
+实现参考：常见开源实现 ``NativeBackdrop.cs``（GPL-3.0，2026-08-13 研究）。
 关键点（决定成败）：
 1. ``DwmExtendFrameIntoClientArea(hwnd, margins=-1)`` —— 把 DWM 玻璃帧扩展到
    整个客户区。**没有这步，Acrylic 只作用于标题栏区域**。
@@ -32,7 +32,7 @@ else:
     _user32 = None
 
 
-# DwmWindowAttribute（与 BlockHelm NativeBackdrop.cs 一致）
+# DwmWindowAttribute（与常见实现一致）
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 _DWMWA_WINDOW_CORNER_PREFERENCE = 33
 _DWMWA_BORDER_COLOR = 34
@@ -114,7 +114,7 @@ def enable_acrylic(widget, dark: bool = False) -> bool:
     """把 QWidget 变成系统级 Acrylic（透桌面模糊）。
 
     widget 需已 setAttribute(Qt.WA_TranslucentBackground, True)。
-    完整调用链（按 BlockHelm NativeBackdrop.cs）：
+    完整调用链（按社区实现 NativeBackdrop.cs）：
       ExtendFrameIntoClientArea(-1) → 深色标题栏 → 圆角 → 边框透明 → SystemBackdrop
     """
     if sys.platform != "win32" or ctypes is None:
@@ -137,7 +137,7 @@ def enable_acrylic(widget, dark: bool = False) -> bool:
 def disable_acrylic(widget, dark: bool = False) -> None:
     """关闭 Acrylic：SystemBackdrop=None + 恢复实色背景（light=白, dark=#151515）。
 
-    与 BlockHelm 的 ApplyCore 对称：关闭时 DWM 不模糊，窗口背景改回实色。
+    与常见实现的 ApplyCore 对称：关闭时 DWM 不模糊，窗口背景改回实色。
     """
     if sys.platform != "win32" or ctypes is None:
         return
@@ -146,7 +146,7 @@ def disable_acrylic(widget, dark: bool = False) -> None:
         if hwnd == 0:
             return
         _set_attr(hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, _DWMSBT_NONE)
-        # 深色主题关 Acrylic 时的实色 = #151515（BlockHelm GetOpaqueWindowBackgroundColor）
+        # 深色主题关 Acrylic 时的实色 = #151515（常见实现 GetOpaqueWindowBackgroundColor）
         from PySide6.QtGui import QColor
         from PySide6.QtCore import Qt
         widget.setAttribute(Qt.WA_TranslucentBackground, False)

@@ -22,7 +22,7 @@ from .core.authlib import ensure_authlib
 __all__ = ["find_java", "build_options", "get_command", "launch_process", "launch_instance",
            "run_hook_cmd", "resolve_game_dir", "parse_game_args"]
 
-# round-55 JVM 参数预设「Aikar 优化」组（对齐 PCL2 预设里社区推荐的 Aikar 调优，
+# round-55 JVM 参数预设「Aikar 优化」组（对齐主流预设里社区推荐的 Aikar 调优，
 # 多数整合包作者亦沿用此组）。带引号的参数交给 JVM 前由 shlex 保持完整。
 _AIKAR_FLAGS = [
     "-XX:+UseG1GC",
@@ -44,7 +44,7 @@ def parse_game_args(text: str) -> tuple[str | None, str | None, list[str]]:
     ``--server <ip>`` / ``--server=<ip>`` 与 ``--port <p>`` / ``--port=<p>``
     抽出交给 minecraft-launcher-lib 的 options（它会正确追加 ``--server/--port``
     两段式启动参数），其余令牌原样返回，由调用方追加到游戏命令末尾（MC 接受
-    尾随参数，与 PCL2 的「游戏附加参数」行为一致）。
+    尾随参数，与主流的「游戏附加参数」行为一致）。
     """
     import shlex
     try:
@@ -79,7 +79,7 @@ def parse_game_args(text: str) -> tuple[str | None, str | None, list[str]]:
 
 
 def resolve_game_dir(inst, settings: dict) -> str:
-    """版本隔离 / 自定义游戏目录解析（对齐 PCL2「版本隔离」三选项）。
+    """版本隔离 / 自定义游戏目录解析（对齐主流「版本隔离」三选项）。
 
     - 默认：游戏数据读写 <mc_dir>（.minecraft，各版本共享存档/模组）；
     - 版本隔离：读写 <mc_dir>/versions/<version_id>（每版本独立存档/模组）；
@@ -91,6 +91,14 @@ def resolve_game_dir(inst, settings: dict) -> str:
         or (settings.get("version_isolation") or "default")
     if iso == "isolated":
         sub = inst.version_id or inst.game_version
+        # round-78 其他启动器版本隔离（导入）：mc_dir 本身就是该版本
+        # 的隔离目录，真实 json 在 mc_dir/<sub>.json。再套 versions/<sub> 会让
+        # options.txt/存档等写到不存在的嵌套目录（同 instances.game_dir 规则）。
+        try:
+            if os.path.isfile(os.path.join(inst.mc_dir, f"{sub}.json")):
+                return inst.mc_dir
+        except OSError:
+            pass
         return os.path.join(inst.mc_dir, "versions", sub)
     if iso == "custom":
         custom = (getattr(inst, "game_dir_override", "") or "").strip()
@@ -105,7 +113,7 @@ def run_hook_cmd(cmd: str, cwd: str = "") -> None:
     """执行一条玩家自定义的「启动后/退出后命令」，不阻塞游戏进程。
 
     整串交给系统 shell（Windows 用 cmd /c 以支持 &&、路径带空格等写法；
-    与 PCL2 的启动后命令语义一致）。失败静默——钩子绝不影响游戏。
+    与主流的启动后命令语义一致）。失败静默——钩子绝不影响游戏。
     """
     cmd = (cmd or "").strip()
     if not cmd:
@@ -140,7 +148,7 @@ def build_options(
     renderer: str = "auto",
     perf_g1gc: bool = True,
     perf_disable_explicit_gc: bool = False,
-    # round-55 启动高级设置（对齐 PCL2 启动游戏/版本设置）：
+    # round-55 启动高级设置（对齐主流启动游戏/版本设置）：
     game_dir: str | None = None,   # 运行时游戏目录（版本隔离/自定义目录以 mll 的
                                    # gameDirectory 下发）；None = 默认 mc_dir
     jvm_preset: str = "default",   # default/aikar/custom 三档（custom 只看 jvm_args）
@@ -164,11 +172,23 @@ def build_options(
         "launcherVersion": launcher_version,
         "jvmArguments": [f"-Xmx{ram_mb}M", f"-Xms{xms}M"],
     }
-    # round-55 JVM 参数预设（对齐 PCL2「JVM 参数」预设下拉）：
-    #   default = 不注入额外调优；aikar = 注入社区推荐 Aikar 组（PCL 默认即此组）；
+    # round-55 JVM 参数预设（对齐主流「JVM 参数」预设下拉）：
+    #   default = 不注入额外调优；aikar = 注入社区推荐 Aikar 组（默认即此组）；
+    #   auto  = 智能推荐（round-80）：按内存自动选组——富裕给完整 Aikar，
+    #           小内存给轻量 G1GC 组（避免 AlwaysPreTouch 等预占内存挤压堆）；
     #   custom = 只用玩家在 jvm_args 里手填的。实例级 jvm_args 始终叠加在预设之上。
     if jvm_preset == "aikar":
         opts["jvmArguments"] += list(_AIKAR_FLAGS)
+    elif jvm_preset == "auto":
+        if ram_mb >= 8192:
+            opts["jvmArguments"] += list(_AIKAR_FLAGS)
+        else:
+            opts["jvmArguments"] += [
+                "-XX:+UseG1GC",
+                "-XX:MaxGCPauseMillis=40",
+                "-XX:+UseStringDeduplication",
+                "-XX:+DisableExplicitGC",
+            ]
     if jvm_args and jvm_args.strip():
         # round-34 加固：shlex.split 正确解析带引号的参数（-Dfoo="a b" 等），
         # 之前 .split() 会把引号内空格拆成多个参数。
@@ -177,7 +197,7 @@ def build_options(
             opts["jvmArguments"] += shlex.split(jvm_args)
         except ValueError:
             opts["jvmArguments"] += jvm_args.split()  # 引号不闭合时降级
-    # round-53 实例级渲染器（对齐 HMCL「版本设置→渲染器」）：
+    # round-53 实例级渲染器（对齐主流「版本设置→渲染器」）：
     #   software = 软件 OpenGL 兜底（老显卡 / 虚拟机黑屏 / 缺驱动）；
     #   legacy   = 旧驱动兼容（关共享上下文，LWJGL2 版本防切换卡死）。
     # 两项都是纯 JVM 属性，1.13+ 注入也被忽略，安全。
@@ -185,12 +205,12 @@ def build_options(
         opts["jvmArguments"].append("-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true")
     elif renderer == "legacy":
         opts["jvmArguments"].append("-Dorg.lwjgl.opengl.Display.enableSharedContext=false")
-    # round-53 实例级实验性 GC（对齐 PCL2「性能」高级设置，24.10 后 HMCL 同款）：
+    # round-53 实例级实验性 GC（对齐主流「性能」高级设置）：
     # 默认开 G1GC 参数组（多数整合包作者推荐），关显式 GC 可减少突发停顿。
     # round-56 修重：preset=aikar 时该组 G1GC 参数已在 _AIKAR_FLAGS 注入，
     # 再注入会整组重复（JVM 后者覆盖前者、不崩，但命令冗余且易误导调参）。
     # 此时仅补 Aikar 组缺失的 UseStringDeduplication，语义等价不丢功能。
-    if perf_g1gc and jvm_preset != "aikar":
+    if perf_g1gc and jvm_preset not in ("aikar", "auto"):
         opts["jvmArguments"] += [
             "-XX:+UseG1GC",
             "-XX:+UnlockExperimentalVMOptions",
@@ -199,10 +219,10 @@ def build_options(
             "-XX:G1ReservePercent=20",
             "-XX:MaxGCPauseMillis=40",
         ]
-    elif perf_g1gc:
+    elif perf_g1gc and jvm_preset == "aikar":
         opts["jvmArguments"].append("-XX:+UseStringDeduplication")
     # round-56 修重：_AIKAR_FLAGS 已含 -XX:+DisableExplicitGC，aikar 预设下跳过。
-    if perf_disable_explicit_gc and jvm_preset != "aikar":
+    if perf_disable_explicit_gc and jvm_preset not in ("aikar", "auto"):
         opts["jvmArguments"].append("-XX:+DisableExplicitGC")
     # External / third-party (Yggdrasil) login: route auth through the
     # authlib-injector javaagent so Minecraft talks to the custom server.
@@ -252,6 +272,33 @@ def build_options(
         if port:
             opts["port"] = str(port)
     return opts
+
+
+def versions_root(inst, version: str = "") -> str:
+    """mll 解析版本 json 用的 .minecraft 根目录（round-78 对齐主流解析器）。
+
+    round-82 起按启动格式（inst.format / detect_format）分流：
+    - iso（版本隔离）→ mc_dir 本身就是隔离目录，真实 json 扁平躺在
+      mc_dir/<version>.json，mll 固定按 ``<root>/versions/<id>/<id>.json`` 解析，
+      把解析根指到 mc_dir 的上级两层（原 .minecraft），让 mll 直接食用玩家真实
+      json——重建、伪造一律不发生（即「按他的格式启动」）。
+    - 其余布局（原版共享 / AC 自建 / 其它整合布局的 .minecraft）
+      根即 mc_dir；`<mc>/<version>.json` 特征兜底自适应，改装/奇怪目录也尽量
+      按外来隔离式扁平布局解析（round-78）。
+    """
+    mc = getattr(inst, "mc_dir", "")
+    if not mc:
+        return ""
+    version = version or getattr(inst, "version_id", "") or getattr(inst, "game_version", "")
+    try:
+        from .instances import detect_format
+        if detect_format(inst) == "iso":
+            return os.path.dirname(os.path.dirname(os.path.normpath(mc)))
+    except Exception:  # noqa: BLE001 - 检测失败退回特征兜底
+        pass
+    if version and os.path.isfile(os.path.join(mc, f"{version}.json")):
+        return os.path.dirname(os.path.dirname(os.path.normpath(mc)))
+    return mc
 
 
 def _apply_game_window_mode(mc_dir: str, window_mode: str) -> None:
@@ -347,7 +394,7 @@ def _needs_repair(missing: list[str]) -> bool:
 
 
 def _prepare_natives(version: str, mc_dir: str, *, on_repair: callable | None = None) -> str | None:
-    """启动前把原生库解压到 java.library.path 指向的目录（对齐 HMCL/MultiMC/Prism）。
+    """启动前把原生库解压到 java.library.path 指向的目录（对齐主流做法）。
 
     关键：minecraft-launcher-lib 的 :func:`command.get_minecraft_command` 只拼
     classpath、**从不解压 natives**——LWJGL/OpenAL 的 dll 缺省会触发
@@ -383,7 +430,7 @@ def _prepare_natives(version: str, mc_dir: str, *, on_repair: callable | None = 
 
 
 def _emit_step(callback, key: str) -> None:
-    """向进度回调报告启动阶段（对齐 HMCL/PCL2 的「启动检查步骤」）。
+    """向进度回调报告启动阶段（对齐主流的「启动检查步骤」）。
 
     mll 的 CallbackDict 只认 setStatus/setProgress/setMax；这里额外读
     可选的 ``setStep`` 键（ProgressWorker 已注入），让对话框能逐行点亮
@@ -469,6 +516,10 @@ def launch_instance(
     *,
     callback=None,
     log_dir: str | None = None,
+    # round-83 服务器收藏一键直连：非空时覆盖 game_args / 全局里的 --server/--port，
+    # 用于「收藏服务器 → 用当前实例直连启动」而不用手改实例的附加参数。
+    server_override: str | None = None,
+    port_override: str | None = None,
 ):
     """Install (if needed) + assemble command + spawn. Returns (proc, log_path)."""
     # round-41 玩家视角加固：实例目录被玩家删了 / 移动后点启动——
@@ -507,9 +558,13 @@ def launch_instance(
     _skip = False
     installed = inst.version_id or inst.game_version
     if inst.version_id:
-        # 导入实例：version_id 即真实版本文件夹名
+        # 基线版本隔离布局：导入实例为隔离目录时 mc_dir 直接就是 versions/<id> 目录，真实 json 躺在
+        # mc_dir/<id>.json —— 两种布局任一命中都算「已安装」，直接按玩家的
+        # 真实 json 启动；绝不往用户实例里塞假补全。
         _skip = _os.path.isfile(_os.path.join(
-            inst.mc_dir, "versions", inst.version_id, f"{inst.version_id}.json"))
+            inst.mc_dir, "versions", inst.version_id, f"{inst.version_id}.json")) \
+            or _os.path.isfile(_os.path.join(
+            inst.mc_dir, f"{inst.version_id}.json"))
     elif _loader and _loader != "vanilla":
         # AC 创建加载器实例：找 <loader>-<...>-<mcver> 的 version json
         installed = None
@@ -542,6 +597,9 @@ def launch_instance(
     # For AC-created instances version_id is empty, so we fall back to the
     # version install_instance actually installed.
     version = inst.version_id or installed
+    # round-78：mll 解析版本 json 的根目录——外国启动器版本隔离实例指向原
+    # .minecraft（mc_dir 上级两级），其余布局就是 mc_dir 本身。
+    vroot = versions_root(inst, version)
     # select_java takes java_auto / user_path as KEYWORD-only args — passing the
     # bool positionally raised TypeError and broke every launch.
     java_auto = settings.get("java_auto", True)
@@ -567,7 +625,7 @@ def launch_instance(
         raise RuntimeError(
             _t("err.java_missing", default="未找到可用的 Java 运行时。\n请到 设置 → Java 安装一个（或开启自动检测）。")
         )
-    # round-55 启动高级设置（对齐 PCL2「启动游戏/版本设置」）：全局默认 + 实例覆盖。
+    # round-55 启动高级设置（对齐主流「启动游戏/版本设置」）：全局默认 + 实例覆盖。
     # game_dir 先解析出来——窗口模式 options.txt 也要写到运行时目录才生效。
     game_dir = resolve_game_dir(inst, settings)
     try:
@@ -576,12 +634,15 @@ def launch_instance(
         pass
     jvm_preset = (getattr(inst, "jvm_preset", "") or "").strip() \
         or settings.get("jvm_preset", "default")
-    if jvm_preset not in ("default", "aikar", "custom"):
+    if jvm_preset not in ("default", "aikar", "auto", "custom"):
         jvm_preset = "default"
     # 游戏附加参数：--server/--port 走 mll 直连，其余令牌追加到命令尾部
     game_args = (getattr(inst, "game_args", "") or "").strip() \
         or settings.get("game_args", "")
     _server, _port, extra_game = parse_game_args(game_args)
+    if server_override:   # round-83 收藏服务器直连优先于附加参数里的 --server
+        _server = server_override
+        _port = port_override if port_override else _port
 
     # Honor the game window mode (fullscreen / borderless / windowed). This is
     # the launcher-side counterpart to the "窗口模式" setting — it must run
@@ -620,7 +681,7 @@ def launch_instance(
         account.get("token", ""),
         mc_dir=inst.mc_dir,
         java=java,
-        # round-42 实例级覆盖（对齐 Prism/HMCL）：ram/jvm 优先实例，0/空回退全局
+        # round-42 实例级覆盖（对齐主流做法）：ram/jvm 优先实例，0/空回退全局
         ram_mb=int(getattr(inst, "ram_mb", 0) or 0) or settings.get("ram_mb", 4096),
         jvm_args=(getattr(inst, "jvm_args", "") or "").strip()
                  or settings.get("jvm_args", ""),
@@ -645,10 +706,10 @@ def launch_instance(
         """(解压 natives + 构造命令) 的单一出口，repair 后复用。"""
         nonlocal_cmd = opts
         if set_natives:
-            nd = _prepare_natives(version, inst.mc_dir)
+            nd = _prepare_natives(version, vroot)
             if nd:
                 nonlocal_cmd["nativesDirectory"] = nd
-        cmd = get_command(version, inst.mc_dir, nonlocal_cmd)
+        cmd = get_command(version, vroot, nonlocal_cmd)
         # round-55 游戏附加参数：--server/--port 已由 mll 处理，其余令牌原文追加
         if extra_game:
             cmd = cmd + extra_game
@@ -659,7 +720,7 @@ def launch_instance(
     _emit_step(callback, "prepare")
     cmd = _assemble_command()
 
-    # round-47 根治之二：classpath 完整性自愈（对齐 MultiMC/Prism/HMCL 的
+    # round-47 根治之二：classpath 完整性自愈（对齐主流启动器的
     # 启动前校验）。之前反复「exit 1 修不好」的真正根因不只是 natives dll——
     # 1.8.9 等老版本的 lwjgl-platform 基础包 / 各主库 jar 若缺失，JVM 一起动
     # 就 ClassNotFound / UnsatisfiedLinkError 秒退。这里在启动前扫描客户端的
@@ -675,7 +736,7 @@ def launch_instance(
         # 加载器实例的库在 versions/<loader> 下，安装后即在，不走此分支。
         try:
             _mll.install.install_minecraft_version(
-                inst.game_version, inst.mc_dir, callback=callback or None
+                inst.game_version, vroot, callback=callback or None
             )
         except Exception:  # noqa: BLE001 - 补全失败不阻塞启动，由 crash 分析兜底
             pass
@@ -709,9 +770,9 @@ def launch_instance(
     except Exception:  # noqa: BLE001 - 预检失败绝不影响启动
         pass
 
-    # round-71 借鉴 PCL-CE McLaunchPrecheck：游戏目录含非 ASCII 字符
+    # round-71 借鉴主流实现做启动前预检：游戏目录含非 ASCII 字符
     # （如中文路径）在部分 UTF-8 环境下会让老版本 MC 启动失败——只警告
-    # 不拦截，且玩家可在设置里关闭；与 PCL 的「不再提示」开关语义一致。
+    # 不拦截，且玩家可在设置里关闭；与主流的「不再提示」开关语义一致。
     try:
         from .i18n import t as _t2
         if settings.get("warn_non_ascii_path", True) and not game_dir.isascii():

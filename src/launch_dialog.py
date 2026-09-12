@@ -1,4 +1,4 @@
-"""Launch progress dialog — HMCL/PCL2-style step list visible during pre-launch.
+"""Launch progress dialog — AC-style step list visible during pre-launch.
 
 Shows the stages of ``launch_instance`` as a list of checkpoints:
 
@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 from .theme import COLORS
 from .i18n import t
 from .icons import icon
+from .frameless import FramelessHelper, TitleBar
+from .win_rounded import enable_win11_round_corners
 
 # Step ordering (must match the keys emitted by src/launch.py `_emit_step`).
 # The label is resolved lazily so retranslate_ui() keeps working.
@@ -41,7 +43,7 @@ _STEP_KEYS = {
     "start": "launch.step.start",
 }
 
-_GLYPH = {"pending": "○", "running": "▶", "done": "✔"}
+# round-91 删除已迁移到 state_pix 的文本符号表 _GLYPH（未引用，残留）。
 _COLOR = {"pending": "text_disabled", "running": "accent", "done": "success"}
 
 
@@ -65,13 +67,21 @@ class LaunchProgressDialog(QDialog):
         self.setModal(False)
         self.setMinimumWidth(460)
         self.setMaximumWidth(560)
-        # 毛玻璃友好的对话框底色（QDialog 走 $bg_app_frost，透底时半透明）
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        # 主题化对话框底色（QDialog 走 $bg_app_frost 主题 token）
         self.setProperty("cls", "card")
 
+        # ── AC 无边框窗口：自定义标题栏 + 圆角 ──
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.titlebar = TitleBar(
+            self, title=t("launch.title"), height=38, controls="close")
+        root.addWidget(self.titlebar)
+
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(20, 12, 20, 14)
+        lay.setSpacing(12)
 
         # ── header ──
         head = QHBoxLayout()
@@ -88,7 +98,7 @@ class LaunchProgressDialog(QDialog):
         self.sub_lbl.setProperty("cls", "sub")
         titles.addWidget(self.sub_lbl)
         head.addLayout(titles, 1)
-        root.addLayout(head)
+        lay.addLayout(head)
 
         # ── step list ──
         self._glyphs: dict[str, QLabel] = {}
@@ -104,10 +114,10 @@ class LaunchProgressDialog(QDialog):
             rh = QHBoxLayout(row)
             rh.setContentsMargins(0, 0, 0, 0)
             rh.setSpacing(10)
-            glyph = QLabel("○")
+            glyph = QLabel()
             glyph.setFixedWidth(18)
-            glyph.setStyleSheet(
-                f"font-size: 14px; color: {COLORS['text_disabled']}; font-weight: 700;")
+            from .ui_kit import state_pix
+            glyph.setPixmap(state_pix("pending", COLORS["text_disabled"], 16))
             name = QLabel(t(_STEP_KEYS[key]))
             name.setStyleSheet(f"font-size: 13px; color: {COLORS['text_sub']};")
             self._glyphs[key] = glyph
@@ -116,22 +126,22 @@ class LaunchProgressDialog(QDialog):
             rh.addWidget(glyph)
             rh.addWidget(name, 1)
             sl.addWidget(row)
-        root.addWidget(steps_box)
+        lay.addWidget(steps_box)
 
         # ── determinate download progress (only visible during install) ──
         self.bar = QProgressBar()
-        # round-53 下载进度可见化：显示百分比数字（对齐 PCL2/HMCL 下载面板）
+        # round-53 下载进度可见化：显示百分比数字
         self.bar.setTextVisible(True)
         self.bar.setFormat("%p%")
         self.bar.setFixedHeight(14)
         self.bar.setVisible(False)
-        root.addWidget(self.bar)
+        lay.addWidget(self.bar)
 
         # ── status line ──
         self.status_lbl = QLabel(t("launch.status_unknown"))
         self.status_lbl.setProperty("cls", "sub")
         self.status_lbl.setWordWrap(True)
-        root.addWidget(self.status_lbl)
+        lay.addWidget(self.status_lbl)
 
         # ── footer ──
         foot = QHBoxLayout()
@@ -142,7 +152,14 @@ class LaunchProgressDialog(QDialog):
         hide_btn.setCursor(Qt.PointingHandCursor)
         hide_btn.clicked.connect(lambda: self.hide())
         foot.addWidget(hide_btn)
-        root.addLayout(foot)
+        lay.addLayout(foot)
+
+        root.addWidget(body, stretch=1)
+
+        # ── frameless + DWM shadow + win11 rounded corners ──
+        self._frameless = FramelessHelper(self)
+        self._frameless.set_titlebar(self.titlebar)
+        enable_win11_round_corners(self)
 
         self._set_step("check", running=True)
 
@@ -190,9 +207,9 @@ class LaunchProgressDialog(QDialog):
     def _mark(self, key: str, mode: str):
         self._modes[key] = mode
         c = COLORS[_COLOR[mode]]
-        self._glyphs[key].setText(_GLYPH[mode])
-        self._glyphs[key].setStyleSheet(
-            f"font-size: 14px; font-weight: 700; color: {c};")
+        from .ui_kit import state_pix
+        self._glyphs[key].setPixmap(state_pix(mode, c, 16))
+        self._glyphs[key].setStyleSheet("")
         if mode == self._MODE_RUNNING:
             self._rows[key].setStyleSheet(
                 f"font-size: 13px; font-weight: 600; color: {COLORS['accent']};")

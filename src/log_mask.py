@@ -1,6 +1,6 @@
 """Log masking — strip access tokens & Windows usernames from shown logs.
 
-Learned from PCL-CE ``McLogFilter.cs``: keep the first/last 5 chars of a
+Learned from mainstream practice: keep the first/last 5 chars of a
 token, mask the middle, and never print the Windows user-name it might be
 leaking. Applied at *display* boundaries (console page, crash evidence) —
 the on-disk game log is left untouched so crash analysis keeps raw truth.
@@ -15,14 +15,14 @@ _MASK_CHAR = "*"
 
 
 def _mask_middle(value: str, keep: int = 5) -> str:
-    """PCL-CE style: token[:keep] + '*'*(len-2*keep) + token[-keep:]."""
+    """Common practice: token[:keep] + '*'*(len-2*keep) + token[-keep:]."""
     if len(value) <= keep * 2:
         return _MASK_CHAR * len(value)
     return value[:keep] + _MASK_CHAR * (len(value) - keep * 2) + value[-keep:]
 
 
 def _mask_access_token(text: str) -> str:
-    """打码 ``accessToken <值>`` 之后的内容（对齐 PCL 对启动命令行参数的过滤）。
+    """打码 ``accessToken <值>`` 之后的内容（对齐主流对启动命令行参数的过滤）。
 
     命令行里 token 与关键字间以空格分隔（``--accessToken <uuid>``），这里对
     ``accessToken `` 后续的第一个连续非空白段按「保留首尾 5 位」处理。
@@ -45,7 +45,7 @@ def _mask_access_token(text: str) -> str:
 
 
 def _mask_user_name(text: str) -> str:
-    """打码当前 Windows 用户名出现的片段（PCL 同时会处理用户目录路径）。"""
+    """打码当前 Windows 用户名出现的片段（主流同时会处理用户目录路径）。"""
     try:
         profile = os.path.expanduser("~")
         user = os.path.basename(os.path.normpath(profile))
@@ -61,7 +61,7 @@ def _mask_user_name(text: str) -> str:
 def mask_secret(text: str, secret: str) -> str:
     """打码一个具体敏感值（登录 token / UUID），保留首尾 5 位。
 
-    与 PCL 一致：长度 < 10 或与 UUID 相同的离线 token 不强制处理——
+    与主流一致：长度 < 10 或与 UUID 相同的离线 token 不强制处理——
     但调用方可自行决定传入。空值/过短时原样返回。
     """
     if not secret or len(secret) < 10:

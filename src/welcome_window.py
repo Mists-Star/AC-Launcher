@@ -60,11 +60,13 @@ class WelcomeWindow(QWidget):
 
         # 主题感知：仅决定文字颜色
         dark = get_theme_mode() == "dark"
-        # 半透明紫色 accent（dark 模式下偏白）
+        # 半透明 accent（dark 模式下偏白）；light 下用 accent_text()，
+        # 避免用户把主题色设为浅色后在白底上看不清描边字（round-91）。
         if dark:
             self._text_color = QColor("#A78BFA")  # 浅紫
         else:
-            self._text_color = QColor(COLORS["accent"])  # #7C3AED
+            from .ui_kit import accent_text
+            self._text_color = QColor(accent_text())
 
         # 状态
         self._finished_emitted = False
@@ -187,6 +189,10 @@ class WelcomeWindow(QWidget):
         family = self._mc_font_family or self._font_family
         font = QFont(family)
         font.setPixelSize(max(24, int(_MC_FONT_PIXEL)))
+        # round-78: MC 像素字体是等宽方块字——「A」「C」各占一整格，
+        # 中间隔一格高亮方块，视觉上两个字离太远。负字距把 C 收进半格，
+        # 凑成更像 logo 的 "AC"（对回退系统字体同样生效）。
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, -14)
         p.setFont(font)
 
         col = QColor(self._text_color)

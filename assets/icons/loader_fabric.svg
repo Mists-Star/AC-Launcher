@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Fabric：官方绿色蝉标识 -->
+  <rect x="3" y="3" width="58" height="58" rx="16" fill="#2FAC66"/>
+  <g fill="#FFFFFF">
+    <path d="M27 36 Q14 18 34 8 L37 22 Q31 27 27 36 Z"/>
+    <path d="M37 36 Q50 18 30 8 L27 22 Q33 27 37 36 Z"/>
+    <ellipse cx="32" cy="42" rx="10" ry="13"/>
+  </g>
+</svg>

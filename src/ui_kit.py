@@ -6,14 +6,123 @@ inline stylesheets to keep the visual language uniform across the app.
 
 Purely additive — safe to import anywhere; never mutates global state.
 """
+import math
+
+from PySide6.QtGui import (
+    QColor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+)
+from PySide6.QtCore import Qt, QSize, Signal, QPointF, QRectF
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QSizePolicy,
-    QButtonGroup,
+    QButtonGroup, QComboBox,
 )
-from PySide6.QtCore import Qt, QSize, Signal
 
 from .theme import COLORS, RoundedCard, R_CARD, R_BTN, F_SM, F_MD, F_LG
 from .icons import icon
+
+
+# ── 全局滚轮防误触（round-86）───────────────────────────────────────────
+# 用户反馈：滚动页面时鼠标悬停在 QComboBox 上会被滚轮误切选项。这里对
+# QComboBox.wheelEvent 全局打补丁，一律忽略滚轮——覆盖所有页面/对话框里
+# 的 20+ 个下拉框（main_window / pages_instances / music / onboarding / Java
+# 管理等），一处生效。优点：
+#   - 下拉弹层打开后滚轮事件走 popup 视图（QAbstractItemView），与 combo
+#     本体无关，仍可照常滚动浏览，不受此补丁影响。
+#   - ui_kit 被 8+ 模块 import，且所有 QComboBox 都在 UI 构建（运行期）才
+#     实例化，补丁必在其前执行，不会出现漏网的下拉框。
+def _ignore_wheel(self, event):
+    event.ignore()
+
+
+QComboBox.wheelEvent = _ignore_wheel
+
+
+def accent_text() -> str:
+    """强调文字色：accent 偏亮时自动换成深色，保证在浅色背景（卡片/弹窗）
+    上仍清晰可读；accent 本身够暗则原样返回主题色。
+
+    round-87 用户反馈：主题色设为琥珀黄（#EAB308）后，主页卡片「导入」
+    徽章等 accent 文字在浅色主题下看不清。用它替代裸的
+    ``color:{COLORS['accent']}``，兼顾强调色与可读性。
+    """
+    c = QColor(COLORS["accent"])
+    lum = (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) / 255.0
+    return "#1F2937" if lum > 0.62 else COLORS["accent"]
+
+
+def state_pix(mode: str, color: str, size: int = 16) -> QPixmap:
+    """自绘状态图标（round-89 消灭文本 emoji/符号）。
+
+    Windows 下 ⚠✔▶★ 这些字符会被 Segoe UI Emoji 渲染成彩色 emoji，
+    风格突兀；统一改为 QPainter 程序绘制、颜色跟随传入主题色。
+    mode: pending=空心圆  dot=实心圆  running=实心三角(播放)
+          chev=细线三角箭头  done=对勾  star=五角星  warn=警示三角。
+    """
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    c = QColor(color)
+    s = float(size)
+
+    if mode == "pending":
+        p.setPen(QPen(c, max(1.4, s * 0.10), Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QRectF(s * 0.08, s * 0.08, s * 0.84, s * 0.84))
+    elif mode == "dot":
+        p.setPen(Qt.NoPen)
+        p.setBrush(c)
+        p.drawEllipse(QRectF(s * 0.2, s * 0.2, s * 0.6, s * 0.6))
+    elif mode == "running":
+        tri = QPainterPath()
+        tri.moveTo(s * 0.3, s * 0.16)
+        tri.lineTo(s * 0.85, s * 0.5)
+        tri.lineTo(s * 0.3, s * 0.84)
+        tri.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.setBrush(c)
+        p.drawPath(tri)
+    elif mode == "chev":
+        tri = QPainterPath()
+        tri.moveTo(s * 0.3, s * 0.12)
+        tri.lineTo(s * 0.7, s * 0.5)
+        tri.lineTo(s * 0.3, s * 0.88)
+        p.setPen(QPen(c, max(1.6, s * 0.12), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(tri)
+    elif mode == "done":
+        tick = QPainterPath()
+        tick.moveTo(s * 0.18, s * 0.52)
+        tick.lineTo(s * 0.43, s * 0.76)
+        tick.lineTo(s * 0.84, s * 0.26)
+        p.setPen(QPen(c, max(1.8, s * 0.13), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(tick)
+    elif mode == "star":
+        pts = []
+        cx, cy, rr, ir = s * 0.5, s * 0.52, s * 0.46, s * 0.19
+        for i in range(10):
+            a = math.radians(-90 + i * 36)
+            rad = rr if i % 2 == 0 else ir
+            pts.append(QPointF(cx + rad * math.cos(a), cy + rad * math.sin(a)))
+        p.setPen(Qt.NoPen)
+        p.setBrush(c)
+        p.drawPolygon(QPolygonF(pts))
+    elif mode == "warn":
+        tri = QPainterPath()
+        tri.moveTo(s * 0.5, s * 0.06)
+        tri.lineTo(s * 0.95, s * 0.9)
+        tri.lineTo(s * 0.05, s * 0.9)
+        tri.closeSubpath()
+        p.setPen(QPen(QColor(c).darker(115), max(1.2, s * 0.08)))
+        p.setBrush(c)
+        p.drawPath(tri)
+        p.setPen(QPen(QColor("#FFFFFF"), max(1.4, s * 0.10),
+                      Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawLine(QPointF(s * 0.5, s * 0.36), QPointF(s * 0.5, s * 0.62))
+        p.drawLine(QPointF(s * 0.5, s * 0.74), QPointF(s * 0.5, s * 0.78))
+    p.end()
+    return pm
 
 
 # ── badge / pill ───────────────────────────────────────────────────────────

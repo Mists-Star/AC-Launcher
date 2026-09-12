@@ -213,7 +213,7 @@ class VersionsPage(QWidget):
             members = [v for v in shown if _group_of(v) == g]
             if not members:
                 continue
-            # 「最新版本」置顶组（对齐 PCL 下载页）：正式版取最新 1 个，
+            # 「最新版本」置顶组（对齐主流下载页）：正式版取最新 1 个，
             # 快照取最新 1 个，合并显示在顶部（仅"全部"过滤时出现）。
             if only_group == "all" and g == "release":
                 latest = members[0]
@@ -283,7 +283,7 @@ class VersionsPage(QWidget):
 
     def _create(self, version_id: str):
         """版本页"安装"入口：打开新建实例向导（预填版本 + 可选加载器），
-        对齐 PCL2/HMCL 的"选版本 → 选加载器 → 安装"流程。"""
+        对齐主流做法的"选版本 → 选加载器 → 安装"流程。"""
         dlg = NewInstanceDialog(self, preset_version=version_id)
         if dlg.exec() != QDialog.Accepted:
             return
@@ -367,7 +367,7 @@ class StorePage(QWidget):
         self.title_lbl = self._header.title_lbl
         root.addWidget(self._header)
 
-        # 第二行：分类标签栏（像 PCL2 下载页一样横向排开，一眼看到所有类型）
+        # 第二行：分类标签栏（像主流下载页一样横向排开，一眼看到所有类型）
         # 复用 ui_kit.ChipGroup，激活态纯 QSS 驱动。
         self.category_chips = ui_kit.ChipGroup(
             [(pt, t(key)) for pt, key in STORE_CATEGORIES],
@@ -619,7 +619,7 @@ class StorePage(QWidget):
 
         thumb = QLabel()
         thumb.setFixedSize(48, 48)
-        # 使用首字母彩色图标作为 fallback（PCL2 风格），比通用 store 图标更有辨识度
+        # 使用首字母彩色图标作为 fallback（主流风格），比通用 store 图标更有辨识度
         fallback = _letter_fallback(m["title"], 48)
         self._img.load(m.get("icon_url", ""), 48, thumb, fallback)
         lay.addWidget(thumb)

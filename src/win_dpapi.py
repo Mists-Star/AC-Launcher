@@ -1,6 +1,6 @@
 """Windows DPAPI 加密/解密（用户级）。
 
-用于账户 access/refresh_token 的安全持久化：PCL2 / HMCL 均用 DPAPI 存令牌，
+用于账户 access/refresh_token 的安全持久化：各主流启动器均用 DPAPI 存令牌，
 防止其他用户或文本编辑器直接读取 accounts.json 里的明文 token。
 
 - 同一 Windows 用户可解密（不需要密码），换用户/换机器后解密失败——调用方

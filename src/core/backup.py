@@ -1,4 +1,4 @@
-"""Instance backup & rollback — 对齐 Prism「一键备份 / 更新坏了一键回滚」。
+"""Instance backup & rollback — 快照备份「一键备份 / 更新坏了一键回滚」。
 
 快照存到 ``data/backups/<instance_id>/<snapshot_id>/``（portable，与启动器并列）。
 

@@ -50,7 +50,8 @@ class _InstanceRow(QWidget):
             extra.append(t("scan.saves") + f" {inst.saves}")
         sub_color = COLORS.get("text_sub", "#6B7280")
         warn_color = COLORS.get("warn", "#EAB308")
-        detail = f"{t('scan.launcher')} {inst.launcher}  ·  " \
+        from .instances import launcher_label
+        detail = f"{t('scan.launcher')} {launcher_label(inst.launcher, show_original=True)}  ·  " \
                  f"{t('scan.version')} {inst.game_version}  ·  " \
                  f"{t('scan.loader')} {inst.loader}"
         if inst.version_id and inst.version_id != inst.game_version:
@@ -281,7 +282,7 @@ class ScanPanel(QWidget):
             for launcher, grp in groups.items():
                 hdr = QListWidgetItem()
                 hbtn = QToolButton()  # round-44：折叠按钮可点
-                hbtn.setText(f"▾ {launcher}  ({len(grp)})")
+                hbtn.setText(f"▾ {launcher_label(launcher, show_original=True)}  ({len(grp)})")
                 hbtn.setProperty("cls", "group")
                 hbtn.setMinimumHeight(30)
                 hbtn.setStyleSheet(
@@ -351,7 +352,8 @@ class ScanPanel(QWidget):
         result = _msgbox(
             self.window(),
             t("scan.import_title"),
-            t("scan.import_body", launcher=inst.launcher, name=inst.name),
+            t("scan.import_body", launcher=launcher_label(inst.launcher, show_original=True),
+              name=inst.name),
             detail=detail,
             icon="question",
             buttons=(t("scan.import_link"), t("scan.import_copy")),

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- OptiFine：橙黄渐变镜头/眼睛 -->
+  <defs>
+    <radialGradient id="g2" cx="0.35" cy="0.3" r="0.9">
+      <stop offset="0" stop-color="#FFB64D"/><stop offset="1" stop-color="#F08A24"/>
+    </radialGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="16" fill="url(#g2)"/>
+  <ellipse cx="32" cy="34" rx="20" ry="15" fill="#FFFFFF" opacity="0.92"/>
+  <circle cx="32" cy="34" r="7.5" fill="#C2550E"/>
+  <circle cx="32" cy="34" r="3" fill="#FFFFFF"/>
+  <path d="M12 14 q8 -8 16 0 q-8 8 -16 0 Z" fill="#FFFFFF" opacity="0.85"/>
+</svg>
