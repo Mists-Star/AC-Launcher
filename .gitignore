@@ -45,6 +45,8 @@ _repro*
 _t_*
 _timing*
 _make_ico*
+_logo_probe.py
+_shots*
 _build_main.log
 
 # AC Launcher build artifacts (PyInstaller variants)
