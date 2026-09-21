@@ -2793,7 +2793,7 @@ class MainWindow(QMainWindow):
         self._lobby_create_help.setProperty("cls", "sub")
         self._lobby_create_help.setWordWrap(True)
         _cl.addWidget(self._lobby_create_help)
-        ll.addWidget(_card)
+        ll.addWidget(_card, 0, Qt.AlignmentFlag.AlignHCenter)  # 卡片 maxWidth 560，须水平居中（原先默认靠左，右侧留白 600px）
         ll.addStretch(1)
         return self.lobby_widget
 
