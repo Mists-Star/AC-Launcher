@@ -69,6 +69,21 @@
 
 offscreen 渲染 8 个页面逐一截图审查（`_shots_audit.py`，诊断脚本不入库）：
 
+### 🐛 启动页 logo 字母粘连修复（用户报障「logo 加载偏移」）
+
+1. **根因**：Minecraft AE 是位图字体，`setPixelSize(96)` 后 QFontMetrics 与
+   实际渲染**严重脱节**——实测 metrics 报 `horizontalAdvance("AC") == 18`，
+   实际墨迹约 134px（**失真 7 倍**）。`drawText` 按 advance 逐字符排布 →
+   A、C 完全重叠粘连成一团歪字形；按 metrics 宽度居中 → 整体错位。
+   round-78 加的 -14 负字距在失真度量上雪上加霜，纯调数字无解
+2. **修法**：`_render_ac_pixmap()` 预渲染——A、C 各自画到离屏图 →
+   逐像素测**实际墨迹**包围盒 → 按墨迹宽 + 14px 间距手动排布拼接；
+   `paintEvent` 改为按墨迹图实际尺寸居中绘制（透明度/缩放动画不变，
+   主题色经 `CompositionMode_SourceIn` 染色）。彻底绕开失真的字体度量
+3. 回退链保留：预渲染异常时兜底纯文本 `AlignCenter` 绘制
+
+offscreen 渲染 8 个页面逐一截图审查（`_shots_audit.py`，诊断脚本不入库）：
+
 1. **联机大厅卡片不居中**（布局 bug）：卡片 `setMaximumWidth(560)` 后
    `QVBoxLayout.addWidget` 默认**靠左**，右侧空出约 600px，整个页面重心歪向左边。
    加 `AlignHCenter` 水平居中（垂直方向上下 stretch 本来就对）

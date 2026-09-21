@@ -14,7 +14,7 @@ WelcomeWindow — AC Launcher 极简启动页（round-28 第三次重做）。
 """
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QPainter, QColor, QFont
+from PySide6.QtGui import QPainter, QColor, QFont, QPixmap, QImage
 
 from .theme import COLORS, get_theme_mode
 
@@ -169,46 +169,111 @@ class WelcomeWindow(QWidget):
         """出现动画完成：刷新一次（保持旧接口兼容）。"""
         self.update()
 
-    def _center_ac_rect(self, p):
-        """计算 "AC" 在窗口中居中的绘制信息（(基线点 x, y, 宽, 高)）。"""
-        fm = p.fontMetrics()
-        w = fm.horizontalAdvance("AC")
-        h = fm.ascent() + fm.descent()
-        r = self.rect()
-        bx = r.center().x() - w // 2
-        by = r.center().y() - h // 2 + fm.ascent()
-        return bx, by, w, h
+    def _ink_bbox(img: QImage):
+        """返回 img 中非透明像素的包围盒 QRect；全透明返回空矩形。"""
+        w, h = img.width(), img.height()
+        min_x, min_y, max_x, max_y = w, h, -1, -1
+        for y in range(h):
+            row_has = False
+            for x in range(w):
+                if img.pixel(x, y) & 0xFF000000:
+                    row_has = True
+                    if x < min_x:
+                        min_x = x
+                    if x > max_x:
+                        max_x = x
+            if row_has:
+                if y < min_y:
+                    min_y = y
+                max_y = y
+        if max_x < 0:
+            from PySide6.QtCore import QRect
+            return QRect()
+        from PySide6.QtCore import QRect
+        return QRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 
-    def paintEvent(self, e):
-        # 透明背景——用 MC 像素字体画出居中的 "AC"，透明度/缩放随进度浮现
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        prog = max(0.0, min(1.0, getattr(self, "draw_progress", 1.0)))
+    def _render_ac_pixmap(self):
+        """预渲染 "AC" 为透明 pixmap，返回裁到墨迹的图。
 
+        round-93 修复「logo 字母粘连/偏移」：Minecraft AE 是**位图字体**，
+        `setPixelSize(96)` 后 QFontMetrics 与实际渲染严重脱节——实测 metrics
+        报 `horizontalAdvance("AC") == 18`，而字形实际渲染约 90px 宽。
+        `drawText` 按 advance 逐字符排布 → A、C 完全重叠粘连，且按 metrics
+        宽度居中整体错位。负字距（round-78 的 -14）在失真度量上更是雪上加霜。
+
+        修法：把 A、C 各自渲染到离屏图 → 逐像素测**实际墨迹**包围盒 →
+        按墨迹宽度手动排布拼接，彻底绕开失真的字体度量。
+        """
         family = self._mc_font_family or self._font_family
         font = QFont(family)
         font.setPixelSize(max(24, int(_MC_FONT_PIXEL)))
-        # round-78: MC 像素字体是等宽方块字——「A」「C」各占一整格，
-        # 中间隔一格高亮方块，视觉上两个字离太远。负字距把 C 收进半格，
-        # 凑成更像 logo 的 "AC"（对回退系统字体同样生效）。
-        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, -14)
-        p.setFont(font)
 
-        col = QColor(self._text_color)
-        col.setAlpha(int(130 + 125 * prog))  # 边现边亮（0.51 → 1.0 alpha）
-        p.setPen(col)
+        CELL_W, CELL_H = 320, 240
+        GAP = 14  # 字符间视觉间距（墨迹到墨迹）
+        pieces = []
+        for ch in "AC":
+            cell = QPixmap(CELL_W, CELL_H)
+            cell.fill(Qt.GlobalColor.transparent)
+            cp = QPainter(cell)
+            cp.setFont(font)
+            cp.setRenderHint(QPainter.RenderHint.TextAntialiasing, False)  # 像素字保持硬边
+            cp.drawText(40, 180, ch)
+            cp.end()
+            bbox = WelcomeWindow._ink_bbox(cell.toImage())
+            if not bbox.isEmpty():
+                pieces.append(cell.copy(bbox))
 
-        bx, by, w, h = self._center_ac_rect(p)
-        # 轻微放大浮现：0.94 → 1.0，围绕文字中心
+        total_w = sum(p.width() for p in pieces) + GAP * (len(pieces) - 1)
+        total_h = max(p.height() for p in pieces) if pieces else 1
+        out = QPixmap(total_w, total_h)
+        out.fill(Qt.GlobalColor.transparent)
+        op = QPainter(out)
+        x = 0
+        for p in pieces:
+            op.drawPixmap(x, total_h - p.height(), p)  # 底边对齐
+            x += p.width() + GAP
+        op.end()
+        return out
+
+    def paintEvent(self, e):
+        # 透明背景——绘制预渲染好的 "AC" 墨迹图（居中），透明度/缩放随进度浮现
+        p = QPainter(self)
+        prog = max(0.0, min(1.0, getattr(self, "draw_progress", 1.0)))
+
+        pm = getattr(self, "_ac_pm", None)
+        if pm is None or pm.isNull():
+            try:
+                self._ac_pm = self._render_ac_pixmap()
+                pm = self._ac_pm
+            except Exception:  # noqa: BLE001 - 预渲染失败兜底为纯文本
+                pm = None
+        if pm is None or pm.isNull():
+            family = self._mc_font_family or self._font_family
+            font = QFont(family)
+            font.setPixelSize(max(24, int(_MC_FONT_PIXEL)))
+            p.setFont(font)
+            p.setPen(QColor(self._text_color))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "AC")
+            p.end()
+            return
+
+        # 按墨迹图实际尺寸居中；浮现 = 透明度 0.51→1.0 + 轻微放大 0.94→1.0
         scale = 0.94 + 0.06 * prog
-        cx, cy = bx + w / 2.0, by - (p.fontMetrics().ascent() - h / 2.0)
+        col = QColor(self._text_color)
+        col.setAlpha(int(130 + 125 * prog))
         p.save()
-        p.translate(cx, cy)
+        p.translate(self.rect().center())
         p.scale(scale, scale)
-        p.translate(-cx, -cy)
-        p.drawText(bx, by, "AC")
+        p.setOpacity(col.alphaF())
+        # 用 tint 上色：预渲染是白色墨迹，这里乘主题色（SourceIn 语义）
+        tinted = QPixmap(pm)
+        tp = QPainter(tinted)
+        tp.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        tp.fillRect(tinted.rect(), col)
+        tp.end()
+        p.drawPixmap(int(-pm.width() / 2), int(-pm.height() / 2), tinted)
         p.restore()
+        p.end()
 
     # ---------- 鼠标（点击任意位置立即跳过）----------
     def mousePressEvent(self, e):
