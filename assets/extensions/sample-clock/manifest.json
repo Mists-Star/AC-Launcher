@@ -1,0 +1,11 @@
+{
+  "id": "sample-clock",
+  "name": "示例：时钟",
+  "name_en": "Sample Clock",
+  "version": "1.0.0",
+  "author": "AC",
+  "entry": "index.html",
+  "description": "演示扩展宿主 API：读取实例列表 + 每秒走秒的时钟。",
+  "description_en": "Demonstrates the extension host API: list instances + a live clock.",
+  "permissions": ["read_only_instance"]
+}

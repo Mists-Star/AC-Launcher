@@ -1,0 +1,35 @@
+[
+  {
+    "id": "jvm-aikar-g1",
+    "name": "Aikar G1GC 预设",
+    "name_en": "Aikar G1GC Preset",
+    "type": "jvm_preset",
+    "version": "1.0.0",
+    "author": "AC",
+    "description": "服务器常用的 Aikar 参数组合（G1GC 分代回收），适合 4GB+ 内存环境。",
+    "description_en": "Aikar's widely-used server flags built on G1GC, best for 4GB+ RAM setups.",
+    "bundle_dir": "jvm-aikar-g1"
+  },
+  {
+    "id": "theme-midnight",
+    "name": "午夜",
+    "name_en": "Midnight",
+    "type": "theme_pack",
+    "version": "1.0.0",
+    "author": "AC",
+    "description": "深紫暗色主题，冷调底色配紫罗兰强调，适合夜间久坐。",
+    "description_en": "Dark violet theme with a violet accent, easy on the eyes at night.",
+    "bundle_dir": "theme-midnight"
+  },
+  {
+    "id": "crash-policy-restart",
+    "name": "崩溃后自动重启",
+    "name_en": "Auto-restart on Crash",
+    "type": "crash_pol",
+    "version": "1.0.0",
+    "author": "AC",
+    "description": "发现崩溃后优先建议重启游戏并自动做崩溃分析。",
+    "description_en": "After a crash, favor restarting and analyze the report automatically.",
+    "bundle_dir": "crash-policy-restart"
+  }
+]

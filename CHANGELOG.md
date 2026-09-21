@@ -9,6 +9,65 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-92（2026-09-21）— 模块化内容市场 · JS 扩展宿主（选装桥接）
+
+* **模块化内容市场**（`src/modules.py` + `settings_dialog.py`「模块与扩展」分区）：
+  主题包 / JVM 预设 / 音效包 / 崩溃策略统一为「可安装模块」
+  （`data/modules/<id>/manifest.json` + 按类型载荷），支持本地 zip / 目录 /
+  旧主题 .json 导入、应用副作用（写主题桥接 / jvm_preset / sfx 卷 / crash_policy）、
+  导出、卸载回滚；内置精选目录 `assets/modules/catalog.json`（Aikar G1GC 预设、
+  午夜主题、崩溃后自动重启）
+
+* **JS 扩展宿主**（`src/plugin_host.py`，QWebEngine 选装）：扩展 =
+  `data/extensions/<id>/manifest.json` + HTML 入口，manifest 声明权限
+  （read_only_instance / change_args / exec_command / network），默认全拒 +
+  逐项授权弹窗；无 QWebChannel 下用「注入客户端脚本 + 页面队列 + QTimer 轮询
+  runJavaScript 回投」的沙箱桥接，越权调用一律返回 `__error`；随包示例 `sample-clock`
+  演示 `window.AC.listInstances()`
+
+* **崩溃策略接线**：`crash_pol` 模块接入崩溃流程——`active_crash_policy()` 读
+  action=restart 时崩溃弹窗追加「重启游戏」按钮并设为默认（复用完整启动流程，
+  含内存/磁盘预检）；auto_analyze=true 时弹窗关闭后非模态打开日志分析器
+  （`main_window.py:_show_crash_dialog`）
+
+* **扩展启动参数接线**：host `changeArgs` 写入的 `ext_launch_arg_jobs` 在
+  `build_options` 消费——追加到 JVM 参数末尾并按 token 与预设/玩家参数去重
+  （`launch.py`）
+
+### 🔍 验证
+
+1. `venv\Scripts\python.exe -m py_compile src/modules.py src/plugin_host.py src/modules_page.py src/settings_dialog.py src/i18n.py src/launch.py src/main_window.py`
+2. `pythonw main.py` 冒烟：设置 → 模块与扩展三分区正常；无 QWebEngine 时扩展区给出选装提示
+3. 市场流程：安装「Aikar G1GC 预设」应用、安装「午夜」主题应用、安装「崩溃后自动重启」应用
+4. 扩展流程：安装示例时钟 → 授权弹窗逐项选择 → 打开扩展窗口显示实例数 + 走秒
+5. 崩溃接线：应用 crash-policy-restart 后，人为制造非零退出（如启动不存在的版本），
+   崩溃弹窗应出现「重启游戏」默认按钮，关闭后自动打开日志分析器
+
+### 🐛 仓库侧审查修复（2026-09-21 入库前）
+
+1. **zip 安装的「manifest 位于包根」形式实际装不上**（P1，功能失效）：
+   `_install_from_folder()` 固定拿解压容器目录名去和 `manifest.id` 比对，
+   而 zip 安装时容器是随机临时目录（`ac_mod_xxxx`），**必然不一致**并抛错——
+   导致文档声称支持的包根布局全部安装失败。新增 `check_dir_name` 开关，
+   仅 zip 包根场景跳过该校验；本地目录安装与「包内唯一顶层目录」仍照常校验
+
+2. **扩展卸载后 `changeArgs` 注入的 JVM 参数永久残留**（P1，静默副作用）：
+   `uninstall_extension()` 原先只删目录与授权，没清理全局配置里的
+   `ext_launch_arg_jobs`——扩展卸载后它注入的启动参数**持续影响每次启动**，
+   而玩家在 UI 里已找不到来源、无法撤销。新增 `clear_ext_arg_jobs()` 并在卸载时调用
+
+3. **`changeArgs` 反复调用导致配置无限膨胀**（P2）：原实现每次追加一条 job，
+   同一扩展重复调用会不停堆叠；改为按 `ext` 归属先剔除同名再写入（替换语义）
+
+4. **zip 解压改为 fail-closed**（安全加固）：原先直接用 `zf.extractall()`。
+   实测确认 Python 3.13 标准库**已内置路径净化**（`../../a.txt` 折叠为
+   `<dest>/a.txt`，绝对路径去根），**并非可利用的 Zip Slip**；但净化是静默的，
+   恶意成员会被悄悄塞进模块目录。改为逐成员 `realpath` 校验后显式拒绝，
+   以便在安装阶段就报错中止，同时防御将来解释器行为变化
+
+> 补记：本次为 09-21 完成、随日期批次补记；启动主线施工图见
+> `docs/LAUNCH_MODE_DESIGN.md`（⚠️ 编号冲突：round-92 已被本次占用）。
+
 ## round-91（2026-09-12）— 自绘符号收尾 · 自定义强调色贯通
 
 * **全局消灭文本 emoji / 符号**：Windows 下 `✓` `●` `▶` 会被 Segoe UI Emoji 渲染成

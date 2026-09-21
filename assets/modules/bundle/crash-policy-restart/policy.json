@@ -1,0 +1,6 @@
+{
+  "action": "restart",
+  "auto_analyze": true,
+  "open_logs": true,
+  "note": "action ∈ restart / report / ask；auto_analyze=true 时崩溃后将直接读取日志分析。"
+}

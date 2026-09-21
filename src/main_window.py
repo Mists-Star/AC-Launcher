@@ -975,7 +975,11 @@ class HomePage(QWidget):
         tip_title.setProperty("cls", "body-bold")
         tip_header.addWidget(tip_title)
         tip_header.addStretch(1)
-        refresh_icon = QLabel("🔄")
+        refresh_icon = QLabel()
+        # round-91 用自带 refresh.svg 替代文本 🔄（Windows 下渲染成彩色 emoji）
+        from .icons import pixmap as _px
+        refresh_icon.setPixmap(_px("refresh", 16))
+        refresh_icon.setFixedSize(18, 18)
         refresh_icon.setCursor(Qt.PointingHandCursor)
         refresh_icon.setToolTip(t("pcl.tip_refresh", default="换一条提示"))
         tip_header.addWidget(refresh_icon)
@@ -3436,7 +3440,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"{base} · {reason}" if reason else base)
             # round-80 崩溃诊断：非零退出时弹窗给可操作按钮（不只改状态栏）
             if code not in (0, None):
-                self._show_crash_dialog(code, log_path=log_path, base_dir=cwd)
+                self._show_crash_dialog(code, log_path=log_path, base_dir=cwd, inst_id=_iid)
         if not procs:
             try:
                 self._game_poll_timer.stop()
@@ -3444,11 +3448,16 @@ class MainWindow(QMainWindow):
                 pass
             self._set_game_running_ui(False)
 
-    def _show_crash_dialog(self, code: int, log_path: str = "", base_dir: str = "") -> None:
+    def _show_crash_dialog(self, code: int, log_path: str = "", base_dir: str = "",
+                           inst_id: str = "") -> None:
         """round-80 崩溃诊断弹窗：游戏异常退出时列出关键日志 + 操作按钮。
 
-        round-81 多实例：``log_path``/``base_dir`` 可以是退出实例自己的值；
-        为空时回退到「最近启动」的全局引用。
+        round-81 多实例：``log_path``/``base_dir``/``inst_id`` 可以是退出实例
+        自己的值；为空时回退到「最近启动」的全局引用。
+
+        round-92 崩溃策略接线：读取模块市场 ``crash_pol`` 模块的
+        ``active_crash_policy()``——action=restart 时追加「重启游戏」按钮并设为
+        默认；auto_analyze=true 时弹窗关闭后自动打开日志分析器（非模态）。
 
         内容 = latest.log 尾部 + crash-reports 最新文件摘要；三种按钮：
         打开日志目录（优先 crash-reports）/ 复制诊断信息（方便贴给
@@ -3521,16 +3530,64 @@ class MainWindow(QMainWindow):
                 t("exit.crash_copy", default="复制诊断信息"),
                 QMessageBox.ButtonRole.ActionRole)
             box.addButton(QMessageBox.StandardButton.Ok)
+            # ── round-92 崩溃策略接线（modules.apply_crash_module → active_crash_policy）──
+            # action=restart → 追加「重启游戏」按钮并设为默认；auto_analyze=true →
+            # 弹窗关闭后自动打开日志分析器。策略读取/实例解析失败一律按无策略兜底。
+            _relaunch = None
+            restart_btn = None
+            try:
+                from .modules import active_crash_policy
+                _policy = active_crash_policy() or {}
+            except Exception:  # noqa: BLE001 - 策略读取失败按无策略兜底
+                _policy = {}
+            _action = str(_policy.get("action") or "")
+            _auto_analyze = bool(_policy.get("auto_analyze"))
+            if inst_id and (_action == "restart" or _auto_analyze):
+                try:
+                    from .instances import manager as _mgr
+                    for _mi in _mgr().list():
+                        if getattr(_mi, "id", "") == inst_id:
+                            _relaunch = _mi
+                            break
+                except Exception:  # noqa: BLE001 - 找不到实例就不给这些附加行为
+                    _relaunch = None
+            if _action == "restart" and _relaunch is not None:
+                restart_btn = box.addButton(
+                    t("exit.crash_restart", default="重启游戏"),
+                    QMessageBox.ButtonRole.AcceptRole)
+                box.setDefaultButton(restart_btn)
             # 可点标题栏/X 关掉场景（自动关闭启动器前游戏就崩了）→ 非模态兜底
             box.exec()
             clicked = box.clickedButton()
-            if clicked is open_btn:
+            if clicked is restart_btn:
+                # 崩溃策略：一键重启（复用完整启动流程，含内存/磁盘预检）
+                self._handle_play(_relaunch)
+            elif clicked is open_btn:
                 _open = crash_dir if os.path.isdir(crash_dir) else (
                     log_dir if os.path.isdir(log_dir) else (base_dir or os.path.expanduser("~")))
                 QDesktopServices.openUrl(QUrl.fromLocalFile(_open))
             elif clicked is copy_btn:
                 QApplication.clipboard().setText(detail)
+            # 崩溃策略 auto_analyze：关闭崩溃弹窗后非模态打开日志分析器
+            if _auto_analyze and _relaunch is not None:
+                self._open_crash_analyzer(_relaunch)
         except Exception:  # noqa: BLE001 - 崩溃诊断绝不允许二次炸 UI
+            pass
+
+    def _open_crash_analyzer(self, inst) -> None:
+        """round-92 崩溃策略 auto_analyze：为指定实例非模态打开日志分析器。
+
+        持引用防 GC（与 modules_page 的 _ext_windows 同做法），多次崩溃只保留
+        最近一个引用，避免列表无限增长。
+        """
+        try:
+            from PySide6.QtCore import Qt as _Qt
+            from .crash_dialog import CrashAnalyzerDialog
+            dlg = CrashAnalyzerDialog(inst=inst, parent=self)
+            dlg.setWindowModality(_Qt.WindowModality.NonModal)
+            dlg.show()
+            self._pending_analyzers = [dlg]  # 只保最近一个，防 GC + 防泄漏
+        except Exception:  # noqa: BLE001 - 自动分析失败不二次弹错
             pass
 
     def _set_game_running_ui(self, running: bool = True):

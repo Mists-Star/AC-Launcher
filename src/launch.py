@@ -271,6 +271,29 @@ def build_options(
         opts["server"] = server
         if port:
             opts["port"] = str(port)
+    # JS 扩展宿主 changeArgs 写入的任务（ext_launch_arg_jobs）：追加到 JVM
+    # 参数末尾，与已有参数（预设/玩家 jvm_args/渲染器）按 token 去重——
+    # 同名 -XX 开关 JVM 是后者覆盖前者，重复注入只会让命令冗余、难调参。
+    try:
+        from .settings_dialog import load_config as _load_ext_cfg
+        _ext_jobs = _load_ext_cfg().get("ext_launch_arg_jobs") or []
+    except Exception:  # noqa: BLE001 - 配置读取失败仅跳过扩展参数，不影响启动
+        _ext_jobs = []
+    if _ext_jobs:
+        import shlex as _shlex
+        _seen = set(opts["jvmArguments"])
+        for _job in _ext_jobs:
+            _txt = str((_job or {}).get("args") or "").strip()
+            if not _txt:
+                continue
+            try:
+                _toks = _shlex.split(_txt)
+            except ValueError:
+                _toks = _txt.split()
+            for _tok in _toks:
+                if _tok not in _seen:
+                    opts["jvmArguments"].append(_tok)
+                    _seen.add(_tok)
     return opts
 
 

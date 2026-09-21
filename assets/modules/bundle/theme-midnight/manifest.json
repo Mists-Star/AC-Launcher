@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "theme-midnight",
+  "name": "午夜",
+  "name_en": "Midnight",
+  "version": "1.0.0",
+  "type": "theme_pack",
+  "author": "AC",
+  "description": "深紫暗色主题，冷调底色配紫罗兰强调，适合夜间久坐。",
+  "description_en": "Dark violet theme with cool undertones and a violet accent, easy on the eyes at night.",
+  "tags": ["dark", "violet"]
+}

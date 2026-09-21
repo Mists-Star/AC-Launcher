@@ -1,0 +1,30 @@
+{
+  "id": "theme-midnight",
+  "name": "午夜",
+  "name_en": "Midnight",
+  "mode": "dark",
+  "colors": {
+    "bg_app": "#14131F",
+    "bg_panel": "#1C1A2B",
+    "bg_card": "#201E31",
+    "bg_hover": "#2A2740",
+    "bg_input": "#181624",
+    "accent": "#8B5CF6",
+    "accent_hover": "#A78BFA",
+    "accent_press": "#7C3AED",
+    "accent_soft": "#2A2140",
+    "text_main": "#EDE9FE",
+    "text_sub": "#A5A0C0",
+    "text_disabled": "#6B667F",
+    "text_accent": "#A78BFA",
+    "border": "#2E2A42",
+    "border_light": "#3D3856",
+    "border_focus": "#8B5CF6",
+    "danger": "#F87171",
+    "success": "#4ADE80",
+    "info": "#60A5FA",
+    "warn": "#FBBF24",
+    "shadow_card": "0 2px 10px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4)"
+  },
+  "radii": {"card": 12, "big": 16, "btn": 10, "small": 6}
+}

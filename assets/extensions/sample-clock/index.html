@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Sample Clock</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: linear-gradient(160deg, #1c1a2b 0%, #14131f 100%);
+    color: #ede9fe; font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card { text-align: center; padding: 24px; }
+  .time { font-size: 56px; font-weight: 800; letter-spacing: 2px; }
+  .date { color: #a5a0c0; font-size: 15px; margin-top: 6px; }
+  .status { margin-top: 22px; font-size: 13px; color: #a5a0c0; }
+  .status b { color: #a78bfa; }
+  .tag { display: inline-block; margin-top: 12px; padding: 3px 12px;
+         border-radius: 999px; background: #2a2140; color: #a78bfa;
+         font-size: 12px; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="time" id="time">--:--:--</div>
+    <div class="date" id="date"></div>
+    <div class="status" id="status">宿主桥接检测中…</div>
+    <div class="tag">AC Extension · window.AC</div>
+  </div>
+<script>
+  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+  function tick() {
+    var d = new Date();
+    document.getElementById("time").textContent =
+      pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+    document.getElementById("date").textContent = d.toLocaleDateString();
+  }
+  tick();
+  setInterval(tick, 1000);
+
+  var st = document.getElementById("status");
+  if (window.AC) {
+    window.AC.listInstances().then(function (list) {
+      st.innerHTML = "宿主已连接，实例数：<b>" + (list.length || 0) + "</b>";
+    }).catch(function (err) {
+      st.textContent = "实例读取被拒绝：" + err.message;
+    });
+  } else {
+    st.textContent = "宿主桥接未就绪（可能未授权或非扩展窗口）";
+  }
+</script>
+</body>
+</html>

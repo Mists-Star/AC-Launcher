@@ -125,6 +125,14 @@ _DEFAULTS = {
     "dev_mode_key": "",              # stored only for UI display; real key comes from env/file
     # round-80 设置折叠（常见做法）：记录被玩家收起的分组标题（i18n 当前语言标题）
     "collapsed_groups": [],
+    # ---- round-93 模块化内容市场 + JS 扩展宿主 ----
+    "enabled_modules": [],            # 已启用内容模块 id 集合
+    "ext_grants": {},                 # 扩展权限授权表 {ext_id: {perm: bool}}
+    "ext_launch_arg_jobs": [],        # 扩展 changeArgs 写入的启动参数任务（launch 侧消费）
+    "crash_policy": None,             # 已应用的崩溃策略载荷（crash 流程消费）
+    "_jvm_module": "",                # 当前 JVM 预设来源模块 id
+    "_sfx_module": "",                # 当前音效来源模块 id
+    "_crash_module": "",              # 当前崩溃策略来源模块 id
 }
 
 
@@ -423,7 +431,8 @@ class SettingsPage(QWidget):
         self._sec_list.setIconSize(QSize(18, 18))
         self._sec_list.setSpacing(2)
         self._sec_list.setContentsMargins(8, 12, 8, 12)
-        for key, ico in (("settings", "sliders"), ("java", "java")):
+        for key, ico in (("settings", "sliders"), ("java", "java"),
+                         ("modules", "store")):
             it = QListWidgetItem(icon(ico), t(f"settings.sec_{key}"))
             self._sec_list.addItem(it)
         bl.addWidget(self._sec_list)
@@ -432,7 +441,8 @@ class SettingsPage(QWidget):
         # round-46 设置页挤压根治：内容多必然超一屏（快速设置 6+ grp），
         # 不滚动 = grp 被压扁（用户反馈"挤压问题没解决"）。恢复每页独立
         # QScrollArea（纵向滚动正常；横向滚动条禁用），内容按 Preferred 排满。
-        for page in (self._build_settings(), self._build_java_group()):
+        for page in (self._build_settings(), self._build_java_group(),
+                     self._build_modules()):
             wrapper = QWidget()
             wl = QVBoxLayout(wrapper)
             wl.setContentsMargins(0, 0, 0, 0)
@@ -502,6 +512,18 @@ class SettingsPage(QWidget):
             self._build_ui()
         finally:
             self._rebuilding = False
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # MODULES PANEL（round-93：模块化内容市场 + JS 扩展宿主）
+    # ═══════════════════════════════════════════════════════════════════════
+    def _build_modules(self) -> QWidget:
+        """「模块与扩展」分区：模块市场 / 已装模块 / 从文件安装 / JS 扩展。
+
+        独立分区而不是塞进「设置」页，因其操作（安装/卸载/授权）都是
+        立即生效型，不参加 _save 收集；每次进入本页时重建（reload 安全）。
+        """
+        from .modules_page import ModulesPage
+        return ModulesPage(self)
 
     # ═══════════════════════════════════════════════════════════════════════
     # SETTINGS PANEL（round-68 合并页：原「快速设置」+「高级设置」）

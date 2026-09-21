@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "crash-policy-restart",
+  "name": "崩溃后自动重启",
+  "name_en": "Auto-restart on Crash",
+  "version": "1.0.0",
+  "type": "crash_pol",
+  "author": "AC",
+  "description": "发现崩溃后优先建议重启游戏并自动做崩溃分析，适合单机反复验证配置的场景。",
+  "description_en": "After a crash, favor restarting the game and analyze the report automatically. Good for iterating on configs.",
+  "tags": ["crash", "restart"]
+}

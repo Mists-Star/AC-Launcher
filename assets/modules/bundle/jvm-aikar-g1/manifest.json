@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "jvm-aikar-g1",
+  "name": "Aikar G1GC 预设",
+  "name_en": "Aikar G1GC Preset",
+  "version": "1.0.0",
+  "type": "jvm_preset",
+  "author": "AC",
+  "description": "服务器常用的 Aikar 参数组合，以 G1GC 分代回收为骨架，兼顾吞吐与停顿控制，适合 4GB+ 内存环境。",
+  "description_en": "Aikar's widely-used server flags built on G1GC, balancing throughput and pause control, best for 4GB+ RAM setups.",
+  "tags": ["g1gc", "server", "aikar"]
+}
