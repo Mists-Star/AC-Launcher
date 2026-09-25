@@ -192,7 +192,9 @@ class WelcomeWindow(QWidget):
         按墨迹宽度手动排布拼接，彻底绕开失真的字体度量。
         """
         family = self._mc_font_family or self._font_family
-        font = QFont(family)
+        # 防 tofu：family 可能是空串（offscreen / 极简系统下 defaultFamily() 返回 ""），
+        # QFont("") 会渲染出缺字形方框；空串时用 QFont() 默认构造。
+        font = QFont(family) if family else QFont()
         font.setPixelSize(max(24, int(_MC_FONT_PIXEL)))
 
         CELL_W, CELL_H = 320, 240
@@ -236,7 +238,7 @@ class WelcomeWindow(QWidget):
                 pm = None
         if pm is None or pm.isNull():
             family = self._mc_font_family or self._font_family
-            font = QFont(family)
+            font = QFont(family) if family else QFont()
             font.setPixelSize(max(24, int(_MC_FONT_PIXEL)))
             p.setFont(font)
             p.setPen(QColor(self._text_color))

@@ -66,6 +66,14 @@
 
 ## round-94（2026-09-22）— 字体查找共享化（移除写死本机路径）
 
+* **字体不随包**（用户 09-25 决定）：后续 AC 走「暴力极简」美学重写，MC 像素字体
+  只是排障期可选外观，不再作为发布产物（另：随包字体 16MB 且属 Mojang 字形版权灰色地带）。
+  已移除 `assets/fonts/minecraft_pixel.ttf`；`fonts.py` 三级查找保留——
+  玩家想要像素字效果，把 .ttf 放进 `data/fonts/` 即可（优先级最高），不放则回退系统矢量字体
+* **启动页回退链防 tofu**：无 MC 字体时 `_font_family` 可能为空串
+  （极端环境下 `QFont().defaultFamily()` 返回 ""），`QFont("")` 渲染成缺字形方框；
+  两处字体构造加防线——空串改用 `QFont()` 默认构造
+
 * 新增 `src/fonts.py`：MC 像素字体三级查找——
   ①`data/fonts/`（用户放置即覆盖默认）②`assets/fonts/`（随包只读）
   ③系统已安装字体中 family 含 `minecraft` 的。全部缺失返回 None，调用方回退，启动动画永不崩
