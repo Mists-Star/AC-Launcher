@@ -16,14 +16,11 @@ from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPainter, QColor, QFont, QPixmap, QImage
 
+from .fonts import load_mc_font_family
 from .theme import COLORS, get_theme_mode
 
 _FONT_CANDIDATES = ("Segoe UI Light", "Segoe UI", "Helvetica Neue", "Arial")
 
-# MC 像素字体（用户字体目录），优先加载；全部缺失才回退 _FONT_CANDIDATES。
-_MC_FONT_PATHS = (
-    r"<本地字体目录>\[苦力怕论坛]Minecraft(同时支持中英文).ttf",
-)
 # AC 字母渲染字号（MC 像素字为等宽方块字，给足大号）
 _MC_FONT_PIXEL = 96
 
@@ -74,23 +71,13 @@ class WelcomeWindow(QWidget):
         # 描边动画进度（QPropertyAnimation 驱动）
         self.__draw_progress = 0.0
 
-        # 找字体：MC 像素字体优先（用户指定，round-62），失败回退系统字体。
+        # 找字体：MC 像素字体优先（round-94 起走共享查找：data/fonts → 随包
+        # assets/fonts → 系统已装 "minecraft" family），失败回退系统字体。
+        self._mc_font_family = load_mc_font_family()
         try:
             from PySide6.QtGui import QFontDatabase
         except Exception:
             QFontDatabase = None
-        self._mc_font_family = None
-        if QFontDatabase is not None:
-            for _path in _MC_FONT_PATHS:
-                try:
-                    _fid = QFontDatabase.addApplicationFont(_path)
-                    if _fid >= 0:
-                        _fams = QFontDatabase.applicationFontFamilies(_fid)
-                        if _fams:
-                            self._mc_font_family = _fams[0]
-                            break
-                except Exception:
-                    continue
         avail = set(QFontDatabase.families()) if QFontDatabase is not None else set()
         self._font_family = next((f for f in _FONT_CANDIDATES if f in avail),
                                  QFont().defaultFamily())

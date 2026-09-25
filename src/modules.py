@@ -364,6 +364,11 @@ def uninstall_module(mid: str) -> None:
     # JVM 预设模块：卸载后清掉它填进去的 jvm_args（用户没再改过才清）
     if mod.type == "jvm_preset":
         _unset_jvm_in_cfg(mid)
+    # 音效 / 崩溃策略模块：卸载后清掉它们写进 config 的键防残留
+    if mod.type == "sfx_pack":
+        _unset_sfx_in_cfg(mid)
+    if mod.type == "crash_pol":
+        _unset_crash_in_cfg(mid)
 
 
 def export_module_zip(mod: ModuleInfo, dest_path: str) -> None:
@@ -482,6 +487,29 @@ def _unset_jvm_in_cfg(mid: str) -> None:
     c = _cfg()
     if c.get("_jvm_module") == mid:
         c["_jvm_module"] = ""
+        c["jvm_preset"] = "default"
+        c["jvm_args"] = ""
+        _save(c)
+
+
+def _unset_sfx_in_cfg(mid: str) -> None:
+    """卸载 sfx_pack 模块：还在用它的话清掉 sfx_* 键（防残留覆盖用户后续设置）。"""
+    c = _cfg()
+    if c.get("_sfx_module") == mid:
+        for key in ("click", "hover", "success", "error"):
+            c.pop(f"sfx_{key}", None)
+        c.pop("sfx_enabled", None)
+        c.pop("sfx_vol", None)
+        c["_sfx_module"] = ""
+        _save(c)
+
+
+def _unset_crash_in_cfg(mid: str) -> None:
+    """卸载 crash_pol 模块：还在用它的话清掉崩溃策略（回到启动器默认行为）。"""
+    c = _cfg()
+    if c.get("_crash_module") == mid:
+        c.pop("crash_policy", None)
+        c["_crash_module"] = ""
         _save(c)
 
 

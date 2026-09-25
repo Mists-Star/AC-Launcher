@@ -1256,7 +1256,36 @@ class InstancesPage(QWidget):
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setSizes([280, 720])
 
-        body.addWidget(self._splitter, stretch=1)
+        # round-92 修复：之前收起时把整个 _left_panel setVisible(False)，折叠
+        # 按钮也跟着消失，列表再也点不回来。这里加一条常驻「展开条」：
+        # 展开状态下隐藏，收起后留在最左侧，提供反向箭头。
+        self._strip = QWidget()
+        self._strip.setFixedWidth(40)
+        self._strip.setVisible(False)
+        strip_lay = QVBoxLayout(self._strip)
+        strip_lay.setContentsMargins(0, 8, 0, 0)
+        strip_lay.setSpacing(0)
+        self.reopen_btn = QPushButton("")
+        self.reopen_btn.setToolTip(t("instances.fold_list"))
+        self.reopen_btn.setCursor(Qt.PointingHandCursor)
+        self.reopen_btn.setFixedSize(24, 22)
+        self.reopen_btn.setIcon(
+            QIcon(state_pix("chev", COLORS["text_sub"], 14)))
+        self.reopen_btn.setIconSize(QSize(14, 14))
+        self.reopen_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {COLORS['text_sub']}; "
+            f"border: none; border-radius: 6px; font-size: 12px; }}"
+            f"QPushButton:hover {{ background: {COLORS['bg_hover']}; }}"
+        )
+        self.reopen_btn.clicked.connect(self._toggle_panel)
+        strip_lay.addWidget(self.reopen_btn, 0, Qt.AlignHCenter)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(self._strip)
+        row.addWidget(self._splitter, stretch=1)
+        body.addLayout(row, stretch=1)
         self._body_stack.addWidget(self._split_view)
 
         root.addWidget(self._body_stack, stretch=1)
@@ -1549,16 +1578,16 @@ class InstancesPage(QWidget):
         self._render_detail()
 
     # ── 左侧列表折叠：收起后面板隐藏 → 右侧详情全宽 ──
+    # round-92 修复：收起不再把唯一的按钮藏起来；改为面板整体隐藏，但最左侧
+    # 的展开条（reopen_btn）常驻可点。
     def _toggle_panel(self):
         self._list_panel_visible = not self._list_panel_visible
         self._left_panel.setVisible(self._list_panel_visible)
-        # round-89 折叠箭头自绘（不用文本 ▶/◀）
+        self._strip.setVisible(not self._list_panel_visible)
+        # 头部箭头始终表示「收起」；展开条箭头表示「展开」
         from .ui_kit import state_pix
-        if not self._list_panel_visible:
-            self.fold_btn.setIcon(QIcon(state_pix("chev", COLORS["text_main"], 14)))
-        else:
-            self.fold_btn.setIcon(QIcon(state_pix("chev", COLORS["text_main"], 14)
-                                        .transformed(QTransform().rotate(180))))
+        self.fold_btn.setIcon(QIcon(state_pix("chev", COLORS["text_main"], 14)
+                                    .transformed(QTransform().rotate(180))))
         self.fold_btn.setIconSize(QSize(14, 14))
         if self._list_panel_visible:
             self._splitter.setSizes(

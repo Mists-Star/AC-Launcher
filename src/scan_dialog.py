@@ -23,7 +23,7 @@ from .theme import COLORS
 from .i18n import t
 from .worker import Worker
 from .scan import discover_instances, ScannedInstance
-from .instances import manager as instances_manager, _CopyFailed
+from .instances import manager as instances_manager, _CopyFailed, launcher_label
 from .frameless import FramelessHelper, TitleBar
 from .win_rounded import _msgbox, info, warn
 
@@ -278,7 +278,10 @@ class ScanPanel(QWidget):
             for inst in instances:
                 groups.setdefault(inst.launcher, []).append(inst)
             # round-44 折叠按钮：可点击 ▾/▸ 切换显隐，_group_rows 维护映射
+            # round-97：组键是内部码（如 "PCL-CE"），组头文字是显示名（"PCL2"），
+            # 无法靠文字匹配回键——必须直接持有组头按钮引用（_group_headers）。
             self._group_rows: dict[str, list] = {}
+            self._group_headers: dict[str, QToolButton] = {}
             for launcher, grp in groups.items():
                 hdr = QListWidgetItem()
                 hbtn = QToolButton()  # round-44：折叠按钮可点
@@ -298,11 +301,17 @@ class ScanPanel(QWidget):
                 for inst in grp:
                     row = _InstanceRow(inst, self._import)
                     item = QListWidgetItem()
-                    item.setSizeHint(row.sizeHint())
+                    hint = row.sizeHint()
+                    # round-97：行宽封顶到列表视口宽。QListWidget 的 sizeHint 会随
+                    # 行内容（长实例名/长详情）无限撑宽，把整个面板顶出横向溢出，
+                    # 右侧"导入/计数/导入文件"被裁掉。封顶后行内布局自动压缩详情区。
+                    hint.setWidth(max(self.inst_list.viewport().width() - 24, 320))
+                    item.setSizeHint(hint)
                     self.inst_list.addItem(item)
                     self.inst_list.setItemWidget(item, row)
                     row_items.append(item)
                 self._group_rows[launcher] = row_items
+                self._group_headers[launcher] = hbtn
 
         # update count label
         if hasattr(self, 'search_count'):
@@ -321,20 +330,19 @@ class ScanPanel(QWidget):
     def _toggle_group(self, launcher: str) -> None:
         """round-44：切换某个 launcher 折叠/展开（▾/▸）。"""
         items = getattr(self, "_group_rows", {}).get(launcher)
-        if not items:
+        hbtn = getattr(self, "_group_headers", {}).get(launcher)
+        if not items or hbtn is None:
             return
-        # 找对应 hdr 行的 QToolButton 切图标
-        for i in range(self.inst_list.count()):
-            it = self.inst_list.item(i)
-            w = self.inst_list.itemWidget(it)
-            if isinstance(w, QToolButton) and w.text().endswith(f"({len(items)})") \
-                    and launcher in w.text():
-                any_visible = any(not it.isHidden() for it in items)
-                target = any_visible  # 当前可见 → 折叠；当前隐藏 → 展开
-                for row in items:
-                    row.setHidden(target)
-                w.setText(("▸ " if target else "▾ ") + w.text()[2:])
-                break
+        any_visible = any(not it.isHidden() for it in items)
+        target = any_visible  # 当前可见 → 折叠；当前隐藏 → 展开
+        for row in items:
+            row.setHidden(target)
+        # 只替换行首 ▾/▸ 箭头，保留其余文字（round-97：老实现截断字符会
+        # 累积空格，且靠文字反查按钮在显示名≠内部码时永远匹配不上）。
+        text = hbtn.text()
+        while text and text[0] in ("▾", "▸", " "):
+            text = text[1:]
+        hbtn.setText(("▸" if target else "▾") + " " + text)
 
     # ---------- import ----------
     def _choose_mode(self, inst: ScannedInstance) -> str | None:

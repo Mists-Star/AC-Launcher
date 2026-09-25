@@ -107,7 +107,8 @@ _DEFAULTS = {
     "close_after_launch_delay": 5,   # 检测游戏稳定运行的等待秒数
     # round-83 系统托盘（关窗藏托盘）：True = 点关闭按钮只是隐藏到托盘，
     # 游戏进程/下载任务不受影响；False = 恢复「关闭即退出」。
-    "tray_minimize": True,
+    # round-92 默认改「关闭即退出」：玩家点 X 即退出是主流直觉；想藏托盘可勾选。
+    "tray_minimize": False,
     # ---- download mirror ----
     # round-46 用户要求"全部优先镜像/速度优先"——默认 BMCLAPI（国内镜像速度快）
     "download_mirror": "bmclapi",   # official (官方 Mojang) / bmclapi (国内镜像，速度优先)

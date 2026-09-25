@@ -824,7 +824,12 @@ def discover_javas(deep: bool = False, progress=None) -> list[JavaInstall]:
     out: list[JavaInstall] = []
     seen: set[str] = set()
     is_win = platform.system() == "Windows"
-    exe = "java.exe" if is_win else "java"
+    # round-93：Windows 下**优先 javaw.exe**（无控制台，PCL/HMCL 等导入客户端
+    # 的 native 层只认 javaw——用 java.exe 启动会被弹 "Use Javaw.exe pls"）。
+    # 之前只扫 java.exe，玩家在扫描列表里「看不到 javaw」→ 只能选 java.exe，
+    # 一启动就中招。同目录没有 javaw.exe 时才回退 java.exe。
+    exe = "javaw.exe" if is_win else "java"
+    _FALLBACK_EXE = "java.exe" if is_win else None
     # These were previously referenced without being defined, which raised
     # NameError and made the whole Java scan silently return nothing.
     appdata = os.environ.get("APPDATA", "")
@@ -833,6 +838,11 @@ def discover_javas(deep: bool = False, progress=None) -> list[JavaInstall]:
 
     def add_java(path: str) -> None:
         path = os.path.normpath(path)
+        # javaw.exe 缺失时回退到同目录的 java.exe（老 JRE 可能只带 java.exe）
+        if (not os.path.isfile(path) and is_win
+                and path.lower().endswith("javaw.exe") and _FALLBACK_EXE):
+            alt = os.path.join(os.path.dirname(path), _FALLBACK_EXE)
+            path = alt if os.path.isfile(alt) else path
         if path in seen or not os.path.isfile(path):
             return
         seen.add(path)
@@ -950,13 +960,15 @@ def discover_javas(deep: bool = False, progress=None) -> list[JavaInstall]:
 
     # 7) Other launchers ship their own runtimes — reuse them
     for rt_root in _launcher_runtime_roots(appdata, local, profile):
-        _sweep_java(rt_root, add_java, exe, max_depth=4, progress=progress)
+        _sweep_java(rt_root, add_java, exe, max_depth=4, progress=progress,
+                    fallback=_FALLBACK_EXE)
 
     # 8) DEEP: portable / unzipped JDKs anywhere on disk. This is the only way
     #    to find a runtime the user just extracted to e.g. D:\AppData\jdk-21.
     if deep:
         for drive in _drive_roots():
-            _sweep_java(drive, add_java, exe, max_depth=5, progress=progress)
+            _sweep_java(drive, add_java, exe, max_depth=5, progress=progress,
+                        fallback=_FALLBACK_EXE)
 
     return out
 
@@ -987,8 +999,12 @@ _JAVA_SKIP = {
 }
 
 
-def _sweep_java(root: str, add_java, exe: str, max_depth: int, progress=None) -> None:
-    """Breadth-limited hunt for <something>/bin/<java exe> under *root*."""
+def _sweep_java(root: str, add_java, exe: str, max_depth: int, progress=None,
+                fallback: str | None = None) -> None:
+    """Breadth-limited hunt for <something>/bin/<java exe> under *root*.
+
+    ``fallback``：Windows 下 javaw.exe 缺失时接受同目录 java.exe（round-93）。
+    """
     stack = [(root, 0)]
     visited = 0
     while stack:
@@ -1001,7 +1017,10 @@ def _sweep_java(root: str, add_java, exe: str, max_depth: int, progress=None) ->
                 pass
         # A JDK/JRE root is recognised by bin/<exe>; "release" confirms it.
         cand = os.path.join(path, "bin", exe)
-        if os.path.isfile(cand):
+        if os.path.isfile(cand) or (fallback and os.path.isfile(
+                os.path.join(path, "bin", fallback))):
+            # round-93：只带 java.exe 的老 JRE 也要收录——add_java 会在
+            # javaw.exe 缺失时回退；这里统一把候选路径交给它判定。
             add_java(cand)
             continue  # don't descend into a runtime we already matched
         if depth >= max_depth:

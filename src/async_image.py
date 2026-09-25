@@ -568,60 +568,49 @@ def _draw_iso_block(p, s, top, side_l, side_r):
 
 
 def make_version_pixmap(version_id: str, vtype: str, size: int = 56) -> QPixmap:
-    """Draw a layered version tile: themed gradient shell + a big isometric
-    MC block icon (grass for release, purpur for snapshots, …) + version id.
+    """Draw a flat per-version tile in the style of HMCL / PCL2: solid theme
+    color rounded square + centered version id.
 
-    round-53 改版：中央的版本号文本换成 3D 方块图标（对齐主流启动器的图形化
-    标注），版本号移到底部；生态装饰 chips 保留在四角。
+    round-92 扁平化：去掉渐变卡片 / 3D 等距方块 / 装饰 chips / 更新名，只剩
+    「主题色方块 + 版本号」，观感与主流启动器对齐。release 用其更新主题色
+    (c1)，snapshot 等无主题的版本回退到 vtype 语义色。
     """
     th = version_theme(version_id)
     if th is not None:
         c1, c2 = th["c1"], th["c2"]
-        deco = th.get("deco", [])
-        name_zh = th["zh"]
     else:
         c1, c2 = _TYPE_THEME.get(vtype, ("#94A3B8", "#64748B"))
-        deco = []
-        name_zh = ""
 
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
 
-    # 1) outer card shell (rounded gradient)
-    grad = QLinearGradient(0, 0, size, size)
-    grad.setColorAt(0, QColor(c1))
-    grad.setColorAt(1, QColor(c2))
+    # 1) 扁平纯色圆角方块 + 细描边（与浅色列表背景拉开层次）
     path = QPainterPath()
-    path.addRoundedRect(0, 0, size, size, size * 0.18, size * 0.18)
-    p.fillPath(path, QBrush(grad))
+    radius = size * 0.16
+    path.addRoundedRect(0, 0, size, size, radius, radius)
+    fill = QColor(c1)
+    p.fillPath(path, fill)
+    p.setPen(QPen(QColor(c2), 1.0))
+    p.drawPath(path)
 
-    # 2) eco deco chips around the rim (keep the update-ecosystem touch)
-    if deco:
-        rim = [(0.16, 0.18), (0.84, 0.18), (0.16, 0.5), (0.84, 0.5)]
-        n = min(len(deco), len(rim))
-        for i in range(n):
-            dx, dy = rim[i]
-            _draw_deco(p, size * dx, size * dy, size * 0.05, deco[i])
-
-    # 3) the block — round-53 main icon (replaces the motif/hero texture)
-    block = _ISO_BLOCK.get(vtype, _ISO_BLOCK["old_alpha"])
-    _draw_iso_block(p, size, *block)
-
-    # 4) bottom: version id (small, white, shadowed for contrast)
+    # 2) 版本号居中。文字色按底色亮度自适应：亮底用深色，保证可读。
     label = version_id
-    base_fs = size * 0.145 if len(label) <= 9 else size * 0.115
-    min_fs = max(6.0, size * 0.09)
+    base_fs = size * 0.26 if len(label) <= 9 else size * 0.20
+    min_fs = max(6.0, size * 0.15)
     f = QFont("Microsoft YaHei", int(base_fs), QFont.Bold)
     f.setWeight(QFont.Bold)
-    text_rect = pm.rect().adjusted(int(size * 0.04), int(size * 0.72),
-                                   int(-size * 0.04), int(-size * 0.06))
+    lum = 0.299 * fill.red() + 0.587 * fill.green() + 0.114 * fill.blue()
+    text_color = QColor("#1F2937") if lum > 150 else QColor("#FFFFFF")
+    shade = QColor(0, 0, 0, 60)
+    text_rect = pm.rect().adjusted(int(size * 0.06), int(size * 0.08),
+                                   int(-size * 0.06), int(-size * 0.08))
     fm = QFontMetrics(f)
-    for _ in range(8):
+    for _ in range(10):
         if fm.horizontalAdvance(label) <= text_rect.width():
             break
-        new_fs = max(min_fs, f.pointSizeF() * 0.9)
+        new_fs = max(min_fs, f.pointSizeF() * 0.88)
         if abs(new_fs - f.pointSizeF()) < 0.1:
             break
         f.setPointSizeF(new_fs)
@@ -629,17 +618,9 @@ def make_version_pixmap(version_id: str, vtype: str, size: int = 56) -> QPixmap:
     if fm.horizontalAdvance(label) > text_rect.width():
         label = fm.elidedText(label, Qt.ElideRight, text_rect.width())
     p.setFont(f)
-    p.setPen(QColor(0, 0, 0, 90))
-    p.drawText(text_rect.adjusted(0, 1, 0, 1), Qt.AlignHCenter | Qt.AlignBottom, label)
-    p.setPen(QColor("#FFFFFF"))
-    p.drawText(text_rect, Qt.AlignHCenter | Qt.AlignBottom, label)
-
-    # 5) tiny update name at the very top (optional; only tidy themes get it)
-    if name_zh and size >= 56:
-        nf = QFont("Microsoft YaHei", max(6, int(size * 0.085)))
-        p.setFont(nf)
-        p.setPen(QColor(255, 255, 255, 190))
-        p.drawText(pm.rect().adjusted(0, int(size * 0.035), 0, 0),
-                   Qt.AlignHCenter | Qt.AlignTop, name_zh)
+    p.setPen(shade)
+    p.drawText(text_rect.adjusted(0, 1, 0, 1), Qt.AlignCenter, label)
+    p.setPen(text_color)
+    p.drawText(text_rect, Qt.AlignCenter, label)
     p.end()
     return pm

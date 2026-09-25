@@ -643,6 +643,68 @@ def launch_instance(
         raise RuntimeError(
             _t("err.java_path_invalid", default="指定的 Java 路径不存在：{path}\n请在 设置 → Java 里重新选择，或开启「自动检测」。", path=user_java)
         )
+    # round-93 「Use Javaw.exe pls」根治。两条线同时处理：
+    #   1) Windows 下统一用 javaw.exe 拉起游戏。PCL/HMCL 等导入客户端（尤其
+    #      1.8.x）的 native 层会检测启动进程名——用 java.exe（会带出控制台
+    #      窗口）启动时，客户端直接弹无标题英文框 "Use Javaw.exe pls" 且无
+    #      引导（该字符串不在我们代码里，玩家「选了 Java 还弹」就是这个）。
+    #      主流启动器一律以 javaw.exe 启动，这里把选到的 java.exe 归一为同
+    #      目录 javaw.exe，弹窗源彻底消失。
+    #   2) 手动固定 Java 与版本要求不匹配（如拿 Java 17 跑需 Java 8 的 1.8.9）
+    #      → 老客户端模块系统直接崩（InaccessibleObjectException）+ 启动必
+    #      失败且无提示（本次用户实测场景）。此时优先自动切换到兼容的已装
+    #      Java 并明示；无可用才中文报错，绝不无声把玩家丢给游戏。
+    if java:
+        from .core.java import scan_javas as _scan_javas
+        from .core.java import java_major as _java_major
+        _need = required_java_major(inst.game_version)
+        _jmajor = 0
+        _norm = os.path.normcase(os.path.normpath(java))
+        for _j in _scan_javas(deep=False):
+            if os.path.normcase(os.path.normpath(_j["path"])) == _norm:
+                _jmajor = int(_j.get("major") or 0)
+                break
+        if not _jmajor:
+            _jmajor = _java_major(str(os.path.basename(java)))
+        if not _jmajor:
+            # 兜底：手动路径不在扫描结果里时，从目录名（java17 / jre1_8）解析
+            import re as _re
+            _m = _re.search(r"(?:jdk|jre|java|openjdk)[-_ ]?(\d{1,2})",
+                            java, flags=_re.IGNORECASE)
+            if _m:
+                _n = int(_m.group(1))
+                _jmajor = 8 if _n == 1 else _n
+        if _jmajor and _jmajor != _need:
+            # 手动路径版本不符 → 尝试自动找一个兼容 Java；找到就切换并明示
+            _alt = None
+            if not java_auto:
+                _alt = select_java(inst.game_version, java_auto=True)
+            if _alt and _alt != java:
+                from .i18n import t as _t
+                _warn = callback.get("setStatus") if callback and hasattr(callback, "get") else None
+                if callable(_warn):
+                    _warn(_t("launch.java_mismatch_auto",
+                             default="所选 Java {jv} 不适用于此版本（需要 Java {need}），已自动改用 {used}",
+                             jv=f"Java {_jmajor}", need=_need,
+                             used=os.path.basename(os.path.dirname(_alt))))
+                java = _alt
+            elif not _alt:
+                from .i18n import t as _t
+                raise RuntimeError(
+                    _t("err.java_compat_missing",
+                       default="此版本需要 Java {need}，但未检测到兼容的 Java 运行时。\n"
+                               "请到 设置 → Java → 管理，安装 Java {need} 后再启动。",
+                       need=_need)
+                )
+        if sys.platform == "win32" and java.lower().endswith("java.exe"):
+            _javaw = os.path.join(os.path.dirname(java), "javaw.exe")
+            if os.path.isfile(_javaw) and java != _javaw:
+                java = _javaw
+                from .i18n import t as _t
+                _warn = callback.get("setStatus") if callback and hasattr(callback, "get") else None
+                if callable(_warn):
+                    _warn(_t("launch.switch_javaw",
+                             default="已自动切换为 javaw.exe 启动（避免老客户端弹提示）"))
     if not os.path.isfile(java):
         from .i18n import t as _t
         raise RuntimeError(
@@ -719,6 +781,15 @@ def launch_instance(
         port=_port,
         **authlib_args,
     )
+    # round-92 外来 1.8 老客户端修复：混淆/自签字节码在 HotSpot 验证器里会
+    # VerifyError 秒退（典型：`n.M()Lsun/misc/Unsafe| Bad type on operand stack`）。
+    # PCL/主流启动器对 1.8.x 客户端普遍注入 -noverify 跳过字节码验证；对正常
+    # 客户端无副作用（字节码验证本就是兜底）。限定：导入客户端（version_id 非空）
+    # + 该版本要求 Java ≤ 8。
+    if (getattr(inst, "version_id", "")
+            and required_java_major(inst.game_version) <= 8
+            and "-noverify" not in opts.get("jvmArguments", [])):
+        opts.setdefault("jvmArguments", []).append("-noverify")
     # round-47 集成 natives 解压（MH「启动即秒退 exit 1」的根治之一）：
     # minecraft-launcher-lib 只把 nativesDirectory 写进 -Djava.library.path，
     # 但从不真正解压 LWJGL/OpenAL 的 dll。缺 dll → 游戏 JVM 直接抛
@@ -750,7 +821,51 @@ def launch_instance(
     # -cp，凡有游戏真正需要的库缺失，就先补装再重建命令；仅缺 natives 分类器
     # jar（只装 dll）则忽略（dll 已由 _prepare_natives 解压到 java.library.path）。
     missing = _missing_classpath(cmd)
-    if _needs_repair(missing):
+    # round-92 外来完整客户端（version_id 非空，如 PCL2 导入）分流：绝不把它
+    # 改造成官方布局（旧逻辑触发 install_minecraft_version 下载整套官方库，既污染
+    # 实例又让玩家看到「在补 PCL 特殊格式」）。两步走：
+    #   1) 用官方库 URL **精确补齐缺失 jar**——lwjgl-platform/jinput/twitch 等来自
+    #      libraries.minecraft.net，URL 可依 maven 坐标直接构造（BMCLAPI 镜像自动
+    #      回退官方源）；只写 jar 文件，不动 json / versions 目录，不碰布局。
+    #   2) 仍补不齐（库不在官方仓库 / 网络失败）→ 宽容启动：JVM 会静默忽略缺失的
+    #      classpath 条目（可选平台包缺了通常不影响进主菜单），仅提示不拦截。
+    _libs_root = os.path.join(inst.mc_dir, "libraries") if inst else ""
+    if _needs_repair(missing) and getattr(inst, "version_id", ""):
+        if missing and os.path.isdir(_libs_root):
+            try:
+                from .core.mirror import MirrorSession
+                with MirrorSession() as _sess:
+                    for _p in list(missing):
+                        _rel = os.path.relpath(_p, _libs_root)
+                        if _rel.startswith(".."):
+                            continue  # 目根之外的不属于本库区，跳过
+                        _url = "https://libraries.minecraft.net/" + _rel.replace("\\", "/")
+                        try:
+                            _r = _sess.get(_url, timeout=20)
+                            # 防 BMCLAPI 对缺失老库返回 22 字节 stub：内容过小视为
+                            # 「仓库无此文件」，弃写（否则假 jar 会占住 classpath，
+                            # 后续永远跳过补齐、真库也补不进来）。
+                            if _r.status_code == 200 and len(_r.content) > 1000:
+                                os.makedirs(os.path.dirname(_p), exist_ok=True)
+                                with open(_p, "wb") as _f:
+                                    _f.write(_r.content)
+                                missing.remove(_p)
+                        except Exception:  # noqa: BLE001 - 单个库下载失败不阻断
+                            pass
+            except Exception:  # noqa: BLE001 - 镜像整体不可用时降级到宽容启动
+                pass
+        if missing:
+            # 仍缺 → 重建 cmd 让补齐的库/natives 生效；宽容提示不拦截
+            cmd = _assemble_command()
+            _repair_status = callback.get("setStatus") if callback else None
+            if _repair_status:
+                _heads = "、".join(os.path.basename(p) for p in missing[:4])
+                from .i18n import t as _t
+                _repair_status(_t(
+                    "launch.missing_libs_direct",
+                    default="按原客户端直接启动：{n} 个缺失库不在客户端内（{heads}…），JVM 会忽略缺失条目",
+                    n=len(missing), heads=_heads))
+    elif _needs_repair(missing):
         _repair_status = callback.get("setStatus") if callback else None
         if _repair_status:
             _repair_status(f"检测到 {len(missing)} 个缺失库文件，正在补全…")

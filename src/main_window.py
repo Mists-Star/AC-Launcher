@@ -78,8 +78,10 @@ NAV_GROUPS = [
     (None, [("nav.home", "home")]),                             # 启动（主项）
     ("nav.group.game", [("nav.instances", "instances"), ("nav.mods", "mods")]),
     ("nav.group.resource", [("nav.store", "store"), ("nav.versions", "versions")]),
-    ("nav.group.fun", [("nav.music", "music"), ("nav.achievements", "achievements")]),                # 音乐（direction B 彩蛋）
     ("nav.group.multiplayer", [("lobby.nav_lobby", "lobby")]),
+    # 其他：不常用 / AC 特供功能收进一个分组，避免主导航铺太开（round-92）
+    ("nav.group.other", [("nav.music", "music"),
+                         ("nav.achievements", "achievements")]),
     ("nav.group.system", [("nav.account", "account"), ("nav.console", "console"), ("nav.settings", "settings")]),
 ]
 
@@ -1199,6 +1201,8 @@ class HomePage(QWidget):
             # 极简留白。
             if self._alive(getattr(self, "inst_grid_card", None)):
                 self.inst_grid_card.setMaximumHeight(130)
+                # round-97：空态时把之前提高的最小高度还原，避免 min>max 卡死。
+                self.inst_grid_card.setMinimumHeight(96)
             empty_w = QWidget()
             empty_lay = QHBoxLayout(empty_w)
             empty_lay.setContentsMargins(4, 0, 4, 0)
@@ -1236,6 +1240,13 @@ class HomePage(QWidget):
         # 响应式列数：按内容宽度估算，限制 1~4 列
         width = self.content.width() if self.content.width() > 0 else 900
         cols = max(1, min(4, width // 320))
+        # round-97：首次导入后网格被压成小条（QScrollArea 不自动跟随内容最小高度，
+        # 视口只剩 ~100px，卡片底部被裁 + 出现滚动条）。给网格卡一个能放下整行
+        # 卡片的最小高度，让卡片完整可见（至多按 3 行计算，超出交给内部滚动）。
+        rows = (len(instances) + cols - 1) // cols
+        need = min(rows, 3) * 144 + (min(rows, 3) - 1) * 14 + 60
+        if self._alive(getattr(self, "inst_grid_card", None)):
+            self.inst_grid_card.setMinimumHeight(min(need, 520))
         for idx, i in enumerate(instances):
             r = idx // cols
             c = idx % cols
@@ -1604,6 +1615,7 @@ class MainWindow(QMainWindow):
         _boot_trace("4 accounts ok")
         self._play_worker = None
         self._game_proc = None      # round-34：运行中游戏进程
+        self._game_procs = {}       # round-92 多开：按实例 id 登记运行中游戏
         self._game_name = ""
         self._game_poll_timer = None
         self._active_toasts = []
@@ -3571,6 +3583,16 @@ class MainWindow(QMainWindow):
             # 崩溃策略 auto_analyze：关闭崩溃弹窗后非模态打开日志分析器
             if _auto_analyze and _relaunch is not None:
                 self._open_crash_analyzer(_relaunch)
+            # 崩溃策略 open_logs=true：玩家未点「打开日志目录/复制/重启」而直接
+            # 关闭弹窗时，自动打开日志目录（对应 crash_pol policy.json 的 open_logs 声明）
+            if (_policy.get("open_logs")
+                    and clicked is not open_btn
+                    and clicked is not copy_btn
+                    and clicked is not restart_btn):
+                _auto_dir = crash_dir if os.path.isdir(crash_dir) else (
+                    log_dir if os.path.isdir(log_dir) else "")
+                if _auto_dir:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(_auto_dir))
         except Exception:  # noqa: BLE001 - 崩溃诊断绝不允许二次炸 UI
             pass
 

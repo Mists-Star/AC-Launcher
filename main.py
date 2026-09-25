@@ -201,6 +201,7 @@ def main():
     # acquire and quits immediately.
     from src.paths import get_config_path
     from PySide6.QtCore import QLockFile
+    from src.brand import APP_DISPLAY
     _lock = QLockFile(get_config_path("ac.lock"))
     _lock.setStaleLockTime(30_000)  # 30 s: released on clean exit; stale after crash
     if not _lock.tryLock(100):
@@ -209,7 +210,6 @@ def main():
         # window is found the lock is stale/orphaned — take over and start.
         # round-40 P3 修复：窗口标题用品牌名（APP_DISPLAY），不硬编码——
         # 改品牌后单实例"提升已有窗口"仍有效。
-        from src.brand import APP_DISPLAY
         if _raise_existing_instance(APP_DISPLAY):
             _log.write("3.5 another instance already running — raised it\n"); _log.flush()
             return
@@ -219,6 +219,20 @@ def main():
         except Exception:
             pass
         _lock.tryLock(100)
+    else:
+        # round-96 修复「新手教程背后露出启动器页面」：清理数据（删除 ac.lock）
+        # 或前一次异常退出时，旧实例的锁文件会丢失——新实例 tryLock 会误成功，
+        # 形成双实例并存：旧启动器主窗口还留着，教程弹窗叠在上面。
+        # 这里拿到锁后再按窗口标题扫一遍：此刻本进程尚未创建任何窗口，
+        # FindWindow 命中的必然是在跑的旧实例 → 提升它并退出，绝不双开。
+        if _raise_existing_instance(APP_DISPLAY):
+            _log.write("3.5 window found for a free lock — raising existing instance\n")
+            _log.flush()
+            try:
+                _lock.unlock()
+            except Exception:
+                pass
+            return
     _log.write("3.5 single-instance lock acquired\n"); _log.flush()
 
     # Load config FIRST so theme mode can be applied before QSS generation
@@ -328,6 +342,16 @@ def main():
         def _show_main():
             """真正显示主窗口 + 预加载资源中心 + 强制前台。"""
             win.show()
+            # round-95 修复：强制前台必须放在 win.show() 之后。此前这段在
+            # 教程分支之前执行，_force_foreground 内部 ShowWindow(SW_RESTORE)
+            # 会把「尚未显示」的主窗口直接拉成可见 → 教程弹窗背后露出启动器
+            # 主页（round-30/46 只挪了 win.show()，没防住这条旁路）。
+            try:
+                win.repaint()
+                win.raise_()
+                _force_foreground(win)
+            except Exception:
+                pass
             # Pre-warm the resource center in the background: build StorePage
             # off-screen right after show so its search + icon downloads run
             # while the user is still on the home page.
@@ -375,16 +399,10 @@ def main():
                 _v.start()
             except Exception:
                 pass
-            # Force a synchronous first paint so the window never flashes a
-            # transparent / empty frame before its content is actually drawn.
-            app.processEvents()
-            win.repaint()
-            win.raise_()
-            # The launcher must be the front-most / focused window after the
-            # boot sequence. Without this, focus is left on whatever external
-            # app was foreground before us and the freshly shown window drops
-            # to the back.
-            _force_foreground(win)
+            # round-95：强制首页首帧/前台逻辑已移入 _show_main()（win.show() 之后）。
+            # 这里不再对「未显示」的主窗口做 repaint/raise/_force_foreground——
+            # ShowWindow(SW_RESTORE) 会把还没到展示时机的主窗口拉出来，
+            # 导致教程弹窗背后露出启动器主页。
 
         # 新手教程：首次启动（launch_count < 3）弹出。
         # round-30 用户反馈：教程前会闪现 ~1s 启动器主页——把 win.show() 挪到

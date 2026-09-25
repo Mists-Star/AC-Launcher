@@ -770,6 +770,18 @@ class InstancesManager:
         loader = loader if loader in LOADERS else "vanilla"
 
         if mode == "copy":
+            # round-98：复制「版本隔离」实例必须保留 versions/<id>/ 层级。
+            # 扫描出的隔离实例（PCL2 等开启版本隔离）其 mc_dir 就是
+            # versions/<id> 目录本身，目录内既有 <id>.json（启动所需）又有
+            # saves/mods（游戏数据）。旧实现把它拍平到 <new>/.minecraft/*，
+            # 产物既不是标准 .minecraft 也不是版本目录：_probe_format 因
+            # <mc>/<id>.json 存在判为 "iso" → versions_root 指到实例目录的
+            # 上级 → mll 按 <root>/versions/<id>/<id>.json 解析必然
+            # VersionNotFound（玩家看到「版本不存在 / 文件不见了」，而磁盘上
+            # 文件其实都在）。保留层级后 mll 直接食用玩家真实 json，且标记
+            # 版本隔离让存档/模组仍落在该版本目录。
+            isolated_src = bool(version_id) and os.path.isfile(
+                os.path.join(mc_dir, f"{version_id}.json"))
             inst = Instance(
                 id=_new_id(),
                 name=name,
@@ -780,15 +792,19 @@ class InstancesManager:
                 kind=kind,
                 needs_convert=needs_convert,
                 java_path=java_path or "",
+                isolation="isolated" if isolated_src else "",
                 external=False,
                 launcher=launcher or "Other",
             )
             inst.ensure_dirs()  # creates data/instances/<id>/.minecraft
+            dst_mc = (os.path.join(inst.mc_dir, "versions", version_id)
+                      if isolated_src else inst.mc_dir)
+            os.makedirs(dst_mc, exist_ok=True)
             try:
                 if on_progress is not None:
-                    _copied_with_progress(mc_dir, inst.mc_dir, on_progress)
+                    _copied_with_progress(mc_dir, dst_mc, on_progress)
                 else:
-                    shutil.copytree(mc_dir, inst.mc_dir, dirs_exist_ok=True,
+                    shutil.copytree(mc_dir, dst_mc, dirs_exist_ok=True,
                                     ignore=shutil.ignore_patterns("libraries"))
             except (OSError, shutil.Error) as e:  # fall back to in-place link
                 shutil.rmtree(inst.root, ignore_errors=True)

@@ -67,8 +67,14 @@ def _major_from_path(path: str) -> int:
 # round-40 P2-5 性能：scan_javas 进程级缓存（60s TTL）——之前每次启动游戏
 # 都全盘扫 Java（含 discover_javas 整盘 os.walk），慢盘卡数秒。各主流启动器均
 # 缓存扫描结果。deep=True 全盘扫更慢，TTL 更长。
-_SCAN_CACHE: list | None = None
-_SCAN_CACHE_AT: float = 0.0
+# round-96 修复：浅扫/深扫缓存槽分离。原先单一缓存被浅扫结果（30s TTL 之外
+# 深扫也复用同槽）污染，导致先浅后深时 deep 调用错用浅扫结果（只看到
+# Oracle javapath 1 条）。deep 是全盘超集：fresh deep 缓存可直接供浅扫复用，
+# 但浅扫结果绝不进 deep 槽。
+_SCAN_CACHE_DEEP: list | None = None
+_SCAN_CACHE_DEEP_AT: float = 0.0
+_SCAN_CACHE_FAST: list | None = None
+_SCAN_CACHE_FAST_AT: float = 0.0
 _SCAN_TTL_DEEP = 300.0   # deep 全盘扫：5 分钟复用
 _SCAN_TTL_FAST = 30.0    # 浅扫：30s 复用
 
@@ -82,12 +88,17 @@ def scan_javas(deep: bool = True) -> list[dict]:
          bundled runtimes and (when ``deep``) a whole-disk sweep that finds
          *portable* unzipped JDKs the standard scanner can never see.
     """
-    global _SCAN_CACHE, _SCAN_CACHE_AT
+    global _SCAN_CACHE_DEEP, _SCAN_CACHE_DEEP_AT, _SCAN_CACHE_FAST, _SCAN_CACHE_FAST_AT
     import time as _time
     now = _time.time()
-    ttl = _SCAN_TTL_DEEP if deep else _SCAN_TTL_FAST
-    if _SCAN_CACHE is not None and now - _SCAN_CACHE_AT < ttl:
-        return _SCAN_CACHE
+    if deep:
+        if _SCAN_CACHE_DEEP is not None and now - _SCAN_CACHE_DEEP_AT < _SCAN_TTL_DEEP:
+            return _SCAN_CACHE_DEEP
+    else:
+        if _SCAN_CACHE_DEEP is not None and now - _SCAN_CACHE_DEEP_AT < _SCAN_TTL_DEEP:
+            return _SCAN_CACHE_DEEP
+        if _SCAN_CACHE_FAST is not None and now - _SCAN_CACHE_FAST_AT < _SCAN_TTL_FAST:
+            return _SCAN_CACHE_FAST
 
     out: list[dict] = []
     seen: set[str] = set()
@@ -123,8 +134,12 @@ def scan_javas(deep: bool = True) -> list[dict]:
     except Exception:  # noqa: BLE001 - never let discovery break a launch
         pass
 
-    _SCAN_CACHE = out
-    _SCAN_CACHE_AT = _time.time()
+    if deep:
+        _SCAN_CACHE_DEEP = out
+        _SCAN_CACHE_DEEP_AT = _time.time()
+    else:
+        _SCAN_CACHE_FAST = out
+        _SCAN_CACHE_FAST_AT = _time.time()
     return out
 
 

@@ -9,6 +9,69 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-98（2026-09-25）— PCL 版本隔离导入启动失败修复 · 外来客户端宽容启动
+
+> 依据 `docs/round98_memory.md`（TRAE 实测记录）整理。
+
+* **PCL2 版本隔离实例导入后启动报「版本不存在」**（P0，玩家实测）：
+  根因是三层错位——①PCL2 版本隔离下 `versions/<id>/` 里既有 `<id>.json` 又有
+  `saves/ mods/`，扫描正确地把它判为版本目录；②**复制导入时把版本目录拍平**
+  到 `<instance>/.minecraft/*`；③`_probe_format` 见到 `<mc>/<id>.json` 判为 `iso` →
+  `versions_root` 返回**实例目录的上级** → mll 去
+  `data/instances/versions/<id>/<id>.json` 找，**必然不存在**
+  （修复前实测 `EXISTS = False`）
+
+* 修复（`instances.py::import_external` copy 分支）：复制前判
+  `isolated_src = version_id 且 mc_dir/<version_id>.json 存在` —— 是则目标目录取
+  `<new>/.minecraft/versions/<version_id>/` 并标 `isolation="isolated"`，
+  否保持原行为。修复后实测 `isolation=isolated`、`game_dir` 落在版本目录内
+
+* **外来完整客户端宽容启动**：PCL2/HMCL 等导入客户端（version_id 非空）启动时若
+  classpath 缺库——旧逻辑会触发 `install_minecraft_version` 下载官方原版库
+  （「在补 PCL 特殊格式的 MC」）。现在按其原库布局直接启动，缺失条目由 JVM 静默
+  忽略 + 进度提示，**绝不污染玩家客户端**（`launch.py`）
+
+* **关闭行为默认改「直接退出」**：`tray_minimize` 默认 False——点关闭按钮即退出
+  （主流直觉）；设置里勾选「最小化到系统托盘」可恢复藏盘常驻
+
+## round-97（2026-09-23）— 扫描 / 首页三处 bug
+
+* **PCL2 分组折叠完全失效**：组键是内部码（`"PCL-CE"`）而组头文字是显示名
+  （`"PCL2"`），旧 `_toggle_group` 靠 `launcher in w.text()` 反查按钮 → **永远匹配不上**。
+  修复：`_rebuild_instance_list` 用 `_group_headers[launcher]` 直接持有按钮引用；
+  `_toggle_group` 直查，并只替换行首 ▾/▸（老实现 `text[2:]` 每次点击累积空格）
+
+## round-96（2026-09-23）— 单实例守卫加固
+
+* 用户报「新手教程背后露出启动器页面」：根因是清理数据删掉 `ac.lock` 后旧实例未退出，
+  新实例 `tryLock` **误成功** → 双实例并存，教程叠在旧主窗口上
+* 修复：`tryLock` 成功后仍用 `FindWindowW` 按 `APP_DISPLAY` 标题找窗口，找到则提拉旧实例
+  并 `unlock` 退出；`splash_window.__init__` 设 `setWindowTitle(APP_DISPLAY)`，
+  让 **splash 阶段**也可被识别。实测：删运行中锁再启动 → 进程数不增
+
+## round-95（2026-09-22/23）— 实例页折叠 / 教程叠窗 / 版本图标扁平化
+
+* **实例页折叠后再也展开不了**：`_toggle_panel` 收拢时对整个 `_left_panel`
+  `setVisible(False)`，折叠按钮随之消失。修复：新增常驻 40px 展开条
+  （`_strip` + `reopen_btn`），收起后留在最左侧提供反向箭头
+* **新手教程背后露出主窗口**：根因 = `_force_foreground` 里的
+  `user32.ShowWindow(hwnd, SW_RESTORE)` 把"未显示"的窗口直接拉成可见，
+  而它原先在教程分支之前运行（round-30/46 只挪了 `win.show()`，没防住这条旁路）。
+  修复：repaint / raise_ / `_force_foreground` 整体移入 `_show_main()`、紧跟 `win.show()`
+* **扫描弹窗 NameError**：`scan_dialog.py::_rebuild_instance_list` 用 `launcher_label`
+  但仅在他函数局部 import → 模块级补 import。这可能是之前「扫描实例扫不出来」的元凶
+* **版本库图标扁平化**：`make_version_pixmap` 重写为 HMCL/PCL2 式纯色圆角方块 + 居中
+  版本号；无渐变 / 3D 方块 / 装饰 chips；文本色按底色亮度自适应（亮底深字）
+* **侧边栏「其他」分组**：新增 `nav.group.other`，音乐 / 成就从「娱乐」移入
+
+## round-94（2026-09-22）— 字体查找共享化（移除写死本机路径）
+
+* 新增 `src/fonts.py`：MC 像素字体三级查找——
+  ①`data/fonts/`（用户放置即覆盖默认）②`assets/fonts/`（随包只读）
+  ③系统已安装字体中 family 含 `minecraft` 的。全部缺失返回 None，调用方回退，启动动画永不崩
+* 移除原先写死的 `<本地字体目录>\[苦力怕论坛]Minecraft(...).ttf`
+  （换机 / 目录移动后静默失效），改为随包 `assets/fonts/minecraft_pixel.ttf`
+
 ## round-92（2026-09-21）— 模块化内容市场 · JS 扩展宿主（选装桥接）
 
 * **模块化内容市场**（`src/modules.py` + `settings_dialog.py`「模块与扩展」分区）：

@@ -76,8 +76,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nav.group.game": "游戏",
         "nav.group.resource": "资源",
         "nav.group.multiplayer": "联机",
+        "nav.group.other": "其他",
         "nav.group.system": "系统",
-        "nav.group.fun": "娱乐",
         "nav.music": "音乐",
         "nav.achievements": "成就",
 
@@ -345,6 +345,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "launch.low_mem_title": "内存可能不足",
         "launch.low_mem_msg": "你为《我的世界》分配了 {ram} MB 内存，但当前可用物理内存仅剩 {avail} MB。\n继续启动可能导致卡顿、黑屏甚至无法进入游戏。\n建议先在设置中调低内存，再重新启动。",
         "launch.low_mem_continue": "仍然启动",
+        # round-92 外来完整客户端宽容启动（PCL/HMCL 等导入，缺失库直接忽略不下载）
+        "launch.missing_libs_direct": "按原客户端直接启动：{n} 个缺失库不在客户端内（{heads}…），JVM 会忽略缺失条目",
+        # round-93 老客户端 javaw 归一 + 手动 Java 版本不符自动切换
+        "launch.switch_javaw": "已自动切换为 javaw.exe 启动（避免老客户端弹提示）",
+        "launch.java_mismatch_auto": "所选 {jv} 不适用于此版本（需要 Java {need}），已自动改用 {used}",
         # round-80 磁盘空间预检
         "launch.low_disk_title": "磁盘空间可能不足",
         "launch.low_disk_msg": "启动需要约 {need} MB 可用空间（游戏内存 {ram} MB + 2GB 余量），但 {path} 所在磁盘仅剩 {free} MB。\n继续可能导致世界存档写入失败或游戏崩溃。\n建议先清理磁盘空间，或迁移实例到空间更大的磁盘。",
@@ -374,7 +379,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "javamgr.installed": "已安装",
         "javamgr.in_use": "使用中",
         "javamgr.version_unknown": "未知版本",
-        "javamgr.not_recommended": "未能识别版本号 — 可能是精简 JDK / 破损 / AI 生成。游戏可能因缺失文件无法启动，谨慎使用。",
+        "javamgr.not_recommended": "未能识别版本号 — 可能是精简 JDK 或安装不完整。游戏可能因缺失文件无法启动，谨慎使用。",
         "javamgr.not_installed": "未安装",
         "javamgr.download": "下载",
         "javamgr.downloading": "下载中…",
@@ -1356,8 +1361,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nav.group.game": "Game",
         "nav.group.resource": "Resources",
         "nav.group.multiplayer": "Multiplayer",
+        "nav.group.other": "Other",
         "nav.group.system": "System",
-        "nav.group.fun": "Fun",
         "nav.music": "Music",
         "nav.achievements": "Achievements",
 
@@ -1633,6 +1638,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "launch.low_mem_title": "Low memory warning",
         "launch.low_mem_msg": "You allocated {ram} MB to Minecraft, but only {avail} MB of physical memory is currently available.\nLaunching anyway may cause lag, black screens, or failure to enter the game.\nConsider lowering the memory setting before launching again.",
         "launch.low_mem_continue": "Launch anyway",
+        # round-92 imported external client fallback (missing libs ignored, no download)
+        "launch.missing_libs_direct": "Starting as-is: {n} missing libraries aren't in this client ({heads}…); the JVM ignores missing classpath entries",
+        # round-93 javaw normalization for old clients + manual-Java mismatch auto-switch
+        "launch.switch_javaw": "Automatically switched to javaw.exe (avoids popups from old clients)",
+        "launch.java_mismatch_auto": "{jv} is not suitable for this version (needs Java {need}); switched to {used}",
         # round-80 disk space pre-check
         "launch.low_disk_title": "Low disk space warning",
         "launch.low_disk_msg": "Launching needs about {need} MB of free space (game RAM {ram} MB + 2 GB buffer), but the disk holding {path} only has {free} MB left.\nContinuing may cause world-save write failures or a game crash.\nFree up disk space first, or move the instance to a bigger disk.",
@@ -1682,7 +1692,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "javamgr.use_this": "Use",
         "javamgr.in_use": "In use",
         "javamgr.version_unknown": "Unknown version",
-        "javamgr.not_recommended": "Version could not be detected — may be a stripped/broken/AI-generated JDK. The game might fail to start due to missing files. Use with caution.",
+        "javamgr.not_recommended": "Version could not be detected — may be a stripped or incompletely installed JDK. The game might fail to start due to missing files. Use with caution.",
         "javamgr.delete_ours": "Delete",
         "javamgr.download_title": "Download Java (any version)",
         "javamgr.major_label": "Select version",
