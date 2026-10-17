@@ -1064,6 +1064,8 @@ class MainWindow(QMainWindow):
         # 已被收起的下载对话框可经底部状态栏进度条召回。
         self._dl_workers: dict[str, object] = {}
         self._dl_dlgs: dict[str, object] = {}
+        self._dl_pct: dict[str, int] = {}      # round-109：实例 → 最新下载百分比
+        self._dl_aborted: set[str] = set()     # round-109：用户主动取消的实例
         self._game_proc = None      # round-34：运行中游戏进程
         self._game_procs = {}       # round-92 多开：按实例 id 登记运行中游戏
         self._game_name = ""
@@ -1675,6 +1677,7 @@ class MainWindow(QMainWindow):
 
     def _on_download_progress(self, inst_id: str, value: int, maximum: int) -> None:
         pct = int(value * 100 / maximum) if maximum and maximum > 0 else 0
+        self._dl_pct[inst_id] = pct
         try:
             self.instances_page.set_instance_task(inst_id, "downloading", pct)
         except Exception:  # noqa: BLE001
@@ -1682,6 +1685,8 @@ class MainWindow(QMainWindow):
 
     def _on_download_done(self, inst_id: str) -> None:
         self._dl_workers.pop(inst_id, None)
+        self._dl_pct.pop(inst_id, None)
+        self._dl_aborted.discard(inst_id)
         inst = self.inst_mgr.get(inst_id)
         name = getattr(inst, "name", "") or inst_id
         self._progress.setVisible(False)
@@ -1697,9 +1702,25 @@ class MainWindow(QMainWindow):
 
     def _on_download_error(self, inst_id: str, err: str) -> None:
         self._dl_workers.pop(inst_id, None)
+        self._dl_pct.pop(inst_id, None)
+        cancelled = inst_id in self._dl_aborted
+        self._dl_aborted.discard(inst_id)
         inst = self.inst_mgr.get(inst_id)
         name = getattr(inst, "name", "") or inst_id
         self._progress.setVisible(False)
+        dlg = self._dl_dlgs.pop(inst_id, None)
+        if cancelled:
+            # round-109：用户主动「取消下载并启动」→ 这不是失败，走中性文案。
+            self.statusBar().showMessage(
+                t("status.download_cancelled", name=name), 6000)
+            if dlg is not None:
+                dlg.mark_done(t("launch.dl_cancelled"))
+                QTimer.singleShot(1200, dlg.close)
+            try:
+                self.instances_page.set_instance_task(inst_id, "")
+            except Exception:  # noqa: BLE001
+                pass
+            return
         # 失败不阻断：实例仍可创建，首次启动会重新触发下载/修复（install 幂等）。
         self.statusBar().showMessage(
             t("status.download_error", name=name, err=err), 9000)
@@ -1707,10 +1728,38 @@ class MainWindow(QMainWindow):
             self.instances_page.set_instance_task(inst_id, "")
         except Exception:  # noqa: BLE001
             pass
-        dlg = self._dl_dlgs.pop(inst_id, None)
         if dlg is not None:
             dlg.set_status_text(err)
             QTimer.singleShot(2500, dlg.close)
+
+    def _confirm_launch_while_downloading(self, inst, worker) -> bool:
+        """下载护栏的逃生口（round-109）。
+
+        默认建议继续等待；用户也可选择「取消下载并启动」——worker.abort() 会让
+        在途下载立即抛错退出（不再写盘），随后正常走启动流程。返回 True 表示
+        放行启动。
+        """
+        from PySide6.QtWidgets import QMessageBox
+        iid = getattr(inst, "id", "")
+        pct = self._dl_pct.get(iid, 0)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(t("launch.dl_busy_title"))
+        box.setText(t("launch.dl_busy_msg", name=inst.name, pct=pct))
+        wait = box.addButton(t("launch.dl_busy_wait"), QMessageBox.ButtonRole.AcceptRole)
+        force = box.addButton(t("launch.dl_busy_force"), QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(wait)
+        box.exec()
+        if box.clickedButton() is not force:
+            self.statusBar().showMessage(
+                t("status.download_blocked_launch", name=inst.name))
+            return False
+        self._dl_aborted.add(iid)
+        try:
+            worker.abort()
+        except Exception:  # noqa: BLE001
+            pass
+        return True
 
     def _set_progress(self, value: int, maximum: int):
         if maximum and maximum > 0:
@@ -2870,12 +2919,13 @@ class MainWindow(QMainWindow):
         if getattr(inst, "id", "") in getattr(self, "_game_procs", {}):
             self.statusBar().showMessage(t("status.instance_running", name=inst.name))
             return
-        # round-107 T8：该实例后台下载仍在进行 → 不并发启动（双写同一目录）。
+        # round-107 T8 / round-109：该实例后台下载仍在进行 → 默认不并发启动
+        # （双写同一目录）；但给逃生口 —— 用户可取消下载后立刻启动，护栏不再
+        # 变成「永久拦住启动」。
         _dl = getattr(self, "_dl_workers", {}).get(getattr(inst, "id", ""))
         if _dl is not None and _dl.isRunning():
-            self.statusBar().showMessage(
-                t("status.download_blocked_launch", name=inst.name))
-            return
+            if not self._confirm_launch_while_downloading(inst, _dl):
+                return
         account = self.current_account or OFFLINE_ACCOUNT
         settings = load_config()
         # round-79e 低内存警告：实例覆盖内存优先，超可用物理内存时警告

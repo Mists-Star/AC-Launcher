@@ -37,10 +37,12 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
             mirror = "bmclapi" if "bmclapi" in _pick_auto_mirror() else "official"
         except Exception:
             mirror = "official"
-    if mirror == "bmclapi" or proxy:
-        from .mirror import patch_install_session, set_proxy
-        set_proxy(proxy or None)
-        patch_install_session()
+    # round-109：打补丁与走镜像解耦 —— 镜像与否由 set_mirror 在请求时决定，
+    # 补丁本身永远打上，好让官方源也拿到「超时 + 重试 + 可取消」。
+    from .mirror import patch_install_session, set_mirror, set_proxy
+    set_proxy(proxy or None)
+    set_mirror(mirror == "bmclapi")
+    patch_install_session()
 
     mc_dir = inst.mc_dir
     loader = inst.loader if inst.loader in SUPPORTED_LOADERS else "vanilla"
@@ -135,6 +137,27 @@ def repair_minecraft_dir(mc_dir: str, callback=None) -> list[str]:
     other launcher's game directory we make it launchable. Returns the list of
     repaired version ids (empty if none found).
     """
+    # round-109：体检修复同样是 mll 的网络下载路径，之前没有任何加固 —— 如果本次
+    # 会话的第一个网络动作就是体检修复（patch_install_session 的 _PATCHED 幂等门
+    # 还没被 install_instance 打开），就仍会裸连接挂死。这里补上与 install_instance
+    # 一致的「超时 + 重试 + 可取消 + 按用户设置走镜像」。
+    try:
+        from ..settings_dialog import load_config
+        cfg = load_config()
+    except Exception:  # noqa: BLE001 - config may be unavailable in some contexts
+        cfg = {}
+    mirror = cfg.get("download_mirror", "bmclapi")
+    if mirror == "auto":
+        try:
+            from ..net_api import _pick_auto_mirror
+            mirror = "bmclapi" if "bmclapi" in _pick_auto_mirror() else "official"
+        except Exception:
+            mirror = "official"
+    from .mirror import patch_install_session, set_mirror, set_proxy
+    set_proxy(cfg.get("download_proxy", "") or None)
+    set_mirror(mirror == "bmclapi")
+    patch_install_session()
+
     repaired = []
     for version in list_installed_versions(mc_dir):
         try:
@@ -159,10 +182,10 @@ def install_mrpack(mrpack_path: str, mc_dir: str, *, mirror: str = "official",
     The same bmclapi/proxy redirect as :func:`install_instance` is applied so
     any game-file downloads the pack triggers go through the chosen mirror.
     """
-    if mirror == "bmclapi" or proxy:
-        from .mirror import patch_install_session, set_proxy
-        set_proxy(proxy or None)
-        patch_install_session()
+    from .mirror import patch_install_session, set_mirror, set_proxy
+    set_proxy(proxy or None)
+    set_mirror(mirror == "bmclapi")
+    patch_install_session()
     minecraft_launcher_lib.mrpack.install_mrpack(
         mrpack_path, mc_dir, callback=callback
     )
