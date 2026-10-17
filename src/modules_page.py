@@ -161,6 +161,8 @@ class ModulesPage(QWidget):
                 flags[m.id] = "sfx_pack"
             elif m.type == "crash_pol" and cfg.get("_crash_module") == m.id:
                 flags[m.id] = "crash_pol"
+            elif m.type == "effect" and m.id in (cfg.get("_effect_owners") or {}).values():
+                flags[m.id] = "effect"
         return flags
 
     def _module_row(self, m: M.ModuleInfo, applied: str) -> QFrame:
@@ -231,6 +233,8 @@ class ModulesPage(QWidget):
                 M.apply_sfx_module(m)
             elif m.type == "crash_pol":
                 M.apply_crash_module(m)
+            elif m.type == "effect":
+                M.apply_effect_module(m)
             else:
                 warn(self, t("modules.apply"), t("modules.type_unknown"))
                 return

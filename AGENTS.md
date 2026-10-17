@@ -24,6 +24,10 @@
    - `launcher_config.json`、任何 token / 凭据 / 用户数据
    - `assets/mc_textures/`（MC 原版纹理，版权属 Mojang，本地资源不入库）
    - 第三方专有资源、未经授权的品牌素材
+   - **个人可识别信息（PII）**：本机用户名、绝对路径、邮箱一律不得写进任何入库文件。
+     文档里引用本机路径必须写成占位符——仓库根用 `<repo>`、本机工作区用 `<workspace>`、
+     用户名用 `C:\Users\<user>`；文档内的仓库源码链接用相对路径（`../src/xxx.py#L12-L34`），
+     不要写 `file:///D:/...` 这类本机绝对链接。
 
 5. **文件归位**：源码 `src/`、资源 `assets/`、研究/调研文档 `docs/`、打包脚本根目录。
 
@@ -78,4 +82,9 @@ docs: ...     文档
 ```
 
 摘要用中文，正文按 P0/P1/P2 或模块分组列要点。
-推送走 SSH remote：`git@github.com:Mists-Star/AC-Launcher.git`（https 在 GFW 下不通）。
+
+**连接（用户 2026-10-17 指定：走 gh-proxy）**：直连 `github.com` 在 GFW 下不稳定，
+HTTPS 走 gh-proxy 加速前缀，形如
+`https://<gh-proxy 站点>/https://github.com/Mists-Star/AC-Launcher.git`
+（仓库内已在用 `ghfast.top` / `v6.gh-proxy.org` / `cdn.gh-proxy.org` / `edgeone.gh-proxy.org`）。
+SSH remote（`git@github.com:Mists-Star/AC-Launcher.git`）保留作备选。

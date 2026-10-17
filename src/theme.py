@@ -586,6 +586,19 @@ QPushButton[cls="accent"] {
 }
 QPushButton[cls="accent"]:hover { background: $accent_hover; }
 QPushButton[cls="accent"]:pressed { background: $accent_press; }
+/* round-105 hero "play" button — same accent as the sidebar so it re-skins on
+   every theme/accent change (must NOT be an inline stylesheet, which freezes
+   the old accent at construction time). */
+QPushButton[cls="play"] {
+    background: $accent;
+    color: $text_on_accent;
+    border: 2px solid $accent_press;
+    border-radius: 12px;
+    padding: 8px 24px;
+    font-weight: 600;
+}
+QPushButton[cls="play"]:hover { background: $accent_hover; border-color: $accent_press; }
+QPushButton[cls="play"]:pressed { background: $accent_press; border-color: $accent; }
 /* danger outline */
 QPushButton[cls="danger"] {
     background: transparent;
@@ -771,6 +784,16 @@ QListWidget::item:selected {
 #ac-nav::item:!selected:pressed {
     background: $border;
 }
+/* round-107 图标模式：条目只有图标（无文字），内边距收紧；选中态去掉左侧竖条
+   以保持图标水平居中。 */
+#ac-nav[compact="true"]::item {
+    padding: 10px 0;
+    margin: 3px 8px;
+}
+#ac-nav[compact="true"]::item:selected {
+    border-left: none;
+    padding-left: 0;
+}
 
 /* ---- scroll area ---- */
 QScrollArea { background: transparent; border: none; }
@@ -816,6 +839,18 @@ QProgressBar {
 QProgressBar::chunk {
     background: $accent;
     border-radius: ${r_small}px;
+}
+/* round-107 slim bar（启动对话框 / 状态栏）：去掉「黑框 + 方块」的塑料感，
+   改为柔和半透明轨道 + 圆角 accent 填充。百分比用旁侧标签单独显示。 */
+QProgressBar[cls="slim"] {
+    background: $bg_hover;
+    border: none;
+    border-radius: 3px;
+    height: 6px;
+}
+QProgressBar[cls="slim"]::chunk {
+    background: $accent;
+    border-radius: 3px;
 }
 
 /* ---- check box ---- */

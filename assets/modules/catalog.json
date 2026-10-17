@@ -31,5 +31,60 @@
     "description": "发现崩溃后优先建议重启游戏并自动做崩溃分析。",
     "description_en": "After a crash, favor restarting and analyze the report automatically.",
     "bundle_dir": "crash-policy-restart"
+  },
+  {
+    "id": "effect-frosted-glass",
+    "name": "毛玻璃",
+    "name_en": "Frosted Glass",
+    "type": "effect",
+    "version": "1.0.0",
+    "author": "AC",
+    "description": "把卡片与弹窗换成半透明的玻璃拟态质感，浅色/暗色主题都更通透。",
+    "description_en": "Turns cards and dialogs into a translucent frosted-glass look for both light and dark themes.",
+    "bundle_dir": "effect-frosted-glass"
+  },
+  {
+    "id": "effect-acrylic-window",
+    "name": "透底窗口",
+    "name_en": "Acrylic Window",
+    "type": "effect",
+    "version": "1.0.0",
+    "author": "AC",
+    "description": "启用系统级亚克力半透明窗口，桌面背景透出来，边缘更柔和。（仅 Windows 10 1803+）",
+    "description_en": "Enables the system Acrylic translucent window so the desktop shows through. (Windows 10 1803+ only)",
+    "bundle_dir": "effect-acrylic-window"
+  },
+  {
+    "id": "effect-liquid-trail",
+    "name": "液态流光",
+    "name_en": "Liquid Light-trail",
+    "type": "effect",
+    "version": "1.0.0",
+    "author": "AC",
+    "description": "列表卡片与商店卡的流光描边与反射扫光动画。",
+    "description_en": "Animated light-trail borders and reflective sweeps on list and store cards.",
+    "bundle_dir": "effect-liquid-trail"
+  },
+  {
+    "id": "effect-page-transition",
+    "name": "页面切换动画",
+    "name_en": "Page Transition",
+    "type": "effect",
+    "version": "1.0.0",
+    "author": "AC",
+    "description": "切换页面时淡入 + 轻微上浮的过渡动画；关闭则瞬时切换。",
+    "description_en": "A fade-in with a slight rise when switching pages; off means instant switching.",
+    "bundle_dir": "effect-page-transition"
+  },
+  {
+    "id": "effect-achievement-toast",
+    "name": "成就弹窗",
+    "name_en": "Achievement Toasts",
+    "type": "effect",
+    "version": "1.0.0",
+    "author": "AC",
+    "description": "解锁成就时在角落弹出提示。默认关闭以免打扰。",
+    "description_en": "Pops a corner toast when an achievement unlocks. Off by default to stay out of the way.",
+    "bundle_dir": "effect-achievement-toast"
   }
 ]

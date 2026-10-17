@@ -79,5 +79,10 @@ _shot*
 _shots/
 ac.lock
 _*.png
+# 脱敏审计/历史改写模拟脚本（内含真实 PII 字面量，绝不入库）
+_pii_*.py
+_rewrite_*.py
+_diff_*.py
+_logo_probe.py
 # MC 原版纹理（本地资源，版权属 Mojang，不入库）
 assets/mc_textures/

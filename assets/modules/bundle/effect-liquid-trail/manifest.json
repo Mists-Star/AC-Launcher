@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "effect-liquid-trail",
+  "name": "液态流光",
+  "name_en": "Liquid Light-trail",
+  "version": "1.0.0",
+  "type": "effect",
+  "author": "AC",
+  "description": "列表卡片与商店卡的流光描边与反射扫光动画；关闭后界面静止省电。",
+  "description_en": "Animated light-trail borders and reflective sweeps on list and store cards. Turn it off for a still, lower-power UI.",
+  "tags": ["trail", "animation", "cards"]
+}

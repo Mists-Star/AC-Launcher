@@ -16,13 +16,12 @@ import math
 import hashlib
 from collections import OrderedDict
 
-from PySide6.QtCore import QObject, QUrl, Qt, QPointF
+from PySide6.QtCore import QObject, QUrl, Qt, QPointF, QRectF
 from PySide6.QtNetwork import (
     QNetworkAccessManager, QNetworkRequest, QNetworkReply,
 )
 from PySide6.QtGui import (
-    QPixmap, QPainter, QColor, QLinearGradient, QBrush, QFont, QFontMetrics,
-    QPainterPath, QPen, QPolygonF,
+    QPixmap, QPainter, QColor, QPainterPath, QPolygonF, QTransform,
 )
 
 from shiboken6 import isValid
@@ -349,60 +348,107 @@ _tex_cache: dict[str, QPixmap] = {}
 _tex_miss: set[str] = set()
 
 
-def make_version_pixmap(version_id: str, vtype: str, size: int = 56) -> QPixmap:
-    """Draw a flat per-version tile in the style of HMCL / PCL2: solid theme
-    color rounded square + centered version id.
+# round-107 版本图标回归「MC 3D 等距方块」：正式版草方块 / 快照命令方块 /
+# 愚人节蛋糕 / 旧版铁砧·圆石，对齐主流启动器。此前 round-92 压成「纯色方块 +
+# 版本号文字」，长版本号被省略号截断且毫无辨识度。这里改用随包的真实 MC 贴图
+# （assets/mc_textures/block）渲染 3D 方块，缺贴图时回退纯色向量块。
+_BLOCK_FACES: dict[str, tuple[str, str, str | None]] = {
+    # vtype -> (top texture, side texture, right face texture or None)
+    "release":   ("grass_block_top", "grass_block_side", None),
+    "snapshot":  ("command_block_side", "command_block_side", "command_block_front"),
+    "april":     ("cake_top", "cake_side", None),
+    "old_beta":  ("anvil_top", "anvil", None),
+    "old_alpha": ("cobblestone", "cobblestone", None),
+}
+_BLOCK_FALLBACK = ("bedrock", "bedrock", None)
 
-    round-92 扁平化：去掉渐变卡片 / 3D 等距方块 / 装饰 chips / 更新名，只剩
-    「主题色方块 + 版本号」，观感与主流启动器对齐。release 用其更新主题色
-    (c1)，snapshot 等无主题的版本回退到 vtype 语义色。
-    """
-    th = version_theme(version_id)
-    if th is not None:
-        c1, c2 = th["c1"], th["c2"]
+
+def _load_block_tex(name: str) -> "QPixmap | None":
+    """Load a block texture from the bundled assets; crop the first frame for
+    animated strips (e.g. command_block is 16×64 = 4 frames)."""
+    if not name:
+        return None
+    if name in _tex_cache:
+        return _tex_cache[name]
+    if name in _tex_miss:
+        return None
+    path = get_resource_path(os.path.join(_TEXTURE_ROOT, "block", f"{name}.png"))
+    pm = QPixmap(path) if (path and os.path.exists(path)) else QPixmap()
+    if pm.isNull():
+        _tex_miss.add(name)
+        return None
+    if pm.height() > pm.width():
+        frames = max(1, pm.height() // pm.width())
+        pm = pm.copy(0, 0, pm.width(), pm.height() // frames)
+    _tex_cache[name] = pm
+    return pm
+
+
+def _paint_face(p: QPainter, quad: list, tf: QTransform,
+                pm: "QPixmap | None", col: QColor, shade: int) -> None:
+    """Paint one isometric face: textured (mapped via ``tf``) or flat fill,
+    then a translucent black overlay for 3D shading."""
+    path = QPainterPath()
+    path.addPolygon(QPolygonF(quad))
+    p.save()
+    p.setClipPath(path)
+    if pm is not None and not pm.isNull():
+        old = p.transform()
+        p.setTransform(tf, True)
+        p.drawPixmap(QRectF(0.0, 0.0, 1.0, 1.0), pm, QRectF(pm.rect()))
+        p.setTransform(old)
     else:
-        c1, c2 = _TYPE_THEME.get(vtype, ("#94A3B8", "#64748B"))
+        p.fillPath(path, col)
+    if shade:
+        p.fillPath(path, QColor(0, 0, 0, shade))
+    p.restore()
+
+
+def _draw_iso_block(p: QPainter, s: float, top_pm, side_pm, right_pm,
+                    top_col: QColor, side_col: QColor, right_col: QColor) -> None:
+    """Draw a 2:1 isometric cube filling an s×s box (top vertex at origin)."""
+    cx = s / 2.0
+    hh = s * 0.25
+    vh = s * 0.5
+    A = QPointF(cx, 0.0)
+    B = QPointF(s, hh)
+    C = QPointF(cx, hh * 2.0)
+    D = QPointF(0.0, hh)
+
+    def quad(o: QPointF, e1: QPointF, e2: QPointF) -> list:
+        return [o, o + e1, o + e1 + e2, o + e2]
+
+    # Top face (brightest), left face, right face (darkest)
+    _paint_face(p, quad(A, QPointF(cx, hh), QPointF(-cx, hh)),
+                QTransform(cx, hh, -cx, hh, cx, 0.0), top_pm, top_col, 0)
+    _paint_face(p, quad(D, QPointF(cx, hh), QPointF(0.0, vh)),
+                QTransform(cx, hh, 0.0, vh, 0.0, hh), side_pm, side_col, 44)
+    _paint_face(p, quad(C, QPointF(cx, -hh), QPointF(0.0, vh)),
+                QTransform(cx, -hh, 0.0, vh, cx, hh * 2.0),
+                right_pm or side_pm, right_col, 82)
+
+
+def make_version_pixmap(version_id: str, vtype: str, size: int = 56) -> QPixmap:
+    """Draw a 3D isometric MC block icon for a version (HMCL / PCL2 style).
+
+    round-107：正式版草方块、快照命令方块、愚人节蛋糕、旧版铁砧 / 圆石。用
+    随包真实 MC 贴图渲染；任何贴图缺失都会回退到纯色向量块，绝不画出坏图标。
+    ``version_id`` 保留在签名里以兼容旧调用点（图标由 ``vtype`` 决定）。
+    """
+    names = _BLOCK_FACES.get(vtype) or _BLOCK_FALLBACK
+    top_pm = _load_block_tex(names[0])
+    side_pm = _load_block_tex(names[1])
+    right_pm = _load_block_tex(names[2]) if names[2] else None
+    cols = _ISO_BLOCK.get(vtype) or _ISO_BLOCK["old_alpha"]
 
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-
-    # 1) 扁平纯色圆角方块 + 细描边（与浅色列表背景拉开层次）
-    path = QPainterPath()
-    radius = size * 0.16
-    path.addRoundedRect(0, 0, size, size, radius, radius)
-    fill = QColor(c1)
-    p.fillPath(path, fill)
-    p.setPen(QPen(QColor(c2), 1.0))
-    p.drawPath(path)
-
-    # 2) 版本号居中。文字色按底色亮度自适应：亮底用深色，保证可读。
-    label = version_id
-    base_fs = size * 0.26 if len(label) <= 9 else size * 0.20
-    min_fs = max(6.0, size * 0.15)
-    f = QFont("Microsoft YaHei", int(base_fs), QFont.Bold)
-    f.setWeight(QFont.Bold)
-    lum = 0.299 * fill.red() + 0.587 * fill.green() + 0.114 * fill.blue()
-    text_color = QColor("#1F2937") if lum > 150 else QColor("#FFFFFF")
-    shade = QColor(0, 0, 0, 60)
-    text_rect = pm.rect().adjusted(int(size * 0.06), int(size * 0.08),
-                                   int(-size * 0.06), int(-size * 0.08))
-    fm = QFontMetrics(f)
-    for _ in range(10):
-        if fm.horizontalAdvance(label) <= text_rect.width():
-            break
-        new_fs = max(min_fs, f.pointSizeF() * 0.88)
-        if abs(new_fs - f.pointSizeF()) < 0.1:
-            break
-        f.setPointSizeF(new_fs)
-        fm = QFontMetrics(f)
-    if fm.horizontalAdvance(label) > text_rect.width():
-        label = fm.elidedText(label, Qt.ElideRight, text_rect.width())
-    p.setFont(f)
-    p.setPen(shade)
-    p.drawText(text_rect.adjusted(0, 1, 0, 1), Qt.AlignCenter, label)
-    p.setPen(text_color)
-    p.drawText(text_rect, Qt.AlignCenter, label)
+    # 2px padding so the AA edges of the top vertex aren't clipped
+    p.translate(2, 2)
+    _draw_iso_block(p, float(size - 4), top_pm, side_pm, right_pm,
+                    QColor(cols[0]), QColor(cols[1]), QColor(cols[2]))
     p.end()
     return pm
+

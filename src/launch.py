@@ -770,7 +770,9 @@ def launch_instance(
         ram_mb=int(getattr(inst, "ram_mb", 0) or 0) or settings.get("ram_mb", 4096),
         jvm_args=(getattr(inst, "jvm_args", "") or "").strip()
                  or settings.get("jvm_args", ""),
-        res=(settings.get("res_w"), settings.get("res_h")) if settings.get("res_w") else None,
+        # round-105 分辨率预设已删除：不再向游戏强制下发分辨率，由玩家在游戏内
+        # 自由缩放窗口。显式传 res=None（不再读取可能残留的 res_w/res_h）。
+        res=None,
         renderer=getattr(inst, "renderer", "auto") or "auto",
         perf_g1gc=bool(getattr(inst, "perf_g1gc", True)),
         perf_disable_explicit_gc=bool(getattr(inst, "perf_disable_explicit_gc", False)),

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "effect-achievement-toast",
+  "name": "成就弹窗",
+  "name_en": "Achievement Toasts",
+  "version": "1.0.0",
+  "type": "effect",
+  "author": "AC",
+  "description": "解锁成就时在角落弹出提示。默认关闭以免打扰，成就页仍可从设置进入。",
+  "description_en": "Pops a corner toast when an achievement unlocks. Off by default to stay out of the way; the achievements page is still reachable from settings.",
+  "tags": ["achievement", "toast", "notify"]
+}

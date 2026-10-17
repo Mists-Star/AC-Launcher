@@ -1,6 +1,6 @@
 # AC Launcher (Absolute Controller / 绝对控制器)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D4.svg)](https://github.com/Mists-Star/AC-Launcher)
 
 **如绝对求解器，掌控每一次启动。**
@@ -110,12 +110,12 @@ python -B _diag_all.py
 
 ## ⚖️ License / 许可证
 
-Released under the [MIT License](LICENSE).
+Released under the [GNU General Public License v3.0](LICENSE).
 This is an independent hobby project and is **not affiliated with Mojang or Microsoft**.
 
-**AC Launcher 是独立开发者的个人项目，仅供启动与管理 Minecraft 实例使用，禁止商用。**
+**AC Launcher 是独立开发者的个人项目，仅供启动与管理 Minecraft 实例使用。**
 
 ---
 
-*AC Launcher is a personal project by an independent developer.
-No commercial use. Designed solely for launching and managing Minecraft instances.*
+*AC Launcher is a personal project by an independent developer,
+designed solely for launching and managing Minecraft instances.*

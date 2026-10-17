@@ -362,6 +362,28 @@ class _InstRow(LightTrailCard):
         self._cur_tag.setVisible(is_current)
         lay.addWidget(self._cur_tag)
 
+        # round-107 T8：任务徽标（下载中 / 就绪），默认隐藏，由页面按
+        # _task_states 驱动（下载完成后显示「就绪」）。
+        self._task_lbl = QLabel("")
+        self._task_lbl.setVisible(False)
+        lay.addWidget(self._task_lbl)
+
+    def set_task_state(self, state):
+        """round-107 T8 行内任务徽标：``(kind, pct)``，None/空则隐藏。"""
+        if not state:
+            self._task_lbl.setVisible(False)
+            return
+        kind, pct = state
+        if kind == "downloading":
+            self._task_lbl.setText(t("instances.task_downloading", pct=pct))
+            self._task_lbl.setStyleSheet(
+                f"font-size: 11px; color: {COLORS['accent']};")
+        else:  # ready
+            self._task_lbl.setText(t("instances.task_ready"))
+            self._task_lbl.setStyleSheet(
+                f"font-size: 11px; color: {COLORS['success']};")
+        self._task_lbl.setVisible(True)
+
     def set_selected(self, on: bool):
         self._selected = on
         self.set_border(COLORS["accent"] if on else COLORS["border"],
@@ -475,6 +497,9 @@ class NewInstanceDialog(QDialog):
     def __init__(self, parent=None, preset_version: str = "", embedded: bool = False):
         super().__init__(parent)
         self._group_expanded: dict[str, bool] = {}
+        # round-107：滚到底自动续加载所需状态（替代手动「显示全部」按钮）
+        self._ver_collapsed: list[str] = []
+        self._ver_shown: set[str] = set()
         self._embedded = embedded
         self._versions: list[dict] = []
         self._selected_version: str = preset_version or ""
@@ -608,6 +633,8 @@ class NewInstanceDialog(QDialog):
         self._ver_vbox.setContentsMargins(0, 0, 0, 0)
         self._ver_vbox.setSpacing(10)
         self._ver_scroll.setWidget(self._ver_content)
+        # round-107：滚到底部自动续加载（对齐主流的持续下拉），不再用手动按钮
+        self._ver_scroll.verticalScrollBar().valueChanged.connect(self._on_ver_scroll)
         lay.addWidget(self._ver_scroll, stretch=1)
 
         # now that _ver_vbox exists, apply the default filter
@@ -631,6 +658,7 @@ class NewInstanceDialog(QDialog):
 
     def _set_version_filter(self, key: str):
         self._version_filter = key
+        self._ver_shown = set()  # 换筛选 → 整列表重新淡入
         for k, btn in self._ver_filter_btns.items():
             btn.setChecked(k == key)
             self._style_filter_btn(btn, k == key)
@@ -652,6 +680,7 @@ class NewInstanceDialog(QDialog):
 
     def _on_version_search(self, text: str):
         self._version_search = text.strip().lower()
+        self._ver_shown = set()  # 搜索变更 → 结果重新淡入
         self._refresh_version_list()
 
     def _group_of(self, v: dict) -> str:
@@ -660,8 +689,10 @@ class NewInstanceDialog(QDialog):
         return self._GROUP_OF_TYPE.get(v.get("type", "release"), "legacy")
 
     def _refresh_version_list(self):
-        # round-38 性能：懒加载——每组最多渲染 _MAX_GROUP_VISIBLE 张卡，
-        # 超出折叠为「显示全部 N 个」按钮（全量渲染 200+ 卡导致新建向导卡顿）
+        # round-107：改为「滚到底部自动续加载」。此前超出 _MAX_GROUP_VISIBLE 的
+        # 版本折叠成「显示全部 N 个」按钮，需玩家手动点开（用户反馈反人类）；
+        # 现在首屏渲染前 _MAX_GROUP_VISIBLE 张，剩余由滚动触发展开，并给新出现
+        # 的卡片做淡入动画。
         while self._ver_vbox.count():
             item = self._ver_vbox.takeAt(0)
             w = item.widget()
@@ -672,46 +703,51 @@ class NewInstanceDialog(QDialog):
                     if not self._version_search or self._version_search in v.get("id", "").lower()]
         groups = self._GROUP_ORDER if self._version_filter == "all" else [self._version_filter]
         expanded = getattr(self, "_group_expanded", {})
+        self._ver_collapsed = []
+        shown = getattr(self, "_ver_shown", None)
+        if shown is None:
+            shown = self._ver_shown = set()
+
+        def add_card(v: dict) -> None:
+            card = self._make_version_card(v)
+            self._ver_vbox.addWidget(card)
+            if v.get("id") not in shown:
+                shown.add(v.get("id"))
+                fade_in_widget(card)  # 新出现的卡片淡入（旧卡片不复播）
 
         for g in groups:
             members = [v for v in versions if self._group_of(v) == g]
             if not members:
                 continue
-            # latest group at top when "all"
-            if self._version_filter == "all" and g == "release":
-                latest = members[0]
-                snap_members = [v for v in versions if self._group_of(v) == "snapshot"]
-                latest_snap = snap_members[0] if snap_members else None
-                hdr = QLabel(t("versions.group.latest"))
-                hdr.setProperty("cls", "group")
-                self._ver_vbox.addWidget(hdr)
-                self._ver_vbox.addWidget(self._make_version_card(latest))
-                if latest_snap and latest_snap["id"] != latest["id"]:
-                    self._ver_vbox.addWidget(self._make_version_card(latest_snap))
-                continue
             hdr = QLabel(t(f"versions.group.{g}"))
             hdr.setProperty("cls", "group")
             self._ver_vbox.addWidget(hdr)
             show_all = expanded.get(g, False)
-            visible = members if (show_all or len(members) <= self._MAX_GROUP_VISIBLE) \
-                else members[:self._MAX_GROUP_VISIBLE]
+            if show_all or len(members) <= self._MAX_GROUP_VISIBLE:
+                visible = members
+            else:
+                visible = members[:self._MAX_GROUP_VISIBLE]
+                self._ver_collapsed.append(g)
             for v in visible:
-                self._ver_vbox.addWidget(self._make_version_card(v))
-            if not show_all and len(members) > self._MAX_GROUP_VISIBLE:
-                more = QPushButton(t("versions.show_all", n=len(members)))
-                more.setProperty("cls", "secondary")
-                more.setMinimumHeight(32)
-                more.setCursor(Qt.PointingHandCursor)
-                more.clicked.connect(lambda _, gg=g: self._expand_version_group(gg))
-                self._ver_vbox.addWidget(more)
+                add_card(v)
         self._ver_vbox.addStretch(1)
 
-    def _expand_version_group(self, group: str):
-        """展开某版本组（懒加载优化）。"""
-        if not hasattr(self, "_group_expanded"):
-            self._group_expanded = {}
-        self._group_expanded[group] = True
-        self._refresh_version_list()
+    def _on_ver_scroll(self, value: int) -> None:
+        """滚到底部 → 自动展开下一组被折叠的版本（替代手动「显示全部」按钮）。"""
+        if getattr(self, "_ver_suppress_scroll", False):
+            return
+        collapsed = getattr(self, "_ver_collapsed", [])
+        if not collapsed:
+            return
+        vbar = self._ver_scroll.verticalScrollBar()
+        if vbar.maximum() <= 0 or value < vbar.maximum() - 48:
+            return
+        self._group_expanded[collapsed[0]] = True
+        self._ver_suppress_scroll = True
+        try:
+            self._refresh_version_list()
+        finally:
+            self._ver_suppress_scroll = False
 
     def _make_version_card(self, v: dict) -> QFrame:
         ver_id = v["id"]
@@ -737,22 +773,9 @@ class NewInstanceDialog(QDialog):
         info.addWidget(date)
         lay.addLayout(info, stretch=1)
 
-        if ver_id == self._selected_version:
-            from .ui_kit import state_pix
-            selected = QWidget()
-            selected.setAttribute(Qt.WA_StyledBackground, True)
-            sel_lay = QHBoxLayout(selected)
-            sel_lay.setContentsMargins(0, 0, 0, 0)
-            sel_lay.setSpacing(5)
-            si = QLabel()
-            si.setPixmap(state_pix("done", COLORS["success"], 13))
-            si.setFixedSize(14, 14)
-            st = QLabel(t("instances.current"))
-            st.setStyleSheet(f"color: {COLORS['success']}; font-weight: 600;")
-            sel_lay.addWidget(si)
-            sel_lay.addWidget(st)
-            lay.addWidget(selected)
-
+        # round-105 去重：此前被选中的版本行同时渲染绿色「✓ 当前」徽章
+        # 和下方那颗「当前」按钮，同一个词出现两次。这里只保留按钮侧的状态，
+        # 不再额外插一个徽章。
         btn = QPushButton(t("versions.install"))
         btn.setMinimumHeight(32)
         if ver_id == self._selected_version:
@@ -1203,11 +1226,16 @@ class InstancesPage(QWidget):
     current_changed = Signal(str)
     section_requested = Signal(str, str)  # section key, instance id
     scan_done = Signal()  # emitted when the embedded scanner closes
+    # round-107 T8：页面内新建实例后上报 id，由 MainWindow 统一发起后台下载。
+    instance_created = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.mgr = manager()
         self._rows: dict[str, _InstRow] = {}
+        # round-107 T8 实例行任务状态（仅内存，重启即清）：
+        #   id -> ("downloading", pct) | ("ready", 100)
+        self._task_states: dict[str, tuple[str, int]] = {}
         self._selected_id: str | None = None
         self._scan_panel = None
         self._new_panel = None
@@ -1237,6 +1265,21 @@ class InstancesPage(QWidget):
         hl.addWidget(self.new_btn)
         hl.addWidget(self.scan_btn)
         hl.addWidget(self.mrpack_btn)
+        # round-107 收起键重做：原按钮随列表一起折叠 → 位置来回跳动（用户反馈
+        # 「位置会偏移、很反人类」）。改为一颗**常驻页头**的图标按钮：无论列表
+        # 展开/收起，它始终停在同一个位置，状态靠图标方向 + tooltip 表达。
+        self.panel_btn = QPushButton("")
+        self.panel_btn.setFixedSize(34, 34)
+        self.panel_btn.setCursor(Qt.PointingHandCursor)
+        self.panel_btn.setToolTip(t("instances.fold_list"))
+        self.panel_btn.setIconSize(QSize(15, 15))
+        self.panel_btn.setStyleSheet(
+            f"QPushButton {{ background: {COLORS['bg_btn']}; color: {COLORS['text_main']};"
+            f" border: 1px solid {COLORS['border']}; border-radius: 8px; }}"
+            f"QPushButton:hover {{ background: {COLORS['bg_hover']}; }}"
+        )
+        self.panel_btn.clicked.connect(self._toggle_panel)
+        hl.addWidget(self.panel_btn)
         hl.addStretch(1)
         self._header = ui_kit.page_header(
             t("instances.title"), action=head_actions, icon_key="instances")
@@ -1279,29 +1322,12 @@ class InstancesPage(QWidget):
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.setSpacing(8)
 
-        # 列表标题行：标题 + 折叠按钮（◀ 收起列表 → 右侧详情全宽）
+        # 列表标题行（round-107：原「折叠按钮」上移到页头常驻 panel_btn，标题行只留标题）
         self._list_head = QHBoxLayout()
         self.list_lbl = QLabel(t("instances.list_title"))
         self.list_lbl.setProperty("cls", "group")
         self._list_head.addWidget(self.list_lbl)
         self._list_head.addStretch(1)
-        # round-91 折叠箭头自绘（初始即用 chev，不再用文本 ◀，避免字体/emoji 渲染不一致）
-        self.fold_btn = QPushButton("")
-        self.fold_btn.setToolTip(t("instances.fold_list"))
-        self.fold_btn.setCursor(Qt.PointingHandCursor)
-        self.fold_btn.setFixedSize(24, 22)
-        from .ui_kit import state_pix
-        self.fold_btn.setIcon(
-            QIcon(state_pix("chev", COLORS["text_sub"], 14)
-                  .transformed(QTransform().rotate(180))))
-        self.fold_btn.setIconSize(QSize(14, 14))
-        self.fold_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {COLORS['text_sub']}; "
-            f"border: none; border-radius: 6px; font-size: 12px; }}"
-            f"QPushButton:hover {{ background: {COLORS['bg_hover']}; }}"
-        )
-        self.fold_btn.clicked.connect(self._toggle_panel)
-        self._list_head.addWidget(self.fold_btn)
         left_lay.addLayout(self._list_head)
 
         self.list_scroll = QScrollArea()
@@ -1330,37 +1356,11 @@ class InstancesPage(QWidget):
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setSizes([280, 720])
 
-        # round-92 修复：之前收起时把整个 _left_panel setVisible(False)，折叠
-        # 按钮也跟着消失，列表再也点不回来。这里加一条常驻「展开条」：
-        # 展开状态下隐藏，收起后留在最左侧，提供反向箭头。
-        self._strip = QWidget()
-        self._strip.setFixedWidth(40)
-        self._strip.setVisible(False)
-        strip_lay = QVBoxLayout(self._strip)
-        strip_lay.setContentsMargins(0, 8, 0, 0)
-        strip_lay.setSpacing(0)
-        self.reopen_btn = QPushButton("")
-        self.reopen_btn.setToolTip(t("instances.fold_list"))
-        self.reopen_btn.setCursor(Qt.PointingHandCursor)
-        self.reopen_btn.setFixedSize(24, 22)
-        self.reopen_btn.setIcon(
-            QIcon(state_pix("chev", COLORS["text_sub"], 14)))
-        self.reopen_btn.setIconSize(QSize(14, 14))
-        self.reopen_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {COLORS['text_sub']}; "
-            f"border: none; border-radius: 6px; font-size: 12px; }}"
-            f"QPushButton:hover {{ background: {COLORS['bg_hover']}; }}"
-        )
-        self.reopen_btn.clicked.connect(self._toggle_panel)
-        strip_lay.addWidget(self.reopen_btn, 0, Qt.AlignHCenter)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        row.addWidget(self._strip)
-        row.addWidget(self._splitter, stretch=1)
-        body.addLayout(row, stretch=1)
+        # round-107：原「左侧展开条 + 折叠按钮」双按钮方案整体移除——收起按钮
+        # 已常驻页头（panel_btn），这里只放分割器，位置永不偏移。
+        body.addWidget(self._splitter, stretch=1)
         self._body_stack.addWidget(self._split_view)
+        self._sync_panel_btn()  # 初始同步页头收起按钮图标方向
 
         root.addWidget(self._body_stack, stretch=1)
         QTimer.singleShot(0, self._refresh)
@@ -1370,6 +1370,19 @@ class InstancesPage(QWidget):
         """Public entry point: rebuild the instance list. Called by the main
         window after the scan dialog closes so imported instances appear."""
         self._refresh()
+
+    def set_instance_task(self, inst_id: str, state: str, pct: int = 0) -> None:
+        """round-107 T8：由 MainWindow 驱动某实例的「下载中 / 就绪」徽标。
+
+        ``state`` 为空串则清除。仅内存态，不写实例字段（保持 Instance 幂等）。
+        """
+        if state:
+            self._task_states[inst_id] = (state, int(pct or 0))
+        else:
+            self._task_states.pop(inst_id, None)
+        row = self._rows.get(inst_id)
+        if row is not None:
+            row.set_task_state(self._task_states.get(inst_id))
 
     def _refresh(self, *, switch: bool = True):
         """Rebuild the left list + right details from the manager.
@@ -1434,6 +1447,7 @@ class InstancesPage(QWidget):
                 self._rows[inst.id] = row
             else:
                 row.refresh_state(inst.id == cur)
+            row.set_task_state(self._task_states.get(inst.id))
             self._list_vbox.insertWidget(idx, row)
         self._list_vbox.addStretch(1)
 
@@ -1589,6 +1603,8 @@ class InstancesPage(QWidget):
             (t("instances.open_saves"), "folder", (lambda: self._open_saves(inst))),
             # round-38 中轴：把整合包应用到已有实例（二次安装/升级）
             (t("instances.apply_pack"), "download", (lambda: self._apply_mrpack_to(inst))),
+            # 实例体检（含一键本地修复）：静态扫描性能模组 / JVM / Java / 启动参数
+            (t("health.title"), "tools", (lambda: self._health_check(inst))),
             (t("instances.crash_analyze"), "repair", (lambda: self._analyze_crash(inst))),
         ]:
             a = _more_menu.addAction(icon(ico), key)
@@ -1652,22 +1668,26 @@ class InstancesPage(QWidget):
         self._render_detail()
 
     # ── 左侧列表折叠：收起后面板隐藏 → 右侧详情全宽 ──
-    # round-92 修复：收起不再把唯一的按钮藏起来；改为面板整体隐藏，但最左侧
-    # 的展开条（reopen_btn）常驻可点。
+    # round-107 重做：按钮常驻页头（panel_btn），收起/展开位置始终不变；
+    # 不再有会跳位的「列表内箭头 + 左边缘展开条」双按钮。
     def _toggle_panel(self):
         self._list_panel_visible = not self._list_panel_visible
         self._left_panel.setVisible(self._list_panel_visible)
-        self._strip.setVisible(not self._list_panel_visible)
-        # 头部箭头始终表示「收起」；展开条箭头表示「展开」
-        from .ui_kit import state_pix
-        self.fold_btn.setIcon(QIcon(state_pix("chev", COLORS["text_main"], 14)
-                                    .transformed(QTransform().rotate(180))))
-        self.fold_btn.setIconSize(QSize(14, 14))
+        self._sync_panel_btn()
         if self._list_panel_visible:
             self._splitter.setSizes(
                 [self._splitter.width() // 3, self._splitter.width() * 2 // 3])
         else:
             self._splitter.setSizes([0, self._splitter.width()])
+
+    def _sync_panel_btn(self):
+        """同步页头收起按钮的图标方向（展开=◀ / 收起=▶）。tooltip 复用同一键。"""
+        from .ui_kit import state_pix
+        pix = state_pix("chev", COLORS["text_sub"], 14)
+        if self._list_panel_visible:
+            pix = pix.transformed(QTransform().rotate(180))
+        self.panel_btn.setIcon(QIcon(pix))
+        self.panel_btn.setIconSize(QSize(15, 15))
 
     def selected_instance(self) -> Instance | None:
         """当前选中的实例（供快捷键/外部调用）。round-42。"""
@@ -1689,8 +1709,8 @@ class InstancesPage(QWidget):
         m.addAction(t("instances.restore"),
                     lambda: self._restore(inst))
         m.addSeparator()
-        m.addAction(t("modcheck.title"),
-                    lambda: self._mod_check(inst))
+        m.addAction(t("health.title"),
+                    lambda: self._health_check(inst))
         m.addSeparator()
         m.addAction(t("instances.open_folder"),
                     lambda: self._open_folder(inst))
@@ -1827,10 +1847,17 @@ class InstancesPage(QWidget):
         from .crash_dialog import CrashDialog
         CrashDialog(inst, parent=self).exec()
 
+    def _health_check(self, inst: Instance):
+        """实例体检（N5 冲突预检的升级）：静态扫描 + 弹报告 + 一键本地修复。
+
+        修复只改实例字段并落盘保存，不联网、不动用户游戏文件。
+        """
+        from .mod_check_dialog import open_health_dialog
+        open_health_dialog(self, inst, self.mgr)
+
     def _mod_check(self, inst: Instance):
-        """启动前模组冲突预检（N5）：静态扫描 + 弹报告。"""
-        from .mod_check_dialog import open_check_dialog
-        open_check_dialog(self, inst)
+        """旧入口（模组冲突预检）→ 转调体检，保持兼容。"""
+        self._health_check(inst)
 
     def _delete_instance(self, inst: Instance):
         from .win_rounded import confirm
@@ -1877,12 +1904,18 @@ class InstancesPage(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle(_t("instances.instance_settings"))
         dlg.resize(480, 620)
+        dlg.setMinimumWidth(360)
         root = QVBoxLayout(dlg)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # round-107：禁止底部横向滑条（用户明确不允许横向滚动）——内容强制
+        # 收缩到视口宽度，长文本由 Qt 自动省略/换行，永远不会被挤成两列。
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         root.addWidget(scroll, stretch=1)
         content = QWidget()
+        content.setMinimumWidth(0)
+        content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay = QVBoxLayout(content)
         lay.setSpacing(12)
         # 内存
@@ -2125,6 +2158,7 @@ class InstancesPage(QWidget):
         self.new_btn.setEnabled(on)
         self.scan_btn.setEnabled(on)
         self.mrpack_btn.setEnabled(on)
+        self.panel_btn.setEnabled(on)
 
     def _mk_header_btn(self, text: str, icon_key: str, on_click,
                        w: int, accent: bool = False) -> QPushButton:
@@ -2170,6 +2204,8 @@ class InstancesPage(QWidget):
                             java_path=java_path)
         self._selected_id = inst.id
         self._close_new_panel()
+        # round-107 T8：交由 MainWindow 统一发起后台下载（状态栏 + 可召回对话框）。
+        self.instance_created.emit(inst.id)
         # _close_new_panel defers _refresh() via QTimer so the view rebuilds
         # after the wizard is fully destroyed.
 

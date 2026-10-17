@@ -38,17 +38,23 @@ _FORGE_FAMILY = {"forge", "neoforge", "cleanroom"}
 # id-key 勿拼错：既是 dataclass 字段名，也直接喂给 UI。
 SEV_WARNING = "warning"
 SEV_CRITICAL = "critical"
+# info：提示级（如"可以装但没装的性能模组"）。core.instance_health 复用本
+# dataclass 时用到；纯增量，不影响 scan_conflicts 既有消费方。
+SEV_INFO = "info"
 
 
 @dataclass
 class Finding:
     kind: str                     # loader_mismatch / missing_dep / duplicate_id
-    severity: str                 # critical / warning
+    severity: str                 # critical / warning / info
     title: str                    # i18n key（对话框翻译）
     reason: str                   # i18n key（发生了什么）
     suggestion: str               # i18n key（怎么修）
     filenames: list[str] = field(default_factory=list)   # 涉及的 .jar
     meta: dict = field(default_factory=dict)             # 如 {"dep": "fabric-api", "need": "1.20.x"}
+    # fix：可选的一键修复描述符（仅 core.instance_health 产出，None = 只报告）。
+    # 结构见 instance_health.apply_fix；scan_conflicts 恒为 None，保持既有语义。
+    fix: dict | None = None
 
 
 @dataclass

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "effect-frosted-glass",
+  "name": "毛玻璃",
+  "name_en": "Frosted Glass",
+  "version": "1.0.0",
+  "type": "effect",
+  "author": "AC",
+  "description": "把卡片与弹窗换成半透明的玻璃拟态质感，配合浅色/暗色主题都更通透。",
+  "description_en": "Turns cards and dialogs into a translucent frosted-glass look that reads well on both light and dark themes.",
+  "tags": ["frosted", "glass", "appearance"]
+}

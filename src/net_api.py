@@ -841,6 +841,22 @@ def curseforge_available() -> bool:
     return bool(_curseforge_key())
 
 
+def curseforge_keyless_enabled() -> bool:
+    """Whether the keyless fallback channel (cfwidget + forgecdn direct links) is on.
+
+    Default **off**: the public release must route CurseForge traffic through the
+    official API only. The keyless channel resolves a slug straight to
+    ``edge.forgecdn.net`` and therefore bypasses the mod author's third-party
+    distribution consent the API enforces — shipping it as a default would
+    contradict what we declare to CurseForge.
+    """
+    try:
+        from .settings_dialog import load_config
+        return bool(load_config().get("curseforge_keyless", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def search_curseforge(query: str = "", offset: int = 0, limit: int = 20) -> list[dict]:
     """Search CurseForge mods via the official API (needs an API key).
 

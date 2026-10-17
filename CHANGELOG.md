@@ -9,6 +9,97 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-108（2026-10-17）— CurseForge 对外发布合规准备
+
+> 依据 `docs/round108_memory.md`（TRAE 实测记录）整理。
+
+* **公开发布只挂 Modrinth**：查证 CurseForge 官方口径后确认，`cfwidget +
+  edge.forgecdn.net` 直链绕过作者在 CF 上的第三方分发授权，公开分发与申请声明冲突。
+  故免 key 通道**默认关闭**（`curseforge_keyless=False`），CF 源改为「谁用谁填 key」；
+  官方 API key 待作者成年后再申请（或由 18+ 家长作为合同主体代签）
+* `settings_dialog.py`：`_DEFAULTS` 加 `curseforge_api_key=""` / `curseforge_keyless=False`；
+  `_SENSITIVE_CFG_KEYS` 加入 `curseforge_api_key`——**导出/导入配置备份永不携带该 key**；
+  网络页新增「第三方服务」分组（key 输入框 + 免 key 勾选 + 两段 hint）
+* `net_api.py`：新增 `curseforge_keyless_enabled()`；`pages_browse.py` 的 CF 源改
+  **三态**：有 key → 官方关键词搜索；无 key + 开关开 → slug/链接解析；都没有 →
+  提示去设置填 key（清列表 + 状态栏提示，不起 worker）
+* **顺带修一个潜在崩溃**：`pages_browse._download` 在 CF 源下无条件调
+  `download_cfwidget_file(cf_file, ...)`，但官方 API 搜索命中的 hit 没有 `_cf_file`
+  （`search_curseforge` 只返回 `project_id`）→ `cf_file=None` 会在 worker 里炸。
+  即「**配了 key 能搜到、但一下载就崩**」。现改为有 `_cf_file` 走 forgecdn 直链，
+  否则走 `download_curseforge_mod(project_id, dest)`
+* i18n +7 键 × zh/en：`settings.cf_group/cf_key_ph/cf_key_hint/cf_keyless/cf_keyless_hint`
+  + `store.cf_hint_key/cf_no_key`
+
+## round-107（2026-10-17）— 全启动器 UI/UX 反馈批次（用户手工测试第二轮）
+
+> 依据 `docs/round107_memory.md`（TRAE 实测记录）整理。承接
+> `docs/round105_ui_feedback.md` 执行清单。
+
+* **T3 分辨率预设完全删除**：启动器不再给游戏传分辨率，由玩家在游戏内自由拖动窗口
+  缩放。删 UI 组 + 两个联动方法 + `_DEFAULTS` 两项 + 保存赋值；`launch.py` 侧
+  `res=None`，旧配置里已存的 `res_w` 也一并忽略
+* **T4** 实例设置对话框改 `QScrollArea` + `ScrollBarAlwaysOff`（禁止横向滚动/挤两列）
+* **T5** 实例页「收起」键重做：删「展开条 + 折叠按钮」双按钮，改页头常驻 `panel_btn`
+  （位置永不偏移）
+* **T6 左侧导航可收起为纯图标**（像 Blockhelm）：标题栏汉堡 `nav_toggle_btn` + 宽度动画
+  + `icons_only` 重排 + `#ac-nav` 紧凑 QSS
+* **T7 导航精简**：移除 模组 / 版本库 / 音乐 / 成就 / 控制台 五个入口，功能改由页面内
+  入口承接（设置页新增 `open_page` 信号、资源中心新增 `open_versions_requested`）；
+  `_switch_stack` 默认关页面动画
+* **T8 版本下载前移**：点安装/选版本即下载（不再等首次启动才补版本）。实例创建后立即
+  后台下载，状态栏进度 + 可召回下载对话框 + 实例行「下载中 {pct}% → 就绪」徽标；
+  `_handle_play` 加护栏——下载未完成不并发启动；**仅 AC 自建实例触发**，绝不向其他
+  启动器真实目录写入
+* **T9 首页极简**：只留 hero 当前实例卡 + 开始/结束游戏 + 一行修复提示
+* **N1** 启动/下载对话框可召回（状态栏进度条可点击 → 重开被收起的对话框）
+* **N2** 自动持续加载 + 卡片淡入；顺带修「全部」过滤下正式版被 `continue` 隐藏的真 bug
+* **N3** 版本图标回归 MC 3D 等距方块（草方块/命令方块/蛋糕/铁砧·圆石）
+* **N4** 进度条重做：`QProgressBar[cls="slim"]`（6px 圆角 accent 填充），去「黑框+方块」
+* **N5 效果开关 → 可选模块**：`type="effect"` + `EFFECT_CONFIG_KEYS` + 5 个 effect
+  bundle（成就弹窗 / 亚克力窗 / 磨砂 / 流光 / 页面动画），玻璃拟态/透底/流光/页面动画/
+  成就弹窗从设置页移出，默认不装
+* 验证：compileall exit 0；i18n zh 1271 / en 1271 零单边；离屏冒烟 21 条断言全绿
+* **待真机目检**：下载对话框、实例行任务徽标、导航图标模式、第三方服务分组排版
+  （离屏无字体，只能验结构/配色/几何）
+
+## round-106（2026-10-17）— 实例体检：N5 冲突预检 → 多分区体检 + 一键本地修复
+
+> 依据 `docs/round106_memory.md`（TRAE 实测记录）整理。
+
+* 新增扫描引擎 `src/core/instance_health.py`（471 行，**无 Qt，可无头回归**），
+  对外仅 `scan_health(inst, settings)` / `apply_fix(inst, fix)` /
+  `apply_all_safe(inst, findings)`
+* 把 `core.mod_check.scan_conflicts` 与四层自有检查合成 `groups`
+  （**mods / perf / jvm / java / args**）+ 计数（critical/warning/info）+
+  `scanned` + `fixable`；每层用 `_safe()` 包住——**单项检查抛异常绝不影响整体体检**
+* 五层检查、共 **13 个 kind**，其中 6 个带安全 fix（`aikar_off` / `g1gc_off` /
+  `disable_explicit_gc_off` / `ram_small` / `ram_large` / `residual_server_arg`），
+  外加条件触发的 `pretouch_missing` / `java_mismatch`
+* 层 1 `perf` 渲染模组冲突（sodium+embeddium 同装、OptiFine 与 Sodium/Iris/Oculus
+  并存）与推荐集缺失——**均 report-only 不产出 fix**
+* 防噪设计：性能模组推荐集只收公认五项（刻意不含 iris/indium/c2me/moreculling）；
+  `aikar_off` 与 `pretouch_missing` 互斥；不误报手填 JDK；零模组/原版实例不刷提示；
+  jar 上限 `_MAX_SCAN_JARS=60`（避免上百 jar 元数据读取拖死 UI 线程）
+* 修复范围**仅本地安全修复**：不联网、不动用户游戏文件
+* 用户经 AskUserQuestion 拍板：方向 = 启动器性能体检 + 一键优化；载体 = 升级现有
+  「冲突预检」为完整「实例体检」
+
+## round-105（2026-10-17）— UI 反馈修复（第一批）+ 功能扩展方案
+
+> 依据 `docs/round105_ui_feedback.md` 与 `docs/round105_plan_feature_expansion.md` 整理。
+
+* **T1 主题色未同步**：首页「开始游戏」大按钮改主题色后仍是旧紫色。根因是
+  `_make_play_btn` 用**内联 setStyleSheet 烘焙**了构造时的 `COLORS['accent']`，
+  切 accent 时全局 QSS 会重生但内联样式被冻结。修法：theme.py 新增 QSS 类
+  `QPushButton[cls="play"]`（用 `$accent` 变量），`_make_play_btn` 改 `cls="play"`
+  并删除内联样式
+* **T2 重复的「当前」**：新建实例向导「选择游戏版本」页，被选中版本行同时出现绿色
+  「✓ 当前」徽章 + 黄色「当前」按钮。删多余绿色徽章，只保留按钮侧状态
+* `docs/launcher_feature_ideas_2026-10-17.md`：功能扩展点子池 + 取舍结论；
+  `docs/round105_plan_feature_expansion.md`：A2/A1/B6 三方向实现方案
+  （**本轮只出方案不写生产代码**；摸底后修正——A2/B6 缺口在 UI 落地，A1 才是真空白）
+
 ## round-104（2026-10-17）— 全页面排版简化 · 对标其他启动器
 
 > 玩家要求：设置页别用折叠分栏、直接平铺；把「重复 / 多余 / 繁杂」的页面全部

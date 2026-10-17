@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "effect-acrylic-window",
+  "name": "透底窗口",
+  "name_en": "Acrylic Window",
+  "version": "1.0.0",
+  "type": "effect",
+  "author": "AC",
+  "description": "启用系统级亚克力（Acrylic）半透明窗口，桌面背景透出来，边缘更柔和。（仅 Windows 10 1803+ 生效）",
+  "description_en": "Enables the system Acrylic translucent window so the desktop shows through with softer edges. (Windows 10 1803+ only)",
+  "tags": ["acrylic", "transparent", "window"]
+}

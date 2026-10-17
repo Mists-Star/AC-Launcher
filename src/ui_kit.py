@@ -121,6 +121,12 @@ def state_pix(mode: str, color: str, size: int = 16) -> QPixmap:
                       Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.drawLine(QPointF(s * 0.5, s * 0.36), QPointF(s * 0.5, s * 0.62))
         p.drawLine(QPointF(s * 0.5, s * 0.74), QPointF(s * 0.5, s * 0.78))
+    elif mode == "menu":
+        # round-107 汉堡菜单（三横线）：侧栏收起/展开切换用，替代不可靠的
+        # emoji/符号文本。线宽随尺寸缩放，两端圆头。
+        p.setPen(QPen(c, max(1.6, s * 0.11), Qt.SolidLine, Qt.RoundCap))
+        for y in (0.28, 0.5, 0.72):
+            p.drawLine(QPointF(s * 0.18, s * y), QPointF(s * 0.82, s * y))
     p.end()
     return pm
 

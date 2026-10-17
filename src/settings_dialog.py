@@ -38,14 +38,14 @@ CONFIG_FILE = get_config_path("launcher_config.json")
 _SENSITIVE_CFG_KEYS = frozenset({
     "dev_mode_key",        # 开发者模式密钥
     "win_geometry",        # 窗口几何是本机 UI 态，跨机还原会飘出屏幕
+    # round-108：第三方服务密钥是本机凭证，导出/导入备份一律不带
+    "curseforge_api_key",
 })
 _DEFAULTS = {
     # ---- quick ----
     "ram_mb": 4096,
     "jvm_aikars": True,
     "window_mode": "windowed",       # windowed / borderless / fullscreen
-    "res_w": 1280,
-    "res_h": 720,
     "language": "zh-CN",
     "accent_color": "#7C3AED",        # hex
     "wallpaper_mode": "none",      # none / solid / image / version / gif / video
@@ -70,6 +70,11 @@ _DEFAULTS = {
     "exit_cmd": "",                    # 游戏退出后执行命令（shell）
     "ms_client_id": "",
     "authlib_path": "",
+    # round-108 第三方服务：CurseForge 官方 API 需要用户自己的 3rd-party key。
+    # 公开发布版不捆绑 key —— 谁用谁填。keyless 通道（cfwidget 直链）默认关，
+    # 避免公开分发时绕过作者的分发授权（与 CF ToS 声明保持一致）。
+    "curseforge_api_key": "",
+    "curseforge_keyless": False,
     "launch_sound": True,
     "launch_sound_trigger": "game",
     "launch_sound_file": "",
@@ -101,9 +106,10 @@ _DEFAULTS = {
     # round-51 透底效果：系统级 Acrylic 真毛玻璃（半透明无边框窗口 + 圆角镂空）
     # round-99 极简第一波：默认关，避免实色可读性被透底拖累
     "transparent_window": False,     # 开启后窗口透桌面模糊（可读性依赖实色卡片）
-    "page_transition": True,         # 页面切换淡入动画（round-99 保持默认开：动画是感官重点）
-    # round-100 成就解锁弹窗：默认关（右下角 MC 风格 toast 会打断操作；
-    # 想看的玩家在设置里开，成就页本身始终可从左侧导航进入）。
+    # round-107 页面切换淡入：已改为「可选模块」（默认不装 → 默认关）。
+    "page_transition": False,        # 页面切换淡入动画
+    # round-100 成就解锁弹窗：默认关（右下角 MC 风格 toast 会打断操作）。
+    # round-107 起与毛玻璃/透底/流光/页面动画一样改为可选模块。
     "achievement_toasts": False,
     # ---- 退出释放资源（round-50）----
     "close_after_launch": True,      # 游戏启动并稳定运行后自动关闭启动器
@@ -240,6 +246,9 @@ class SettingsPage(QWidget):
     saved = Signal()
     # Emitted by "取消" so MainWindow can leave the settings page.
     close_requested = Signal()
+    # round-107 页面入口：设置页内按钮跳转到其它页（音乐 / 成就 / 控制台，
+    # 这几个入口已从左侧导航移除）。载荷是页面 key。
+    open_page = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -514,56 +523,6 @@ class SettingsPage(QWidget):
         ml.addLayout(mode_row)
         lay.addWidget(mode_grp)
 
-        # ── Resolution（round-104 合并：预设网格 + 自定义像素同组联动）──
-        res_grp = QGroupBox(t("settings.resolution_preset"))
-        resl = QVBoxLayout(res_grp)
-        resl.setSpacing(10)
-        self.res_btns = QButtonGroup()
-        # round-79b：预设从 3 档扩到 8 档（16:9 / 16:10 / 超宽 / 4K）。
-        # round-103：改两列网格——此前每行 4 个，窄窗口下标签被横向截断；
-        # 两列时每列 ~380px，永不裁字。
-        res_grid = QGridLayout()
-        res_grid.setHorizontalSpacing(24)
-        res_grid.setVerticalSpacing(6)
-        _res_items = [
-            (1280, 720, t("settings.res_hd")),
-            (1600, 900, t("settings.res_900p")),
-            (1920, 1080, t("settings.res_fhd")),
-            (1920, 1200, t("settings.res_16x10_fhd")),
-            (2560, 1440, t("settings.res_2k")),
-            (2560, 1600, t("settings.res_16x10_2k")),
-            (3440, 1440, t("settings.res_ultrawide")),
-            (3840, 2160, t("settings.res_4k")),
-        ]
-        for _i, (rw, rh, label) in enumerate(_res_items):
-            btn = QRadioButton(label)
-            btn.setChecked(
-                int(self.cfg.get("res_w", 1280)) == rw
-                and int(self.cfg.get("res_h", 720)) == rh
-            )
-            btn.res_val = (rw, rh)
-            btn.clicked.connect(lambda _c, v=(rw, rh): self._apply_res_preset(v))
-            self.res_btns.addButton(btn)
-            res_grid.addWidget(btn, _i // 2, _i % 2)
-        res_grid.setColumnStretch(2, 1)
-        resl.addLayout(res_grid)
-        # 自定义像素（原「高级设置」的分辨率 spinbox 并入本组，去重）
-        rrow = QHBoxLayout()
-        rrow.addWidget(QLabel(t("settings.width")))
-        self.rw = QSpinBox(); self.rw.setRange(640, 7680)
-        self.rw.setValue(int(self.cfg.get("res_w", 1280)))
-        self.rh = QSpinBox(); self.rh.setRange(480, 4320)
-        self.rh.setValue(int(self.cfg.get("res_h", 720)))
-        self.rw.valueChanged.connect(self._sync_res_preset)
-        self.rh.valueChanged.connect(self._sync_res_preset)
-        rrow.addWidget(self.rw)
-        rrow.addWidget(QLabel(t("settings.height")))
-        rrow.addWidget(self.rh)
-        rrow.addStretch(1)
-        resl.addLayout(rrow)
-        self._sync_res_preset()
-        lay.addWidget(res_grp)
-
         # ── Cache cleanup（独立 grp，避免和外观挤一起）──
         cache_grp = QGroupBox(t("settings.cache_section"))
         cgl = QVBoxLayout(cache_grp)
@@ -643,27 +602,11 @@ class SettingsPage(QWidget):
 
         # round-49 液态流光 effect：流光卡片 / 页面动画 / 全局透明度
         # round-103：改两列网格——此前 8 个复选框挤在一行，窄窗口下标签被截断。
+        # round-107：毛玻璃/透底/流光/页面动画/成就弹窗 5 项已移出设置页（改为
+        # 「可选模块」，设置 → 模块与扩展，默认不装）。此处只留窗口行为三开关。
         fx_grid = QGridLayout()
         fx_grid.setHorizontalSpacing(24)
         fx_grid.setVerticalSpacing(6)
-        self.effect_trail_chk = QCheckBox(t("settings.effect_light_trail"))
-        self.effect_trail_chk.setChecked(self.cfg.get("effect_light_trail", False))
-        self.effect_trail_chk.toggled.connect(self._on_effect_trail)
-        # round-100 成就解锁弹窗开关（默认关；成就页仍可从左侧导航查看）
-        self.page_trans_chk = QCheckBox(t("settings.page_transition"))
-        self.page_trans_chk.setChecked(self.cfg.get("page_transition", True))
-        self.ach_toast_chk = QCheckBox(t("settings.achievement_toasts"))
-        self.ach_toast_chk.setChecked(self.cfg.get("achievement_toasts", False))
-        self.ach_toast_chk.setToolTip(t("settings.achievement_toasts_hint"))
-        # round-51 透底效果开关（系统 Acrylic 半透明窗口）
-        self.transparent_chk = QCheckBox(t("settings.transparent_window"))
-        self.transparent_chk.setChecked(self.cfg.get("transparent_window", False))
-        self.transparent_chk.toggled.connect(self._on_transparent_toggle)
-        # round-52 玻璃拟态开关（半透明卡片样式）
-        self.frosted_chk = QCheckBox(t("settings.frosted_theme"))
-        self.frosted_chk.setChecked(self.cfg.get("frosted_theme", False))
-        self.frosted_chk.setToolTip(t("settings.frosted_theme_hint"))
-        self.frosted_chk.toggled.connect(self._on_frosted_toggle)
         # round-50 退出释放资源：游戏启动后自动关闭启动器
         self.close_launch_chk = QCheckBox(t("settings.close_after_launch"))
         self.close_launch_chk.setChecked(self.cfg.get("close_after_launch", True))
@@ -675,11 +618,7 @@ class SettingsPage(QWidget):
         self.topmost_chk = QCheckBox(t("settings.always_on_top"))
         self.topmost_chk.setChecked(self.cfg.get("topmost", False))
         self.topmost_chk.toggled.connect(self._on_topmost_toggle)
-        _fx_boxes = [
-            self.effect_trail_chk, self.page_trans_chk, self.ach_toast_chk,
-            self.transparent_chk, self.frosted_chk, self.close_launch_chk,
-            self.tray_chk, self.topmost_chk,
-        ]
+        _fx_boxes = [self.close_launch_chk, self.tray_chk, self.topmost_chk]
         for _i, _cb in enumerate(_fx_boxes):
             fx_grid.addWidget(_cb, _i // 2, _i % 2)
         fx_grid.setColumnStretch(2, 1)
@@ -1028,6 +967,25 @@ class SettingsPage(QWidget):
         lay.addWidget(proxy_grp)
         self._on_proxy_toggle()  # sync proxy_edit enabled state to the radio
 
+        # 第三方服务（round-108）：CurseForge 官方 API Key。
+        # 公开发布版不捆绑 key —— 谁用谁填，各自作为独立的 API 使用者，
+        # 这才符合 CF 3rd Party API ToS 的年龄/署名要求。
+        cf_grp = QGroupBox(t("settings.cf_group"))
+        cl = QVBoxLayout(cf_grp)
+        cl.setSpacing(8)
+        self.cf_key_edit = QLineEdit(str(self.cfg.get("curseforge_api_key", "") or ""))
+        self.cf_key_edit.setPlaceholderText(t("settings.cf_key_ph"))
+        self.cf_key_edit.setMinimumWidth(0)
+        self.cf_key_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        cl.addWidget(self.cf_key_edit)
+        cl.addWidget(self._wrap_hint(t("settings.cf_key_hint")))
+        # 免 key 通道（cfwidget + forgecdn 直链）：默认关，仅供自用/兜底。
+        self.cf_keyless_chk = QCheckBox(t("settings.cf_keyless"))
+        self.cf_keyless_chk.setChecked(bool(self.cfg.get("curseforge_keyless", False)))
+        cl.addWidget(self.cf_keyless_chk)
+        cl.addWidget(self._wrap_hint(t("settings.cf_keyless_hint")))
+        lay.addWidget(cf_grp)
+
         lay.addStretch(1)
         return w
 
@@ -1154,6 +1112,15 @@ class SettingsPage(QWidget):
         bl.addWidget(QLabel(t("settings.bgm_hint")))
         lay.addWidget(bgm_grp)
 
+        # round-107：音乐页入口已从左侧导航移除 → 在「音效」分区补一个入口按钮。
+        music_row = QHBoxLayout()
+        open_music = QPushButton(t("settings.open_music"))
+        open_music.setMinimumHeight(32)
+        open_music.clicked.connect(lambda: self.open_page.emit("music"))
+        music_row.addWidget(open_music)
+        music_row.addStretch(1)
+        lay.addLayout(music_row)
+
         # UI sound effects
         sfx_grp = QGroupBox(t("settings.sfx"))
         xl = QVBoxLayout(sfx_grp)
@@ -1257,6 +1224,23 @@ class SettingsPage(QWidget):
         dgl.addWidget(open_diag)
         lay.addWidget(diag_grp)
 
+        # ── round-107 页面入口：成就 / 控制台 已从左侧导航移除，改由此处进入 ──
+        links_grp = QGroupBox(t("settings.page_links"))
+        lkl = QVBoxLayout(links_grp)
+        lkl.setSpacing(8)
+        links_row = QHBoxLayout()
+        open_ach = QPushButton(t("settings.open_achievements"))
+        open_ach.setMinimumHeight(32)
+        open_ach.clicked.connect(lambda: self.open_page.emit("achievements"))
+        open_con = QPushButton(t("settings.open_console"))
+        open_con.setMinimumHeight(32)
+        open_con.clicked.connect(lambda: self.open_page.emit("console"))
+        links_row.addWidget(open_ach)
+        links_row.addWidget(open_con)
+        links_row.addStretch(1)
+        lkl.addLayout(links_row)
+        lay.addWidget(links_grp)
+
         # ── 关于 / 守则（置底）──
         about_grp = QGroupBox(t("settings.about"))
         al = QVBoxLayout(about_grp)
@@ -1321,24 +1305,6 @@ class SettingsPage(QWidget):
             return 16 * 1024
         except Exception:
             return 16 * 1024
-
-    def _apply_res_preset(self, val) -> None:
-        """分辨率预设被点击 → 同步自定义像素框（预设即快捷跳转）。"""
-        self.rw.setValue(int(val[0]))
-        self.rh.setValue(int(val[1]))
-
-    def _sync_res_preset(self, *_):
-        """像素框变化 → 命中预设则勾选，否则取消全部预设勾选。"""
-        rw, rh = self.rw.value(), self.rh.value()
-        match = None
-        for b in self.res_btns.buttons():
-            if getattr(b, "res_val", None) == (rw, rh):
-                match = b
-                break
-        self.res_btns.setExclusive(False)
-        for b in self.res_btns.buttons():
-            b.setChecked(b is match)
-        self.res_btns.setExclusive(True)
 
     def _sync_ram_preset(self, *_):
         """滑块变化 → 命中预设则勾选，否则取消全部预设勾选。"""
@@ -1791,15 +1757,6 @@ class SettingsPage(QWidget):
         set_theme_mode(mode)
         apply_qss()
 
-    def _on_frosted_toggle(self, on: bool):
-        """Live 玻璃拟态开关（round-52）：半透明卡片 / 实色卡片即时切换。"""
-        try:
-            from .theme import set_frosted
-            set_frosted(on)
-            apply_qss()
-        except Exception:  # noqa: BLE001
-            pass
-
     def _on_topmost_toggle(self, on: bool):
         """Live 窗口置顶开关（round-79b）：即时让主窗置顶/取消置顶。"""
         win = self._window
@@ -1809,16 +1766,8 @@ class SettingsPage(QWidget):
             except Exception:  # noqa: BLE001 - 个别平台不支持时不打扰
                 pass
 
-    def _on_effect_trail(self, on: bool):
-        """Live-toggle 流光卡片 / 页面动画（round-49）。"""
-        from .effects import set_effects_enabled
-        try:
-            win = self._window
-            set_effects_enabled(on)
-            if win is not None and hasattr(win, "home"):
-                win.home.rebuild()
-        except Exception:  # noqa: BLE001
-            pass
+    # round-107：毛玻璃 / 透底 / 流光 三个 live 开关随对应设置项一并移除——
+    # 它们现在是可选模块，模块安装/卸载时由 modules.apply_effect_module 统一重应用。
 
     def _on_opacity_changed(self, val: int):
         """Live 应用全局透明度（round-49）。"""
@@ -1828,18 +1777,6 @@ class SettingsPage(QWidget):
             win = self._window
             if win is not None:
                 set_window_opacity(win, val / 100.0)
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _on_transparent_toggle(self, on: bool):
-        """Live 透底效果开关（round-51）：切系统 Acrylic + 半透明背景。"""
-        try:
-            from .theme import set_app_background_translucent, apply_qss
-            set_app_background_translucent(on)
-            apply_qss()
-            win = self._window
-            if win is not None and hasattr(win, "_apply_transparent_window"):
-                win._apply_transparent_window()
         except Exception:  # noqa: BLE001
             pass
 
@@ -2155,12 +2092,20 @@ class SettingsPage(QWidget):
             lambda: self.post_cmd_edit.text().strip(), target.get("post_launch_cmd", ""))
         target["exit_cmd"] = self._safe(
             lambda: self.exit_cmd_edit.text().strip(), target.get("exit_cmd", ""))
+        # round-108 第三方服务：CF API Key（敏感键，只在本地 cfg，不导出）+ 免 key 通道开关
+        target["curseforge_api_key"] = self._safe(
+            lambda: self.cf_key_edit.text().strip(),
+            target.get("curseforge_api_key", ""))
+        target["curseforge_keyless"] = self._safe(
+            self.cf_keyless_chk.isChecked,
+            bool(target.get("curseforge_keyless", False)))
         checked_mode = self._safe(self.mode_btns.checkedButton, None)
         if checked_mode:
             target["window_mode"] = getattr(checked_mode, "mode_key", target["window_mode"])
-        # round-104 分辨率：像素框为唯一数据源（预设按钮仅做快捷跳转，双向联动）
-        target["res_w"] = self._safe(self.rw.value, target["res_w"])
-        target["res_h"] = self._safe(self.rh.value, target["res_h"])
+        # round-105 分辨率预设已删除：不再向游戏下发分辨率，由玩家在游戏内
+        # 自由缩放窗口。旧配置里可能残留 res_w/res_h，这里一并清除。
+        target.pop("res_w", None)
+        target.pop("res_h", None)
         checked_lang = self._safe(self.lang_btns.checkedButton, None)
         if checked_lang:
             target["language"] = getattr(checked_lang, "lang_code", target["language"])
@@ -2182,8 +2127,6 @@ class SettingsPage(QWidget):
         checked_theme = self._safe(self.theme_btns.checkedButton, None)
         if checked_theme:
             target["theme_mode"] = getattr(checked_theme, "theme_mode_val", target["theme_mode"])
-        target["frosted_theme"] = self._safe(
-            lambda: self.frosted_chk.isChecked(), bool(target.get("frosted_theme", False)))
         target["theme_pack"] = self._safe(
             lambda: self.pack_combo.currentData() or "", target["theme_pack"])
         target["java_auto"] = self._safe(
@@ -2260,19 +2203,19 @@ class SettingsPage(QWidget):
             self.splash_on.isChecked, bool(target["splash_enabled"]))
         if hasattr(self, '_selected_color') and self._selected_color:
             target["accent_color"] = self._selected_color
-        # round-49 液态流光 effect 设置
-        target["effect_light_trail"] = self._safe(
-            self.effect_trail_chk.isChecked, bool(target["effect_light_trail"]))
-        target["page_transition"] = self._safe(
-            self.page_trans_chk.isChecked, bool(target["page_transition"]))
-        # round-100 成就解锁弹窗（默认关）
-        target["achievement_toasts"] = self._safe(
-            self.ach_toast_chk.isChecked, bool(target.get("achievement_toasts", False)))
+        # round-107 视觉效果（流光/页面动画/成就弹窗/透底/毛玻璃）已移出设置页 →
+        # 这些键归「可选模块」所有：已被某模块写入的键保持模块设定的值，其余一律
+        # 回落到「关」，避免旧配置残留让用户以为效果还开着、却无处可关。
+        from .modules import EFFECT_CONFIG_KEYS
+        _owners = dict(target.get("_effect_owners") or {})
+        for _k, _dflt in EFFECT_CONFIG_KEYS.items():
+            if _k in _owners:
+                target[_k] = self._safe(
+                    lambda k=_k, d=_dflt: bool(self.cfg.get(k, d)), _dflt)
+            else:
+                target[_k] = _dflt
         target["window_opacity"] = self._safe(
             lambda: self.win_opacity.value() / 100.0, target["window_opacity"])
-        # round-51 透底效果
-        target["transparent_window"] = self._safe(
-            self.transparent_chk.isChecked, bool(target["transparent_window"]))
         # round-50 退出释放资源
         target["close_after_launch"] = self._safe(
             self.close_launch_chk.isChecked, bool(target["close_after_launch"]))

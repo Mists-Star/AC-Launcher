@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "effect-page-transition",
+  "name": "页面切换动画",
+  "name_en": "Page Transition",
+  "version": "1.0.0",
+  "type": "effect",
+  "author": "AC",
+  "description": "切换页面时淡入 + 轻微上浮的过渡动画，让导航更顺滑；关闭则瞬时切换。",
+  "description_en": "A fade-in with a slight rise when switching pages, smoothing navigation. Turn it off for instant switching.",
+  "tags": ["transition", "animation", "page"]
+}

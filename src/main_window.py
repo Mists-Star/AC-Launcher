@@ -71,13 +71,13 @@ NAV_ITEMS = NAV_KEYS  # index-compatible alias: NAV_ITEMS[i][1] is still the key
 # 每项：(分组标题键 or None=不分组的独立主项, [(label键, key), ...])
 NAV_GROUPS = [
     (None, [("nav.home", "home")]),                             # 启动（主项）
-    ("nav.group.game", [("nav.instances", "instances"), ("nav.mods", "mods")]),
-    ("nav.group.resource", [("nav.store", "store"), ("nav.versions", "versions")]),
+    # round-107 侧栏最简：模组/版本库/音乐/成就/控制台 5 项从侧栏移除（用户已确认）。
+    # 功能全部保留，改由页面内入口承接——模组 → 实例页各分区；版本库 → 首页空态
+    # 「下载版本」+ 新建实例向导；音乐/成就/控制台 → 设置页内入口按钮。
+    ("nav.group.game", [("nav.instances", "instances")]),
+    ("nav.group.resource", [("nav.store", "store")]),
     ("nav.group.multiplayer", [("lobby.nav_lobby", "lobby")]),
-    # 其他：不常用 / AC 特供功能收进一个分组，避免主导航铺太开（round-92）
-    ("nav.group.other", [("nav.music", "music"),
-                         ("nav.achievements", "achievements")]),
-    ("nav.group.system", [("nav.account", "account"), ("nav.console", "console"), ("nav.settings", "settings")]),
+    ("nav.group.system", [("nav.account", "account"), ("nav.settings", "settings")]),
 ]
 
 # Stack index of every page — single source of truth for BOTH nav layouts
@@ -468,46 +468,18 @@ class HomePage(QWidget):
         文字 18px Bold。边框用深紫（不是白——round-32 颜色统一深色系）。
         """
         b = QPushButton(t("home.play"))
-        b.setProperty("cls", "accent")
+        # round-105 修「切换主题色后此按钮仍是旧色」：改用 QSS 类 play，
+        # QSS 内用 $accent 变量，随 apply_qss 重新着色。原内联 setStyleSheet
+        # 在构造时把当时的 accent 冻死，之后切 accent 不会更新（而侧边栏走
+        # 全局 QSS 会更新），于是出现「侧边栏金黄、按钮还紫」的分裂。
+        b.setProperty("cls", "play")
         b.setMinimumHeight(60)
         b.setMinimumWidth(160)
         b.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
         b.setCursor(Qt.PointingHandCursor)
         b.setIcon(icon("play"))
         b.setIconSize(QSize(24, 24))
-        # 强调色实底 + 自适应文字色 + 明显边框 + 投影，从不随主题分裂
-        # （round-91：颜色来自 palette 而非写死品牌紫）。
-        from .theme import COLORS as _C
-        b.setStyleSheet(
-            f"QPushButton {{"
-            f"  background: {_C['accent']};"
-            f"  color: {_C['text_on_accent']};"
-            f"  border: 2px solid {_C['accent_press']};"
-            f"  padding: 8px 24px;"
-            f"  border-radius: 12px;"
-            f"  font-weight: 600;"
-            f"}}"
-            f"QPushButton:hover {{ background: {_C['accent_hover']}; border: 2px solid {_C['accent_press']}; }}"
-            f"QPushButton:pressed {{ background: {_C['accent_press']}; border: 2px solid {_C['accent']}; }}"
-        )
         b.clicked.connect(self._on_play)
-        return b
-
-    def _quick_chip(self, ic, text, cb) -> QPushButton:
-        """Compact icon+label action chip used in the AC default home's
-        quick-action row.  Plain QPushButton with icon — no custom cls so it
-        inherits the theme's standard button styling.  Falls back to text-only
-        if the icon is missing so the chip never renders as an empty box."""
-        from .icons import icon as _icon
-        b = QPushButton(text)
-        b.setCursor(Qt.PointingHandCursor)
-        b.setMinimumHeight(40)
-        b.setMinimumWidth(120)
-        pix = _icon(ic).pixmap(18, 18) if _icon(ic) else None
-        if pix and not pix.isNull():
-            b.setIcon(pix)
-            b.setIconSize(QSize(18, 18))
-        b.clicked.connect(cb)
         return b
 
     # ── four style layouts ──
@@ -515,22 +487,8 @@ class HomePage(QWidget):
         _boot_trace("7.1 ac_default entry")
         self._title_block(lay)
 
-        # ── 统御统计条（direction A: 控制中枢叙事）──
-        # 已接管实例数 · 来源启动器数 · 待修复实例数，一眼看清 AC 的"统御力"。
-        # 用 RoundedCard 自绘圆角 —— QSS border-radius 不裁剪容器背景，
-        # QFrame 会是黑框直角（用户多次反馈"统计次数的黑框没圆角"）。
-        stats = RoundedCard(radius=12)
-        stats.setMinimumHeight(64)
-        sl = QHBoxLayout(stats)
-        sl.setContentsMargins(24, 12, 24, 12)
-        sl.setSpacing(28)
-        self.stat_instances = self._stat_cell(sl, "0", t("home.stat_taken"))
-        self.stat_sources = self._stat_cell(sl, "0", t("home.stat_sources"))
-        self.stat_repair = self._stat_cell(sl, "0", t("home.stat_repair"))
-        # round-46 用户反馈"统计条最右边的扳手孤立"：去掉右端 repair_btn
-        # （修复入口改由 stat_repair 格点击触发——下一轮迭代做可点击统计格）
-        _boot_trace("7.2 stats done")
-        lay.addWidget(stats)
+        # round-107 极简首页：删除「统御统计条」（已接管/来源/待修复）——信息与
+        # 实例页重复，且首页越堆越繁杂（用户反馈「首页太复杂」）。
 
         # ── hero 实例卡（round-100 极简：中性底 + 左侧 3px accent 竖条）──
         # 旧版是 accent→青 大面积渐变 + 白字白 pill：强调色铺底、浅色主题下
@@ -593,122 +551,25 @@ class HomePage(QWidget):
         lay.addWidget(hero)
         lay.addSpacing(14)
 
-        # ── 实例卡片网格（主流风格：点选切换 + 直接启动）──
-        grid_card = RoundedCard(radius=12)
-        grid_card.setMinimumHeight(96)
-        # round-46 用户反馈"首页实例网格被挤压"：maxHeight 320 太小——卡片
-        # minHeight 144 + 间距，2 行就超 → 卡片被压扁。提高到 520，滚动接管。
-        grid_card.setMaximumHeight(520)
-        self.inst_grid_card = grid_card
-        ginner = QVBoxLayout(grid_card)
-        ginner.setContentsMargins(16, 16, 16, 16)
-        ginner.setSpacing(10)
-
-        grid_head = QHBoxLayout()
-        grid_title = QLabel(t("home.instances_grid"))
-        grid_title.setProperty("cls", "group")
-        grid_head.addWidget(grid_title)
-        grid_head.addStretch(1)
-        grid_manage = QPushButton(t("home.manage_all"))
-        grid_manage.setCursor(Qt.PointingHandCursor)
-        from .ui_kit import accent_text
-        grid_manage.setStyleSheet(
-            f"QPushButton {{ font-size:12px; border:none; background:transparent; "
-            f"color:{accent_text()}; padding:4px 8px; border-radius:6px; }} "
-            f"QPushButton:hover {{ background:{COLORS['accent_soft']}; text-decoration:underline; }}"
-        )
-        grid_manage.clicked.connect(self._open_instances)
-        grid_head.addWidget(grid_manage)
-        ginner.addLayout(grid_head)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("background:transparent; border:none;")
-        self.inst_grid = QWidget()
-        self.inst_grid_lay = QGridLayout(self.inst_grid)
-        self.inst_grid_lay.setContentsMargins(0, 0, 0, 0)
-        self.inst_grid_lay.setSpacing(14)
-        scroll.setWidget(self.inst_grid)
-        ginner.addWidget(scroll, stretch=1)
-        lay.addWidget(grid_card)
-        _boot_trace("7.4 grid done")
-
-        # ── 修复日志流（direction A：看得见的自修复）──
-        log_card = RoundedCard(radius=12)
-        log_card.setMinimumHeight(64)
-        log_card.setMaximumHeight(108)
-        ll2 = QVBoxLayout(log_card)
-        ll2.setContentsMargins(20, 10, 20, 10)
-        ll2.setSpacing(6)
-        log_head = QHBoxLayout()
-        log_title = QLabel(t("home.repair_log"))
-        log_title.setProperty("cls", "group")
-        log_head.addWidget(log_title)
-        log_head.addStretch(1)
+        # ── 一行修复 / 异常提示（原「修复日志卡 + 快捷操作行」压缩为单行）──
+        # round-107：首页只保留「当前实例 + 开始游戏 + 一行提示」。实例网格与
+        # 快捷操作行与其他页重复，删掉。3D 皮肤小人位后续单独立项补上。
+        hint_row = QHBoxLayout()
+        hint_row.setSpacing(10)
+        self.log_stream = QLabel(t("home.repair_log_empty"))
+        self.log_stream.setProperty("cls", "sub")
+        self.log_stream.setWordWrap(True)
+        self.log_stream.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        hint_row.addWidget(self.log_stream, stretch=1)
         self.log_clear_btn = QPushButton(t("home.repair_log_clear"))
         self.log_clear_btn.setProperty("cls", "sub")
         self.log_clear_btn.setCursor(Qt.PointingHandCursor)
         self.log_clear_btn.setStyleSheet("font-size: 11px; border: none; background: transparent;")
         self.log_clear_btn.clicked.connect(self._clear_repair_log)
-        log_head.addWidget(self.log_clear_btn)
-        ll2.addLayout(log_head)
-        self.log_stream = QLabel(t("home.repair_log_empty"))
-        self.log_stream.setProperty("cls", "sub")
-        self.log_stream.setWordWrap(True)
-        self.log_stream.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        ll2.addWidget(self.log_stream, stretch=1)
-        lay.addWidget(log_card)
-
-        # ── 快捷操作行 ──
-        actions = QHBoxLayout()
-        actions.setSpacing(10)
-        # 第一个按钮 accent 色突出"扫描"——玩家最常用的入口
-        # 注意：底部"扫描实例"chip 与顶部"扫描接管"按钮功能重复。
-        # 顶部 CTA 是从其他启动器接管实例，
-        # 底部这里改成"刷新列表"——从磁盘重新读取已存在的实例清单，
-        # 便于玩家手动拷入新实例目录后立即可见，无需重启 AC。
-        actions.addWidget(self._quick_chip("refresh", t("home.refresh_list"), self._refresh_instances))
-        actions.addWidget(self._quick_chip("instances", t("nav.instances"), self._open_instances))
-        actions.addWidget(self._quick_chip("download", t("nav.versions"), self._open_versions))
-        actions.addWidget(self._quick_chip("server", t("server_fav.title"),
-                                       self.on_open_server_favorites or (lambda: None)))
-        actions.addWidget(self._quick_chip("settings", t("nav.settings"), self._open_settings))
-        actions.addStretch(1)
-        lay.addLayout(actions)
-        _boot_trace("7.45 actions done")
-
-    def _stat_cell(self, layout, value: str, label: str) -> QLabel:
-        """One statistic cell (big number + caption) in the 统御统计条."""
-        from PySide6.QtWidgets import QVBoxLayout as _VL
-        cell = QWidget()
-        cl = _VL(cell)
-        cl.setContentsMargins(0, 0, 0, 0)
-        cl.setSpacing(2)
-        # 数字标签：cls=big 给 QSS 配色 + 显式 setStyleSheet 兜底（避免 cls 属性
-        # 在某些主题下不生效导致深色背景看不清）。同时 setMinimumWidth 给数字固定
-        # 列宽避免 0/1/2/10 切换时整列跳动。
-        v = QLabel(value)
-        v.setProperty("cls", "big")
-        v.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
-        v.setAlignment(Qt.AlignCenter)
-        v.setMinimumWidth(56)
-        # 显式配色兜底：跟随当前主题（dark/light）的 text_main
-        from .theme import COLORS as _C
-        v.setStyleSheet(
-            f"color: {_C['text_main']}; font-size: 18px; font-weight: 700;"
-        )
-        cl.addWidget(v)
-        cap = QLabel(label)
-        cap.setProperty("cls", "sub")
-        cap.setStyleSheet(
-            f"font-size: 10px; color: {_C['text_sub']};"
-        )
-        cap.setAlignment(Qt.AlignCenter)
-        cap.setWordWrap(True)
-        cl.addWidget(cap)
-        layout.addWidget(cell)
-        return v
+        hint_row.addWidget(self.log_clear_btn, alignment=Qt.AlignTop)
+        lay.addLayout(hint_row)
+        lay.addStretch(1)
+        _boot_trace("7.45 home minimal done")
 
     # ── navigation callbacks ──
     def _open_settings(self):
@@ -726,8 +587,8 @@ class HomePage(QWidget):
     def _refresh_instances(self):
         """Re-read the instance list from disk and repaint the home page.
 
-        Triggered by the bottom-row "刷新列表" chip — distinct from the
-        top-right "扫描接管" CTA which actively scans other launchers.
+        round-107 极简首页后，快捷操作行已删除；本方法保留供刷新入口与
+        其他页面回调复用。
         """
         if self.inst_mgr is None:
             return
@@ -926,65 +787,27 @@ class HomePage(QWidget):
             pass
 
     def _refresh_stats(self, instances):
-        """Update the 统御统计条 (direction A): taken instances / source
-        launchers / instances with crash reports (待修复)."""
-        if not (hasattr(self, "stat_instances") and self._alive(self.stat_instances)):
-            return
-        taken = len(instances)
-        sources = set()
-        needs_repair = 0
-        for i in instances:
-            src = getattr(i, "launcher", "AC") or "AC"
-            if src != "AC":
-                sources.add(src)
-            # 轻量待修复判据：实例目录存在 crash-reports 或 logs/latest.log 有 ERROR
-            try:
-                mc = i.mc_dir
-                if os.path.isdir(os.path.join(mc, "crash-reports")):
-                    cr = os.path.join(mc, "crash-reports")
-                    if any(os.path.getsize(os.path.join(cr, f)) > 0
-                           for f in os.listdir(cr)):
-                        needs_repair += 1
-                        continue
-                logf = os.path.join(mc, "logs", "latest.log")
-                if os.path.isfile(logf) and os.path.getsize(logf) > 0:
-                    # round-34 性能：seek 到尾部只读 20KB，之前 f.read()[-20000:]
-                    # 会把整个 latest.log（可达数百 MB）读进内存卡 UI 线程。
-                    with open(logf, "r", encoding="utf-8", errors="ignore") as f:
-                        try:
-                            f.seek(max(0, os.path.getsize(logf) - 20000))
-                        except OSError:
-                            pass
-                        tail = f.read()
-                    if "ERROR" in tail or "Exception" in tail:
-                        needs_repair += 1
-            except Exception:
-                pass
-        self.stat_instances.setText(str(taken))
-        self.stat_sources.setText(str(len(sources)))
-        self.stat_repair.setText(str(needs_repair))
+        """round-107 极简首页：原「统御统计条」已删除，这里只刷新一行修复提示。"""
         self._refresh_repair_log()
 
     def _refresh_repair_log(self):
-        """Fill the home repair-log stream with recent auto-repair entries."""
+        """Fill the home one-line repair hint with the most recent entry."""
         if not (hasattr(self, "log_stream") and self._alive(self.log_stream)):
             return
         from .repair_log import list_recent
-        entries = list_recent(8)
+        entries = list_recent(1)
         if not entries:
             self.log_stream.setText(t("home.repair_log_empty"))
             return
         import datetime as _dt
-        lines = []
-        for e in entries:
-            ts = _dt.datetime.fromtimestamp(e.get("t", 0)).strftime("%H:%M")
-            summary = e.get("summary", "")
-            inst = e.get("instance", "")
-            text = f"[{ts}] {summary}"
-            if inst:
-                text += f"  ·  {inst}"
-            lines.append(text)
-        self.log_stream.setText("\n".join(lines))
+        e = entries[0]
+        ts = _dt.datetime.fromtimestamp(e.get("t", 0)).strftime("%H:%M")
+        summary = e.get("summary", "")
+        inst = e.get("instance", "")
+        text = f"[{ts}] {summary}"
+        if inst:
+            text += f"  ·  {inst}"
+        self.log_stream.setText(text)
 
     def _clear_repair_log(self):
         from .repair_log import clear
@@ -1237,6 +1060,10 @@ class MainWindow(QMainWindow):
         self.current_account = self.accounts_manager.current()
         _boot_trace("4 accounts ok")
         self._play_worker = None
+        # round-107 T8：实例创建后即后台下载。每实例一个 worker，
+        # 已被收起的下载对话框可经底部状态栏进度条召回。
+        self._dl_workers: dict[str, object] = {}
+        self._dl_dlgs: dict[str, object] = {}
         self._game_proc = None      # round-34：运行中游戏进程
         self._game_procs = {}       # round-92 多开：按实例 id 登记运行中游戏
         self._game_name = ""
@@ -1352,16 +1179,25 @@ class MainWindow(QMainWindow):
             self._build_pcl2_nav(root, body)
         else:
             self._build_ac_nav(body)
+        # round-107：汉堡收起按钮只在 AC 左侧导航布局下出现。
+        self.nav_toggle_btn.setVisible(self.nav_layout != "pcl2")
         _boot_trace("8 nav ok")
 
         body.addLayout(right, stretch=1)
         root.addLayout(body, stretch=1)
 
         # ── status bar with progress ──
+        # round-107：底部状态栏作为「迷你动态显示」——启动/下载期间显示步骤与
+        # 进度；点击进度条即可召回被收起的启动对话框（此前隐藏后无法拉回）。
         self._progress = QProgressBar()
+        self._progress.setProperty("cls", "slim")
+        self._progress.setFixedHeight(8)
         self._progress.setMaximumWidth(220)
         self._progress.setTextVisible(False)
         self._progress.setVisible(False)
+        self._progress.setCursor(Qt.PointingHandCursor)
+        self._progress.setToolTip(t("status.click_to_return"))
+        self._progress.installEventFilter(self)
         self.statusBar().addPermanentWidget(self._progress)
         self.statusBar().showMessage(t("status.ready"))
         ver = QLabel(f"{APP_DISPLAY}  {APP_VERSION}")
@@ -1775,15 +1611,106 @@ class MainWindow(QMainWindow):
         if hasattr(self, "mods_page"):
             self.mods_page.refresh()
 
-    def _on_instance_created(self, _id: str):
+    def _on_instance_created(self, inst_id: str):
         from .achievements import achievements as _ach
         _ach.unlock("first_instance")
         if len(self.inst_mgr.list()) >= 5:
             _ach.unlock("five_instances")
+        # round-107 T8：先落「下载中」徽标，再切到实例页（首次渲染即带状态），
+        # 最后才真正发起后台下载。
+        try:
+            self.instances_page.set_instance_task(inst_id, "downloading", 0)
+        except Exception:  # noqa: BLE001 - 页面未就绪不影响创建
+            pass
         if self.nav_layout == "pcl2":
             self._pcl2_goto("instances")
         else:
             self.nav.setCurrentRow(self._nav_row("instances"))
+        self._start_instance_download(inst_id)
+
+    # ── round-107 T8 实例创建后即后台下载（对齐主流「选版本即下载」）────────
+    def _start_instance_download(self, inst_id: str) -> None:
+        """后台下载/修复实例游戏文件；状态栏 + 可召回对话框显示进度。
+
+        复用 ``install_instance``（幂等：只补缺失文件）。因此「启动时就绪即跳过」
+        天然成立——文件齐备后启动走 ``launch.py`` 的 _skip 直通。仅对 AC 自建
+        （非 external）实例执行，绝不向其他启动器的真实目录写入。
+        """
+        inst = self.inst_mgr.get(inst_id)
+        if inst is None or getattr(inst, "external", False):
+            return
+        prev = self._dl_workers.get(inst_id)
+        if prev is not None and prev.isRunning():
+            return
+        from .core.install import install_instance
+        from .launch_dialog import LaunchProgressDialog
+
+        settings = load_config()
+        self._progress.setVisible(True)
+        self._progress.setMaximum(0)  # 未定长起步
+        self.statusBar().showMessage(t("status.downloading", name=inst.name))
+
+        dlg = LaunchProgressDialog(inst, parent=self, mode="download")
+        dlg.show()
+        self._dl_dlgs[inst_id] = dlg
+
+        w = ProgressWorker(
+            install_instance, inst,
+            java_auto=settings.get("java_auto", True),
+            java_path=(getattr(inst, "java_path", "") or settings.get("java_path", "")),
+            mirror=settings.get("download_mirror", "bmclapi"),
+            proxy=settings.get("download_proxy", ""),
+        )
+        w.status.connect(self.statusBar().showMessage)
+        w.status.connect(dlg.set_status_text)
+        w.step.connect(dlg.set_step)
+        w.progress.connect(self._set_progress)
+        w.progress.connect(dlg.set_progress)
+        w.progress.connect(
+            lambda v, m, iid=inst_id: self._on_download_progress(iid, v, m))
+        w.finished.connect(lambda _r, iid=inst_id: self._on_download_done(iid))
+        w.error.connect(lambda err, iid=inst_id: self._on_download_error(iid, err))
+        self._dl_workers[inst_id] = w
+        w.start()
+
+    def _on_download_progress(self, inst_id: str, value: int, maximum: int) -> None:
+        pct = int(value * 100 / maximum) if maximum and maximum > 0 else 0
+        try:
+            self.instances_page.set_instance_task(inst_id, "downloading", pct)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_download_done(self, inst_id: str) -> None:
+        self._dl_workers.pop(inst_id, None)
+        inst = self.inst_mgr.get(inst_id)
+        name = getattr(inst, "name", "") or inst_id
+        self._progress.setVisible(False)
+        self.statusBar().showMessage(t("status.download_ready", name=name), 6000)
+        try:
+            self.instances_page.set_instance_task(inst_id, "ready")
+        except Exception:  # noqa: BLE001
+            pass
+        dlg = self._dl_dlgs.pop(inst_id, None)
+        if dlg is not None:
+            dlg.mark_done(t("launch.download_ready"))
+            QTimer.singleShot(1200, dlg.close)
+
+    def _on_download_error(self, inst_id: str, err: str) -> None:
+        self._dl_workers.pop(inst_id, None)
+        inst = self.inst_mgr.get(inst_id)
+        name = getattr(inst, "name", "") or inst_id
+        self._progress.setVisible(False)
+        # 失败不阻断：实例仍可创建，首次启动会重新触发下载/修复（install 幂等）。
+        self.statusBar().showMessage(
+            t("status.download_error", name=name, err=err), 9000)
+        try:
+            self.instances_page.set_instance_task(inst_id, "")
+        except Exception:  # noqa: BLE001
+            pass
+        dlg = self._dl_dlgs.pop(inst_id, None)
+        if dlg is not None:
+            dlg.set_status_text(err)
+            QTimer.singleShot(2500, dlg.close)
 
     def _set_progress(self, value: int, maximum: int):
         if maximum and maximum > 0:
@@ -1792,6 +1719,38 @@ class MainWindow(QMainWindow):
         else:
             self._progress.setMaximum(0)  # indeterminate
         self._progress.setVisible(True)
+
+    def eventFilter(self, obj, event):
+        """round-107：点击底部状态栏进度条 → 召回被收起的启动/下载对话框。"""
+        if obj is self._progress and event.type() == QEvent.Type.MouseButtonPress:
+            self._reopen_launch_task()
+            return False
+        return super().eventFilter(obj, event)
+
+    def _reopen_launch_task(self):
+        """把后台仍在进行的启动/下载任务对话框重新拉到前台。
+
+        round-107 T8：若实例下载任务仍在跑，优先召回下载对话框。
+        """
+        dlg = None
+        try:
+            # 有下载任务在跑 → 召回其对话框（多实例并发时取仍在跑的那个）
+            for iid, w in getattr(self, "_dl_workers", {}).items():
+                if w.isRunning():
+                    dlg = getattr(self, "_dl_dlgs", {}).get(iid)
+                    break
+        except RuntimeError:  # C++ 对象已删除
+            pass
+        if dlg is None:
+            dlg = getattr(self, "_launch_dlg", None)
+        if dlg is None:
+            return
+        try:
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except RuntimeError:  # 对话框已被销毁（C++ 对象已删除）
+            self._launch_dlg = None
 
     # ---- top bar (full width, custom title bar) ----
     def _build_titlebar(self):
@@ -1811,6 +1770,19 @@ class MainWindow(QMainWindow):
         name.setProperty("cls", "big")
         name.setStyleSheet(f"color: {COLORS['accent']}; font-weight: 600; font-size: 15px;")
         lay.addWidget(name)
+        # round-107 侧栏图标模式（像 Blockhelm）：汉堡按钮常驻标题栏，收起后
+        # 左侧导航只剩图标、宽度收窄；仅 AC 左侧导航布局可见（顶栏布局不适用）。
+        from .ui_kit import state_pix as _state_pix
+        self.nav_toggle_btn = QPushButton()
+        self.nav_toggle_btn.setIcon(QIcon(_state_pix("menu", COLORS["text_sub"], 16)))
+        self.nav_toggle_btn.setIconSize(QSize(16, 16))
+        self.nav_toggle_btn.setFixedSize(34, 34)
+        self.nav_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.nav_toggle_btn.setProperty("cls", "icon-btn")
+        self.nav_toggle_btn.setToolTip(t("nav.collapse_sidebar"))
+        self.nav_toggle_btn.clicked.connect(self._toggle_nav_collapsed)
+        self.nav_toggle_btn.setVisible(False)  # 真实可见性在 nav 布局确定后设置
+        lay.addWidget(self.nav_toggle_btn)
         lay.addStretch(1)
 
         # ── Account button (dropdown menu for switch / add / remove) ──
@@ -2095,18 +2067,67 @@ class MainWindow(QMainWindow):
     def _build_ac_nav(self, body: QHBoxLayout):
         nav = QListWidget()
         nav.setObjectName("ac-nav")
-        # round-46 用户反馈"上下留白太多"：vertical margins 4px、item height 由 QSS 控
-        nav.setMinimumWidth(140)
-        nav.setMaximumWidth(200)
+        # round-107 图标模式（像 Blockhelm）：收起后宽度收窄到 56（只留图标），
+        # 展开 184。宽度用固定 min==max 控制，动画时同步改两者即可平滑过渡。
+        self._nav_icons_only = bool(self.cfg.get("nav_collapsed", False))
+        _w = 56 if self._nav_icons_only else 184
+        nav.setMinimumWidth(_w)
+        nav.setMaximumWidth(_w)
         nav.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         nav.setIconSize(QSize(22, 22))
         nav.setSpacing(0)  # 不要额外间距，留给 QSS padding
         nav.setContentsMargins(6, 4, 6, 4)
         nav.setUniformItemSizes(True)  # 性能 + 固定行高
+        nav.setProperty("compact", "true" if self._nav_icons_only else "false")
         nav.currentRowChanged.connect(self._on_nav)
         self.nav = nav
         self._populate_ac_nav()
+        if self._nav_icons_only:
+            try:
+                self.nav_toggle_btn.setToolTip(t("nav.expand_sidebar"))
+            except Exception:
+                pass
         body.addWidget(nav)
+
+    def _toggle_nav_collapsed(self):
+        """round-107 侧栏收起/展开（图标模式）：重建导航 + 宽度动画，状态持久化。"""
+        self._nav_icons_only = not getattr(self, "_nav_icons_only", False)
+        target = 56 if self._nav_icons_only else 184
+        self._populate_ac_nav()
+        try:
+            self.nav.setProperty("compact", "true" if self._nav_icons_only else "false")
+            self.nav.style().unpolish(self.nav)
+            self.nav.style().polish(self.nav)
+        except Exception:
+            pass
+        from PySide6.QtCore import QVariantAnimation, QEasingCurve
+        anim = QVariantAnimation(self)
+        anim.setDuration(180)
+        anim.setStartValue(self.nav.width())
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _step(v):
+            try:
+                self.nav.setMinimumWidth(int(v))
+                self.nav.setMaximumWidth(int(v))
+            except Exception:
+                pass
+
+        anim.valueChanged.connect(_step)
+        anim.start()
+        self._nav_anim = anim  # 防 GC
+        try:
+            self.cfg["nav_collapsed"] = self._nav_icons_only
+            save_config(self.cfg)
+        except Exception:
+            pass
+        try:
+            self.nav_toggle_btn.setToolTip(
+                t("nav.expand_sidebar") if self._nav_icons_only
+                else t("nav.collapse_sidebar"))
+        except Exception:
+            pass
 
     def _populate_ac_nav(self):
         """(Re)build the grouped left sidebar.
@@ -2119,8 +2140,10 @@ class MainWindow(QMainWindow):
         nav.blockSignals(True)
         nav.clear()
         self._nav_row_map: dict[int, str] = {}
+        # round-107 图标模式：隐藏分组标题、条目只留居中图标，hover 出 tooltip。
+        icons_only = getattr(self, "_nav_icons_only", False)
         for group_title, items in NAV_GROUPS:
-            if group_title is not None:
+            if group_title is not None and not icons_only:
                 hdr = QListWidgetItem()
                 hdr.setFlags(Qt.NoItemFlags)          # not clickable
                 hdr.setSizeHint(QSize(0, 26))
@@ -2129,7 +2152,12 @@ class MainWindow(QMainWindow):
                 hlabel.setProperty("cls", "nav-group")
                 nav.setItemWidget(hdr, hlabel)
             for label_key, key in items:
-                nav.addItem(QListWidgetItem(icon(key), t(label_key)))
+                label = t(label_key)
+                it = QListWidgetItem(icon(key), "" if icons_only else label)
+                if icons_only:
+                    it.setTextAlignment(Qt.AlignCenter)
+                    it.setToolTip(label)
+                nav.addItem(it)
                 self._nav_row_map[nav.count() - 1] = key
         # select the home row (first entry, no header above it → row 0)
         nav.setCurrentRow(0)
@@ -2383,6 +2411,7 @@ class MainWindow(QMainWindow):
         self.instances_page.current_changed.connect(self._on_current_changed)
         self.instances_page.section_requested.connect(self._on_instance_section)
         self.instances_page.scan_done.connect(self._refresh_after_import)
+        self.instances_page.instance_created.connect(self._on_instance_created)
         return self.instances_page
 
     def _build_mods(self):
@@ -2397,6 +2426,9 @@ class MainWindow(QMainWindow):
             list_instances=lambda: self.inst_mgr.list(),
             get_current_instance=self.current_instance,
         )
+        # round-107：版本库入口已从侧栏移除 → 资源中心页头「版本库」按钮跳转。
+        self.store_page.open_versions_requested.connect(
+            lambda: self._show_page("versions"))
         return self.store_page
 
     def _build_versions(self):
@@ -2448,6 +2480,8 @@ class MainWindow(QMainWindow):
         self.settings_page._window = self  # live-refresh hook
         self.settings_page.saved.connect(self._on_settings_saved)
         self.settings_page.close_requested.connect(lambda: self._show_page("home"))
+        # round-107：设置页内入口按钮 → 跳转到已从侧栏移除的页（音乐/成就/控制台）。
+        self.settings_page.open_page.connect(self._show_page)
         return self.settings_page
 
     def _build_toolbox(self):
@@ -2559,7 +2593,9 @@ class MainWindow(QMainWindow):
             if not self._maybe_save_settings():
                 return
         self._ensure_page(idx)  # 首次切换才真正构建该页（延迟加载）
-        if self.cfg.get("page_transition", True):
+        # round-107：页面切换动画已改为「可选模块」（page_transition 模块），
+        # 默认关 → 瞬时切换；装了模块后再走淡入。
+        if self.cfg.get("page_transition", False):
             fade_page_transition(self.stack, idx)
         else:
             self.stack.setCurrentIndex(idx)
@@ -2584,7 +2620,15 @@ class MainWindow(QMainWindow):
         if self.nav_layout == "pcl2":
             self._pcl2_goto(key)
             return
-        self.nav.setCurrentRow(self._nav_row(key))
+        # round-107：部分页面（mods/versions/music/achievements/console）已从侧栏
+        # 移除，没有对应导航行——此时直接切栈，不再去点不存在的行（否则会误落到首页）。
+        rows = {k: r for r, k in self._nav_row_map.items()}
+        if key in rows:
+            self.nav.setCurrentRow(rows[key])
+            return
+        idx = STACK_INDEX.get(key)
+        if idx is not None:
+            self._switch_stack(idx)
 
     def _on_account_btn_clicked(self):
         """Top-bar account button: no account → straight to login; has account
@@ -2825,6 +2869,12 @@ class MainWindow(QMainWindow):
         # （双开同一实例会争抢存档/资源，同款护栏；不同实例可并行）
         if getattr(inst, "id", "") in getattr(self, "_game_procs", {}):
             self.statusBar().showMessage(t("status.instance_running", name=inst.name))
+            return
+        # round-107 T8：该实例后台下载仍在进行 → 不并发启动（双写同一目录）。
+        _dl = getattr(self, "_dl_workers", {}).get(getattr(inst, "id", ""))
+        if _dl is not None and _dl.isRunning():
+            self.statusBar().showMessage(
+                t("status.download_blocked_launch", name=inst.name))
             return
         account = self.current_account or OFFLINE_ACCOUNT
         settings = load_config()

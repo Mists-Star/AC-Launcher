@@ -34,6 +34,8 @@ from .win_rounded import enable_win11_round_corners
 # Step ordering (must match the keys emitted by src/launch.py `_emit_step`).
 # The label is resolved lazily so retranslate_ui() keeps working.
 STEPS = ["check", "install", "prepare", "precheck", "start"]
+# round-107 T8 下载任务模式：实例创建后即后台下载，只需「安装 / 补齐」两步。
+_DL_STEPS = ["install", "prepare"]
 
 _STEP_KEYS = {
     "check": "launch.step.check",
@@ -61,9 +63,14 @@ class LaunchProgressDialog(QDialog):
 
     _MODE_PENDING, _MODE_RUNNING, _MODE_DONE = "pending", "running", "done"
 
-    def __init__(self, inst, parent=None):
+    def __init__(self, inst, parent=None, *, mode: str = "launch"):
         super().__init__(parent)
-        self.setWindowTitle(t("launch.title"))
+        # round-107 T8：mode="download" 复用同一套步骤列表/进度条范式，
+        # 只显示「安装 / 补齐」两步（实例创建后即下载时使用）。
+        self.mode = mode
+        self._steps = list(_DL_STEPS if mode == "download" else STEPS)
+        self.setWindowTitle(t("launch.download_title") if mode == "download"
+                            else t("launch.title"))
         self.setModal(False)
         self.setMinimumWidth(460)
         self.setMaximumWidth(560)
@@ -75,7 +82,8 @@ class LaunchProgressDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         self.titlebar = TitleBar(
-            self, title=t("launch.title"), height=38, controls="close")
+            self, title=(t("launch.download_title") if mode == "download"
+                         else t("launch.title")), height=38, controls="close")
         root.addWidget(self.titlebar)
 
         body = QWidget()
@@ -90,7 +98,9 @@ class LaunchProgressDialog(QDialog):
         head.addWidget(ic, 0, Qt.AlignLeft)
         titles = QVBoxLayout()
         titles.setSpacing(0)
-        self.title_lbl = QLabel(t("launch.launching", name=inst.name))
+        self.title_lbl = QLabel(
+            t("launch.download_sub", name=inst.name) if mode == "download"
+            else t("launch.launching", name=inst.name))
         self.title_lbl.setStyleSheet(
             f"font-size: 15px; font-weight: 700; color: {COLORS['text_main']};")
         titles.addWidget(self.title_lbl)
@@ -109,7 +119,7 @@ class LaunchProgressDialog(QDialog):
         sl = QVBoxLayout(steps_box)
         sl.setContentsMargins(14, 10, 14, 10)
         sl.setSpacing(6)
-        for key in STEPS:
+        for key in self._steps:
             row = QWidget()
             rh = QHBoxLayout(row)
             rh.setContentsMargins(0, 0, 0, 0)
@@ -129,13 +139,21 @@ class LaunchProgressDialog(QDialog):
         lay.addWidget(steps_box)
 
         # ── determinate download progress (only visible during install) ──
+        # round-107：改 slim 主题条（去塑料感），百分比用旁侧标签显示。
+        prog_row = QHBoxLayout()
+        prog_row.setSpacing(10)
         self.bar = QProgressBar()
-        # round-53 下载进度可见化：显示百分比数字
-        self.bar.setTextVisible(True)
-        self.bar.setFormat("%p%")
-        self.bar.setFixedHeight(14)
+        self.bar.setProperty("cls", "slim")
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
         self.bar.setVisible(False)
-        lay.addWidget(self.bar)
+        prog_row.addWidget(self.bar, 1)
+        self.pct_lbl = QLabel("")
+        self.pct_lbl.setProperty("cls", "sub")
+        self.pct_lbl.setMinimumWidth(38)
+        self.pct_lbl.setVisible(False)
+        prog_row.addWidget(self.pct_lbl)
+        lay.addLayout(prog_row)
 
         # ── status line ──
         self.status_lbl = QLabel(t("launch.status_unknown"))
@@ -145,7 +163,8 @@ class LaunchProgressDialog(QDialog):
 
         # ── footer ──
         foot = QHBoxLayout()
-        hint = QLabel(t("launch.auto_close_hint"))
+        hint = QLabel(t("launch.download_hint") if mode == "download"
+                      else t("launch.auto_close_hint"))
         hint.setStyleSheet(f"font-size: 11px; color: {COLORS['text_disabled']};")
         foot.addWidget(hint, 1)
         hide_btn = QPushButton(t("launch.hide_to_bg"))
@@ -161,14 +180,14 @@ class LaunchProgressDialog(QDialog):
         self._frameless.set_titlebar(self.titlebar)
         enable_win11_round_corners(self)
 
-        self._set_step("check", running=True)
+        self._set_step(self._steps[0], running=True)
 
     # ── public API (driven from the UI thread via worker signals) ─────────
     def set_step(self, key: str):
         """Worker.step slot — light up the given stage, done-ify the previous."""
-        key = key if key in self._modes else STEPS[0]
+        key = key if key in self._modes else self._steps[0]
         prev_running = None
-        for k in STEPS:
+        for k in self._steps:
             if self._modes[k] == self._MODE_RUNNING:
                 prev_running = k
         self._set_step(key, running=True)
@@ -183,25 +202,27 @@ class LaunchProgressDialog(QDialog):
 
     def set_progress(self, value: int, maximum: int):
         """Worker.progress slot — determinate bar while installing."""
+        self.bar.setVisible(True)
+        self.pct_lbl.setVisible(True)
         if maximum and maximum > 0:
-            self.bar.setVisible(True)
+            v = max(0, min(value, maximum))
             self.bar.setMaximum(maximum)
-            self.bar.setValue(max(0, min(value, maximum)))
+            self.bar.setValue(v)
+            self.pct_lbl.setText(f"{int(v * 100 / maximum)}%")
         else:
-            self.bar.setVisible(True)
             self.bar.setMaximum(0)  # indeterminate
-        self.bar.setStyleSheet(
-            f"QProgressBar {{ background: {COLORS['bg_input']}; border: none; "
-            f"border-radius: 7px; color: {COLORS['text_sub']}; font-size: 9px; "
-            f"text-align: center; }}"
-            f"QProgressBar::chunk {{ background: {COLORS['accent']}; "
-            f"border-radius: 7px; }}")
+            self.pct_lbl.setText(t("launch.status_unknown"))
 
     def mark_launched(self):
         """Game process spawned — flip every step to done (called by MainWindow)."""
-        for k in STEPS:
+        self.mark_done(t("launch.started"))
+
+    def mark_done(self, subtitle: str = ""):
+        """All steps done + optional subtitle (下载任务完成时也走这里）。"""
+        for k in self._steps:
             self._mark(k, self._MODE_DONE)
-        self.sub_lbl.setText(t("launch.started"))
+        if subtitle:
+            self.sub_lbl.setText(subtitle)
 
     # ── internals ───────────────────────────────────────────────────────────
     def _mark(self, key: str, mode: str):

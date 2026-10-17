@@ -31,8 +31,9 @@ MODULE_TYPES: dict[str, str] = {
     "jvm_preset": "modules.type_jvm_preset",
     "sfx_pack":   "modules.type_sfx_pack",
     "crash_pol":  "modules.type_crash_pol",
+    "effect":     "modules.type_effect",
 }
-TYPE_ORDER = ["theme_pack", "jvm_preset", "sfx_pack", "crash_pol"]
+TYPE_ORDER = ["effect", "theme_pack", "jvm_preset", "sfx_pack", "crash_pol"]
 MANIFEST_FILE = "manifest.json"
 
 _PAYLOAD_FILES = {
@@ -40,6 +41,20 @@ _PAYLOAD_FILES = {
     "jvm_preset": "preset.json",
     "sfx_pack":   "sfx.json",
     "crash_pol":  "policy.json",
+    "effect":     "effect.json",
+}
+
+# ── 视觉特效模块（round-107）：把原本在设置页里的毛玻璃/透底/流光等开关做成
+# 「可安装模块」（默认不装 → 默认关）。effect.json 形如：
+#     {"settings": {"frosted_theme": true, "transparent_window": true}}
+# 只允许写这里的键（白名单，防模块乱写配置）。_effect_owners 记录每个键由谁拥有，
+# 卸载时精确回滚；设置页保存时未装模块的键一律回落默认（关），杜绝残留。
+EFFECT_CONFIG_KEYS: dict[str, bool] = {
+    "frosted_theme": False,        # 玻璃拟态：半透明卡片
+    "transparent_window": False,   # 透底：系统 Acrylic 半透明窗口
+    "effect_light_trail": False,   # 液态流光：卡片曳光 + 反射扫光
+    "page_transition": False,      # 页面切换淡入动画
+    "achievement_toasts": False,   # 成就解锁弹窗
 }
 
 _RE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -361,6 +376,9 @@ def uninstall_module(mid: str) -> None:
         _unset_sfx_in_cfg(mid)
     if mod.type == "crash_pol":
         _unset_crash_in_cfg(mid)
+    # 视觉特效模块：卸载后把它拥有的特效键复位默认（关）并立即重应用
+    if mod.type == "effect":
+        _unset_effect_in_cfg(mid)
 
 
 def export_module_zip(mod: ModuleInfo, dest_path: str) -> None:
@@ -466,6 +484,77 @@ def apply_crash_module(mod: ModuleInfo) -> bool:
 def active_crash_policy() -> Optional[dict]:
     """取当前生效的崩溃策略（供崩溃流程读取，无则由调用方给默认）。"""
     return _cfg().get("crash_policy")
+
+
+def apply_effect_module(mod: ModuleInfo) -> bool:
+    """应用「视觉特效」模块：把 effect.json 的 settings 写进 config 并立即重应用。
+
+    载荷：``{"settings": {"frosted_theme": true, "transparent_window": true}}``；
+    键必须在 :data:`EFFECT_CONFIG_KEYS` 白名单内。默认不装 → 特效默认关闭。
+    """
+    payload = module_payload(mod)
+    if not payload:
+        raise ModuleError("特效模块缺少 effect.json")
+    settings = payload.get("settings") or payload.get("config") or {}
+    if not isinstance(settings, dict) or not settings:
+        raise ModuleError("effect.json 的 settings 为空")
+    unknown = [k for k in settings if k not in EFFECT_CONFIG_KEYS]
+    if unknown:
+        raise ModuleError(f"effect.json 含未知特效键：{', '.join(unknown)}")
+    c = _cfg()
+    owners = dict(c.get("_effect_owners") or {})
+    for key, val in settings.items():
+        c[key] = bool(val)
+        owners[key] = mod.id
+    c["_effect_owners"] = owners
+    _save(c)
+    _reapply_appearance()
+    return True
+
+
+def _reapply_appearance() -> None:
+    """把 config 里的视觉特效重新应用到当前运行窗口（装/卸模块后立即见效）。"""
+    try:
+        from . import theme
+        c = _cfg()
+        theme.set_frosted(c.get("frosted_theme", False))
+        theme.set_app_background_translucent(c.get("transparent_window", False))
+        theme.apply_qss()
+    except Exception:
+        pass
+    try:
+        from .effects import set_effects_enabled
+        set_effects_enabled(_cfg().get("effect_light_trail", False))
+    except Exception:
+        pass
+    try:
+        from PySide6.QtWidgets import QApplication
+        for w in QApplication.topLevelWidgets():
+            try:
+                if hasattr(w, "_apply_transparent_window"):
+                    w._apply_transparent_window()
+                home = getattr(w, "home", None)
+                if home is not None and hasattr(home, "rebuild"):
+                    home.rebuild()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _unset_effect_in_cfg(mid: str) -> None:
+    """卸载 effect 模块：把它拥有的特效键复位默认（关）并立即重应用。"""
+    c = _cfg()
+    owners = dict(c.get("_effect_owners") or {})
+    owned = [k for k, o in owners.items() if o == mid]
+    if not owned:
+        return
+    for key in owned:
+        c[key] = EFFECT_CONFIG_KEYS.get(key, False)
+        owners.pop(key, None)
+    c["_effect_owners"] = owners
+    _save(c)
+    _reapply_appearance()
 
 
 def _unset_theme_in_cfg(mid: str) -> None:
