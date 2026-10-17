@@ -9,6 +9,45 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-109（2026-10-17）— 下载止血 + PCL 式详细进度
+
+> 依据 `docs/round109_download_hardening.md`（TRAE 实测记录）整理。承接用户实测
+> 「下载卡死半个多小时只能杀进程」的反馈。
+
+* **根因**：`minecraft-launcher-lib` 的每次下载都走 `requests.session()` /
+  `requests.get()` 且**从不传 `timeout`** —— 一个卡住的 socket 会永久阻塞它所属的
+  `ThreadPoolExecutor` 线程，`future.result()` 永不返回、不报错、无法取消。另发现
+  `requests.Session.request()` 总把 `timeout` 显式塞进 `send` 的 kwargs（默认 `None`），
+  故 `setdefault` 永不生效，必须判断「是 `None`」
+* **止血 1** `src/core/mirror.py`：`MirrorSession` 注入 `(10, 30)` 超时 + 单次重试，
+  挂住的 socket 必在 read 间隔超时后抛 `ReadTimeout`（read 是相邻两次读的间隔上限，
+  持续有数据的慢速下载不误杀）
+* **止血 2** 覆盖 mll 自持 session 的三条路径：`_helper` / `install` / `runtime`
+  （mrpack / fabric / forge / quilt 经 `_helper.download_file` 传递覆盖）；
+  `_RequestsShim.get()` 把无 session 的裸 `requests.get()`（版本 json / logging config /
+  客户端 jar / JVM 清单）也收进 `MirrorSession`
+* **止血 3** 游戏文件两源皆 404 时显式 `raise_for_status()` —— 此前只静默
+  `return False`，安装却照报 `"Installation complete"`，缺文件被误报为成功
+* **止血 4** `src/main_window.py`：`_handle_play` 的下载护栏加**逃生口** ——
+  默认拦截（防双写同一目录），但可「取消下载并启动」；`worker.abort()` 让在途下载
+  立即抛错退出
+* **PCL 式进度** `src/worker.py`：`_DlStatus` 把 mll 裸状态串翻译成
+  「阶段 + 计数 + 文件名」（`正在下载依赖库（12/88） · asm-9.7.1.jar`），
+  40 位 sha1 一律折叠，阶段未知时透传原始串
+* **停滞检测** `_STALL_SECONDS = 45`：无任何回调超时即提示「网络较慢，仍在等待下载…」，
+  让「慢」与「挂死」对用户可区分
+* **打补丁与走镜像解耦** `src/core/install.py`：`install_instance` / `install_mrpack`
+  的 `if mirror == "bmclapi" or proxy:` 条件包裹改为**无条件**打补丁 —— 官方源用户
+  同样拿到超时 / 重试 / 取消，镜像与否由 `set_mirror` 在请求时判定
+* **顺带补一处缺口**：`repair_minecraft_dir`（实例体检路径 `diagnostics.py:445`）
+  此前直连 mll 无任何加固，仅在「会话首个网络动作就是体检」时暴露；现补上与
+  `install_instance` 一致的 `set_proxy` / `set_mirror` / `patch_install_session()`
+* i18n +12 键 × zh/en（`dl.phase.*` / `dl.downloading` / `dl.complete` /
+  `launch.dl_busy_*` / `launch.dl_cancelled` / `status.download_stalled` /
+  `status.download_cancelled`）
+* **两源回退**：BMCLAPI（主源）失败 → 原始 Mojang URL（次源）；非 Mojang 主机
+  （Modrinth / maven / 自有 API）不重写主机。单文件最坏边界 = 2 源 × 2 次 × 30s = 120s
+
 ## round-108（2026-10-17）— CurseForge 对外发布合规准备
 
 > 依据 `docs/round108_memory.md`（TRAE 实测记录）整理。
