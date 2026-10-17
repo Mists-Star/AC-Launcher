@@ -283,20 +283,6 @@ def _is_isolated_version_dir(version_dir: str) -> bool:
     return False
 
 
-def _detect_version(mc_dir: str):
-    """Return (game_version, loader) from the newest version manifest."""
-    versions = _enum_standard_versions(mc_dir)
-    if not versions:
-        return ("unknown", "vanilla")
-    versions.sort(
-        key=lambda v: os.path.getmtime(os.path.join(v[3], v[0] + ".json"))
-        if os.path.isfile(os.path.join(v[3], v[0] + ".json")) else 0,
-        reverse=True,
-    )
-    vid, base, loader, _ = versions[0]
-    return (base or vid, loader)
-
-
 # ---------- launcher-specific metadata parsers ----------
 
 # mmc-pack.json component uid → our loader id. Source: community metadata.
@@ -1038,8 +1024,3 @@ def _sweep_java(root: str, add_java, exe: str, max_depth: int, progress=None,
             if e.name in _JAVA_SKIP or e.name.startswith("$"):
                 continue
             stack.append((e.path, depth + 1))
-
-
-def scan_all():
-    """Convenience: run both discoveries. Returns (instances, javas)."""
-    return discover_instances(), discover_javas()

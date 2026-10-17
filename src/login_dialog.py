@@ -18,7 +18,7 @@ import os
 import webbrowser
 import secrets
 
-from PySide6.QtGui import QDesktopServices, QPixmap, QColor, QLinearGradient
+from PySide6.QtGui import QDesktopServices, QPixmap  # round-100：QColor/QLinearGradient 已随 hero 中性化移除
 
 from .theme import COLORS, RoundedCard
 from .icons import icon
@@ -204,27 +204,29 @@ class LoginDialog(QDialog):
         self._login_box.setVisible(True)
 
     def _build_hero(self) -> QWidget:
-        """紫色→洋红渐变的顶部横幅：图标 + 标题 + 副标题（白字）。
+        """顶部横幅（round-100 极简）：中性卡 + 左侧 3px accent 竖条。
 
-        对齐 Account 设计稿的高光 banner，作为登录弹窗的第一视觉焦点。
+        旧版是紫→洋红渐变 + 白字（大面积强调色，主题色一换整块变色），
+        改为中性底 + 全局 token 文字 + accent 竖条/小图标点缀。
         """
-        g = QLinearGradient(0, 0, 460, 0)
-        g.setColorAt(0.0, QColor(COLORS["accent"]))
-        g.setColorAt(0.55, QColor("#9333EA"))
-        g.setColorAt(1.0, QColor("#DB2777"))
-        hero = RoundedCard(radius=16, fill=g)
-        hero.setMinimumHeight(120)
+        hero = RoundedCard(radius=16, accent_border=3)
+        hero.setMinimumHeight(110)
         hl = QVBoxLayout(hero)
         hl.setContentsMargins(22, 18, 22, 18)
         hl.setSpacing(6)
         ic = QLabel()
-        ic.setPixmap(icon("account").pixmap(34, 34))
+        ic.setFixedSize(40, 40)
+        ic.setAlignment(Qt.AlignCenter)
+        ic.setProperty("cls", "tile")
+        ic.setPixmap(icon("account").pixmap(22, 22))
         hl.addWidget(ic)
         ttl = QLabel(t("login.heading"))
-        ttl.setStyleSheet("color:#FFFFFF; font-size:22px; font-weight:800;")
+        ttl.setProperty("cls", "big")
+        ttl.setStyleSheet("font-size:22px; font-weight:800;")
         hl.addWidget(ttl)
         sub = QLabel(t("login.subtitle"))
-        sub.setStyleSheet("color:rgba(255,255,255,0.92); font-size:12px;")
+        sub.setProperty("cls", "sub")
+        sub.setStyleSheet("font-size:12px;")
         sub.setWordWrap(True)
         hl.addWidget(sub)
         return hero

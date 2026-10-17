@@ -9,6 +9,246 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-104（2026-10-17）— 全页面排版简化 · 对标其他启动器
+
+> 玩家要求：设置页别用折叠分栏、直接平铺；把「重复 / 多余 / 繁杂」的页面全部
+> 审一遍再简化；先总体审计、再对标其他启动器的排版与功能分布，做一轮优化。
+
+* **先只读审计**（`docs/round104_audit.md`）：通读 10 个导航页 + 15 个对话框，
+  穷尽清点设置页 **约 27 个折叠组**，并分页列出 `[重复] / [多余] / [繁杂] /
+  [布局风险]` 问题；对标 **Prism Launcher（左栏分类 + 类内 Tab）、HMCL（左栏
+  不折叠扁平分组）、PCL2（顶部四板块）**——三家一致走「左侧分类导航」。
+* **设置页：3 段 / 27 折叠组 → 9 扁平分类**。左菜单改为
+  `基础 / 外观 / 启动 / 网络 / 音效 / 账号 / 高级 / Java 管理 / 模块与扩展`，
+  **组内不再折叠**。删除折叠管理器 `_FoldMgr` 整类与四个旧构建方法；
+  去重复：**游戏内存**（预设 + 滑块合并，滑块为唯一数据源）、**分辨率**
+  （预设 + 像素框合并，双向联动）、**JVM**（两组并入「启动」页）。
+  移除无运行期消费者的「启动器内存」`launcher_ram_mb`，并在保存时清理
+  历史键 `launcher_ram_mb` / `collapsed_groups`。
+* **首页删三套多余模板**：`pcl_card / hmcl_list / modrinth_modern` 自 round-32
+  起切换入口已移除、属死代码 → 只留 `ac_default`。连带清理
+  `apply_home_style / _refresh_pcl_avatar / _instance_card / _list_row` 及
+  onboarding 的 `style_changed / style 单选 / _update_style_preview` 与
+  对应 i18n 键（`style.* / settings.home_style* / onboard.step_style`）。
+* **控制台页**：两个语义重叠的输入框（搜索 / 过滤）**合一**（搜索即过滤 +
+  高亮 + 计数）；页头 5 个同级按钮收敛为「自动滚动」开关 + 「更多」菜单。
+* **模块页**：已安装模块行的导出 / 卸载图标钮、扩展行的重授权 / 卸载图标钮
+  收进行尾「⋯」菜单（新增 `_more_btn` helper）。
+* **资源中心**：目标实例上移页头（与源切换同排）；删掉独立「搜索」按钮，
+  搜索框输入即防抖搜索。
+* **顺延项并入本轮**：①补全 `new_instance` 的 **LiteLoader** 版本分支（原缺失
+  → 版本下拉恒空，接入 `fetch_liteloader_builds`）；②**旧版 Fabric** 支持列表
+  接入——后台预热 `fetch_legacy_fabric_games` 缓存，`_compatible_loaders` 由
+  启发式改为「有缓存用真实列表、无缓存回退」；③**模块页**展示 QtWebEngine
+  不可用的**具体原因**（`webengine_unavailable_reason`，文本可选可复制）。
+* **验证**：`compileall` 通过；i18n zh/en 键 **1202/1202** 无单边键；离屏冒烟
+  覆盖 SettingsPage 九分类、HomePage 构建 + refresh、ConsolePage 搜索即过滤、
+  StorePage / ModulesPage 构建、OnboardingDialog 无 style 残留、
+  NewInstanceDialog 加载器兼容表（含 legacyfabric/liteloader），全部 OK。
+
+## round-103（2026-10-16）— 手绘矢量 logo · 死代码清扫 · 设置裁字修复
+
+> 玩家四点要求：①启动 logo 别再用手写的 MC 像素字体；②代码里无用/多余/
+> 100% 走 fallback 的收掉；③排查「设置项存了但实际不生效」类隐患；
+> ④（顺延）修设置→外观底部文字裁切。
+
+* **启动 logo 换手绘矢量 monogram**（`brand.py` 新增几何 + `welcome_window.py`
+  / `splash_window.py` 重写）。起因：MC 像素字体属「字体不随包」（玩家
+  2026-09-25 决定），发布环境三级查找**每一级都失败**，两个启动页实际永远在
+  渲染系统 fallback 字体——既是死路径也是每次启动的无谓开销。新方案为
+  **填充式锥形笔锋路径**（中轴粗、两端尖），零字体/零外部资源，任何 DPI 都清晰。
+  出现动画由「缩放+淡入」改为**手写显现**（笔画按手绘顺序逐段画出，A 先 C 后）。
+  离屏渲染预览已目检：A 圆角顶、C 开月牙开口向右，形态正常。
+* **删除 `src/fonts.py`**（整模块 100% fallback 死代码）；同时清掉
+  `welcome_window.mark_ready`（空实现、全仓无调用）、`_on_stroke_done`、
+  `brand.APP_TAGLINE`（无引用）。
+* **修复真隐患：页面切换动画被流光开关牵连**（`effects.py`）。
+  `fade_page_transition` 在 `EFFECTS_ENABLED`（流光装饰总开关，默认关）关闭时
+  直接瞬时跳转 → 设置里「页面切换动画」开关（默认开）**形同虚设**，默认配置下
+  动画从不播放。改为只由调用方按 `page_transition` 配置决定，与流光解耦。
+* **修复设置→外观/分辨率预设文字被横向裁断**（`settings_dialog.py`）。
+  实测根因：外观组 8 个复选框、分辨率组 8 个单选各挤在一行，`QScrollArea`
+  强制页宽贴合视口 → 每项被压到 83–188px，长标签（最长需 228px）被截断；
+  离屏量测 `need>got` 逐条命中。两处均改**两列网格**，并在 760–1024px
+  四档宽度复测：**裁切 0 项**。
+* **删除设置页重复的 `lay.addWidget(app_grp)`**（`L816`/`L932` 加同一控件，
+  Qt 会把「外观」组移到最后）——保留一次，恢复编号注释的预期顺序。
+* **死代码全量清扫（脚本化校验）**：判据为「符号名在整项目出现次数 == 1（仅
+  定义行）」，即无任何调用/引用点（也排除 getattr 字符串引用）。据此删除
+  **33 个函数 + 2 个常量**：`main_window` 的 round-100 遗留模板构造器
+  （`nav_items`/`_yield`/`_make_scan_btn`/`_make_settings_btn`/`_action_card`/
+  `_quick_btn`/`_open_mods`）、`settings_dialog` 的 dev_mode 桩、
+  `async_image` 的扁平化前装饰绘制（含 `_circle`/`_hex`/`_MOTIF` 等）、
+  以及 `achievements`/`downloader`/`i18n`/`lobby`/`modules`/`onboarding`/`scan`/
+  `theme` 的无用访问器。`python -m compileall src main.py` 通过。
+* **修复「重置新手教程」点了无反应**（`settings_dialog._reset_tutorial`）。
+  教程开关自 round-45 起改为显式 flag 文件 `onboarding_done.flag`，旧实现却
+  仍在删已废弃的 `launch_count.txt`，且该文件不存在时连提示都不弹 → 按钮
+  100% 空操作。改为调用 `onboarding.reset_onboarding()`（函数内导入避免与
+  onboarding 循环依赖）。**此缺陷为收尾复核时新发现，非上轮清单项。**
+* **保留并上报 4 个「疑似未接线」符号**（疑为功能隐患而非纯死代码，未删）：
+  `main_window.apply_home_style` 及 `onboarding` 的 style 步骤分支 /
+  `style_changed` 信号——均为已移除的「主页模板切换」**刻意保留的恢复入口**
+  （注释注明 re-add 方式），非误留；`net_api.fetch_liteloader_builds` /
+  `fetch_legacy_fabric_games`（疑似应接入版本选择，LiteLoader / 旧版 Fabric
+  目前不可选）、`plugin_host.webengine_unavailable_reason`（WebEngine 不可用
+  时未向用户展示具体原因）。（`onboarding.reset_onboarding` 本轮已接入。）
+* **配置键复核修正**（上轮「5 个从未读取」经二次核对后收窄）：`jvm_aikars`
+  （`settings_dialog L1072` 旧配置迁移时读取）、`collapsed_groups`（折叠组
+  读取/写回）实为**在用**；`launcher_ram_mb` 仅在设置页回填滑块，**无任何
+  运行期消费者 → 承诺的「AC 自身加速（模组加载/资源解压）」不生效**（疑死
+  设置，待定：接线 or 移除）；真正从未读取的只有 `enabled_modules` 与
+  `dev_mode_key`（后者为已移除功能字段、注释标明「字段保留」）。
+  （`sfx_click/hover/success/error` 经核为**动态键** `cfg.get(f"sfx_{key}")`，
+  非死。）
+* **核实并排除误报**：探索代理误判 `page_transition` / `achievement_toasts` /
+  `close_after_launch` 三项「设置不生效」；实查三者均在 `_collect` 采集
+  （`settings_dialog` L2377+）且在运行期被读取（`main_window` L2912 / L1794 /
+  L3366），功能正常。
+
+## round-102（2026-10-16）— 风格门禁：外部 skill 移植 + 首次全量扫描
+
+> 玩家在 WB 国际版装了 `humanizer`（文案去AI味）与 `hallmark`（设计反 slop
+> 58 门禁）两个 skill，要求评估 AC 是否需要并抄用。结论：AC 已基本达标，
+> 转为**固化门禁**防回归。
+
+* **全量扫描结果**：i18n 1194 条中文 AI 高频词 0 命中；2944 条英文仅 1 处
+  （`ld_fabric` 的 "vibrant"，本轮修复）；感叹号仅 7 处且全为功能性 toast。
+  对比度 9/9 配对全过（亮/暗；最低暗色 `text_accent` 3.38:1，判定为
+  ≥18px 粗体限定）；饱和面积 ≤2%（门禁线 5%）。
+* **新增 [docs/style-gates.md](docs/style-gates.md)**：两 skill 的 Qt 适配版
+  —— 文案 10 条 + 视觉 12 条 + 发版抽查流程；含已知豁免（frameless 关闭红、
+  splash 光晕、占位 em dash）。今后改文案/样式/发版前照单过一遍。
+* `i18n.py`：`new_instance.ld_fabric` 英文 "Lightweight, vibrant mod
+  ecosystem" → "Lightweight loader, active mod ecosystem"（对齐中文语气，
+  消 vibrabt 类促销词）。
+* 待办顺延（玩家验收时确认）：设置→外观页底部复选框行被卡片底边裁切；
+  内存进一步下探的取舍。
+
+## round-101（2026-10-13）— 验收修复：导航全失效 · 清数据首启闪退 · 教程无任务栏图标
+
+> 玩家真机验收 round-100 时连续暴露 3 个阻断性问题，均在本轮修复并回归验证。
+
+* **致命：关闭流光特效后全部导航点击无响应**（`effects.py`）
+  `fade_page_transition` 开头 `if not EFFECTS_ENABLED: return`，而
+  `EFFECTS_ENABLED` 由装饰性配置 `effect_light_trail`（默认关）驱动；
+  `_switch_stack` 又把该函数当作**唯一**切页口——玩家一旦关闭流光（默认即关），
+  点击任何左侧菜单都不切页、且无异常。改为关特效时执行瞬时 `setCurrentIndex`
+  （切换是功能不是装饰），开特效时维持淡入+上浮。新增导航点击离屏回归
+  （9 个功能页 + 分组标题/弹窗行分流，特效开/关两条路径均断言切页）。
+* **致命：清空 data/ 或全新首启时静默闪退**（`main.py` + `main_window.py`）
+  首启流程为 splash 关闭 → 延迟 1.2s 弹新手教程 → 教程结束才 show 主窗口；
+  Qt 默认 `quitOnLastWindowClosed=True` 在 splash（最后一个可见窗口）关闭瞬间
+  直接退出 app，表现为「窗口一闪而过、日志停在构建完成、无任何报错」。
+  改为 `app.setQuitOnLastWindowClosed(False)` 手动管理生命周期，主窗口
+  `closeEvent` 实关闭分支显式 `QApplication.quit()`（托盘最小化 hide 不误退）。
+* **新手教程窗口在任务栏无图标**（`onboarding.py`）
+  教程对话框的 owner 是尚未 show 的主窗口，Windows 不给这种 owned window
+  发任务栏按钮。`showEvent` 首次显示时加 `WS_EX_APPWINDOW` 扩展样式，强制
+  任务栏条目（图标继承 app windowIcon）；失败静默不阻断教程。
+* **发布前清理**：删除历史测试实例（含扁平化坏布局，版本 json 散落在
+  `.minecraft` 根导致版本解析 notfound）、图标/网络缓存、成就、配置、
+  `_diag*/_audit*` 等全部诊断脚本与截图、`dist/`（749MB 打包产物）、
+  `__pycache__`、试验性 `*.spec`；`.gitignore` 补 `*.spec`。
+
+## round-100（2026-10-07）— 极简美学重构第二波：其余页面清扫 · 欢迎页 token · 动画打磨
+
+> round-99 第二波（清单见第一波段落：其余页面 + 欢迎页/AC 标志 + 成就入口 +
+> 动画三件套）。玩家指令「ac搁太久了，赶快做完」。
+
+* **alpha 序盲区第二波清扫**：`ui_kit.badge`、`pages_instances`（行徽章底/
+  「当前」标签/ModCard 启用态/`_badge_style`）、`modules_page` 4 处、
+  `scan_dialog` 2 处状态标、`achievements_page`、`java_manager_dialog`、
+  `settings_dialog` 主题色徽章、`main_window` 来源徽章，全部从
+  `{color}1F`/#RRGGBBAA 式手拼 → `with_alpha()`；`pages_instances` 新增
+  `_loader_vivid()`/`_loader_badge()`（与资源详情同一套「主题包声明
+  `loader_vivid` 才品牌色、默认中性」模式）
+* **首页 hero 重写（`main_window.py`）**：accent→#28BCD8 大渐变底 + 白字 +
+  白 pill + 白底 combo 全套内联 → `RoundedCard(radius=16, accent_border=3)`
+  中性卡 + `badge`/`sub` 类 + 全局实例选择器样式；主按钮沿用全局 accent
+  按钮；hero 高 192→176。`login_dialog` hero 同款重写（紫→洋红渐变 → 中性卡）
+* **成就解锁弹窗默认关**：`achievement_toasts: False`（设置→效果可开，
+  带提示语；成就页始终可从左侧导航进入），`_show_achievement_toast` 首行守卫
+* **欢迎页（`welcome_window.py`）**：暗色文字色硬编码 `#A78BFA` →
+  `COLORS["text_accent"]`（随自定义 accent 联动提亮），亮色保持
+  `accent_text()`；AC 像素墨迹渲染/透明画布/浮现动画维持 round-93 方案
+* **动画打磨（克制）**：`fade_page_transition` 150→160ms，新页追加
+  **8px 上浮汇入**（上浮前强制同步布局取真实落点、结束归位 → 连续切换零
+  漂移）；新增 `effects.fade_in_widget()` 一次性淡入（结束必清 effect），
+  应用于资源中心结果列表（仅整页重置，加载更多不闪整屏）与实例列表刷新
+* **移除资源中心 OptiFine 分类入口（拍板）**：`STORE_CATEGORIES` 去
+  optifine；`pages_browse` 清理 `_load_optifine`/下载分支/预取调用；
+  OptiFine 仍可从「新建实例 → 加载器」作为独立安装入口使用
+* **验证**：py_compile 14 文件；`_audit_i18n` 886 键（仅 3 个已知误报）；
+  离屏冒烟 `_diag_round100_tmp.py` 17 项全过（含动画零漂移/effect 清理、
+  分类按钮=表长、实例页 8 位 hex 全 alpha 在前）；第一波回归
+  `_diag_store_detail_tmp.py` 24 项全过；真机启动 `_startup.log` 到
+  `MainWindow built` + `hero done` 无异常
+* **补充（玩家复核「查bug + 颜色不能花里胡哨」）**：
+  - 硬编码色修复 4 处：`pages_instances._style_filter_btn` 选中态白字
+    `#FFFFFF` → `COLORS['text_on_accent']`（浅 accent 下白字不可读 bug）；
+    实例页 splitter hover 硬编码紫 `rgba(124,58,237,0.3)` →
+    `with_alpha(COLORS['accent'], 0x3D)`；`settings_dialog` 自定义色点
+    三色 `#33333A/#555/#9CA3B0` → 主题 token；`login_dialog` 清理
+    未使用的 `QColor/QLinearGradient` import
+  - `modules_page` 去花：模块类型徽章删除 `_TYPE_COLORS` 4 色 → 中性
+    `cls="badge"`（与加载器徽章同一理由：多色同屏显花）；作者/描述灰字
+    `#9CA3AF`/`#6B7280` → `cls="sub"`；已应用/已安装绿标 → `success`
+    token（`with_alpha` 底色）；内置蓝标 → 中性 badge
+  - 新增离屏计量审计 `_audit_visual_tmp.py`：11 页面高饱和像素面积占比
+    （`s>0.45 且 v>0.25`）全部 ≤2%（home 1.86% 最高，为 hero 主按钮 +
+    3px 竖条 + 边框点缀），8-hex 反序内联残留 = 0；ModsPage 截图复核
+    绿/灰/紫块均为 token/类驱动（success 12% 底 / badge / tile）
+
+## round-99（2026-09-27）— 极简美学重构第一波：全局中性基座 · 资源详情/资源中心去花哨
+
+> 玩家反馈「很多页面配色不清晰、颜色丑、色块压住文字」，拍板提前上极简美学重构
+> （分两波推进）。本波 = 全局基座 + 资源详情页/资源中心 + 漏键 + 花哨默认翻转；
+> 第二波 = 其余页面清扫 + 欢迎页/AC 标志 + 成就入口 + 动画打磨。
+
+* **Qt 颜色解析 bug（截图「半绿半紫」的真根因）**：Qt 的 8 位 hex 是
+  **`#AARRGGBB`（alpha 在前）**，旧代码 `f"{accent}22"`（= `#RRGGBBAA`）会被
+  解析成完全无关的颜色——紫 `#7C3AED` + `"22"` → `(58,237,20)` **荧光绿**。
+  页面里所有「淡色 accent」（横幅渐变的 `accent18`、推荐条 `accent14/40`、
+  chip `accent26`、加载器徽章底 `colr1F`、版本行 hover `accent66`）全是怪绿。
+  修复：`theme.py` 新增公开助手 `with_alpha()`；`_apply_accent` 的 `accent_soft`
+  改正确序（`#22RRGGBB`，实测 `#14B8A6` → `(20,184,166)` 而非怪色）
+* **全局基座（`theme.py`，不改 token 名 → 主题包兼容）**：新增中性 QSS 类
+  `hero / latest / vrow / badge / bare`（实色底 + 1px 描边，无渐变、无 accent
+  底纹）；`chip:checked` 从整块实色改为「accent 描边 + 淡底」点缀；写入
+  **强调色使用规约**：accent 只允许出现在主按钮、选中态、focus 描边、进度条与
+  ≤16px 小图标点缀上，禁止作文字背景或大面积底色
+* **资源详情页（`store_detail.py`）全面清扫**：横幅紫渐变 → `hero` 中性卡；
+  「推荐」条去 accent 底纹 → `latest`（唯一强调 = 左侧 3px accent 竖条 + 星标）；
+  加载器 13 色品牌徽章默认关（主题包声明 `"loader_vivid": true` 才恢复，兑现
+  「花哨保留但自选」）；分类/加载器徽章 → `badge` 中性；loader 筛选 chip 删除
+  整段内联样式 → 全局 `chip`；版本号不再按最新态染 accent；`_fill_latest`
+  加载器名改中性纯文本；「在线页面/加载更多/获取中文翻译」统一 `cls="secondary"`
+  （旧 `surface` 是卡片容器类，按钮上会显示成裸文字"链接"）
+* **资源中心（`pages_browse.py`）**：`_letter_fallback` 首字母图标从
+  `hash(title)%360` 随机饱和色块 → 中性灰底 + 次级文字色；`TYPE_COLOR` 模块级
+  颜色快照改 `_type_color()` 按需读 COLORS（切主题实时刷新），去掉 `#DB2777`
+  硬编码（并入中性）
+* **漏翻译 4 键**（中英都缺、界面直接显示 key 原文）：`store.detail_shown` /
+  `store.detail_load_more` / `store.detail_more_n` / `store.detail_all_loaded`
+* **花哨默认翻转**：`frosted_theme / transparent_window / effect_light_trail`
+  默认改 False（`settings_dialog` DEFAULTS + `main.py` / `main_window.py` 读取点
+  全部同步）；`page_transition` 保持 True（动画是感官重点，后续专门打磨）；
+  本地 `launcher_config.json` 仅关这 3 个花哨项，Java/内存/实例等配置全保留
+* **暗色「深色补丁压字」修复**：plain `QWidget` 包装层会被全局 `QWidget` 规则
+  画上 `bg_app` 底色——亮色主题下不可见（贴卡片色），暗色主题下在行卡片上成为
+  一块深色补丁压住版本号文字。新增 `bare` 裸容器类，版本号包装层挂上后像素级
+  验证透明（`alpha=0`）
+
+🔍 **验证**（TRAE 离屏实测）：
+* `_audit_i18n.py`：4 键补齐，MISSING 仅剩 3 个已知误报（`scan.note_` 为动态
+  拼接、`key`/`some.key` 为文档字符串）
+* `_diag_store_detail_tmp.py` 离屏冒烟 23 项全 PASS：全局类挂载、行内样式零
+  8 位 hex、分页文案本地化（「加载更多（共 53 个）」）、切 accent 后 `accent_soft`
+  正确解析、`_type_color` 实时取值、`bare` 容器像素透明
+* `py_compile` 全绿；截图目检 `_shots/store_detail_minimal_{light,dark}.png`：
+  无渐变、无彩块压字，亮/暗两套均「中性底 + 单一 accent 点缀」
+
 ## round-98（2026-09-25）— PCL 版本隔离导入启动失败修复 · 外来客户端宽容启动
 
 > 依据 `docs/round98_memory.md`（TRAE 实测记录）整理。

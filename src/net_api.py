@@ -805,13 +805,14 @@ def translate_text(text: str, target: str = "zh-CN") -> str:
 
 
 # 资源中心支持的 Modrinth project_type（对齐主流下载分类：模组/整合包/光影/资源包/数据包）
+# round-100：移除 OptiFine 分类入口（用户拍板）——OptiFine 仍可从"新建实例 →
+# 加载器"作为独立安装入口使用（见 core/install.py），资源中心不再单列分类。
 STORE_CATEGORIES = [
     ("mod",          "store.category_mod"),
     ("modpack",      "store.category_modpack"),
     ("shader",       "store.category_shader"),
     ("resourcepack", "store.category_resourcepack"),
     ("datapack",     "store.category_datapack"),
-    ("optifine",     "store.category_optifine"),
 ]
 
 # BMCLAPI OptiFine 元数据端点（按 MC 版本列出所有 OptiFine 版本）。
@@ -1247,6 +1248,15 @@ def fetch_legacy_fabric_games():
         raise NetError("Cannot fetch Legacy Fabric game versions: " + str(e)) from e
     _store(key, versions)
     return versions
+
+
+def legacy_fabric_games_cached():
+    """Cached Legacy Fabric supported MC versions, or None if not yet fetched.
+
+    Read-only cache peek (no network) so the UI can consult the real support
+    list without blocking; callers fall back to a heuristic while it is cold.
+    """
+    return _cached("legacyfab:games")
 
 
 CLEANROOM_RELEASES_API = "https://api.github.com/repos/CleanroomMC/Cleanroom/releases"

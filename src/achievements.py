@@ -68,14 +68,8 @@ class Achievements(QObject):
     def is_unlocked(self, aid: str) -> bool:
         return aid in self._unlocked
 
-    def unlocked_ids(self) -> list[str]:
-        return [a for a in ACHIEVEMENTS if a in self._unlocked]
-
     def progress(self) -> tuple[int, int]:
         return len(self._unlocked), len(ACHIEVEMENTS)
-
-    def unlocked_at(self, aid: str) -> float:
-        return self._unlocked.get(aid, 0.0)
 
     # ---- trigger ----
     def unlock(self, aid: str) -> bool:

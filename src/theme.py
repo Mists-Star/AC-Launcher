@@ -134,15 +134,6 @@ def set_frosted(on: bool) -> None:
     _notify_theme_change()
 
 
-def is_frosted() -> bool:
-    """当前是否开启玻璃拟态（半透明卡片）。"""
-    return _frosted
-
-
-def get_frosted_global() -> bool:
-    """兼容别名：同 is_frosted。"""
-    return _frosted
-
 # ── 透底效果（round-51）：系统级 Acrylic 真毛玻璃时，应用层背景变半透明，
 # ── 让 DWM 的桌面模糊透出来。关闭时恢复实色（round-32 的默认行为）。
 _app_bg_translucent = False
@@ -163,10 +154,6 @@ def set_app_background_translucent(on: bool) -> None:
     _notify_theme_change()
 
 
-def is_app_background_translucent() -> bool:
-    return _app_bg_translucent
-
-
 def _to_translucent(hex_color: str, alpha: int) -> str:
     """把 #RRGGBB 转成 #AARRGGBB（alpha 0..255）。"""
     try:
@@ -177,6 +164,17 @@ def _to_translucent(hex_color: str, alpha: int) -> str:
         return f"#{alpha:02X}{r:02X}{g:02X}{b:02X}"
     except Exception:
         return hex_color
+
+
+def with_alpha(hex_color: str, alpha: int) -> str:
+    """公开助手：#RRGGBB → #AARRGGBB（alpha 在前）。
+
+    ⚠️ Qt 的 8 位 hex 是 **#AARRGGBB**（round-99 排查确认）：把 alpha 拼在
+    末尾（`f"{accent}22"` = #RRGGBBAA）会被 Qt 当 AARRGGBB 解析成完全无关的
+    颜色——紫 #7C3AED + "22" 会解析出 (58,237,20) 亮绿。页面里一切"淡色/
+    半透明 accent"都必须走本函数，不要再手工拼末尾 alpha。
+    """
+    return _to_translucent(hex_color, alpha)
 
 
 # Active design tokens (override-able via theme packs)
@@ -249,7 +247,11 @@ def _apply_accent(hex_color: str) -> None:
         return f"{max(0, int(r * factor)):02x}{max(0, int(g * factor)):02x}{max(0, int(b * factor)):02x}"
     COLORS["accent_hover"] = _lighten(0.2)
     COLORS["accent_press"] = _darken(0.85)
-    COLORS["accent_soft"] = f"{_darken(0.95)}22"  # very faint tint with alpha
+    # round-99 修「改主题色后大片颜色变绿」：旧写法把 alpha 拼在末尾
+    # （f"{_darken(0.95)}22" = #RRGGBBAA），Qt 按 #AARRGGBB 解析 → 紫 accent
+    # 的"淡色"变成 (58,237,20) 亮绿，凡是引用 accent_soft / f"{accent}XX"
+    # 的地方（卡片底、chip 选中、横幅渐变…）全是荧光绿/黄。必须 alpha 在前。
+    COLORS["accent_soft"] = _to_translucent(hex_color, 0x22)  # faint accent film
     COLORS["text_accent"] = _lighten(0.15)
     COLORS["border_focus"] = hex_color
     # round-44 按钮文字自适应：accent 亮度低（深紫等）用白字，亮度高（浅色
@@ -1031,10 +1033,50 @@ QPushButton[cls="chip"]:pressed {
     color: $accent;
 }
 QPushButton[cls="chip"]:checked {
-    background: $accent;
-    color: $text_on_accent;
+    background: $accent_soft;   /* round-99：选中态=accent 描边+淡底（点缀），不再整块实色 */
+    color: $accent;
     border-color: $accent;
     font-weight: 600;
+}
+
+/* ---- round-99 极简基座：详情页中性容器（无渐变 / 无 accent 底纹）--------
+   强调色使用规约（新页面照办）：accent 只允许出现在主按钮、选中态、focus
+   描边、进度条，以及 ≤16px 的小图标点缀上；禁止作为文字背景或大面积底色
+   ——「色块压住文字」的根源。 */
+QFrame[cls="hero"] {
+    background: $bg_panel;
+    border: 1px solid $border;
+    border-radius: ${r_big}px;
+}
+QFrame[cls="latest"] {
+    background: $glassy;
+    border: 1px solid $border;
+    border-left: 3px solid $accent;   /* 唯一强调：3px 左条（点缀级） */
+    border-radius: ${r_card}px;
+}
+[cls="badge"] {
+    background: $bg_hover;
+    color: $text_sub;
+    border: 1px solid $border;
+    border-radius: ${r_small}px;
+    padding: 1px 9px;
+    font-size: ${f_xs}px;
+    font-weight: 600;
+}
+/* round-99：裸容器（无底色、无描边）。plain QWidget 会被全局 QWidget 规则
+   画上 bg_app 底色——亮色主题下不可见（贴卡片色），暗色主题下在卡片上变成
+   一块「深色补丁压住文字」。纯排布用的 QWidget 包装层挂本类即透明。 */
+[cls="bare"] {
+    background: transparent;
+    border: none;
+}
+QFrame[cls="vrow"] {
+    background: $glassy;
+    border: 1px solid $border;
+    border-radius: ${r_btn}px;
+}
+QFrame[cls="vrow"]:hover {
+    border: 1px solid $border_light;
 }
 """)
 
@@ -1147,10 +1189,6 @@ class RoundedCard(QFrame):
         self._accent_border = accent_border  # px accent stripe on the left
         # 容器透明 + 自绘背景（不再依赖 QSS background）
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-
-    def set_radius(self, r: int) -> None:
-        self._radius = r
-        self.update()
 
     def set_fill(self, fill) -> None:
         # 允许传入 hex 字符串（如 COLORS["bg_card"]），统一归一为 QColor，

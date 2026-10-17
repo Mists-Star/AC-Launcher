@@ -39,29 +39,7 @@ ONBOARDING_DEFAULTS = {
     "language": "zh-CN",
     "accent_color": "#7C3AED",
     "ram_mb": 4096,
-    "home_style": "ac_default",
 }
-
-
-def get_launch_count() -> int:
-    p = os.path.join(get_data_dir(), "launch_count.txt")
-    try:
-        with open(p, "r") as f:
-            return int(f.read().strip() or "0")
-    except (FileNotFoundError, ValueError):
-        return 0
-
-
-def increment_launch_count() -> int:
-    p = os.path.join(get_data_dir(), "launch_count.txt")
-    try:
-        c = get_launch_count() + 1
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w") as f:
-            f.write(str(c))
-        return c
-    except OSError:
-        return 999  # skip onboarding if we can't write
 
 
 def mark_onboarding_done() -> None:
@@ -93,10 +71,6 @@ def should_show_onboarding() -> bool:
 class OnboardingDialog(QDialog):
     """Multi-step wizard that runs before the main window on first launches."""
 
-    # Emitted whenever the user picks a home style, so the live main window can
-    # re-render its home page immediately (without persisting anything to disk).
-    style_changed = Signal(str)
-
     STEPS = [
         ("welcome", [
             ("title", "onboard.title"),
@@ -112,11 +86,6 @@ class OnboardingDialog(QDialog):
         ("ram", [
             ("title", "onboard.step_ram"),
         ]),
-        # NOTE: "style" step intentionally removed (2026-08-01) — template
-        # switching in the wizard caused dangling-C++-widget crashes
-        # (libshiboken "already deleted") while the live home page re-renders.
-        # Template switching is only available in Settings now. Restore by
-        # re-adding ("style", [("title", "onboard.step_style")]) here.
         ("java", [
             ("title", "onboard.step_java"),
             ("body", "onboard.java_text"),
@@ -204,6 +173,33 @@ class OnboardingDialog(QDialog):
         self._frameless.set_titlebar(self.titlebar)
 
         self._show_step(0)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        # 首启时主窗口尚未 show（教程走完才 _show_main），本对话框是一个
+        # 「owner 不可见的 owned window」——Windows 默认不给这类窗口发任务栏
+        # 按钮（用户反馈：教程窗口在、任务栏却找不到图标，容易以为程序没开）。
+        # 加 WS_EX_APPWINDOW 强制它在任务栏占一个条目（图标继承 app windowIcon）。
+        if getattr(self, "_appwindow_forced", False):
+            return
+        self._appwindow_forced = True
+        try:
+            import sys as _sys
+            if _sys.platform != "win32":
+                return
+            import ctypes
+            GWL_EXSTYLE = -20
+            WS_EX_APPWINDOW = 0x00040000
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+            user32.GetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+            user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+            style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_APPWINDOW)
+        except Exception:  # noqa: BLE001 - 任务栏图标是增强，失败不阻断教程
+            pass
 
     def _show_step(self, idx: int):
         self._step = idx
@@ -352,31 +348,6 @@ class OnboardingDialog(QDialog):
             )
             self.step_layout.addWidget(ram_w)
 
-        elif step_key == "style":
-            self.style_grp, style_w = _radio_group(
-                [("ac_default", t("style.ac_default")),
-                 ("pcl_card", t("style.pcl_card")),
-                 ("hmcl_list", t("style.hmcl_list")),
-                 ("modrinth_modern", t("style.modrinth_modern"))],
-                ONBOARDING_DEFAULTS["home_style"],
-            )
-            # Connect radio buttons: show preview + save immediately
-            for rb in self.style_grp.buttons():
-                rb.toggled.connect(self._on_style_picked)
-            self.step_layout.addWidget(style_w)
-
-            # Preview card — shows description of selected style
-            self.style_preview = QLabel()
-            self.style_preview.setWordWrap(True)
-            self.style_preview.setObjectName("style_preview")
-            self.style_preview.setStyleSheet(
-                f"background: {COLORS['bg_panel']}; border-radius: 8px; "
-                f"padding: 12px 16px; color: {COLORS['text_sub']}; "
-                f"font-size: 12px; border: 1px solid {COLORS['border']};"
-            )
-            self.step_layout.addWidget(self.style_preview)
-            self._update_style_preview(self.cfg.get("home_style", "ac_default"))
-
         elif step_key == "java":
             from .core.java import find_java
             from .core import java_install
@@ -444,18 +415,6 @@ class OnboardingDialog(QDialog):
             # Re-render current step so all text updates to new language
             self._show_step(self._step)
 
-    def _on_style_picked(self, checked: bool):
-        """Called when a style radio button is toggled."""
-        if not checked:
-            return
-        rb = self.sender()
-        if rb and hasattr(rb, 'val'):
-            self.cfg["home_style"] = rb.val
-            self._update_style_preview(rb.val)
-            # Notify the live main window so its home page re-renders immediately.
-            # (We do NOT persist this — onboarding must not pollute saved config.)
-            self.style_changed.emit(rb.val)
-
     def _on_ob_theme_picked(self, rb):
         """Live-preview theme when user picks light/dark in onboarding."""
         if rb is None or not hasattr(rb, "theme_mode_val"):
@@ -465,36 +424,6 @@ class OnboardingDialog(QDialog):
         set_theme_mode(mode)
         self.cfg["theme_mode"] = mode
         self._refresh_qss()
-
-    def _update_style_preview(self, style_key: str):
-        """Update the style preview card text based on selected style."""
-        previews = {
-            "ac_default": (
-                "AC Default — Clean centered layout with a large Play button, "
-                "instance card, and scan entry. Best for new users."
-            ),
-            "pcl_card": (
-                "Card Grid — Grid of instance cards with version badges, "
-                "mod count, and quick-action buttons. Visual & information-dense."
-            ),
-            "hmcl_list": (
-                "List — Traditional list view with instance details "
-                "in rows. Compact & familiar."
-            ),
-            "modrinth_modern": (
-                "Minimal Modern — Sidebar navigation with featured instances, "
-                "horizontal scrolling cards, and modern spacing."
-            ),
-        }
-        # Try i18n keys first, fall back to English descriptions
-        key = f"style.preview_{style_key}"
-        translated = t(key)
-        if translated != key:  # translation exists
-            text = translated
-        else:
-            text = previews.get(style_key, "")
-        if hasattr(self, 'style_preview'):
-            self.style_preview.setText(text)
 
     def _refresh_qss(self):
         """Re-generate and re-apply QSS so token changes take effect visually."""
@@ -535,10 +464,6 @@ class OnboardingDialog(QDialog):
             chk = self.ram_grp.checkedButton()
             if chk:
                 self.cfg["ram_mb"] = chk.val
-        elif key == "style" and hasattr(self, 'style_grp'):
-            chk = self.style_grp.checkedButton()
-            if chk:
-                self.cfg["home_style"] = chk.val
         elif key == "theme" and hasattr(self, 'ob_theme_grp'):
             chk = self.ob_theme_grp.checkedButton()
             if chk and hasattr(chk, "theme_mode_val"):
@@ -644,7 +569,7 @@ class OnboardingDialog(QDialog):
 
     def _persist_java(self):
         """Merge the Java choice into the saved config without touching the
-        wizard's preview-only settings (accent / ram / style / lang)."""
+        wizard's preview-only settings (accent / ram / lang)."""
         cfg = load_config()
         cfg["java_path"] = self.cfg.get("java_path", "")
         cfg["java_auto"] = self.cfg.get("java_auto", True)

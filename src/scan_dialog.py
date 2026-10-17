@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt, QSize, QTimer, Signal
 import time
 
 from .icons import icon
-from .theme import COLORS
+from .theme import COLORS, with_alpha
 from .i18n import t
 from .worker import Worker
 from .scan import discover_instances, ScannedInstance
@@ -71,7 +71,8 @@ class _InstanceRow(QWidget):
         # 未导入标记：让玩家一眼看出"这只是发现，还没归 AC 管"。
         self.state_lbl = QLabel(t("scan.not_imported"))
         self.state_lbl.setStyleSheet(
-            f"color: {COLORS['warn']}; background: {COLORS['warn']}1F; "
+            f"color: {COLORS['warn']};"
+            f" background: {with_alpha(COLORS['warn'], 0x1F)}; "
             f"border-radius: 9px; padding: 2px 10px; font-size: 11px;"
         )
         lay.addWidget(self.state_lbl)
@@ -92,7 +93,8 @@ class _InstanceRow(QWidget):
     def mark_imported(self):
         self.state_lbl.setText(t("scan.imported"))
         self.state_lbl.setStyleSheet(
-            f"color: {COLORS['success']}; background: {COLORS['success']}1F; "
+            f"color: {COLORS['success']};"
+            f" background: {with_alpha(COLORS['success'], 0x1F)}; "
             f"border-radius: 9px; padding: 2px 10px; font-size: 11px;"
         )
         self.btn.setText(t("scan.imported"))

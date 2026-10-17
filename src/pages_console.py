@@ -12,7 +12,7 @@ from PySide6.QtGui import (QFont, QTextCursor, QDesktopServices,
                            QTextCharFormat, QColor)
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit,
-    QLineEdit, QApplication, QFileDialog, QLabel, QTextEdit,
+    QLineEdit, QApplication, QFileDialog, QLabel, QTextEdit, QMenu,
 )
 
 from .theme import COLORS, F_SM
@@ -43,26 +43,35 @@ class ConsolePage(QWidget):
         root.setSpacing(16)
 
         # ── header：标题 + 当前实例 + 工具按钮 ──
+        # round-104：把 5 个同级按钮收敛为「自动滚动」开关 + 「更多」菜单，
+        # 复制/打开目录/导出/清空都进菜单，页头不再拥挤。
         self._auto_btn = ui_kit.make_button(
             t("console.autoscroll"), kind="secondary", icon_key="refresh",
             on_click=self._toggle_autoscroll, checkable=True, min_h=32)
         self._auto_btn.setChecked(True)
+        self._more_btn = ui_kit.make_button(
+            t("console.more"), kind="secondary", min_h=32)
+        self._more_btn.setCursor(Qt.PointingHandCursor)
+        _m = QMenu(self._more_btn)
+        for key, slot in (
+            (t("console.copy"), self._copy),
+            (t("console.open_folder"), self._open_folder),
+            (t("console.export"), self._export),
+        ):
+            _m.addAction(key).triggered.connect(
+                lambda _c=False, f=slot: f())
+        _m.addSeparator()
+        _m.addAction(t("console.clear")).triggered.connect(
+            lambda _c=False: self._clear())
+        self._more_btn.setMenu(_m)
         self._header = ui_kit.page_header(
             t("console.title"), desc="", icon_key="console",
-            action=[
-                self._auto_btn,
-                ui_kit.make_button(t("console.copy"), kind="secondary",
-                                   icon_key="export", on_click=self._copy, min_h=32),
-                ui_kit.make_button(t("console.open_folder"), kind="secondary",
-                                   icon_key="folder", on_click=self._open_folder, min_h=32),
-                ui_kit.make_button(t("console.clear"), kind="secondary",
-                                   icon_key="delete", on_click=self._clear, min_h=32),
-            ])
+            action=[self._auto_btn, self._more_btn])
         self._sub = self._header.desc_lbl
         root.addWidget(self._header)
 
-        # ── 搜索行（round-77，对齐 Zaphyrous 日志面板）：搜索并高亮全部匹配，
-        #    Enter 跳下一个；右侧「导出…」把当前（过滤后的）视图存成 .txt ──
+        # ── 搜索行（round-77）：单个输入框同时做「过滤 + 高亮」——搜索即过滤，
+        #    Enter 跳下一个匹配；匹配计数在右侧 ──
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
         self._search = QLineEdit()
@@ -75,17 +84,7 @@ class ConsolePage(QWidget):
         self._count_lbl.setStyleSheet(
             f"color: {COLORS['text_sub']}; font-size: {F_SM}px;")
         search_row.addWidget(self._count_lbl)
-        search_row.addWidget(ui_kit.make_button(
-            t("console.export"), kind="secondary", icon_key="export",
-            on_click=self._export, min_h=32))
         root.addLayout(search_row)
-
-        # ── 过滤行 ──
-        self._filter = QLineEdit()
-        self._filter.setPlaceholderText(t("console.filter_placeholder"))
-        self._filter.setClearButtonEnabled(True)
-        self._filter.textChanged.connect(self._render)
-        root.addWidget(self._filter)
 
         # ── 日志面板 ──
         self._view = QPlainTextEdit()
@@ -159,7 +158,7 @@ class ConsolePage(QWidget):
 
     def _render(self, force: bool = True):
         lines = self._buffer.splitlines()
-        q = self._filter.text().strip().lower()
+        q = self._search.text().strip().lower()
         if q:
             lines = [ln for ln in lines if q in ln.lower()]
         if len(lines) > _MAX_LINES:

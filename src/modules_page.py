@@ -15,21 +15,19 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QGroupBox, QCheckBox, QFrame, QSizePolicy,
+    QGroupBox, QCheckBox, QFrame, QSizePolicy, QMenu,
 )
 
 from . import modules as M
 from . import plugin_host as PH
 from .i18n import t, get_language
+from .theme import COLORS, with_alpha
 from .icons import icon
 from .win_rounded import info, warn, confirm, pick_files, pick_folder
 
-_TYPE_COLORS = {
-    "theme_pack": "#8B5CF6",
-    "jvm_preset": "#3B82F6",
-    "sfx_pack":   "#22C55E",
-    "crash_pol":  "#F59E0B",
-}
+# round-100：模块类型徽章改中性（cls="badge"）。旧版按类型给 4 种品牌色，
+# 与加载器徽章同一问题——多色同屏显花，且硬编码色不随主题/自定义 accent
+# 联动。类型名文字已足够区分，颜色不再承担语义。
 
 
 def _lname(name: str, name_en: str) -> str:
@@ -43,6 +41,22 @@ def _mod_name(m: M.ModuleInfo) -> str:
 def _type_label(mtype: str) -> str:
     key = M.MODULE_TYPES.get(mtype)
     return t(key) if key else mtype
+
+
+def _more_btn(entries) -> QPushButton:
+    """行尾「⋯」菜单（round-104）：把导出/卸载等次要操作收进一个下拉按钮，
+    避免每行堆一排图标钮。``entries``: [(label, icon_key, callback), ...]。"""
+    btn = QPushButton("⋯")
+    btn.setToolTip(t("common.more"))
+    btn.setFixedSize(30, 30)
+    btn.setCursor(Qt.PointingHandCursor)
+    btn.setProperty("cls", "surface")
+    menu = QMenu(btn)
+    for label, ico, cb in entries:
+        a = menu.addAction(icon(ico), label)
+        a.triggered.connect(lambda _c=False, f=cb: f())
+    btn.setMenu(menu)
+    return btn
 
 
 class ModulesPage(QWidget):
@@ -173,26 +187,25 @@ class ModulesPage(QWidget):
         name_row.addWidget(name)
         if m.author:
             au = QLabel(t("modules.by", author=m.author))
-            au.setStyleSheet("color: #9CA3AF; font-size: 11px;")
+            au.setProperty("cls", "sub")
             name_row.addWidget(au)
         name_row.addStretch(1)
         col.addLayout(name_row)
         desc = QLabel(_lname(m.description, m.description_en) or " ")
-        desc.setStyleSheet("color: #6B7280; font-size: 11px;")
+        desc.setProperty("cls", "sub")
         desc.setWordWrap(True)
         col.addWidget(desc)
         h.addLayout(col, stretch=1)
 
         badge = QLabel(_type_label(m.type))
-        c = _TYPE_COLORS.get(m.type, "#6B7280")
-        badge.setStyleSheet(
-            f"color: {c}; background: {c}1F; border-radius: 9px; "
-            f"padding: 2px 10px; font-size: 11px; font-weight: 600;")
+        badge.setProperty("cls", "badge")
         h.addWidget(badge)
         if applied:
             ok = QLabel(t("modules.applied"))
             ok.setStyleSheet(
-                "color: #22C55E; background: #22C55E1F; border-radius: 9px; "
+                f"color: {COLORS['success']};"
+                f" background: {with_alpha(COLORS['success'], 0x1F)};"
+                " border-radius: 9px; "
                 "padding: 2px 10px; font-size: 11px; font-weight: 600;")
             h.addWidget(ok)
 
@@ -200,16 +213,12 @@ class ModulesPage(QWidget):
         apply_b.setMinimumHeight(30)
         apply_b.clicked.connect(lambda _=False, mm=m: self._apply_module(mm))
         h.addWidget(apply_b)
-        exp = QPushButton(icon("export"), "")
-        exp.setToolTip(t("modules.export_tip"))
-        exp.setFixedSize(30, 30)
-        exp.clicked.connect(lambda _=False, mm=m: self._export_module(mm))
-        h.addWidget(exp)
-        rm = QPushButton(icon("delete"), "")
-        rm.setToolTip(t("modules.uninstall_tip"))
-        rm.setFixedSize(30, 30)
-        rm.clicked.connect(lambda _=False, mm=m: self._uninstall_module(mm))
-        h.addWidget(rm)
+        h.addWidget(_more_btn([
+            (t("modules.export_tip"), "export",
+             lambda mm=m: self._export_module(mm)),
+            (t("modules.uninstall_tip"), "delete",
+             lambda mm=m: self._uninstall_module(mm)),
+        ]))
         return row
 
     def _apply_module(self, m: M.ModuleInfo):
@@ -282,25 +291,24 @@ class ModulesPage(QWidget):
             nr.addWidget(nm)
             if e.get("author"):
                 au = QLabel(t("modules.by", author=e.get("author", "")))
-                au.setStyleSheet("color: #9CA3AF; font-size: 11px;")
+                au.setProperty("cls", "sub")
                 nr.addWidget(au)
             nr.addStretch(1)
             col.addLayout(nr)
             ds = QLabel(_lname(e.get("description", ""), e.get("description_en", "") or e.get("description", "")))
-            ds.setStyleSheet("color: #6B7280; font-size: 11px;")
+            ds.setProperty("cls", "sub")
             ds.setWordWrap(True)
             col.addWidget(ds)
             h.addLayout(col, stretch=1)
             badge = QLabel(_type_label(e.get("type", "")))
-            c = _TYPE_COLORS.get(e.get("type", ""), "#6B7280")
-            badge.setStyleSheet(
-                f"color: {c}; background: {c}1F; border-radius: 9px; "
-                f"padding: 2px 10px; font-size: 11px; font-weight: 600;")
+            badge.setProperty("cls", "badge")
             h.addWidget(badge)
             if eid in installed:
                 ok = QLabel(t("modules.installed_label"))
                 ok.setStyleSheet(
-                    "color: #22C55E; background: #22C55E1F; border-radius: 9px; "
+                    f"color: {COLORS['success']};"
+                    f" background: {with_alpha(COLORS['success'], 0x1F)};"
+                    " border-radius: 9px; "
                     "padding: 2px 10px; font-size: 11px; font-weight: 600;")
                 h.addWidget(ok)
             else:
@@ -360,9 +368,16 @@ class ModulesPage(QWidget):
     def _fill_extensions(self):
         self._clear(self._ext_lay)
         if not PH.webengine_available():
-            hint = QLabel(t("ext.unavailable"))
+            # round-104：把「不可用」的具体原因一并显示，便于排查（如缺 DLL、
+            # 导入报错等），不再只有一句笼统提示。
+            msg = t("ext.unavailable")
+            reason = PH.webengine_unavailable_reason()
+            if reason:
+                msg += "\n\n" + t("ext.unavailable_reason", reason=reason)
+            hint = QLabel(msg)
             hint.setProperty("cls", "sub")
             hint.setWordWrap(True)
+            hint.setTextInteractionFlags(Qt.TextSelectableByMouse)
             self._ext_lay.addWidget(hint)
             return
 
@@ -391,14 +406,12 @@ class ModulesPage(QWidget):
             col.addWidget(nm)
             ds = QLabel(_lname(str(b.manifest.get("description", "")),
                                str(b.manifest.get("description_en", "") or b.manifest.get("description", ""))))
-            ds.setStyleSheet("color: #6B7280; font-size: 11px;")
+            ds.setProperty("cls", "sub")
             ds.setWordWrap(True)
             col.addWidget(ds)
             h.addLayout(col, stretch=1)
             lbl = QLabel(t("ext.bundled_badge"))
-            lbl.setStyleSheet(
-                "color: #3B82F6; background: #3B82F61F; border-radius: 9px; "
-                "padding: 2px 10px; font-size: 11px; font-weight: 600;")
+            lbl.setProperty("cls", "badge")
             h.addWidget(lbl)
             ins = QPushButton(t("modules.install"))
             ins.setProperty("cls", "secondary")
@@ -438,7 +451,7 @@ class ModulesPage(QWidget):
         perms = " · ".join(perms_parts) if perms_parts else t("ext.grant_none")
         ps = QLabel(
             (t("ext.perms") + "：" + perms) if e.permissions else perms)
-        ps.setStyleSheet("color: #6B7280; font-size: 11px;")
+        ps.setProperty("cls", "sub")
         ps.setWordWrap(True)
         col.addWidget(ps)
         h.addLayout(col, stretch=1)
@@ -446,16 +459,11 @@ class ModulesPage(QWidget):
         open_b.setMinimumHeight(30)
         open_b.clicked.connect(lambda _=False, ee=e: self._open_extension(ee))
         h.addWidget(open_b)
-        rg = QPushButton(icon("refresh"), "")
-        rg.setToolTip(t("ext.regrant_tip"))
-        rg.setFixedSize(30, 30)
-        rg.clicked.connect(lambda _=False, ee=e: self._regrant(ee))
-        h.addWidget(rg)
-        rm = QPushButton(icon("delete"), "")
-        rm.setToolTip(t("ext.uninstall_tip"))
-        rm.setFixedSize(30, 30)
-        rm.clicked.connect(lambda _=False, ee=e: self._uninstall_extension(ee))
-        h.addWidget(rm)
+        h.addWidget(_more_btn([
+            (t("ext.regrant_tip"), "refresh", lambda ee=e: self._regrant(ee)),
+            (t("ext.uninstall_tip"), "delete",
+             lambda ee=e: self._uninstall_extension(ee)),
+        ]))
         return row
 
     def _install_extension_zip(self):

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 
 from .i18n import t
-from .theme import COLORS, RoundedCard
+from .theme import COLORS, RoundedCard, with_alpha
 from .win_rounded import enable_win11_round_corners, confirm, warn, info
 from .frameless import FramelessHelper, TitleBar
 from .core import java_install
@@ -54,7 +54,8 @@ class _JavaDetectedRow(RoundedCard):
             from .ui_kit import accent_text
             badge = QLabel(f"Java {self.major}")
             badge.setStyleSheet(
-                f"QLabel {{ background:{COLORS['accent']}22; color:{accent_text()};"
+                f"QLabel {{ background:{with_alpha(COLORS['accent'], 0x22)};"
+                f" color:{accent_text()};"
                 f" border-radius:4px; padding:1px 6px; font-size:11px; }}")
             top.addWidget(badge)
 

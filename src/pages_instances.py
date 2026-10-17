@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QSize, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QTransform
 
-from .theme import COLORS, RoundedCard
-from .effects import LightTrailCard  # round-50 卡片混合：实例详情卡流光
+from .theme import COLORS, RoundedCard, with_alpha
+from .effects import LightTrailCard, fade_in_widget  # round-50 卡片混合：实例详情卡流光；round-100 列表淡入
 from . import ui_kit
 from .icons import icon
 from .frameless import FramelessHelper, TitleBar
@@ -67,11 +67,43 @@ _LOADER_DESC = {
 
 
 def _badge_style(color: str) -> str:
-    """Small rounded pill (loader badges on cards)."""
+    """Small rounded pill (loader badges on cards).
+
+    round-100：alpha 必须在**前**（#AARRGGBB）。旧写法 `{color}1F` 是
+    #RRGGBBAA，Qt 按 #AARRGGBB 解析成完全无关的颜色（黄→怪绿）。
+    """
     return (
-        f"color: {color}; background: {color}1F; border-radius: 9px; "
+        f"color: {color}; background: {with_alpha(color, 0x1F)}; border-radius: 9px; "
         f"padding: 2px 10px; font-size: 11px; font-weight: 600;"
     )
+
+
+def _loader_vivid() -> bool:
+    """是否启用加载器品牌彩章（默认关；主题包声明 ``loader_vivid`` 才开）。
+
+    与 store_detail 同一开关：10+ 个品牌色同屏会花，默认走中性 badge 类。
+    """
+    try:
+        from .theme import get_active_theme_pack_id, find_theme_pack
+        pid = get_active_theme_pack_id()
+        if not pid:
+            return False
+        pack = find_theme_pack(pid) or {}
+        return bool(pack.get("loader_vivid"))
+    except Exception:
+        return False
+
+
+def _loader_badge(text: str, loader_id: str) -> "QLabel":
+    """加载器徽章：默认中性 ``badge`` 类；主题包 loader_vivid 时走品牌色。"""
+    from PySide6.QtWidgets import QLabel
+    b = QLabel(text)
+    if _loader_vivid():
+        b.setStyleSheet(
+            _badge_style(LOADER_BADGE.get(loader_id, LOADER_BADGE["vanilla"])))
+    else:
+        b.setProperty("cls", "badge")
+    return b
 
 
 # round-82 启动格式徽章配色（与来源 launcher 徽章区分，见 detect_format）。
@@ -102,7 +134,10 @@ def _fmt_badge(inst) -> "QLabel":
     fmt = detect_format(inst)
     key = _fmt_keys.get(fmt, "instances.fmt_auto")
     b = QLabel(t(key))
-    b.setStyleSheet(_badge_style(FORMAT_BADGE.get(fmt, FORMAT_BADGE["auto"])))
+    if _loader_vivid():
+        b.setStyleSheet(_badge_style(FORMAT_BADGE.get(fmt, FORMAT_BADGE["auto"])))
+    else:
+        b.setProperty("cls", "badge")
     b.setToolTip(t("instances.fmt_tooltip"))
     b.setCursor(Qt.PointingHandCursor)
     return b
@@ -121,6 +156,18 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
             return [
                 {"title": h["title"], "meta": h.get("_loader_version", "")}
                 for h in fetch_legacy_fabric_loaders(mc_version)
+            ]
+        except Exception:
+            return []
+    if loader == "liteloader":
+        # round-104：补全 LiteLoader 分支——之前无此分支导致版本下拉恒空，
+        # 装 LiteLoader 时无法选构建，只能走默认。meta 用 _version（maven 版本串）
+        # 供 install_liteloader 的 build_version 使用。
+        from .net_api import fetch_liteloader_builds
+        try:
+            return [
+                {"title": b["title"], "meta": b.get("_version", "")}
+                for b in fetch_liteloader_builds(mc_version)
             ]
         except Exception:
             return []
@@ -219,10 +266,7 @@ class InstanceCard(LightTrailCard):
         ver_pill = QLabel(inst.game_version or "?")
         ver_pill.setProperty("cls", "pill")
         meta.addWidget(ver_pill)
-        loader_color = LOADER_BADGE.get(inst.loader, LOADER_BADGE["vanilla"])
-        ld_badge = QLabel(loader_name(inst.loader))
-        ld_badge.setStyleSheet(_badge_style(loader_color))
-        meta.addWidget(ld_badge)
+        meta.addWidget(_loader_badge(loader_name(inst.loader), inst.loader))
         meta.addWidget(_fmt_badge(inst))
         meta.addStretch(1)
         info.addLayout(meta)
@@ -233,7 +277,8 @@ class InstanceCard(LightTrailCard):
             tag = QWidget()
             tag.setAttribute(Qt.WA_StyledBackground, True)
             tag.setStyleSheet(
-                f"background: #22C55E1A; border-radius: 10px;")
+                f"background: {with_alpha(COLORS['success'], 0x1A)};"
+                f" border-radius: 10px;")
             tl = QHBoxLayout(tag)
             tl.setContentsMargins(10, 4, 12, 4)
             tl.setSpacing(6)
@@ -300,11 +345,13 @@ class _InstRow(LightTrailCard):
         col.setSpacing(2)
         nm = QLabel(inst.name)
         nm.setProperty("cls", "title")
-        nm.setStyleSheet(f"color: {COLORS['text_main']}; font-size: 13px;")
+        # round-100：字色交给 title 类（内联色不随主题切换刷新）
+        nm.setStyleSheet("font-size: 13px;")
         nm.setWordWrap(False)
         col.addWidget(nm)
         sub = QLabel(f"{inst.game_version or '?'}  ·  {loader_name(inst.loader)}")
-        sub.setStyleSheet(f"color: {COLORS['text_sub']}; font-size: 11px;")
+        sub.setProperty("cls", "sub")
+        sub.setStyleSheet("font-size: 11px;")
         col.addWidget(sub)
         lay.addLayout(col, stretch=1)
 
@@ -343,11 +390,10 @@ class _LoaderCard(QFrame):
     缺失时回退彩色圆点），中间标题+描述，右侧选中对勾。
     """
 
-    def __init__(self, dlg: "NewInstanceDialog", loader_id: str, color: str, parent=None):
+    def __init__(self, dlg: "NewInstanceDialog", loader_id: str, parent=None):
         super().__init__(parent)
         self.dlg = dlg
         self.loader_id = loader_id
-        self._color = color
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(66)
         lay = QHBoxLayout(self)
@@ -360,8 +406,9 @@ class _LoaderCard(QFrame):
         if not ic.isNull():
             self._logo.setPixmap(ic)
         else:
-            # 图标缺失时回退彩色圆点，绝不留空框
-            self._logo.setStyleSheet(f"background:{color}; border-radius:7px;")
+            # 图标缺失时回退中性色块（round-100：不再用品牌色，绝不留空框）
+            self._logo.setStyleSheet(
+                f"background: {COLORS['bg_hover']}; border-radius:7px;")
         self._logo.setFixedSize(40, 40)
         self._logo.setScaledContents(True)
         lay.addWidget(self._logo, 0, Qt.AlignVCenter)
@@ -492,6 +539,24 @@ class NewInstanceDialog(QDialog):
         self._worker.error.connect(self._on_versions_error)
         self._worker.start()
 
+        # round-104：后台预热 Legacy Fabric 支持版本缓存（不阻塞 UI），
+        # 完成后刷新加载器兼容表——届时 legacyfabric 的显示即基于真实支持列表。
+        try:
+            from .net_api import fetch_legacy_fabric_games
+            self._lf_worker = Worker(fetch_legacy_fabric_games)
+            self._lf_worker.finished.connect(self._on_lf_games)
+            self._lf_worker.start()
+        except Exception:
+            self._lf_worker = None
+
+    def _on_lf_games(self, *_args):
+        """round-104：Legacy Fabric 游戏版本缓存就绪 → 刷新加载器兼容表。"""
+        from shiboken6 import isValid
+        if not isValid(self):
+            return
+        if self._selected_version:
+            self._update_compatible_loaders()
+
     # ------------------------------------------------------------------ page 1
     def _build_version_page(self) -> QWidget:
         page = QWidget()
@@ -573,8 +638,9 @@ class NewInstanceDialog(QDialog):
 
     def _style_filter_btn(self, btn: QPushButton, active: bool):
         if active:
+            # round-100：白字改 text_on_accent（浅色 accent 下自动换深字，round-44 规则）
             btn.setStyleSheet(
-                f"QPushButton {{ background: {COLORS['accent']}; color: #FFFFFF; "
+                f"QPushButton {{ background: {COLORS['accent']}; color: {COLORS['text_on_accent']}; "
                 f"border: none; border-radius: 8px; padding: 5px 14px; font-weight: 600; }}"
             )
         else:
@@ -735,11 +801,11 @@ class NewInstanceDialog(QDialog):
         if not load_config().get("show_quilt", True):
             ui_loaders = [l for l in ui_loaders if l != "quilt"]
         for i, loader_id in enumerate(ui_loaders):
-            card = _LoaderCard(self, loader_id, LOADER_BADGE.get(loader_id, LOADER_BADGE["vanilla"]))
+            card = _LoaderCard(self, loader_id)
             self._loader_cards[loader_id] = card
             self._loader_grid.addWidget(card, i // cols, i % cols)
         # LabyMod is not installable in-app; keep it as a link card
-        labymod_card = _LoaderCard(self, "labymod", LOADER_BADGE.get("labymod"))
+        labymod_card = _LoaderCard(self, "labymod")
         self._loader_cards["labymod"] = labymod_card
         self._loader_grid.addWidget(labymod_card, len(ui_loaders) // cols, len(ui_loaders) % cols)
         lay.addLayout(self._loader_grid)
@@ -885,7 +951,14 @@ class NewInstanceDialog(QDialog):
         # Forge exists for almost every release/snapshot
         if minor >= 6:
             loaders.append("forge")
-        if minor <= 13:
+        # round-104：Legacy Fabric 支持范围——优先用 meta.legacyfabric.net 的
+        # 真实游戏版本列表（后台预热缓存）；缓存未就绪时回退到启发式 ≤1.13。
+        from .net_api import legacy_fabric_games_cached
+        lf_games = legacy_fabric_games_cached()
+        if lf_games is not None:
+            if ver in set(lf_games):
+                loaders.append("legacyfabric")
+        elif minor <= 13:
             loaders.append("legacyfabric")
         if minor <= 12:
             loaders.extend(["liteloader", "cleanroom"])
@@ -1195,7 +1268,8 @@ class InstancesPage(QWidget):
         self._splitter.setHandleWidth(3)
         self._splitter.setStyleSheet(
             "QSplitter::handle { background: transparent; }"
-            "QSplitter::handle:hover { background: rgba(124,58,237,0.3); }"
+            # round-100：硬编码紫 → 主题 accent 派生（换主题色时不再残留紫色）
+            f"QSplitter::handle:hover {{ background: {with_alpha(COLORS['accent'], 0x3D)}; }}"
         )
 
         self._left_panel = QWidget()
@@ -1371,6 +1445,8 @@ class InstancesPage(QWidget):
         self._render_detail()
         if switch and self._body_stack is not None:
             self._body_stack.setCurrentIndex(1)  # split view
+        # round-100 列表淡入（克制）：重建后整列轻量淡入
+        fade_in_widget(self.list_scroll.viewport())
 
     def _render_detail(self):
         """Fill the right-hand details panel for the selected instance."""
@@ -1402,14 +1478,15 @@ class InstancesPage(QWidget):
         name_row.setSpacing(10)
         nm = QLabel(inst.name)
         nm.setProperty("cls", "big")
-        nm.setStyleSheet(f"font-size: 20px; color: {COLORS['text_main']};")
+        nm.setStyleSheet("font-size: 20px;")
         name_row.addWidget(nm)
         if inst.id == self.mgr.current_id:
             from .ui_kit import state_pix
             tag = QWidget()
             tag.setAttribute(Qt.WA_StyledBackground, True)
             tag.setStyleSheet(
-                f"background: #22C55E1A; border-radius: 10px;")
+                f"background: {with_alpha(COLORS['success'], 0x1A)};"
+                f" border-radius: 10px;")
             tl = QHBoxLayout(tag)
             tl.setContentsMargins(8, 3, 10, 3)
             tl.setSpacing(6)
@@ -1438,18 +1515,15 @@ class InstancesPage(QWidget):
         ver_pill = QLabel(inst.game_version or "?")
         ver_pill.setProperty("cls", "pill")
         meta.addWidget(ver_pill)
-        loader_color = LOADER_BADGE.get(inst.loader, LOADER_BADGE["vanilla"])
-        ld_badge = QLabel(loader_name(inst.loader))
-        ld_badge.setStyleSheet(_badge_style(loader_color))
-        meta.addWidget(ld_badge)
+        meta.addWidget(_loader_badge(loader_name(inst.loader), inst.loader))
         meta.addWidget(_fmt_badge(inst))
         if inst.loader_version:
             lv = QLabel(inst.loader_version)
-            lv.setStyleSheet(_badge_style(loader_color))
+            lv.setProperty("cls", "badge")
             meta.addWidget(lv)
         if inst.java_path:
             jl = QLabel("☕ " + os.path.basename(inst.java_path))
-            jl.setStyleSheet(_badge_style("#F59E0B"))
+            jl.setProperty("cls", "badge")
             meta.addWidget(jl)
         meta.addStretch(1)
         lay.addLayout(meta)
@@ -2444,8 +2518,10 @@ class ModCard(RoundedCard):
         # ── loader-tinted icon tile ──
         loader = _mod_loader_hint(path)
         tile_key = "mods"
-        tile = ui_kit.tile(tile_key, 44, 22,
-                           bg=LOADER_BADGE.get(loader, "#7C3AED14"))
+        # round-100：图标块默认中性（品牌色仅主题包 loader_vivid 时启用）
+        tile = ui_kit.tile(
+            tile_key, 44, 22,
+            bg=(LOADER_BADGE.get(loader) if _loader_vivid() else None))
         lay.addWidget(tile)
 
         # ── info column: name + meta (loader pill · state) ──
@@ -2457,14 +2533,14 @@ class ModCard(RoundedCard):
         meta = QHBoxLayout()
         meta.setSpacing(8)
         if loader:
-            ld = QLabel(loader_name(loader))
-            ld.setStyleSheet(_badge_style(LOADER_BADGE.get(loader, "#6B7280")))
+            ld = _loader_badge(loader_name(loader), loader)
             meta.addWidget(ld)
         state = QLabel(
             t("mods.state_enabled") if enabled else t("mods.state_disabled"))
         if enabled:
             state.setStyleSheet(
-                f"color: {COLORS['success']}; background: #22C55E1A; "
+                f"color: {COLORS['success']};"
+                f" background: {with_alpha(COLORS['success'], 0x1A)}; "
                 f"font-weight: 600; border-radius: 9px; padding: 2px 10px; "
                 f"font-size: 11px;")
         else:

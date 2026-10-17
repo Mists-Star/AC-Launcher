@@ -188,6 +188,13 @@ def main():
     _log.flush()
 
     app = QApplication(sys.argv)
+    # 生命周期手动管理：首次启动（或清空 data/ 后）splash 关闭与主窗口 show
+    # 之间存在无可见窗口的空窗期——首启还要先弹新手教程（延迟 1.2s）。Qt 默认
+    # quitOnLastWindowClosed=True 会在 splash（最后一个可见窗口）关闭时直接退出
+    # app，表现为「首启/清数据后静默闪退，日志停在构建完成，无任何报错」。
+    # 改为 False：真正退出由 MainWindow.closeEvent 的实关闭分支显式
+    # QApplication.quit() 触发；托盘最小化（hide）也不会被误判为退出。
+    app.setQuitOnLastWindowClosed(False)
     if qt_zh:
         app.installTranslator(qt_translator)
     _log.write("2 QApplication ok\n"); _log.flush()
@@ -255,11 +262,11 @@ def main():
     if pack:
         apply_theme_pack(pack)
     from src.theme import set_frosted
-    set_frosted(cfg.get("frosted_theme", True))
+    set_frosted(cfg.get("frosted_theme", False))
     # round-51 透底效果：按配置把应用层背景切半透明（配合系统 Acrylic）。
     try:
         from src.theme import set_app_background_translucent
-        set_app_background_translucent(cfg.get("transparent_window", True))
+        set_app_background_translucent(cfg.get("transparent_window", False))
     except Exception:
         pass
     apply_qss()

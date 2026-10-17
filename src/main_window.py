@@ -19,7 +19,7 @@ from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QColor, QPixmap,
 from PySide6.QtSvg import QSvgRenderer
 
 from .theme import (COLORS, RoundedCard, set_theme_mode, get_theme_mode,
-                    on_theme_change, F_MD)
+                    on_theme_change, F_MD, with_alpha)
 from .effects import (
     LightTrailCard, set_effects_enabled, set_window_opacity, fade_page_transition,
 )
@@ -63,11 +63,6 @@ NAV_KEYS = [
     ("nav.account", "account"),
     ("nav.settings", "settings"),
 ]
-
-
-def nav_items() -> list[tuple[str, str]]:
-    """(label, key) pairs translated for the *current* language."""
-    return [(t(tk), key) for tk, key in NAV_KEYS]
 
 
 NAV_ITEMS = NAV_KEYS  # index-compatible alias: NAV_ITEMS[i][1] is still the key
@@ -133,15 +128,6 @@ PCL2_SIDEBAR = {
 
 # Fallback account used when the user hasn't logged in (offline single-player).
 OFFLINE_ACCOUNT = {"username": "Player", "uuid": "", "token": ""}
-
-
-def _yield():
-    """Let the splash animation repaint between heavy construction steps."""
-    from PySide6.QtWidgets import QApplication
-
-    app = QApplication.instance()
-    if app is not None:
-        app.processEvents()
 
 
 def _available_memory_mb() -> int | None:
@@ -212,13 +198,10 @@ class _InstanceCard(LightTrailCard):
         if src != "AC":
             from .instances import launcher_label
             # round-86 导入实例允许显示来源启动器名（如 PCL2 / HMCL）。
-            # round-87 文字色跟主题 text_main：避免主题色为浅色（如琥珀黄）时
-            # 黄字压在浅色卡片上看不清——浅色主题深字、深色主题白字，始终可读。
+            # round-100：走中性 badge 类（旧 accent22 底 + text_main 字——
+            # accent22 是错误 alpha（#RRGGBBAA），且强调色不铺底）。
             badge = QLabel(launcher_label(src, show_original=True))
-            badge.setStyleSheet(
-                f"background:{COLORS['accent']}22; color:{COLORS['text_main']}; "
-                f"border-radius:6px; padding:1px 8px; font-size:10px; font-weight:600;"
-            )
+            badge.setProperty("cls", "badge")
             top.addWidget(badge)
         if is_current:
             from .ui_kit import accent_text, state_pix
@@ -346,7 +329,7 @@ class HomePage(QWidget):
             self.backdrop.setGeometry(self.rect())
             self.backdrop.lower()
 
-    # ── (re)build the layout for the current home_style ──
+    # ── (re)build the ac_default home layout ──
     @staticmethod
     def _clear_layout(layout):
         """Recursively tear down a layout and **synchronously** delete all child
@@ -385,9 +368,8 @@ class HomePage(QWidget):
         # 彻底替换 content 容器（旧 widget 同步删除），避免快速 rebuild
         # 时旧控件异步删除导致屏幕上出现"双面板"残留。
         self._replace_content()
-        style = self.cfg.get("home_style", "ac_default")
-        if style != "ac_default" and not self.cfg.get("dev_mode", False):
-            style = "ac_default"
+        # round-104：三套启动器模板（pcl_card / hmcl_list / modrinth_modern）
+        # 已删除，首页固定使用 ac_default。
         # 整个首页包一层 QScrollArea：1100×720 窗口下垂直内容（统计条 + hero
         # + 实例网格 + 日志 + 快捷行）远超视口，不滚动就会被 Qt 硬压缩导致
         # 显示不全。滚动时背景壁纸保持固定（scroll 透明、backdrop 在底层）。
@@ -405,13 +387,8 @@ class HomePage(QWidget):
         lay = QVBoxLayout(inner)
         lay.setContentsMargins(48, 32, 48, 32)
         lay.setSpacing(16)
-        builder = {
-            "pcl_card": self._build_pcl_card,
-            "hmcl_list": self._build_hmcl_list,
-            "modrinth_modern": self._build_modrinth,
-        }.get(style, self._build_ac_default)
-        _boot_trace(f"7.0 build start style={style}")
-        builder(lay)
+        _boot_trace("7.0 build start style=ac_default")
+        self._build_ac_default(lay)
         _boot_trace("7.5 build done")
         lay.addStretch(1)
 
@@ -476,26 +453,6 @@ class HomePage(QWidget):
         row.addStretch(1)
         lay.addLayout(row)
 
-    def _instance_card(self) -> RoundedCard:
-        card = RoundedCard(radius=12)
-        card.setMinimumHeight(170)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(24, 20, 24, 20)
-        cl.setSpacing(10)
-        cl.addWidget(self._label(t("home.instance")))
-
-        # ── instance selector dropdown ──
-        self.inst_combo = QComboBox()
-        self.inst_combo.setProperty("cls", "instance-selector")
-        self.inst_combo.setMinimumHeight(36)
-        self.inst_combo.currentIndexChanged.connect(self._on_inst_changed)
-        cl.addWidget(self.inst_combo)
-
-        self.detail_lbl = QLabel("")
-        self.detail_lbl.setProperty("cls", "sub")
-        cl.addWidget(self.detail_lbl)
-        return card
-
     def _on_inst_changed(self, index: int):
         if index < 0:
             return
@@ -536,70 +493,6 @@ class HomePage(QWidget):
         b.clicked.connect(self._on_play)
         return b
 
-    def _make_scan_btn(self) -> QPushButton:
-        b = QPushButton(t("scan.title"))
-        b.setMinimumHeight(40)
-        b.setIcon(icon("search"))
-        b.setIconSize(QSize(18, 18))
-        b.clicked.connect(self._open_scan)
-        return b
-
-    def _make_settings_btn(self) -> QPushButton:
-        b = QPushButton(t("nav.settings"))
-        b.setMinimumHeight(40)
-        b.setIcon(icon("settings"))
-        b.setIconSize(QSize(18, 18))
-        b.clicked.connect(self._open_settings)
-        return b
-
-    def _action_card(self, title, sub, ic, cb) -> QPushButton:
-        b = QPushButton()
-        b.setCursor(Qt.PointingHandCursor)
-        b.setMinimumHeight(104)
-        b.setProperty("cls", "surface")
-        vl = QVBoxLayout(b)
-        vl.setContentsMargins(16, 14, 16, 14)
-        vl.setSpacing(8)
-        ic_l = QLabel()
-        ic_l.setPixmap(icon(ic).pixmap(26, 26))
-        vl.addWidget(ic_l)
-        tl = QLabel(title)
-        tl.setProperty("cls", "big")
-        vl.addWidget(tl)
-        sl = QLabel(sub)
-        sl.setProperty("cls", "sub")
-        sl.setWordWrap(True)
-        vl.addWidget(sl)
-        vl.addStretch(1)
-        b.clicked.connect(cb)
-        return b
-
-    def _list_row(self, ic, title, sub, cb) -> QPushButton:
-        row = QPushButton()
-        row.setCursor(Qt.PointingHandCursor)
-        row.setMinimumHeight(58)
-        row.setProperty("cls", "row")
-        hl = QHBoxLayout(row)
-        hl.setContentsMargins(16, 8, 16, 8)
-        hl.setSpacing(12)
-        il = QLabel()
-        il.setPixmap(icon(ic).pixmap(22, 22))
-        hl.addWidget(il)
-        col = QVBoxLayout()
-        col.setSpacing(2)
-        col.addWidget(QLabel(title))
-        if sub:
-            sl = QLabel(sub)
-            sl.setProperty("cls", "sub")
-            col.addWidget(sl)
-        hl.addLayout(col)
-        hl.addStretch(1)
-        ch = QLabel("›")
-        ch.setProperty("cls", "sub")
-        hl.addWidget(ch)
-        row.clicked.connect(cb)
-        return row
-
     def _quick_chip(self, ic, text, cb) -> QPushButton:
         """Compact icon+label action chip used in the AC default home's
         quick-action row.  Plain QPushButton with icon — no custom cls so it
@@ -610,21 +503,6 @@ class HomePage(QWidget):
         b.setCursor(Qt.PointingHandCursor)
         b.setMinimumHeight(40)
         b.setMinimumWidth(120)
-        pix = _icon(ic).pixmap(18, 18) if _icon(ic) else None
-        if pix and not pix.isNull():
-            b.setIcon(pix)
-            b.setIconSize(QSize(18, 18))
-        b.clicked.connect(cb)
-        return b
-
-    def _quick_btn(self, ic, text, cb) -> QPushButton:
-        """Accent-coloured big quick action button."""
-        from .icons import icon as _icon
-        b = QPushButton(text)
-        b.setProperty("cls", "accent")
-        b.setCursor(Qt.PointingHandCursor)
-        b.setMinimumHeight(44)
-        b.setMinimumWidth(110)
         pix = _icon(ic).pixmap(18, 18) if _icon(ic) else None
         if pix and not pix.isNull():
             b.setIcon(pix)
@@ -654,81 +532,57 @@ class HomePage(QWidget):
         _boot_trace("7.2 stats done")
         lay.addWidget(stats)
 
-        # ── hero 实例卡（渐变横幅）── 对照 Home.svg：强调色→青线性渐变 + 白 CTA pill。
-        # round-91 起色跟随自定义 accent（内置紫主题下仍是紫→青品牌渐变）。
-        _hero_g = QLinearGradient(0, 0, 900, 0)
-        _hero_g.setColorAt(0.0, QColor(COLORS["accent"]))
-        _hero_g.setColorAt(1.0, QColor("#28BCD8"))
-        hero = RoundedCard(radius=16, fill=_hero_g)
-        hero.setMinimumHeight(192)
-        _white = "#FFFFFF"
+        # ── hero 实例卡（round-100 极简：中性底 + 左侧 3px accent 竖条）──
+        # 旧版是 accent→青 大面积渐变 + 白字白 pill：强调色铺底、浅色主题下
+        # 白字压白底读不清。改为中性卡 + 全局 token 文字 + accent 竖条点缀。
+        hero = RoundedCard(radius=16, accent_border=3)
+        hero.setMinimumHeight(176)
         hl = QHBoxLayout(hero)
         hl.setContentsMargins(28, 22, 28, 22)
         hl.setSpacing(24)
 
-        # 左：当前实例身份（白字，渐变底）
+        # 左：当前实例身份（文字色走全局 token）
         left = QVBoxLayout()
         left.setSpacing(8)
         name_row = QHBoxLayout()
         name_row.setSpacing(10)
         name = QLabel("—")
         name.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-        name.setStyleSheet(f"color: {_white}; background: transparent;")
         name_row.addWidget(name)
         # 来源徽章（各主流启动器…）——控制中枢叙事：这个实例从哪个启动器接管
         self.src_badge = QLabel("")
-        self.src_badge.setStyleSheet(
-            f"background: #FFFFFF33; color: {_white}; border-radius: 8px; "
-            f"padding: 2px 10px; font-size: 11px; font-weight: 600;"
-        )
+        self.src_badge.setProperty("cls", "badge")
         self.src_badge.setVisible(False)
         name_row.addWidget(self.src_badge)
         name_row.addStretch(1)
         left.addLayout(name_row)
         detail = QLabel("")
-        detail.setStyleSheet(f"color: {_white}; font-size: 13px; background: transparent;")
+        detail.setProperty("cls", "sub")
         left.addWidget(detail)
         left.addSpacing(8)
         self.inst_combo = QComboBox()
         self.inst_combo.setMinimumHeight(38)
         self.inst_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.inst_combo.setStyleSheet(
-            "QComboBox { background: rgba(255,255,255,0.22); color: #FFFFFF; "
-            "border: 1px solid rgba(255,255,255,0.45); border-radius: 10px; padding: 0 12px; }"
-            "QComboBox:hover { background: rgba(255,255,255,0.32); }"
-            "QComboBox QAbstractItemView { background: #2D2B36; color: #FFFFFF; "
-            f"selection-background-color: {COLORS['accent']}; border-radius: 8px; }}"
-            "QComboBox::drop-down { border: none; width: 24px; }"
-        )
+        # 全局 instance-selector 类（与侧栏实例下拉同一视觉）
+        self.inst_combo.setProperty("cls", "instance-selector")
         self.inst_combo.currentIndexChanged.connect(self._on_inst_changed)
         left.addWidget(self.inst_combo)
         left.addStretch(1)
         hl.addLayout(left, stretch=1)
 
-        # 右：渐变底上的白色 pill 启动按钮 + 结束游戏按钮
+        # 右：启动按钮（accent 主按钮，样式来自 _make_play_btn）+ 结束游戏
         play = self._make_play_btn()
         play.setMinimumHeight(56)
         play.setMinimumWidth(200)
         play.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         play.setFont(QFont("Segoe UI", 17, QFont.Weight.Bold))
-        play.setStyleSheet(
-            f"QPushButton {{ background:#FFFFFF; color:{COLORS['accent_press']}; border:none; "
-            f"border-radius: 28px; padding:8px 26px; font-weight:700; }}"
-            f"QPushButton:hover {{ background:{COLORS['accent_soft']}; }}"
-            f"QPushButton:pressed {{ background:{COLORS['accent_soft']}; }}"
-            f"QPushButton:disabled {{ background:#F0F0F0; color:#A9A9B0; }}"
-        )
         self.play_btn = play
         hl.addWidget(play, alignment=Qt.AlignVCenter | Qt.AlignRight)
         kill = QPushButton(t("home.kill_game"))
         kill.setMinimumHeight(40)
         kill.setCursor(Qt.PointingHandCursor)
         kill.setVisible(False)
-        kill.setStyleSheet(
-            "QPushButton { background:rgba(255,255,255,0.92); color:#EF4444; border:none; "
-            "border-radius: 20px; padding:6px 18px; font-weight:600; }"
-            "QPushButton:hover { background:#FFFFFF; }"
-        )
+        kill.setProperty("cls", "danger")
         kill.clicked.connect(self._on_kill_game)
         self.kill_btn = kill
         hl.addWidget(kill, alignment=Qt.AlignVCenter | Qt.AlignRight)
@@ -856,190 +710,6 @@ class HomePage(QWidget):
         layout.addWidget(cell)
         return v
 
-    def _build_pcl_card(self, lay):
-        """主页（像素级对齐截图）。
-
-        布局复刻自真实界面（图2）：
-        ┌─────────────────────────────────────────────┐
-        │  ┌────左栏(~280px)────┐  ┌──右栏(壁纸)───┐  │
-        │  │     [头像]         │  │               │  │
-        │  │    Mists_Star      │  │  你知道吗 💡   │  │
-        │  │    正版验证        │  │  ...提示文字..│  │
-        │  │  ┌──────────────┐  │  │               │  │
-        │  │  │  ▶ 启动游戏   │  │  │   壁纸背景    │  │
-        │  │  │  版本号...    │  │  │               │  │
-        │  │  └──────────────┘  │  │               │  │
-        │  │ [实例选择][实例设置]│  │               │  │
-        │  └────────────────────┘  └───────────────┘  │
-        └─────────────────────────────────────────────┘
-        """
-        # ── 水平分割：左控制面板 + 右壁纸区 ──
-        split = QHBoxLayout()
-        split.setContentsMargins(0, 0, 0, 0)
-        split.setSpacing(0)
-
-        # ═══ 左侧面板（固定宽度，浅色卡片）═══
-        left_panel = RoundedCard(radius=12)
-        left_panel.setMinimumWidth(280)
-        left_panel.setMaximumWidth(320)
-        ll = QVBoxLayout(left_panel)
-        ll.setContentsMargins(24, 28, 24, 28)
-        ll.setSpacing(14)
-        ll.setAlignment(Qt.AlignCenter)
-
-        # ── 头像区域（显示皮肤头像，无皮肤时用默认图标）──
-        avatar_container = QWidget()
-        avatar_container.setFixedSize(80, 80)
-        av_lay = QVBoxLayout(avatar_container)
-        av_lay.setContentsMargins(0, 0, 0, 0)
-        self.pcl_avatar_lbl = QLabel()
-        self.pcl_avatar_lbl.setAlignment(Qt.AlignCenter)
-        self.pcl_avatar_lbl.setFixedSize(64, 64)
-        self.pcl_avatar_lbl.setToolTip(t("pcl.avatar_hint", default="玩家头像"))
-        av_lay.addWidget(self.pcl_avatar_lbl, alignment=Qt.AlignCenter)
-        ll.addWidget(avatar_container, alignment=Qt.AlignCenter)
-
-        # 用户名
-        username = QLabel("Player")
-        username.setProperty("cls", "big")
-        username.setAlignment(Qt.AlignCenter)
-        username.setFont(QFont("Segoe UI", 15, QFont.Weight.DemiBold))
-        ll.addWidget(username, alignment=Qt.AlignCenter)
-        self.pcl_username = username
-
-        # 验证状态
-        auth_status = QLabel(t("pcl.auth_pending", default="验证中…"))
-        auth_status.setProperty("cls", "sub")
-        auth_status.setAlignment(Qt.AlignCenter)
-        auth_status.setFont(QFont("Segoe UI", 10))
-        ll.addWidget(auth_status, alignment=Qt.AlignCenter)
-        self.pcl_auth_status = auth_status
-
-        ll.addSpacing(12)
-
-        # ── 大启动按钮（标志性：描边风格、全宽、高50+）──
-        play_btn = self._make_play_btn()
-        play_btn.setMinimumHeight(52)
-        play_btn.setCursor(Qt.PointingHandCursor)
-        self.play_btn = play_btn
-        ll.addWidget(play_btn)
-
-        # 版本号（按钮下方小字）
-        ver_text = QLabel("")
-        ver_text.setProperty("cls", "sub")
-        ver_text.setAlignment(Qt.AlignCenter)
-        ver_text.setFont(QFont("Segoe UI", 9))
-        ll.addWidget(ver_text)
-        self.pcl_ver_text = ver_text
-
-        ll.addSpacing(8)
-
-        # ── 实例选择 / 实例设置（并排两按钮）──
-        inst_row = QHBoxLayout()
-        inst_row.setSpacing(10)
-
-        sel_btn = QPushButton(t("pcl.instance_select", default="实例选择"))
-        sel_btn.setProperty("cls", "diag_btn")
-        sel_btn.setCursor(Qt.PointingHandCursor)
-        sel_btn.setMinimumHeight(36)
-        sel_btn.clicked.connect(self._open_instances)
-        inst_row.addWidget(sel_btn)
-
-        cfg_btn = QPushButton(t("pcl.instance_config", default="实例设置"))
-        cfg_btn.setProperty("cls", "diag_btn")
-        cfg_btn.setCursor(Qt.PointingHandCursor)
-        cfg_btn.setMinimumHeight(36)
-        cfg_btn.clicked.connect(self._open_settings)
-        inst_row.addWidget(cfg_btn)
-
-        ll.addLayout(inst_row)
-        ll.addStretch(1)
-
-        split.addWidget(left_panel)
-
-        # ═══ 右侧面板（壁纸 + 可选浮动提示卡）═══
-        right_panel = QFrame()
-        right_panel.setObjectName("pcl_right_panel")
-        right_panel.setStyleSheet("#pcl_rightPanel { background: transparent; }")
-        rl = QVBoxLayout(right_panel)
-        rl.setContentsMargins(16, 16, 16, 16)
-        rl.setSpacing(0)
-
-        # 「你知道吗」提示卡（右上角浮动）
-        tip_card = RoundedCard(radius=12)
-        tip_card.setMaximumHeight(120)
-        tip_lay = QVBoxLayout(tip_card)
-        tip_lay.setContentsMargins(16, 12, 16, 12)
-        tip_lay.setSpacing(6)
-
-        tip_header = QHBoxLayout()
-        tip_title = QLabel(t("pcl.did_you_know", default="你知道吗"))
-        tip_title.setProperty("cls", "body-bold")
-        tip_header.addWidget(tip_title)
-        tip_header.addStretch(1)
-        refresh_icon = QLabel()
-        # round-91 用自带 refresh.svg 替代文本 🔄（Windows 下渲染成彩色 emoji）
-        from .icons import pixmap as _px
-        refresh_icon.setPixmap(_px("refresh", 16))
-        refresh_icon.setFixedSize(18, 18)
-        refresh_icon.setCursor(Qt.PointingHandCursor)
-        refresh_icon.setToolTip(t("pcl.tip_refresh", default="换一条提示"))
-        tip_header.addWidget(refresh_icon)
-        tip_lay.addLayout(tip_header)
-
-        tip_body = QLabel(t("pcl.tip_default",
-            default="按 Ctrl+W 可以在游戏中唤醒启动器窗口。"))
-        tip_body.setProperty("cls", "sub")
-        tip_body.setWordWrap(True)
-        tip_lay.addWidget(tip_body)
-
-        rl.addWidget(tip_card, alignment=Qt.AlignTop | Qt.AlignRight)
-        rl.addStretch(1)
-
-        split.addWidget(right_panel, stretch=1)
-
-        lay.addLayout(split, stretch=1)
-
-    def _build_hmcl_list(self, lay):
-        self._title_block(lay)
-        lay.addWidget(self._instance_card())
-        self.play_btn = self._list_row("play", t("home.play"), "", self._on_play)
-        lay.addWidget(self.play_btn)
-        lay.addWidget(self._list_row("search", t("scan.title"), "", self._open_scan))
-        lay.addWidget(self._list_row("settings", t("nav.settings"), "", self._open_settings))
-
-    def _build_modrinth(self, lay):
-        self._title_block(lay)
-        grad = QLinearGradient(0, 0, 1, 1)
-        grad.setCoordinateMode(QLinearGradient.ObjectBoundingMode)
-        grad.setColorAt(0, QColor(COLORS["accent"]))
-        grad.setColorAt(1, QColor(COLORS["accent_press"]))
-        panel = RoundedCard(radius=16, fill=grad)
-        panel.setMinimumHeight(168)
-        pl = QVBoxLayout(panel)
-        pl.setContentsMargins(24, 22, 24, 22)
-        pl.setSpacing(10)
-        ft = QLabel(t("home.featured"))
-        ft.setStyleSheet("color: rgba(30,30,50,0.92); font-weight: 600; font-size: 13px;")
-        pl.addWidget(ft)
-        self.inst_lbl = QLabel("—")
-        self.inst_lbl.setStyleSheet("color: #FFFFFF; font-weight: 700; font-size: 22px;")
-        pl.addWidget(self.inst_lbl)
-        self.detail_lbl = QLabel("")
-        self.detail_lbl.setStyleSheet("color: rgba(30,30,50,0.85);")
-        pl.addWidget(self.detail_lbl)
-        self.play_btn = self._make_play_btn()
-        self.play_btn.setStyleSheet(
-            "background: #FFFFFF; color: #1F2937; border-radius: 10px; font-weight: 700;")
-        pl.addWidget(self.play_btn)
-        lay.addWidget(panel)
-        pills = QHBoxLayout()
-        pills.setSpacing(10)
-        pills.addWidget(self._list_row("search", t("scan.title"), "", self._open_scan))
-        pills.addWidget(self._list_row("settings", t("nav.settings"), "", self._open_settings))
-        pills.addWidget(self._list_row("instances", t("nav.instances"), "", self._open_instances))
-        lay.addLayout(pills)
-
     # ── navigation callbacks ──
     def _open_settings(self):
         if self.on_open_settings:
@@ -1066,20 +736,6 @@ class HomePage(QWidget):
         except Exception:
             pass  # never let a bad instances.json break the home view
         self._refresh()
-
-    def _open_mods(self):
-        if self.on_open_mods:
-            self.on_open_mods()
-
-    def _label(self, text: str) -> QLabel:
-        """Hero 卡片标题（QSS cls 默认 'big' = 主标题深色）。
-
-        round-33 修复：之前默认 cls='sub' 导致"当前实例"主标题渲染成次要灰，
-        看起来像看不清。改为主标题大字号深色。
-        """
-        l = QLabel(text)
-        l.setProperty("cls", "big")
-        return l
 
     @staticmethod
     def _alive(w) -> bool:
@@ -1137,12 +793,6 @@ class HomePage(QWidget):
                 self.detail_lbl.setText("")
             if hasattr(self, "play_btn") and self._alive(self.play_btn):
                 self.play_btn.setEnabled(False)
-            # 主页模板字段
-            if hasattr(self, "pcl_username") and self._alive(self.pcl_username):
-                self.pcl_username.setText("Player")
-            if hasattr(self, "pcl_ver_text") and self._alive(self.pcl_ver_text):
-                self.pcl_ver_text.setText("")
-            self._refresh_pcl_avatar()
             return
 
         if hasattr(self, "play_btn") and self._alive(self.play_btn):
@@ -1164,15 +814,6 @@ class HomePage(QWidget):
                 f"{t('home.version')} {inst.game_version}  ·  "
                 f"{t('home.loader')} {inst.loader}"
             )
-
-        # ── 主页模板专属字段填充 ──
-        if hasattr(self, "pcl_username") and self._alive(self.pcl_username):
-            self.pcl_username.setText(inst.name or "Player")
-        if hasattr(self, "pcl_ver_text") and self._alive(self.pcl_ver_text):
-            ver_str = f"{inst.game_version or '?'}"
-            if inst.loader and inst.loader.lower() not in ("vanilla", ""):
-                ver_str += f"  ·  {inst.loader}"
-            self.pcl_ver_text.setText(ver_str)
 
     # ── 实例卡片网格 ──
     def _make_instance_card(self, inst, is_current):
@@ -1281,24 +922,6 @@ class HomePage(QWidget):
             if win is not None and hasattr(win, "kill_game"):
                 if not win.kill_game():
                     win.statusBar().showMessage(t("status.no_game_running"))
-        except Exception:
-            pass
-
-    def _refresh_pcl_avatar(self):
-        """主页模板头像：皮肤头（或默认账户图标）。
-
-        Uses the global skin/account managers so the HomePage can render the
-        logged-in player's head without a direct reference to MainWindow.
-        """
-        if not hasattr(self, "pcl_avatar_lbl") or not self._alive(self.pcl_avatar_lbl):
-            return
-        try:
-            acc = accounts_manager().current()
-            path = skin_manager().active_path(acc["id"]) if acc else None
-            if path and os.path.exists(path):
-                self.pcl_avatar_lbl.setPixmap(render_head(path, 64))
-            else:
-                self.pcl_avatar_lbl.setPixmap(icon("account").pixmap(64, 64))
         except Exception:
             pass
 
@@ -1633,7 +1256,7 @@ class MainWindow(QMainWindow):
         from .theme import set_font_family
         set_font_family(self.cfg.get("font_family", ""))
         # round-49 液态流光 effect：按配置开启流光卡片 + 全局透明度。
-        set_effects_enabled(self.cfg.get("effect_light_trail", True))
+        set_effects_enabled(self.cfg.get("effect_light_trail", False))
         set_window_opacity(self, self.cfg.get("window_opacity", 1.0))
 
         # round-51 透底效果：系统 Acrylic 在 FramelessHelper 设置完窗口标志后
@@ -1797,7 +1420,7 @@ class MainWindow(QMainWindow):
         否则 Acrylic 会被实色背景盖住。关闭时回退圆角即可。
         """
         try:
-            if self.cfg.get("transparent_window", True):
+            if self.cfg.get("transparent_window", False):
                 from .win_acrylic import enable_acrylic
                 self.setAttribute(Qt.WA_TranslucentBackground, True)
                 enable_acrylic(self, dark=get_theme_mode() == "dark")
@@ -1814,7 +1437,12 @@ class MainWindow(QMainWindow):
         从右→左 250ms 滑入 → 持续 4s → 250ms 淡出 → 删除。
         自绘 QWidget 子类（金色边框 + 棕色背景 + 🏆大图标 + 标题 + 描述）。
         防 GC：_active_toasts 列表兜底。
+
+        round-100：默认关（设置「成就解锁弹窗」开启才弹）——弹窗会打断操作，
+        成就本身仍记录，可在左侧「成就」页查看。
         """
+        if not self.cfg.get("achievement_toasts", False):
+            return
         try:
             from .achievements import ACHIEVEMENTS
             from .i18n import t as _t
@@ -2456,6 +2084,12 @@ class MainWindow(QMainWindow):
             self._tray_notify_hide()
             return
         super().closeEvent(event)
+        # main.py 已把 quitOnLastWindowClosed 置 False（防首启 splash→教程
+        # 空窗期误退出），因此主窗口的**实关闭**必须显式退出 app，否则窗口关了
+        # 进程还挂着。托盘退出、启动后自动关闭、标题栏 × 都汇聚到这里。
+        if event.isAccepted():
+            from PySide6.QtWidgets import QApplication
+            QApplication.quit()
 
     # ── AC layout: left vertical nav (the historical default) ──
     def _build_ac_nav(self, body: QHBoxLayout):
@@ -2952,16 +2586,6 @@ class MainWindow(QMainWindow):
             return
         self.nav.setCurrentRow(self._nav_row(key))
 
-    def apply_home_style(self, style_key: str):
-        """Re-render the home page live with a new style (from settings / onboarding)."""
-        # 非开发者模式只允许 AC 默认模板
-        if style_key != "ac_default" and not self.cfg.get("dev_mode", False):
-            style_key = "ac_default"
-        self.cfg["home_style"] = style_key
-        if hasattr(self, "home"):
-            self.home.cfg = self.cfg
-            self.home.rebuild()
-
     def _on_account_btn_clicked(self):
         """Top-bar account button: no account → straight to login; has account
         → pop the account menu (switch / skin / remove / add another)."""
@@ -3061,13 +2685,6 @@ class MainWindow(QMainWindow):
             self.account_btn.setIcon(render_head(path, 24))
         else:
             self.account_btn.setIcon(icon("account"))
-        # keep the home template avatar in sync
-        hp = getattr(self, "home", None)
-        if hp is not None:
-            try:
-                hp._refresh_pcl_avatar()
-            except Exception:
-                pass
 
     def _open_settings(self):
         """Open the embedded settings page (nav row triggers reload + switch)."""

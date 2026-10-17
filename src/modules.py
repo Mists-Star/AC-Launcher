@@ -181,10 +181,6 @@ def find_module(mid: str) -> Optional[ModuleInfo]:
     return None
 
 
-def is_module_enabled(mid: str) -> bool:
-    return mid in set(_load_registry().get("enabled", []))
-
-
 def set_module_enabled(mid: str, on: bool) -> None:
     reg = _load_registry()
     enabled = set(reg["enabled"])
@@ -248,10 +244,6 @@ def _copy_tree(src: str, dest: str) -> None:
             shutil.copytree(s, d)
         else:
             shutil.copy2(s, d)
-
-
-def install_module_dir(path: str) -> ModuleInfo:
-    return _install_from_folder(os.path.abspath(path))
 
 
 def _safe_extract_zip(zf: "zipfile.ZipFile", dest: str) -> None:

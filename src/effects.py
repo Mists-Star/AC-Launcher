@@ -293,8 +293,17 @@ def fade_page_transition(stack, index: int) -> None:
     必清 effect → 不会残留"双页"重影（round-49 修复旧版：持久 effect 在
     modal 弹窗打断时被孤立，页面停在半透明叠加在自身之上）。
 
-    失败或配置关闭 → 直接瞬时切换（不崩、不卡）。"""
-    if stack is None or not EFFECTS_ENABLED:
+    round-100 动画打磨：新页同时轻量上浮 8px 汇入（克制——只动子页局部，
+    与淡入同拍）；上浮前强制同步布局拿到真实落点，动画结束再归位一次，
+    连续切换/中途打断都不会累积偏移。
+
+    调用方（main_window._switch_stack）按配置 ``page_transition`` 决定是否
+    调用本函数；动画失败 → 直接瞬时切换（不崩、不卡）。
+
+    round-103：不再受 ``EFFECTS_ENABLED``（流光装饰总开关）牵连——页面切换
+    动画有自己的配置 ``page_transition``（默认开）。此前本函数在流光关闭时
+    直接跳转，导致「页面切换动画」开关形同虚设。"""
+    if stack is None:
         return
     from PySide6.QtCore import QPropertyAnimation, QEasingCurve
     from PySide6.QtWidgets import QGraphicsOpacityEffect
@@ -306,7 +315,7 @@ def fade_page_transition(stack, index: int) -> None:
         stack.setGraphicsEffect(eff)
         stack.setCurrentIndex(index)
         anim = QPropertyAnimation(eff, b"opacity", stack)
-        anim.setDuration(150)
+        anim.setDuration(160)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
         anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -324,6 +333,31 @@ def fade_page_transition(stack, index: int) -> None:
         # 持有引用防 GC；下次切换会重新 setGraphicsEffect，旧的 finished 仍
         # 会触发 _done 清掉自身，不会互相干扰。
         stack._fade_anim = anim
+
+        # 新页上浮（round-100）：先同步布局取真实落点，再从 +8px 滑回。
+        page = stack.widget(index)
+        if page is not None:
+            try:
+                stack.layout().activate()
+            except Exception:  # noqa: BLE001
+                pass
+            end_pos = page.pos()
+            page.move(end_pos.x(), end_pos.y() + 8)
+            rise = QPropertyAnimation(page, b"pos", stack)
+            rise.setDuration(180)
+            rise.setStartValue(page.pos())
+            rise.setEndValue(end_pos)
+            rise.setEasingCurve(QEasingCurve.OutCubic)
+
+            def _rise_done(_p=page, _pos=end_pos):
+                try:
+                    _p.move(_pos)  # 归位：抵消动画被中途打断的残留偏移
+                except Exception:  # noqa: BLE001
+                    pass
+
+            rise.finished.connect(_rise_done)
+            rise.start()
+            stack._rise_anim = rise
     except Exception:  # noqa: BLE001
         try:
             stack.setGraphicsEffect(None)
@@ -332,8 +366,39 @@ def fade_page_transition(stack, index: int) -> None:
             pass
 
 
-def start_light_trail(card: LightTrailCard) -> None:
-    """显式启动某张流光卡片的动画（通常无需调用——showEvent 自动注册）。"""
-    if EFFECTS_ENABLED and card is not None:
-        _ACTIVE_CARDS.add(card)
-        _ensure_master()
+def fade_in_widget(w, duration: int = 170) -> None:
+    """列表/容器重建后的轻量淡入（round-100 动画打磨，克制）。
+
+    一次性 QGraphicsOpacityEffect——动画结束必清 effect（同
+    fade_page_transition 的防重影策略）；重复触发先清旧 effect。
+    失败或效果总开关关闭 → 静默跳过（纯装饰，不参与功能）。"""
+    if w is None or not EFFECTS_ENABLED:
+        return
+    from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
+    try:
+        w.setGraphicsEffect(None)
+        eff = QGraphicsOpacityEffect(w)
+        eff.setOpacity(0.0)
+        w.setGraphicsEffect(eff)
+        anim = QPropertyAnimation(eff, b"opacity", w)
+        anim.setDuration(duration)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _done():
+            try:
+                w.setGraphicsEffect(None)
+                eff.deleteLater()
+            except Exception:  # noqa: BLE001
+                pass
+
+        anim.finished.connect(_done)
+        anim.start()
+        w._fade_in_anim = anim  # 持有引用防 GC
+    except Exception:  # noqa: BLE001
+        try:
+            w.setGraphicsEffect(None)
+        except Exception:  # noqa: BLE001
+            pass

@@ -17,7 +17,7 @@ from PySide6.QtCore import Signal, QSize, QTimer, Qt
 from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
 
 from .theme import COLORS, RoundedCard
-from .effects import LightTrailCard  # round-50 商店卡流光
+from .effects import LightTrailCard, fade_in_widget  # round-50 商店卡流光；round-100 列表淡入
 from . import ui_kit
 from .icons import icon
 from .i18n import t, version_type_name, loader_name
@@ -26,7 +26,6 @@ from .instances import manager
 from .pages_instances import NewInstanceDialog
 from .net_api import (
     fetch_versions, search_mods, download_mod_to, download_modpack_to,
-    fetch_optifine_versions, download_optifine_to,
     STORE_CATEGORIES,
 )
 from .worker import Worker
@@ -35,34 +34,46 @@ from .store_detail import StoreDetailDialog  # round-66 资源详情页（版本
 
 
 def _letter_fallback(title: str, size: int = 48) -> QPixmap:
-    """Generate a colored letter icon as fallback when mod CDN fails.
-    Uses the first character of the title on a themed background."""
+    """Generate a neutral letter icon as fallback when mod CDN fails.
+
+    round-99 极简：原实现用 ``hash(title) % 360`` 生成随机饱和色块——列表
+    里每张卡片一个颜色，花而杂。改为中性灰底（bg_hover）+ 次级文字色
+    首字母，颜色按需读 COLORS（随主题刷新）。
+    """
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
     # Round background
     p.setPen(Qt.NoPen)
-    # Hash the title to get a consistent color
-    hue = hash(title) % 360
-    color = QColor()
-    color.setHsv(hue, 140, 180)
-    p.setBrush(color)
+    p.setBrush(QColor(COLORS.get("bg_hover", "#F0F1F3")))
     p.drawRoundedRect(0, 0, size, size, size * 0.18, size * 0.18)
     # First letter
     letter = title[0].upper() if title else "?"
     f = QFont("Microsoft YaHei", size // 2, QFont.Bold)
     p.setFont(f)
-    p.setPen(QColor(255, 255, 255, 230))
+    p.setPen(QColor(COLORS.get("text_sub", "#6B7280")))
     p.drawText(pm.rect(), Qt.AlignCenter, letter)
     p.end()
     return pm
 
-TYPE_COLOR = {
-    "release": COLORS["success"], "snapshot": COLORS["warn"],
-    "april": "#DB2777",
-    "old_beta": COLORS["text_sub"], "old_alpha": COLORS["text_sub"],
+
+# 版本类型 → 标签色 token 名。round-99：原 TYPE_COLOR 字典在导入时就把
+# COLORS 值快照写死（切主题不刷新），april 还硬编码品牌粉 #DB2777（最刺眼
+# 的硬编码，并入中性）。改为按需读 token，随主题刷新。
+_TYPE_TOKEN = {
+    "release": "success", "snapshot": "warn",
+    "april": "text_sub",
+    "old_beta": "text_sub", "old_alpha": "text_sub",
 }
+
+
+def _type_color(type_key: str) -> str:
+    """版本类型 → 标签文字色（实时读 COLORS）。"""
+    return COLORS.get(_TYPE_TOKEN.get(type_key, "text_sub"),
+                      COLORS.get("text_sub", "#6B7280"))
+
+
 # group -> display ordering + which raw types belong to it
 _GROUP_ORDER = ["release", "snapshot", "april", "legacy"]
 _GROUP_OF_TYPE = {"release": "release", "snapshot": "snapshot", "old_beta": "legacy", "old_alpha": "legacy"}
@@ -259,10 +270,10 @@ class VersionsPage(QWidget):
 
         if v.get("april"):
             tag_text = t("versions.type.april")
-            tag_color = TYPE_COLOR["april"]
+            tag_color = _type_color("april")
         else:
             tag_text = version_type_name(v["type"])
-            tag_color = TYPE_COLOR.get(v["type"], COLORS["text_sub"])
+            tag_color = _type_color(v["type"])
         tag = QLabel(tag_text)
         tag.setStyleSheet(f"color: {tag_color};")
         lay.addWidget(tag)
@@ -354,7 +365,8 @@ class StorePage(QWidget):
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
 
-        # 第一行：标题 + 源切换
+        # 第一行：标题 + 目标实例 + 源切换（round-104：目标实例上移到页头，
+        # 搜索行只留搜索框——「搜索」按钮被搜索框吃掉）
         self.source_combo = QComboBox()
         self.source_combo.setMinimumHeight(36)
         self.source_combo.setMinimumWidth(120)
@@ -362,8 +374,21 @@ class StorePage(QWidget):
         self.source_combo.addItem(t("store.source_curseforge"), "curseforge")
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
 
+        target_w = QWidget()
+        tw = QHBoxLayout(target_w)
+        tw.setContentsMargins(0, 0, 0, 0)
+        tw.setSpacing(8)
+        self.target_lbl = QLabel(t("store.target_label"))
+        self.target_lbl.setProperty("cls", "sub")
+        tw.addWidget(self.target_lbl)
+        self.inst_combo = QComboBox()
+        self.inst_combo.setMinimumHeight(32)
+        self.inst_combo.setMinimumWidth(160)
+        self.inst_combo.currentIndexChanged.connect(self._on_target_changed)
+        tw.addWidget(self.inst_combo)
+
         self._header = ui_kit.page_header(
-            t("store.title"), action=self.source_combo, icon_key="store")
+            t("store.title"), action=[target_w, self.source_combo], icon_key="store")
         self.title_lbl = self._header.title_lbl
         root.addWidget(self._header)
 
@@ -373,7 +398,6 @@ class StorePage(QWidget):
             [(pt, t(key)) for pt, key in STORE_CATEGORIES],
             on_change=self._set_category, spacing=8, min_h=34)
         self._cat_btns = self.category_chips.buttons
-        self._cat_btns["optifine"].setToolTip(t("store.optifine_what"))
         self._cat_row = QHBoxLayout()
         self._cat_row.setSpacing(8)
         self._cat_row.addStretch(1)
@@ -381,29 +405,13 @@ class StorePage(QWidget):
         self._cat_row.addStretch(1)
         root.addLayout(self._cat_row)
 
-        # 第三行：目标实例 + 搜索框 + 搜索按钮
-        head2 = QHBoxLayout()
-        head2.setSpacing(10)
-        self.target_lbl = QLabel(t("store.target_label"))
-        self.target_lbl.setProperty("cls", "sub")
-        head2.addWidget(self.target_lbl)
-        self.inst_combo = QComboBox()
-        self.inst_combo.setMinimumHeight(32)
-        # round-52 自适应：去掉 200 硬性最小宽度，combo 弹性伸展，窄窗口不溢出。
-        self.inst_combo.setMinimumWidth(0)
-        self.inst_combo.currentIndexChanged.connect(self._on_target_changed)
-        head2.addWidget(self.inst_combo, stretch=1)
+        # 第三行：搜索框（无独立按钮——输入即防抖搜索，Enter 立即搜索）
         self.search = QLineEdit()
         self.search.setPlaceholderText(t("store.search_placeholder"))
         self.search.setMinimumHeight(34)
-        self.search.setMinimumWidth(0)
+        self.search.textChanged.connect(lambda _=None: self._search_timer.start())
         self.search.returnPressed.connect(self._search_timer.start)
-        head2.addWidget(self.search, stretch=2)
-        self.search_btn = ui_kit.make_button(
-            t("store.search"), icon_key="search",
-            on_click=self._search_timer.start, min_h=36)
-        head2.addWidget(self.search_btn)
-        root.addLayout(head2)
+        root.addWidget(self.search)
 
         self.status = QLabel(t("store.loading"))
         self.status.setProperty("cls", "sub")
@@ -441,10 +449,6 @@ class StorePage(QWidget):
         self.category_chips.set(category)
         if not initial:
             self._search_timer.start()
-
-    def _on_category_changed(self, _index: int):
-        self._category = self.category_combo.currentData()
-        self._search()
 
     def _on_source_changed(self, _index: int):
         """CurseForge 无 key 时走"链接解析"模式（cfwidget+forgecdn 免 key 通道）。
@@ -553,9 +557,6 @@ class StorePage(QWidget):
         if self._source == "curseforge":
             self._load_curseforge(reset)
             return
-        if self._category == "optifine":
-            self._load_optifine(reset)
-            return
         self.status.setText(t("store.fetching"))
         self._load_gen += 1
         gen = self._load_gen
@@ -577,25 +578,6 @@ class StorePage(QWidget):
         worker = Worker(worker_fn, self._query)
         self._track(worker, gen, reset)
 
-    def _load_optifine(self, reset: bool):
-        """OptiFine 分类：按目标实例的 MC 版本列出可用构建（BMCLAPI）。"""
-        inst = self._target()
-        if inst is None or not inst.game_version:
-            self._loading_more = False
-            self.status.setText(t("store.optifine_no_instance"))
-            if reset:
-                while self._vbox.count():
-                    item = self._vbox.takeAt(0)
-                    w = item.widget()
-                    if w is not None:
-                        w.deleteLater()
-            return
-        self.status.setText(t("store.optifine_fetching", mc=inst.game_version))
-        self._load_gen += 1
-        gen = self._load_gen
-        worker = Worker(fetch_optifine_versions, inst.game_version)
-        self._track(worker, gen, reset)
-
     def _on_loaded(self, mods: list[dict], reset: bool):
         self._loading_more = False
         self._mods = mods if reset else self._mods + mods
@@ -608,6 +590,14 @@ class StorePage(QWidget):
         self.status.setText(t("store.results", n=len(self._mods)))
         for m in mods:
             self._vbox.addWidget(self._make_card(m))
+        # round-100 列表淡入（克制）：只在整页重置时淡入，加载更多不闪整屏
+        if reset and mods:
+            fade_in_widget(self.scroll.viewport())
+        # 策略变更：结果一到就把每个资源的「详情页 72px 封面」预取进缓存，
+        # 不必等用户点进详情才开始下载（详情页 StoreDetailDialog 用的正是 72
+        # 尺寸）。失败静默——详情页仍会按需加载，不会因此空白。
+        for m in mods:
+            self._img.prefetch(m.get("icon_url", ""), 72)
 
     def _make_card(self, m: dict) -> QFrame:
         # round-50 商店卡流光：低强度慢速，视觉整洁
@@ -646,8 +636,8 @@ class StorePage(QWidget):
             dl = QPushButton(t("store.download"))
             dl.clicked.connect(
                 lambda _, pid=m["project_id"], pslug=m["slug"],
-                fname=m.get("_filename", ""), cf=m.get("_cf_file"):
-                self._download(pid, pslug, fname, cf)
+                cf=m.get("_cf_file"):
+                self._download(pid, pslug, cf_file=cf)
             )
         dl.setMinimumHeight(34)
         dl.setIcon(icon("download"))
@@ -656,7 +646,7 @@ class StorePage(QWidget):
 
         # round-66：modrinth 源卡片点击 → 详情页（全部版本 / 翻译 / 按版本下载）。
         # 下载/安装按钮会消费鼠标事件，不会误触卡片的点击打开。
-        if self._source == "modrinth" and self._category != "optifine":
+        if self._source == "modrinth":
             card.setCursor(Qt.PointingHandCursor)
             card.mousePressEvent = lambda _e, m=m: self._open_detail(m)
         return card
@@ -673,8 +663,7 @@ class StorePage(QWidget):
             _TYPE_SUBDIR.get(self._category, "mods"))
         dlg.exec()
 
-    def _download(self, project_id: str, slug: str, optifine_filename: str = "",
-                  cf_file: dict | None = None):
+    def _download(self, project_id: str, slug: str, cf_file: dict | None = None):
         inst = self._target()
         if inst is None:
             toast(self, t("common.hint"), t("store.download_hint"))
@@ -693,9 +682,6 @@ class StorePage(QWidget):
         if self._source == "curseforge":
             from .net_api import download_cfwidget_file
             self._dworker = Worker(download_cfwidget_file, cf_file, dest)
-        elif optifine_filename:
-            # OptiFine 是 mod：下载 jar 到 mods/（需 Forge/Fabric 前置生效）
-            self._dworker = Worker(download_optifine_to, optifine_filename, dest)
         else:
             # round-37：传入实例的 MC 版本 + 加载器，让 Modrinth 过滤兼容版本
             # 并自动拉取 required 依赖树（download_mod_to 已支持依赖解析）
@@ -743,7 +729,6 @@ class StorePage(QWidget):
         self.title_lbl.setText(t("store.title"))
         self.target_lbl.setText(t("store.target_label"))
         self.search.setPlaceholderText(t("store.search_placeholder"))
-        self.search_btn.setText(t("store.search"))
         self.more_btn.setText(t("store.more"))
         # rebuild source combo, keep selection
         keep = self.source_combo.currentData()

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QComboBox,
 )
 
-from .theme import COLORS, RoundedCard, R_CARD, R_BTN, F_SM, F_MD, F_LG
+from .theme import COLORS, RoundedCard, R_CARD, R_BTN, F_SM, F_MD, F_LG, with_alpha
 from .icons import icon
 
 
@@ -127,10 +127,14 @@ def state_pix(mode: str, color: str, size: int = 16) -> QPixmap:
 
 # ── badge / pill ───────────────────────────────────────────────────────────
 def badge(text: str, color: str, font_size: int = 11) -> QLabel:
-    """Small rounded pill. ``color`` drives the text and a translucent bg."""
+    """Small rounded pill. ``color`` drives the text and a translucent bg.
+
+    round-100：alpha 必须在前（#AARRGGBB）——旧 `{color}1F` 是 #RRGGBBAA，
+    Qt 会解析成完全无关的颜色。
+    """
     lb = QLabel(text)
     lb.setStyleSheet(
-        f"color: {color}; background: {color}1F; border-radius: 9px; "
+        f"color: {color}; background: {with_alpha(color, 0x1F)}; border-radius: 9px; "
         f"padding: 2px 10px; font-size: {font_size}px; font-weight: 600;"
     )
     return lb

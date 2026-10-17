@@ -124,6 +124,38 @@ class ImageLoader(QObject):
         reply.setProperty("path", path)
         reply.setProperty("token", self._token)
 
+    def prefetch(self, url: str, size: int) -> None:
+        """Warm disk + memory caches for ``url`` without a target widget.
+
+        Used by the store list: the moment results arrive, every card's cover
+        is also fetched for the detail-dialog size — opening a detail view then
+        hits memory/disk instead of starting a fresh network fetch (the old
+        behaviour was "cache only after the user clicks in"). Replies reuse
+        ``_on_finished``: the rounded PNG is saved to disk and put into the
+        memory LRU; pixmap delivery is skipped because the target is None.
+        Failures stay silent — the regular ``load()`` path retries on demand.
+        """
+        if not url:
+            return
+        cache_key = (url, size)
+        if cache_key in self._mem:
+            self._mem_get(cache_key)  # touch for LRU freshness
+            return
+        key = hashlib.md5(url.encode("utf-8")).hexdigest()
+        path = os.path.join(self._cache_dir, f"{key}_{size}.png")
+        if os.path.exists(path):
+            return  # already on disk — the later load() reads it straight in
+        req = QNetworkRequest(QUrl(url))
+        req.setHeader(QNetworkRequest.UserAgentHeader, "MC-Launcher/0.1")
+        self._rid += 1
+        rid = self._rid
+        self._pending[rid] = (None, size)
+        reply = self._mgr.get(req)
+        reply.setProperty("rid", rid)
+        reply.setProperty("url", url)
+        reply.setProperty("path", path)
+        reply.setProperty("token", self._token)
+
     def _on_finished(self, reply: QNetworkReply) -> None:
         # Cache the result regardless of whether the original target widget is
         # still alive; stale replies still warm the disk+memory cache. Only set
@@ -315,256 +347,6 @@ _DECO_TO_TEXTURE: dict[str, str | None] = {
 }
 _tex_cache: dict[str, QPixmap] = {}
 _tex_miss: set[str] = set()
-
-
-def _deco_texture(key: str) -> QPixmap | None:
-    """Return a real texture pixmap for an eco-deco key, or None (use vector)."""
-    rel = _DECO_TO_TEXTURE.get(key)
-    if rel is None:
-        return None
-    if rel in _tex_miss:
-        return None
-    if rel in _tex_cache:
-        return _tex_cache[rel]
-    path = get_resource_path(os.path.join(_TEXTURE_ROOT, rel + ".png"))
-    if os.path.exists(path):
-        pm = QPixmap(path)
-        _tex_cache[rel] = pm if not pm.isNull() else None
-    else:
-        _tex_miss.add(rel)
-        _tex_cache[rel] = None
-    return _tex_cache[rel]
-
-
-# translucent white used for motif + eco-deco strokes/fills on any gradient
-_MOTIF = QColor(255, 255, 255, 72)
-_MOTIF_STRONG = QColor(255, 255, 255, 120)
-
-
-def _circle(p, x, y, r):
-    p.drawEllipse(QPointF(x, y), r, r)
-
-
-def _hex(p, x, y, r):
-    poly = QPolygonF()
-    for i in range(6):
-        a = math.radians(60 * i - 90)
-        poly.append(QPointF(x + math.cos(a) * r, y + math.sin(a) * r))
-    p.drawPolygon(poly)
-
-
-def _draw_motif(p, s, key):
-    """Draw a small signature glyph for an update theme, in translucent white."""
-    p.setPen(Qt.NoPen)
-    p.setBrush(QBrush(_MOTIF))
-    cx, cy = s / 2, s * 0.74
-    if key == "aquatic":
-        p.setPen(QPen(_MOTIF, max(2, s * 0.045), Qt.SolidLine, Qt.RoundCap))
-        p.setBrush(Qt.NoBrush)
-        for yy in (s * 0.66, s * 0.78):
-            path = QPainterPath()
-            path.moveTo(s * 0.16, yy)
-            path.cubicTo(s * 0.32, yy - s * 0.08, s * 0.46, yy + s * 0.08, s * 0.6, yy)
-            path.cubicTo(s * 0.7, yy - s * 0.08, s * 0.82, yy + s * 0.08, s * 0.84, yy)
-            p.drawPath(path)
-    elif key == "nether":
-        path = QPainterPath()
-        path.moveTo(s * 0.5, s * 0.58)
-        path.cubicTo(s * 0.78, s * 0.74, s * 0.62, s * 0.9, s * 0.5, s * 0.92)
-        path.cubicTo(s * 0.38, s * 0.9, s * 0.22, s * 0.74, s * 0.5, s * 0.58)
-        p.drawPath(path)
-    elif key == "bees":
-        for dx, dy, r in [(0, 0, 0.13), (0.22, -0.12, 0.09), (-0.22, -0.12, 0.09),
-                          (0.22, 0.14, 0.09), (-0.22, 0.14, 0.09)]:
-            _hex(p, cx + dx * s, cy + dy * s, r * s)
-    elif key == "village":
-        p.drawRect(s * 0.34, s * 0.66, s * 0.32, s * 0.26)
-        path = QPainterPath()
-        path.moveTo(s * 0.3, s * 0.66)
-        path.lineTo(s * 0.5, s * 0.5)
-        path.lineTo(s * 0.7, s * 0.66)
-        path.closeSubpath()
-        p.drawPath(path)
-    elif key == "caves":
-        path = QPainterPath()
-        path.moveTo(s * 0.5, s * 0.56)
-        path.lineTo(s * 0.68, s * 0.78)
-        path.lineTo(s * 0.5, s * 0.94)
-        path.lineTo(s * 0.32, s * 0.78)
-        path.closeSubpath()
-        p.drawPath(path)
-    elif key == "wild":
-        p.setPen(QPen(_MOTIF, max(2, s * 0.045), Qt.SolidLine, Qt.RoundCap))
-        p.setBrush(Qt.NoBrush)
-        for k in range(6):
-            a = math.radians(60 * k)
-            p.drawLine(cx, cy, cx + math.cos(a) * s * 0.28, cy + math.sin(a) * s * 0.28)
-    elif key == "cherry":
-        for k in range(5):
-            a = math.radians(72 * k - 90)
-            _circle(p, cx + math.cos(a) * s * 0.15, cy + math.sin(a) * s * 0.15, s * 0.09)
-    elif key == "trials":
-        for gx in (0.36, 0.56):
-            for gy in (0.62, 0.82):
-                p.drawRoundedRect(s * gx, s * gy, s * 0.09, s * 0.09, 2, 2)
-    elif key == "color":
-        p.setBrush(Qt.NoBrush)
-        cols = ["#F87171", "#FBBF24", "#34D399", "#60A5FA", "#C084FC"]
-        for i, c in enumerate(cols):
-            p.setPen(QPen(QColor(c), max(2, s * 0.05)))
-            p.drawLine(s * 0.16, s * (0.62 + i * 0.07), s * 0.84, s * (0.56 + i * 0.07))
-    elif key == "combat":
-        path = QPainterPath()
-        path.moveTo(s * 0.5, s * 0.58)
-        path.lineTo(s * 0.7, s * 0.68)
-        path.lineTo(s * 0.7, s * 0.86)
-        path.cubicTo(s * 0.7, s * 0.9, s * 0.5, s * 0.94, s * 0.5, s * 0.94)
-        path.cubicTo(s * 0.5, s * 0.94, s * 0.3, s * 0.9, s * 0.3, s * 0.86)
-        path.lineTo(s * 0.3, s * 0.68)
-        path.closeSubpath()
-        p.drawPath(path)
-    elif key == "frost":
-        p.setPen(QPen(_MOTIF, max(2, s * 0.045), Qt.SolidLine, Qt.RoundCap))
-        p.setBrush(Qt.NoBrush)
-        for k in range(6):
-            a = math.radians(60 * k)
-            ex, ey = cx + math.cos(a) * s * 0.3, cy + math.sin(a) * s * 0.3
-            p.drawLine(cx, cy, ex, ey)
-            mx, my = cx + math.cos(a) * s * 0.18, cy + math.sin(a) * s * 0.18
-            for b in (-0.5, 0.5):
-                ba = a + b
-                p.drawLine(mx, my, mx + math.cos(ba) * s * 0.1, my + math.sin(ba) * s * 0.1)
-    elif key == "exploration":
-        p.setPen(QPen(_MOTIF, max(2, s * 0.045)))
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(cx - s * 0.16, cy - s * 0.16, s * 0.32, s * 0.32)
-        _circle(p, cx, cy, s * 0.04)
-    elif key == "bountiful":
-        p.setPen(QPen(_MOTIF, max(2, s * 0.045)))
-        p.setBrush(Qt.NoBrush)
-        for dx in (-0.1, 0.1):
-            p.drawArc(s * (0.5 + dx) - s * 0.04, cy - s * 0.16, s * 0.08, s * 0.32, 30 * 16, 120 * 16)
-    elif key == "redstone":
-        p.setPen(QPen(_MOTIF, max(2, s * 0.05), Qt.SolidLine, Qt.RoundCap))
-        p.setBrush(Qt.NoBrush)
-        pts = [(0.2, 0.62), (0.4, 0.78), (0.6, 0.62), (0.8, 0.78)]
-        for i in range(len(pts) - 1):
-            p.drawLine(s * pts[i][0], s * pts[i][1], s * pts[i + 1][0], s * pts[i + 1][1])
-        for x, y in pts:
-            _circle(p, s * x, s * y, s * 0.03)
-
-
-def _draw_deco(p, x, y, r, key):
-    """Draw a tiny eco chip (a creature / block / item the update added)."""
-    p.setPen(Qt.NoPen)
-    p.setBrush(QBrush(_MOTIF_STRONG))
-    save = p.pen()
-    if key in ("piglin", "sniffer", "frog", "polar", "rabbit", "llama",
-               "horse", "parrot", "bat", "warden", "breeze"):
-        _circle(p, x, y, r * 0.9)               # round creature body
-        p.setPen(QPen(QColor(0, 0, 0, 40), 1))
-        _circle(p, x + r * 0.3, y - r * 0.2, r * 0.18)  # eye
-        p.setPen(save)
-    elif key in ("lava", "honey", "ice"):
-        path = QPainterPath()
-        path.moveTo(x - r, y + r * 0.4)
-        path.quadTo(x - r, y - r, x, y - r)
-        path.quadTo(x + r, y - r, x + r, y + r * 0.4)
-        path.quadTo(x, y + r, x - r, y + r * 0.4)
-        p.drawPath(path)
-    elif key in ("netherite", "copper", "iron", "glazed", "wheat", "hay",
-                 "banner", "acacia", "flower"):
-        p.drawRoundedRect(x - r, y - r * 0.7, r * 2, r * 1.4, 2, 2)
-    elif key in ("amethyst", "spike", "crate", "repeater", "shield",
-                 "sword", "pumpkin", "village"):
-        path = QPainterPath()
-        path.moveTo(x, y - r)
-        path.lineTo(x + r, y + r)
-        path.lineTo(x - r, y + r)
-        path.closeSubpath()
-        p.drawPath(path)
-    elif key in ("fish", "kelp", "branch", "map", "shulker", "pillage"):
-        p.setPen(QPen(_MOTIF_STRONG, max(1, r * 0.4), Qt.SolidLine, Qt.RoundCap))
-        p.setBrush(Qt.NoBrush)
-        p.drawLine(x, y - r, x, y + r)
-    elif key in ("bubble", "color", "redstone", "hopper", "stray"):
-        _circle(p, x, y, r * 0.7)
-    else:
-        _circle(p, x, y, r * 0.8)
-
-
-def _draw_hero_texture(p, s, tex):
-    """Draw one real texture as the card's bottom 'hero' item. A soft backing
-    square lifts the texture off the gradient so it stays readable even when
-    the texture colour is close to the theme (amethyst on purple, frog on
-    green, etc.)."""
-    r = s * 0.2
-    box = int(round(r * 2))
-    x, y = s * 0.5, s * 0.74
-
-    # contrast backing, slightly larger than the texture
-    p.setPen(Qt.NoPen)
-    p.setBrush(QColor(0, 0, 0, 72))
-    back = box * 1.18
-    p.drawRoundedRect(x - back / 2, y - back / 2, back, back, r * 0.3, r * 0.3)
-
-    # texture clipped into a rounded square
-    path = QPainterPath()
-    path.addRoundedRect(x - r, y - r, box, box, r * 0.25, r * 0.25)
-    p.save()
-    p.setClipPath(path)
-    scaled = tex.scaled(box, box, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-    p.drawPixmap(int(x - r), int(y - r), scaled)
-    p.restore()
-
-    # white rim for legibility
-    p.setPen(QPen(QColor(255, 255, 255, 95), max(1.0, r * 0.1)))
-    p.setBrush(Qt.NoBrush)
-    p.drawRoundedRect(x - r, y - r, box, box, r * 0.25, r * 0.25)
-
-
-def _draw_iso_block(p, s, top, side_l, side_r):
-    """Draw an isometric Minecraft block (top diamond + two side quads).
-
-    Centered around ``(s/2, s*0.44)``, sized ~62% of the tile so the version
-    label below stays readable even at 48 px.
-    """
-    w = s * 0.30          # horizontal half-width
-    h = s * 0.155         # vertical half-height (isometric ≈ 30°)
-    drop = s * 0.16       # side face depth
-    cx = s * 0.5
-    y0 = s * 0.40
-
-    def poly(pts):
-        return QPolygonF([QPointF(x, y) for x, y in pts])
-
-    top_pts = [(cx, y0), (cx + w, y0 + h), (cx, y0 + 2 * h), (cx - w, y0 + h)]
-    left_pts = [(cx - w, y0 + h), (cx, y0 + 2 * h),
-                (cx, y0 + 2 * h + drop), (cx - w, y0 + h + drop)]
-    right_pts = [(cx + w, y0 + h), (cx, y0 + 2 * h),
-                 (cx, y0 + 2 * h + drop), (cx + w, y0 + h + drop)]
-
-    # soft drop shadow under the block (ground contact)
-    p.setPen(Qt.NoPen)
-    p.setBrush(QColor(0, 0, 0, 46))
-    sh = QPainterPath()
-    sh.addEllipse(cx - w * 1.28, y0 + 2 * h + drop - s * 0.04, w * 2.56, s * 0.10)
-    p.drawPath(sh)
-
-    p.setPen(QPen(QColor(0, 0, 0, 34), max(1.0, s * 0.012)))
-    p.setBrush(QColor(side_l))   # darkened left face
-    p.drawPolygon(poly(left_pts))
-    p.setBrush(QColor(side_r))   # right face
-    p.drawPolygon(poly(right_pts))
-    p.setBrush(QColor(top))      # bright top face
-    p.drawPolygon(poly(top_pts))
-
-    # slight top highlight = 反光，活一点（对齐 MC 图标的高光习惯）
-    p.setPen(Qt.NoPen)
-    p.setBrush(QColor(255, 255, 255, 42))
-    hl = QPainterPath()
-    hl.addEllipse(cx - w * 0.6, y0 - s * 0.012, w * 1.2, h * 0.9)
-    p.fillPath(hl, QBrush(QColor(255, 255, 255, 42)))
 
 
 def make_version_pixmap(version_id: str, vtype: str, size: int = 56) -> QPixmap:

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QGridLayout,
 )
 
-from .theme import COLORS, RoundedCard
+from .theme import COLORS, RoundedCard, with_alpha
 from .i18n import t
 from . import ui_kit
 from .achievements import ACHIEVEMENTS, CATEGORY_KEYS, achievements
@@ -52,7 +52,7 @@ class _AchCard(RoundedCard):
             badge = QWidget()
             badge.setAttribute(Qt.WA_StyledBackground, True)
             badge.setStyleSheet(
-                f"background: {COLORS['success']}22;"
+                f"background: {with_alpha(COLORS['success'], 0x22)};"
                 f" border-radius: 8px;"
             )
             bh = QHBoxLayout(badge)

@@ -112,9 +112,6 @@ class DownloadQueue(QObject):
         self.start()
         self._q.put(task)
 
-    def active_count(self) -> int:
-        return sum(1 for w in self._workers if w.isRunning())
-
     def shutdown(self, wait_ms: int = 4000) -> None:
         """置位取消 → 投递 None 终止信号 → join 所有消费线程（幂等）。
 

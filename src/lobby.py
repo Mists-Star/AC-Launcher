@@ -113,10 +113,3 @@ def leave_lobby(lobby_id: str, player: str = "Player"):
     if not raw["members"]:
         del data["lobbies"][lobby_id]
     _save(data)
-
-
-def get_lobby(lobby_id: str) -> Lobby | None:
-    """Get a single lobby by ID."""
-    data = _load()
-    raw = data["lobbies"].get(lobby_id)
-    return Lobby(**raw) if raw else None

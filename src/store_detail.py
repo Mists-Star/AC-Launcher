@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QUrl, QSize, QPoint
 from PySide6.QtGui import QDesktopServices, QColor
 
-from .theme import COLORS
+from .theme import COLORS, with_alpha
 from .i18n import t
 from .worker import Worker
 from .async_image import ImageLoader
@@ -38,6 +38,9 @@ PAGE_SIZE = 50
 
 
 # 加载器 → 徽章配色（对齐各加载器自身的品牌色，让加载器一眼可辨）。
+# round-99 极简重构：**默认不使用**——13 个品牌色同屏时页面花而杂，加载器
+# 徽章默认走全局中性 ``badge`` 类。只有主题包显式声明 ``"loader_vivid": true``
+# （见 ``_loader_vivid()``）时才恢复品牌色（vivid 模式）。
 LOADER_BADGE_COLORS = {
     "fabric":     "#B0633A",   # Fabric 沙金棕
     "forge":      "#E04E14",   # Forge 橙红
@@ -54,6 +57,23 @@ LOADER_BADGE_COLORS = {
     "datapack":   "#0D9488",
 }
 LOADER_DEFAULT = "#6B7280"
+
+
+def _loader_vivid() -> bool:
+    """是否启用加载器品牌彩章（默认关；主题包可开）。
+
+    主题包 JSON 里写 ``"loader_vivid": true`` 即恢复旧观感（品牌色徽章）。
+    主题色板 token 保持零新增，避免破坏自定义主题包兼容性。
+    """
+    try:
+        from .theme import get_active_theme_pack_id, find_theme_pack
+        pid = get_active_theme_pack_id()
+        if not pid:
+            return False
+        pack = find_theme_pack(pid) or {}
+        return bool(pack.get("loader_vivid"))
+    except Exception:
+        return False
 
 
 def _human_size(n) -> str:
@@ -99,21 +119,22 @@ class _VersionRow(QFrame):
     def __init__(self, parent, ver: dict, is_latest: bool, on_download):
         super().__init__(parent)
         self._ver = ver
-        self.setObjectName("vrow")
+        # round-99 极简：容器走全局 ``vrow`` 类（中性卡底 + 中性描边 +
+        # hover 描边变亮），删除内联样式——内联样式不随主题切换刷新，且旧
+        # hover 的 ``{accent}66`` 是错误 alpha（#RRGGBBAA 会被 Qt 当
+        # #AARRGGBB 解析成荧光绿）。
+        self.setProperty("cls", "vrow")
         self.setCursor(Qt.PointingHandCursor)
         accent = COLORS.get("accent", "#7C3AED")
-        brd = COLORS.get("border", "#E5E7EB")
-        self.setStyleSheet(
-            f"#vrow {{ background: {COLORS.get('bg_card', '#FFFFFF')}; "
-            f"border: 1px solid {brd}; border-radius: 10px; }}"
-            f"#vrow:hover {{ border: 1px solid {accent}66; }}"
-        )
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 8, 10, 8)
         lay.setSpacing(12)
 
         # 版本号（推荐加星：自绘星标，不用文本 ★）
         v_wrap = QWidget()
+        # round-99：纯排布包装层挂 bare 类 —— 否则全局 QWidget 规则会给它
+        # 画上 bg_app 底色，暗色主题下在行卡片上是一块深色补丁压住文字。
+        v_wrap.setProperty("cls", "bare")
         vh = QHBoxLayout(v_wrap)
         vh.setContentsMargins(0, 0, 0, 0)
         vh.setSpacing(6)
@@ -124,9 +145,10 @@ class _VersionRow(QFrame):
             si.setFixedSize(15, 15)
             vh.addWidget(si)
         v_lbl = QLabel(ver.get("version_number", "—"))
+        # round-99：颜色继承全局 text_main（不再按最新态染 accent——accent
+        # 只留给左侧星标点缀）；字号/字重内联保留。
         v_lbl.setStyleSheet(
-            f"font-size: 13px; font-weight: {'800' if is_latest else '600'}; "
-            f"color: {accent if is_latest else COLORS['text_main']};")
+            f"font-size: 13px; font-weight: {'800' if is_latest else '600'};")
         v_lbl.setToolTip(t("store.detail_latest_tip") if is_latest else "")
         vh.addWidget(v_lbl)
         lay.addWidget(v_wrap)
@@ -137,15 +159,18 @@ class _VersionRow(QFrame):
         mc_lbl.setProperty("cls", "sub")
         lay.addWidget(mc_lbl)
 
-        # 加载器彩章
+        # 加载器徽章：默认中性（badge 类）；主题包 loader_vivid 时走品牌色
         loaders = ver.get("loaders", [])
         if loaders:
-            ld0 = loaders[0].lower()
-            colr = LOADER_BADGE_COLORS.get(ld0, LOADER_DEFAULT)
             ld_lbl = QLabel(loaders[0])
-            ld_lbl.setStyleSheet(
-                f"color: {colr}; background: {colr}1F; border-radius: 8px; "
-                f"padding: 1px 8px; font-size: 11px; font-weight: 600;")
+            if _loader_vivid():
+                colr = LOADER_BADGE_COLORS.get(loaders[0].lower(), LOADER_DEFAULT)
+                ld_lbl.setStyleSheet(
+                    f"color: {colr}; background: {with_alpha(colr, 0x1F)};"
+                    f" border-radius: 8px; padding: 1px 8px;"
+                    f" font-size: 11px; font-weight: 600;")
+            else:
+                ld_lbl.setProperty("cls", "badge")
             if len(loaders) > 1:
                 ld_lbl.setText(f"{loaders[0]} +{len(loaders)-1}")
                 ld_lbl.setToolTip(", ".join(loaders))
@@ -243,7 +268,9 @@ class StoreDetailDialog(QDialog):
         # 加载更多
         more_row = QHBoxLayout()
         self.more_btn = QPushButton(t("store.detail_load_more"))
-        self.more_btn.setProperty("cls", "surface")
+        # round-99：小动作按钮统一 cls="secondary"（中性描边），不再用
+        # surface（surface 是卡片容器类，按钮上会 text-align:left/padding:0）
+        self.more_btn.setProperty("cls", "secondary")
         self.more_btn.setCursor(Qt.PointingHandCursor)
         self.more_btn.setMinimumHeight(32)
         self.more_btn.clicked.connect(self._load_more)
@@ -255,7 +282,9 @@ class StoreDetailDialog(QDialog):
         # ── ⑤ 翻译区 ──
         tl_row = QHBoxLayout()
         self.translate_btn = QPushButton(t("store.detail_translate"))
-        self.translate_btn.setProperty("cls", "surface")
+        # round-99：改 cls="secondary"（中性描边小按钮）——旧 surface 类在
+        # 按钮上是左对齐/零内边距，显示成裸文字"链接"，与页面按钮体系不一致
+        self.translate_btn.setProperty("cls", "secondary")
         self.translate_btn.setCursor(Qt.PointingHandCursor)
         self.translate_btn.clicked.connect(self._translate)
         tl_row.addWidget(self.translate_btn)
@@ -294,15 +323,12 @@ class StoreDetailDialog(QDialog):
     # ---------------- UI 构建 ----------------
     def _build_header(self) -> QFrame:
         card = self._card
-        accent = COLORS.get("accent", "#7C3AED")
-        soft = COLORS.get("accent_soft", "#EDE9FE")
 
         head = QFrame()
-        head.setObjectName("hdr")
-        head.setStyleSheet(
-            f"#hdr {{ border-radius: 14px; background: "
-            f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {soft}, stop:1 {accent}18); }}"
-        )
+        # round-99 极简：删除紫渐变（旧写法 stop:1 的 ``{accent}18`` 是错误
+        # alpha → 实渲染成怪绿/荧光），改全局 ``hero`` 中性卡（panel 底 +
+        # 中性描边）；强调色交给内容自身（下载按钮/星标）点缀。
+        head.setProperty("cls", "hero")
         hl = QHBoxLayout(head)
         hl.setContentsMargins(16, 14, 14, 14)
         hl.setSpacing(14)
@@ -319,17 +345,16 @@ class StoreDetailDialog(QDialog):
         ti = QVBoxLayout()
         ti.setSpacing(5)
         self.title = QLabel(card.get("title", ""))
-        self.title.setStyleSheet(
-            f"font-size: 20px; font-weight: 800; color: {COLORS['text_main']};")
+        self.title.setProperty("cls", "title")
         self.title.setWordWrap(True)
         ti.addWidget(self.title)
 
         meta = QHBoxLayout()
         meta.setSpacing(10)
         cat_b = QLabel(t(_cat_key(self._category)))
-        cat_b.setStyleSheet(
-            f"color: {accent}; background: {soft}; "
-            f"border-radius: 8px; padding: 2px 10px; font-size: 11px; font-weight: 600;")
+        # round-99：分类徽章走中性 badge 类（旧写法 accent 字+soft 底在
+        # accent 变绿时不可读）
+        cat_b.setProperty("cls", "badge")
         meta.addWidget(cat_b)
         self.meta = QLabel(t("store.meta",
                              downloads=card.get("downloads", 0),
@@ -337,9 +362,9 @@ class StoreDetailDialog(QDialog):
         self.meta.setProperty("cls", "sub")
         meta.addWidget(self.meta)
         meta.addStretch(1)
-        # 在线页面（子行右侧）
+        # 在线页面（子行右侧）：round-99 小动作按钮统一 cls="secondary"
         self.open_btn = QPushButton(t("store.detail_open"))
-        self.open_btn.setProperty("cls", "surface")
+        self.open_btn.setProperty("cls", "secondary")
         self.open_btn.setCursor(Qt.PointingHandCursor)
         self.open_btn.setMinimumHeight(28)
         link = (f"https://modrinth.com/{_type_slug(self._category)}/"
@@ -360,20 +385,20 @@ class StoreDetailDialog(QDialog):
     def _build_latest(self) -> QFrame:
         accent = COLORS.get("accent", "#7C3AED")
         box = QFrame()
-        box.setObjectName("latest")
-        box.setStyleSheet(
-            f"#latest {{ border-radius: 12px; background: {accent}14; "
-            f"border: 1px solid {accent}40; }}")
+        # round-99 极简：删除整块 accent 底纹（旧 ``{accent}14`` 底 +
+        # ``{accent}40`` 描边均为错误 alpha → 渲染成怪绿，且色块压文字），
+        # 改全局 ``latest`` 类：中性玻璃底 + 仅左侧 3px accent 竖条点缀。
+        box.setProperty("cls", "latest")
         bi = QHBoxLayout(box)
         bi.setContentsMargins(13, 9, 11, 9)
         bi.setSpacing(10)
 
         tag = QWidget()
         tag.setAttribute(Qt.WA_StyledBackground, True)
-        tag.setStyleSheet(
-            f"background: {accent}22; border-radius: 9px;")
+        # round-99：tag 走中性 badge（旧 ``{accent}22`` 错误 alpha）
+        tag.setProperty("cls", "badge")
         tag_lay = QHBoxLayout(tag)
-        tag_lay.setContentsMargins(10, 2, 12, 2)
+        tag_lay.setContentsMargins(8, 1, 10, 1)
         tag_lay.setSpacing(6)
         from .ui_kit import state_pix
         si = QLabel()
@@ -381,18 +406,19 @@ class StoreDetailDialog(QDialog):
         si.setFixedSize(15, 15)
         tag_lay.addWidget(si)
         st = QLabel(t("store.detail_latest"))
-        st.setStyleSheet(
-            f"color: {accent}; font-size: 12px; font-weight: 800;")
+        # 星标是唯一 accent 点缀（≤16px 图标，符合强调色规约）；文字中性
+        st.setProperty("cls", "sub")
+        st.setStyleSheet("font-weight: 700;")
         tag_lay.addWidget(st)
         bi.addWidget(tag)
 
         self.latest_ver = QLabel("—")
-        self.latest_ver.setStyleSheet(
-            f"color: {COLORS['text_main']}; font-size: 14px; font-weight: 700;")
+        self.latest_ver.setStyleSheet("font-size: 14px; font-weight: 700;")
         self.latest_ver.setToolTip(t("store.detail_latest_tip"))
         bi.addWidget(self.latest_ver)
 
         self.latest_loader = QLabel("")
+        self.latest_loader.setProperty("cls", "sub")
         bi.addWidget(self.latest_loader)
         self.latest_mc = QLabel("")
         self.latest_mc.setProperty("cls", "sub")
@@ -452,21 +478,10 @@ class StoreDetailDialog(QDialog):
         b.setCheckable(True)
         b.setChecked(checked)
         b.setCursor(Qt.PointingHandCursor)
-        style = (
-            "QPushButton { background: transparent; color: $SUB; border: 1px solid $BRD;"
-            " border-radius: 13px; padding: 3px 12px; font-size: 12px; }"
-            "QPushButton:checked { background: $ACCENT15; color: $ACCENT;"
-            " border-color: $ACCENT; font-weight: 700; }"
-            "QPushButton:hover { background: $HOVER; }"
-        )
-        c = COLORS
-        style = (style
-                 .replace("$SUB", c.get("text_sub", "#6B7280"))
-                 .replace("$BRD", c.get("border", "#E5E7EB"))
-                 .replace("$ACCENT15", c.get("accent", "#7C3AED") + "26")
-                 .replace("$ACCENT", c.get("accent", "#7C3AED"))
-                 .replace("$HOVER", c.get("bg_hover", "#F0F1F3")))
-        b.setStyleSheet(style)
+        # round-99 极简：走全局 ``chip`` 类（中性卡底；选中 = accent 描边 +
+        # 淡底点缀，由 QSS :checked 驱动）。删除内联样式——旧写法
+        # ``$ACCENT15`` 用 accent + "26"（错误 alpha），且内联不随主题刷新。
+        b.setProperty("cls", "chip")
         b.clicked.connect(self._rebuild_rows)
         self._chip_group.addButton(b, len(self._loader_options))
         self._loader_options.append(value)
@@ -577,14 +592,19 @@ class StoreDetailDialog(QDialog):
             self.latest_ver.setToolTip(files[0].get("filename", ""))
         loaders = v.get("loaders", [])
         if loaders:
-            text = ""
-            for ld in loaders[:2]:
-                colr = LOADER_BADGE_COLORS.get(ld.lower(), LOADER_DEFAULT)
-                # round-91 去掉文本 ● 圆点：Windows 下可能渲染成彩色 emoji，
-                # 加载器名本身已带品牌色，点多余。
-                text += (f"<span style='color:{colr}; font-weight:700;'>{ld}</span>  ")
-            self.latest_loader.setTextFormat(Qt.RichText)
-            self.latest_loader.setText(text.strip())
+            if _loader_vivid():
+                text = ""
+                for ld in loaders[:2]:
+                    colr = LOADER_BADGE_COLORS.get(ld.lower(), LOADER_DEFAULT)
+                    # round-91 去掉文本 ● 圆点：Windows 下可能渲染成彩色 emoji，
+                    # 加载器名本身已带品牌色，点多余。
+                    text += (f"<span style='color:{colr}; font-weight:700;'>{ld}</span>  ")
+                self.latest_loader.setTextFormat(Qt.RichText)
+                self.latest_loader.setText(text.strip())
+            else:
+                # round-99 极简：默认纯文本中性色（cls=sub），加载器名不染品牌色
+                self.latest_loader.setTextFormat(Qt.PlainText)
+                self.latest_loader.setText("  ".join(loaders[:2]))
         else:
             self.latest_loader.setText("—")
         gvs = v.get("game_versions", [])
