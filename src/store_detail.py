@@ -29,7 +29,7 @@ from PySide6.QtGui import QDesktopServices, QColor
 
 from .theme import COLORS, with_alpha
 from .i18n import t
-from .worker import Worker
+from .worker import ProgressWorker, Worker
 from .async_image import ImageLoader
 from .win_rounded import info, enable_win11_round_corners
 from .frameless import FramelessHelper, TitleBar
@@ -656,12 +656,15 @@ class StoreDetailDialog(QDialog):
         dest = os.path.join(self._inst.game_dir, self._subdir)
         self.status.setText(t("store.downloading",
                               slug=self._card.get("slug", "")))
-        w = Worker(
+        # round-111：改用 ProgressWorker，速度行进已有 status 标签
+        # （本对话框没有独立进度条，速度是用户明确要的可观测项）。
+        w = ProgressWorker(
             download_mod_version_to,
             self._card.get("project_id", ""), v.get("id", ""), dest,
             getattr(self._inst, "game_version", "") or "",
             getattr(self._inst, "loader", "") or "",
         )
+        w.speed.connect(lambda s: self.status.setText(s))
 
         def _ok(p: str):
             self.status.setText(t("store.downloaded", file=os.path.basename(p)))

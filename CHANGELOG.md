@@ -50,6 +50,21 @@ round-110 说「资源中心 store 整合包下载走裸 `Worker`，只拿到提
 * `_install_modpack` 由裸 `Worker` 改用 `ProgressWorker`（它自动注入
   mll 风格 callback，并在 `install_scope()` 内跑，速度计量天然可用）
 
+### C. 单个 mod 下载也接进度 + 速度（`src/net_api.py` / `src/pages_browse.py` / `src/store_detail.py`）
+
+CHANGELOG「仍未做」第 2 项，同批补掉：
+
+* 新增 `_CbProgress` / `_cb_progress()`：把 mll 风格 callback 桥接成 net_api 的
+  `progress(sofar, total)`。**多文件场景（依赖树）用「文件序号 × 100 +
+  文件内百分比」聚合**，让进度条跨文件平滑前进而不是每完成一个文件跳一格
+* `download_mod_to` / `download_mod_version_to` / `download_cfwidget_file` /
+  `download_curseforge_mod` 均新增 `callback` 参数（默认 None，旧调用方零影响）
+* `StorePage._download` 由裸 `Worker` 改用 `ProgressWorker`，复用 B 项那条
+  slim 进度条 + 速度标签
+* `StoreDetailDialog._download_version` 同样改用 `ProgressWorker`，
+  速度行进该对话框已有的 status 标签（本对话框没有独立进度条，
+  速度是用户明确要的可观测项）
+
 ### 验证（全部离线，本地 HTTP 服务器）
 
 | 测试 | 结果 |
@@ -57,6 +72,7 @@ round-110 说「资源中心 store 整合包下载走裸 `Worker`，只拿到提
 | `_is_big_target` 判定（12 例：正/反斜杠/Linux/part 残件/同目录其它 jar/空/None） | 12/12 |
 | mll 分片集成（17 项）：分块数与 offset 唯一性、字节正确、sha1 通过/不符抛 `InvalidChecksum`、无 Range 服务器回退且不留 `.part`、已存在零请求跳过、`setStatus` 有而 `setProgress`/`setMax` 无、**小文件零探测请求** | 17/17 |
 | 整合包进度桥接（8 项）：`setMax` 只一次且=总长、`setProgress` 单调不减至总量、`callback=None` 仍可下载、回调抛异常不拖垮下载 | 8/8 |
+| mod 下载进度聚合（8 项）：`setMax` = 文件数×100、`setProgress` 单调不减且跨文件平滑前进、三文件字节正确、`callback=None` 仍可下载 | 8/8 |
 | StorePage 离屏冒烟（12 项）：控件默认隐藏、忙指示/定长切换、速度行写入、错误路径收起、`show()` 无异常 | 12/12 |
 
 i18n 无新增键（沿用 `dl.speed` / `dl.speed_idle`），zh 1287 / en 1287 保持对称。
@@ -64,10 +80,12 @@ i18n 无新增键（沿用 `dl.speed` / `dl.speed_idle`），zh 1287 / en 1287 �
 ### 仍未做（下轮候选）
 
 * mll 的 **runtime 文件**（`<mc>/runtime/...`，多个中小文件）与**大体积
-  library** 未接入分片 —— 前者单文件不够大，后者需先解决「无差别探测」
-  的开销问题（可考虑按 `.jar` + libraries 路径 + 已有 `.part` 大小启发）
-* 资源中心**单个 mod** 的下载（`_download` / `StoreDetailDialog`）仍是裸
-  `Worker`，无进度/速度 UI
+  library** 未接入分片 —— 已评估：libraries/assets 绝大多数 < 8MB（阈值），
+  而为判断大小需逐个探测，在数百到上千次 `download_file` 的安装里是净回归；
+  客户端 jar 已是单次安装最大的单文件，收益已拿走。若要覆盖需先解决
+  「无差别探测」开销（如按 `.part` 已有大小 / 进程内 size 缓存做启发式）
+* ~~资源中心**单个 mod** 的下载仍是裸 `Worker`，无进度/速度 UI~~
+  → **本批 C 项已补**
 
 ## round-110（2026-10-18）— 下载测速 + 大文件分片并行（+下载诊断日志）
 

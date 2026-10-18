@@ -800,16 +800,21 @@ def download_mod_to(
     dest_dir: str,
     mc_version: str = "",
     loader: str = "",
+    callback=None,
 ) -> str:
     """Download a mod + its required dependency tree into dest_dir.
 
     round-37：依赖树自动拉取（Modrinth required dependencies 递归解析）。
     返回本体文件路径（保持旧签名兼容——UI 只需显示主文件）。
+
+    round-111：``callback`` 收 mll 风格 dict（由 :class:`ProgressWorker`
+    注入），桥接成跨文件聚合的字节级进度 + 实时速度。
     """
     files = resolve_mod_dependencies(project_id, mc_version, loader)
     if not files:
         raise NetError("没有可下载的文件")
     os.makedirs(dest_dir, exist_ok=True)
+    prog = _cb_progress(callback, len(files))
     primary_path = ""
     for item in files:
         if not item["url"]:
@@ -817,9 +822,11 @@ def download_mod_to(
         dest = os.path.join(dest_dir, item["filename"])
         # round-37：统一断点续传下载器（中断后 .part 续传）
         try:
-            download_file(item["url"], dest)
+            download_file(item["url"], dest, progress=prog)
         except NetError as e:
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
+        if prog is not None:
+            prog.next_file()
         if item["project_id"] == project_id:
             primary_path = dest
     return primary_path
@@ -831,26 +838,32 @@ def download_mod_version_to(
     dest_dir: str,
     mc_version: str = "",
     loader: str = "",
+    callback=None,
 ) -> str:
     """Download a specific version of a mod + its dependency tree (round-66).
 
     资源中心详情页"选择版本下载"入口：与 `download_mod_to` 行为一致，
     但解析给定的 Modrinth version id 而非最新匹配版本。
+
+    round-111：新增 ``callback``（mll 风格，ProgressWorker 注入）→ 进度/速度。
     """
     files = resolve_mod_dependencies(
         project_id, mc_version, loader, version_id=version_id)
     if not files:
         raise NetError("没有可下载的文件（或该版本不存在）")
     os.makedirs(dest_dir, exist_ok=True)
+    prog = _cb_progress(callback, len(files))
     primary_path = ""
     for item in files:
         if not item["url"]:
             continue
         dest = os.path.join(dest_dir, item["filename"])
         try:
-            download_file(item["url"], dest)
+            download_file(item["url"], dest, progress=prog)
         except NetError as e:
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
+        if prog is not None:
+            prog.next_file()
         if item["project_id"] == project_id:
             primary_path = dest
     return primary_path
@@ -997,8 +1010,12 @@ def search_curseforge(query: str = "", offset: int = 0, limit: int = 20) -> list
     return hits
 
 
-def download_curseforge_mod(project_id: str, dest_dir: str) -> str:
-    """Download a CurseForge mod's latest file into dest_dir."""
+def download_curseforge_mod(project_id: str, dest_dir: str,
+                            callback=None) -> str:
+    """Download a CurseForge mod's latest file into dest_dir.
+
+    round-111：新增 ``callback``（mll 风格，ProgressWorker 注入）→ 进度/速度。
+    """
     key = _curseforge_key()
     if not key:
         raise NetError("未配置 CurseForge API Key")
@@ -1022,7 +1039,8 @@ def download_curseforge_mod(project_id: str, dest_dir: str) -> str:
         raise NetError("该模组没有直接下载链接")
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, filename)
-    return download_file(url, dest, timeout=120)
+    return download_file(url, dest, timeout=120,
+                         progress=_cb_progress(callback))
 
 
 # ---- CurseForge 免 key 通道（cfwidget 详情 + forgecdn 直链）----
@@ -1083,15 +1101,19 @@ def curseforge_link_search(query: str, limit: int = 8) -> list[dict]:
     return hits
 
 
-def download_cfwidget_file(cf_file: dict, dest_dir: str) -> str:
-    """下载 cfwidget 解析出的最新文件（forgecdn 直链，无需 key）。"""
+def download_cfwidget_file(cf_file: dict, dest_dir: str, callback=None) -> str:
+    """下载 cfwidget 解析出的最新文件（forgecdn 直链，无需 key）。
+
+    round-111：新增 ``callback``（mll 风格，ProgressWorker 注入）→ 进度/速度。
+    """
     fid = cf_file.get("id")
     name = cf_file.get("name", "mod.jar")
     if not fid:
         raise NetError("缺少文件 ID")
     url = FORGECDN_URL.format(a=fid // 1000, b=fid % 1000, name=name)
     os.makedirs(dest_dir, exist_ok=True)
-    return download_file(url, os.path.join(dest_dir, name), timeout=120)
+    return download_file(url, os.path.join(dest_dir, name), timeout=120,
+                         progress=_cb_progress(callback))
 
 
 def fetch_liteloader_builds(mc_version: str) -> list[dict]:
@@ -1286,6 +1308,50 @@ def search_mods(query: str = "", offset: int = 0, limit: int = 20,
     ]
     _store(key, hits)
     return hits
+
+
+class _CbProgress:
+    """把 mll 风格 callback 桥接成 net_api 的 ``progress(sofar, total)``。
+
+    round-111：:class:`ProgressWorker` 会自动往被调用函数注入 mll 风格的
+    ``callback`` dict（``setProgress`` / ``setMax``，整数协议）。net_api 的
+    下载器只认 ``progress(sofar, total)``，所以需要这层桥接。
+
+    多文件场景（依赖树）用「文件序号 × 100 + 文件内百分比」聚合成总体进度，
+    让进度条跨文件平滑前进而不是每完成一个文件跳一格。
+    """
+
+    __slots__ = ("_sp", "_sm", "_n", "_i")
+
+    def __init__(self, callback, nfiles: int = 1):
+        self._sp = callback.get("setProgress") if isinstance(callback, dict) else None
+        self._sm = callback.get("setMax") if isinstance(callback, dict) else None
+        self._n = max(1, int(nfiles))
+        self._i = 0
+        if self._sm is not None:
+            try:
+                self._sm(self._n * 100)
+            except Exception:  # noqa: BLE001 - UI 回调绝不拖垮下载
+                pass
+
+    def next_file(self) -> None:
+        self._i = min(self._i + 1, self._n)
+
+    def __call__(self, sofar: int, total: int) -> None:
+        if self._sp is None:
+            return
+        try:
+            frac = (sofar / total) if total else 0.0
+            self._sp(self._i * 100 + int(frac * 100))
+        except Exception:  # noqa: BLE001 - UI 回调绝不拖垮下载
+            pass
+
+
+def _cb_progress(callback, nfiles: int = 1):
+    """有可用 setProgress 时才返回桥接器，否则返回 None（零开销）。"""
+    if isinstance(callback, dict) and callback.get("setProgress") is not None:
+        return _CbProgress(callback, nfiles)
+    return None
 
 
 def download_modpack_to(project_id: str, dest_dir: str, callback=None) -> str:

@@ -710,25 +710,40 @@ class StorePage(QWidget):
         # round-57 修：隔离/自定义目录下游戏真实的 mods/shaders/resourcepacks
         # 在 <game_dir>/<sub>，之前固定 inst.mc_dir 会让下载的模组游戏里不生效。
         dest = os.path.join(inst.game_dir, sub)
+        # round-111：改用 ProgressWorker（裸 Worker 没有 callback/速度），
+        # 复用整合包那条 slim 进度条 + 速度标签。
         if self._source == "curseforge":
             from .net_api import download_cfwidget_file, download_curseforge_mod
             if cf_file:
                 # 免 key 通道解析出的文件（含 id/name）→ forgecdn 直链
-                self._dworker = Worker(download_cfwidget_file, cf_file, dest)
+                self._dworker = ProgressWorker(download_cfwidget_file,
+                                               cf_file, dest)
             else:
                 # 官方 API 搜索命中只有 project_id → 走官方下载接口
-                self._dworker = Worker(download_curseforge_mod, project_id, dest)
+                self._dworker = ProgressWorker(download_curseforge_mod,
+                                               project_id, dest)
         else:
             # round-37：传入实例的 MC 版本 + 加载器，让 Modrinth 过滤兼容版本
             # 并自动拉取 required 依赖树（download_mod_to 已支持依赖解析）
-            self._dworker = Worker(
+            self._dworker = ProgressWorker(
                 download_mod_to, project_id, dest,
                 getattr(inst, "game_version", "") or "",
                 getattr(inst, "loader", "") or "",
             )
-        self._dworker.finished.connect(lambda p: self.status.setText(t("store.downloaded", file=os.path.basename(p))))
-        self._dworker.error.connect(lambda e: self.status.setText(t("store.download_fail", e=e)))
+        self._dworker.progress.connect(self._on_pack_progress)
+        self._dworker.speed.connect(self._on_pack_speed)
+        self._dworker.finished.connect(self._on_mod_downloaded)
+        self._dworker.error.connect(self._on_pack_error)
+        self._dl_bar.setVisible(True)
+        self._dl_bar.setRange(0, 0)          # 依赖树文件数未知 → 忙指示
+        self._dl_speed.setVisible(True)
+        self._dl_speed.setText("")
         self._dworker.start()
+
+    def _on_mod_downloaded(self, p):
+        self._dl_bar.setVisible(False)
+        self._dl_speed.setVisible(False)
+        self.status.setText(t("store.downloaded", file=os.path.basename(p)))
 
     # ---- modpack: download .mrpack → install as a new instance ----
     def _install_modpack(self, project_id: str, slug: str):
