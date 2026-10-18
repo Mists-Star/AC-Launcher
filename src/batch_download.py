@@ -78,7 +78,7 @@ class BatchDownloader(threading.Thread):
         super().__init__(daemon=True, name="AC-BatchDownloader")
         if workers < 1:
             workers = 4
-        self._workers = min(workers, 8)          # 上限 8，防整机打满（对标 20 保守化）
+        self._workers = min(workers, 16)         # round-110：上限 8→16，大包并行度更高
         self._queue: queue.Queue[BatchItem | None] = queue.Queue()
         self._cancel = threading.Event()
         self._lock = threading.Lock()

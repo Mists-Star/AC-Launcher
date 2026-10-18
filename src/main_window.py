@@ -1191,6 +1191,11 @@ class MainWindow(QMainWindow):
         # ── status bar with progress ──
         # round-107：底部状态栏作为「迷你动态显示」——启动/下载期间显示步骤与
         # 进度；点击进度条即可召回被收起的启动对话框（此前隐藏后无法拉回）。
+        # round-110 A：左侧再加一个实时速度标签（1.2 MB/s · 已下载 34.5 MB）。
+        self._speed_lbl = QLabel("")
+        self._speed_lbl.setProperty("cls", "sub")
+        self._speed_lbl.setVisible(False)
+        self.statusBar().addPermanentWidget(self._speed_lbl)
         self._progress = QProgressBar()
         self._progress.setProperty("cls", "slim")
         self._progress.setFixedHeight(8)
@@ -1666,6 +1671,8 @@ class MainWindow(QMainWindow):
         w.status.connect(self.statusBar().showMessage)
         w.status.connect(dlg.set_status_text)
         w.step.connect(dlg.set_step)
+        w.speed.connect(dlg.set_speed)
+        w.speed.connect(self._set_speed)
         w.progress.connect(self._set_progress)
         w.progress.connect(dlg.set_progress)
         w.progress.connect(
@@ -1690,6 +1697,7 @@ class MainWindow(QMainWindow):
         inst = self.inst_mgr.get(inst_id)
         name = getattr(inst, "name", "") or inst_id
         self._progress.setVisible(False)
+        self._set_speed("")
         self.statusBar().showMessage(t("status.download_ready", name=name), 6000)
         try:
             self.instances_page.set_instance_task(inst_id, "ready")
@@ -1708,6 +1716,7 @@ class MainWindow(QMainWindow):
         inst = self.inst_mgr.get(inst_id)
         name = getattr(inst, "name", "") or inst_id
         self._progress.setVisible(False)
+        self._set_speed("")
         dlg = self._dl_dlgs.pop(inst_id, None)
         if cancelled:
             # round-109：用户主动「取消下载并启动」→ 这不是失败，走中性文案。
@@ -1760,6 +1769,14 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
         return True
+
+    def _set_speed(self, text: str) -> None:
+        """round-110 A：状态栏实时速度标签（空串则收起）。"""
+        try:
+            self._speed_lbl.setText(text or "")
+            self._speed_lbl.setVisible(bool(text))
+        except RuntimeError:  # C++ 对象已删除
+            pass
 
     def _set_progress(self, value: int, maximum: int):
         if maximum and maximum > 0:
@@ -2995,6 +3012,8 @@ class MainWindow(QMainWindow):
         self._play_worker.status.connect(self.statusBar().showMessage)
         self._play_worker.step.connect(self._launch_dlg.set_step)
         self._play_worker.status.connect(self._launch_dlg.set_status_text)
+        self._play_worker.speed.connect(self._launch_dlg.set_speed)
+        self._play_worker.speed.connect(self._set_speed)
         self._play_worker.progress.connect(self._set_progress)
         self._play_worker.progress.connect(self._launch_dlg.set_progress)
         # launch_instance 返回 (proc, log_path)；round-34 把 proc 交给进程跟踪
@@ -3008,6 +3027,7 @@ class MainWindow(QMainWindow):
 
     def _on_launch_done(self, inst: Instance, _proc=None, _log_path=None):
         self._progress.setVisible(False)
+        self._set_speed("")
         self.statusBar().showMessage(t("status.launched", name=inst.name))
         self.home.play_btn.setEnabled(True)
         # round-52：进度对话框全部点亮后稍作停留再关（玩家能看到「启动游戏✔」）
@@ -3386,6 +3406,7 @@ class MainWindow(QMainWindow):
 
     def _on_launch_error(self, msg: str):
         self._progress.setVisible(False)
+        self._set_speed("")
         # round-52：关闭启动进度对话框（避免错误弹窗与进度面板叠着）
         _dlg = getattr(self, "_launch_dlg", None)
         if _dlg is not None:

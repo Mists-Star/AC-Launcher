@@ -24,12 +24,25 @@ socket 就会让它所属的 ThreadPoolExecutor 线程永久阻塞：``future.re
 
 ``_MIRROR_ON`` 在**请求时**决定是否重写 Mojang 主机，因此「打补丁」与「走镜像」
 解耦：官方源用户同样拿到超时 / 重试 / 取消，只是不做主机重写。
+
+round-110 三件事：
+
+* A 速度可见 —— mll 的回调只有「文件计数」，拿不到字节数，所以速度只能在传输
+  层按响应字节记账（:class:`SpeedMeter` + :class:`_CountingRaw`），再按滑动时间窗
+  估出 B/s；
+* B 镜像健康 —— 某个 Mojang 主机在 BMCLAPI 上返回 403（当前 ``libraries`` 路径
+  就是被 Cloudflare 拦的）时，把该主机记进本次安装的失效集合，后续请求直接走官方
+  源，不再逐文件白试一遍再回退；
+* C 诊断日志 —— 每请求的 status / 耗时 / 声明字节数，默认关闭（:func:`set_diag`）。
 """
 from __future__ import annotations
 
 import contextlib
 import importlib
+import os
 import threading
+import time
+from collections import deque
 
 import requests
 
@@ -61,6 +74,107 @@ _RETRIES = 1
 _MIRROR_ON = False
 
 
+# ── round-110 A：字节记账 + 滑动时间窗测速 ──────────────────────────────────
+class SpeedMeter:
+    """线程安全的字节记账 + 滑动时间窗速度估算。
+
+    mll 用 ThreadPoolExecutor 并发下载，多个线程同时写盘，所以累加与快照都必须
+    持锁。速度按窗口内的「字节数 / 实际跨度」计算：窗口外样本丢弃，因此一次挂死
+    （长时间没有新字节）会让速度自然归零，而不是靠一个假的时间戳假装在动。
+    """
+
+    __slots__ = ("_lock", "_pending", "_pending_since", "_samples", "_total",
+                 "_window")
+
+    def __init__(self, window: float = 5.0) -> None:
+        self._lock = threading.Lock()
+        self._pending = 0
+        self._pending_since = 0.0
+        self._samples: deque = deque()      # [(monotonic_ts, bytes)]
+        self._total = 0
+        self._window = window
+
+    def note(self, nbytes: int) -> None:
+        """记入刚收到的字节数（可由任意线程调用）。"""
+        if nbytes <= 0:
+            return
+        with self._lock:
+            if not self._pending:
+                # 采样点的时间戳取「本批字节的起点」而不是 flush 的时刻，否则单批
+                # 数据算出来的跨度为 0，速度会永远是 0。
+                self._pending_since = time.monotonic()
+            self._pending += nbytes
+            self._total += nbytes
+
+    def snapshot(self) -> tuple[float, int]:
+        """返回 ``(bytes_per_second, total_bytes)``。
+
+        ``bytes_per_second`` 在样本跨度太短（<0.75s）或窗口内无样本时为 0.0 ——
+        宁可不显示速度，也不显示一个虚高的数字。
+        """
+        now = time.monotonic()
+        with self._lock:
+            if self._pending:
+                self._samples.append((self._pending_since, self._pending))
+                self._pending = 0
+            total = self._total
+            cutoff = now - self._window
+            while self._samples and self._samples[0][0] < cutoff:
+                self._samples.popleft()
+            if not self._samples:
+                return 0.0, total
+            span = now - self._samples[0][0]
+            got = sum(n for _, n in self._samples)
+        if span < 0.75:
+            return 0.0, total
+        return got / span, total
+
+
+def active_meter():
+    """当前线程所属安装的速度计量器（无安装上下文时为 None）。
+
+    分片下载把字节统计放在 ThreadPoolExecutor 的工作线程里，那些线程没有安装
+    上下文，所以调用方要在**自己线程**先取到计量器再传进去。
+    """
+    ctx = active_context()
+    return getattr(ctx, "meter", None) if ctx is not None else None
+
+
+def note_bytes(nbytes: int) -> None:
+    """把字节计入**当前线程所属安装**的速度计量（无安装上下文则忽略）。
+
+    net_api 自家的下载循环用它在每个 chunk 落盘时喂数，这样「自建下载」与
+    「mll 下载」共用同一个速度口径。
+    """
+    meter = active_meter()
+    if meter is not None:
+        meter.note(nbytes)
+
+
+# ── round-110 C：每请求诊断日志（默认关，绝不打断下载）────────────────────
+_DIAG = False
+_DIAG_LOCK = threading.Lock()
+
+
+def set_diag(enabled: bool) -> None:
+    """开关「每请求 status / 耗时 / 声明字节数」诊断日志。"""
+    global _DIAG
+    _DIAG = bool(enabled)
+
+
+def _diag_log(line: str) -> None:
+    with _DIAG_LOCK:
+        try:
+            from ..paths import get_data_dir
+            log_dir = os.path.join(get_data_dir(), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, "download.log"), "a",
+                      encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:  # noqa: BLE001 - 诊断日志任何失败都不影响下载
+            pass
+
+
 def set_mirror(enabled: bool) -> None:
     """Enable/disable the BMCLAPI host rewrite for subsequently sent requests."""
     global _MIRROR_ON
@@ -76,12 +190,17 @@ class InstallContext:
     "cancel download and launch" escape hatch: mll spawns its worker threads
     from the same thread that builds the session, so one abort flag reaches
     every concurrent download of that install.
+
+    round-110：同时挂载该次安装的 :class:`SpeedMeter`（A）与「镜像失效主机」集合
+    （B）—— 某主机在镜像上返回 403 时记入，后续该主机的请求直接走官方源。
     """
 
-    __slots__ = ("_ev",)
+    __slots__ = ("_ev", "meter", "mirror_dead")
 
     def __init__(self) -> None:
         self._ev = threading.Event()
+        self.meter = SpeedMeter()
+        self.mirror_dead: set = set()
 
     def abort(self) -> None:
         self._ev.set()
@@ -129,6 +248,7 @@ class MirrorSession(requests.Session):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._ctx = active_context()
+        self._last_status = None
         _apply_proxy(self, _PROXY)
 
     def request(self, method, url, *args, **kwargs):  # type: ignore[override]
@@ -142,6 +262,7 @@ class MirrorSession(requests.Session):
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = _SEND_TIMEOUT
         url = getattr(request, "url", None)
+        started = time.monotonic()
         if isinstance(url, str) and request.method == "GET":
             rewritten = _rewrite(url)
             if rewritten != url:
@@ -149,11 +270,36 @@ class MirrorSession(requests.Session):
                 request.url = rewritten
                 got = self._try_source(request, **kwargs)
                 if got is not None:
-                    return got
+                    _diag(url, rewritten, got, started)
+                    return _wrap_raw(got, self._ctx)
+                # 镜像对本主机不可用：记为失效，后续同主机请求直接走官方源，
+                # 不再每个文件都白试一次（round-110 B）。
+                self._mark_mirror_dead(url)
                 request.url = url
-                return self._try_source(request, last=True, strict=True, **kwargs)
+                resp = self._try_source(request, last=True, strict=True, **kwargs)
+                _diag(url, url, resp, started)
+                return _wrap_raw(resp, self._ctx)
         # 非 Mojang 主机（Modrinth / maven / 自有 API）：原样透传，只加超时/重试。
-        return self._try_source(request, last=True, strict=False, **kwargs)
+        resp = self._try_source(request, last=True, strict=False, **kwargs)
+        _diag(url, url, resp, started)
+        return _wrap_raw(resp, self._ctx)
+
+    def _mark_mirror_dead(self, original_url: str) -> None:
+        """镜像对 ``original_url`` 所属主机返回「被拦」状态 → 本次安装内不再走它。
+
+        只在 401/403/406 这类「明确拒绝」上生效：404 可能只是该文件镜像没同步，
+        逐个回退即可，不足以判定整台主机失效。
+        """
+        if self._last_status not in (401, 403, 406):
+            return
+        ctx = self._ctx
+        if ctx is None:
+            return
+        for host, _repl in _MOJANG_HOSTS:
+            prefix = "https://" + host
+            if original_url == prefix or original_url.startswith(prefix + "/"):
+                ctx.mirror_dead.add(host)
+                return
 
     def _try_source(self, request, *, last=False, strict=False, **kwargs):
         """在**单一源**上发请求，最多重试 ``_RETRIES`` 次。
@@ -171,9 +317,11 @@ class MirrorSession(requests.Session):
             except requests.RequestException:
                 if attempt < _RETRIES:
                     continue  # 超时 / 连接错误 → 同一源再试一次
+                self._last_status = None
                 if last:
                     raise
                 return None
+            self._last_status = resp.status_code
             if resp.status_code >= 400:
                 if not last:
                     try:
@@ -191,6 +339,68 @@ class MirrorSession(requests.Session):
                 return resp
             return resp
         return None  # 理论不可达（循环至少跑一次）
+
+
+class _CountingRaw:
+    """包住 urllib3 的 ``HTTPResponse``，只统计 ``read()`` 真正拿到的字节数。
+
+    mll 的 ``_helper.download_file`` 用 ``shutil.copyfileobj(r.raw, f)`` 落盘，
+    全程只调 ``raw.read``；包一层即可拿到真实字节吞吐，而不改动任何下载逻辑。
+    其余属性原样透传（``decode_content`` 等会被 mll 赋值，走 ``__setattr__``）。
+    """
+
+    __slots__ = ("_raw", "_sink")
+
+    def __init__(self, raw, sink) -> None:
+        object.__setattr__(self, "_raw", raw)
+        object.__setattr__(self, "_sink", sink)
+
+    def read(self, *args, **kwargs):
+        data = object.__getattribute__(self, "_raw").read(*args, **kwargs)
+        if data:
+            try:
+                object.__getattribute__(self, "_sink")(len(data))
+            except Exception:  # noqa: BLE001
+                pass
+        return data
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_raw"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_raw"), name, value)
+
+
+def _wrap_raw(resp, ctx):
+    """给响应的 ``raw`` 装上计数代理（无速度计量器时原样返回）。"""
+    meter = getattr(ctx, "meter", None) if ctx is not None else None
+    if meter is None or resp is None:
+        return resp
+    try:
+        raw = resp.raw
+        if isinstance(raw, _CountingRaw):
+            return resp
+        resp.raw = _CountingRaw(raw, meter.note)
+    except Exception:  # noqa: BLE001 - 包装失败不影响下载
+        pass
+    return resp
+
+
+def _diag(orig: str, used: str, resp, started: float) -> None:
+    """round-110 C：每请求一行诊断（status / 耗时 / 声明字节 / 是否走镜像）。"""
+    if not _DIAG:
+        return
+    ms = int((time.monotonic() - started) * 1000)
+    status = getattr(resp, "status_code", "?")
+    size = "-"
+    try:
+        size = resp.headers.get("Content-Length", "-") or "-"
+    except Exception:  # noqa: BLE001
+        pass
+    src = "mirror" if used != orig else "direct"
+    _diag_log(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {status} {ms}ms "
+              f"{size}B {src} {orig}")
+
 
 
 class _RequestsShim:
@@ -229,7 +439,11 @@ _PATCH_MODULES = ("_helper", "install", "runtime")
 def _rewrite(url):
     if not _MIRROR_ON or not isinstance(url, str):
         return url
+    ctx = active_context()
+    dead = ctx.mirror_dead if ctx is not None else None
     for host, repl in _MOJANG_HOSTS:
+        if dead and host in dead:
+            continue  # round-110 B：该主机已被镜像拒绝，本次安装直接走官方源
         prefix = "https://" + host
         if url == prefix or url.startswith(prefix + "/"):
             return repl + url[len(prefix):]

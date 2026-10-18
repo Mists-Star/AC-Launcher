@@ -155,6 +155,13 @@ class LaunchProgressDialog(QDialog):
         prog_row.addWidget(self.pct_lbl)
         lay.addLayout(prog_row)
 
+        # ── round-110 A：实时速度行（mll 只给文件计数，拿不到字节数，
+        #    所以这里显示的是传输层计量出的真实吞吐与累计字节）──
+        self.speed_lbl = QLabel("")
+        self.speed_lbl.setProperty("cls", "sub")
+        self.speed_lbl.setVisible(False)
+        lay.addWidget(self.speed_lbl)
+
         # ── status line ──
         self.status_lbl = QLabel(t("launch.status_unknown"))
         self.status_lbl.setProperty("cls", "sub")
@@ -212,6 +219,11 @@ class LaunchProgressDialog(QDialog):
         else:
             self.bar.setMaximum(0)  # indeterminate
             self.pct_lbl.setText(t("launch.status_unknown"))
+
+    def set_speed(self, text: str):
+        """Worker.speed slot — 显示「1.2 MB/s · 已下载 34.5 MB」。"""
+        self.speed_lbl.setText(_wrap(text or ""))
+        self.speed_lbl.setVisible(bool(text))
 
     def mark_launched(self):
         """Game process spawned — flip every step to done (called by MainWindow)."""

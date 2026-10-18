@@ -148,6 +148,78 @@ _CHUNK = 65536
 # 抖动退避重试（分段里说明 retry<4 + Sleep(300~500+retry*300)）。
 _MAX_DOWNLOAD_RETRIES = 3
 
+# round-110 D：大文件自动改走分片多线程。
+# 单条 TCP 连接的实际吞吐 ≈ 窗口 / RTT，跨境/跨运营商链路上常常只有 0.3MB/s
+# 量级；整合包主文件、大 mod 正是「少数超大文件」的组合，单连接会直接顶死在
+# 这个上限上。超过阈值就交给 parallel_download_file（HTTP Range 分片并行）。
+_PARALLEL_MIN_BYTES = 8 * 1024 * 1024
+
+
+def _active_meter():
+    """当前线程所属安装的速度计量器（无安装上下文时为 None）。"""
+    try:
+        from .core.mirror import active_meter
+    except Exception:  # noqa: BLE001 - 计量失败绝不影响下载
+        return None
+    return active_meter()
+
+
+def _note_bytes(nbytes: int) -> None:
+    """把已落盘字节计入当前安装的速度计量（无安装上下文时静默忽略）。"""
+    meter = _active_meter()
+    if meter is not None:
+        meter.note(nbytes)
+
+
+def _remote_size(url: str, headers: dict | None, timeout: int) -> int:
+    """用一次极小的 ``Range: bytes=0-0`` 请求拿远端文件总长（拿不到返回 0）。
+
+    HEAD 在部分 CDN / 镜像上被拒，而这一发 ``206`` 顺带确认了服务器支持分段，
+    正好是分片下载的前提。
+    """
+    hdrs = dict(_HEADERS)
+    if headers:
+        hdrs.update(headers)
+    hdrs["Range"] = "bytes=0-0"
+    try:
+        r = requests.get(url, headers=hdrs, timeout=timeout, stream=True,
+                         proxies=_proxies())
+    except requests.RequestException:
+        return 0
+    try:
+        if r.status_code == 206:
+            cr = r.headers.get("Content-Range", "")
+            return int(cr.rsplit("/", 1)[-1]) if "/" in cr else 0
+        if r.status_code == 200:
+            return int(r.headers.get("Content-Length", 0) or 0)
+        return 0
+    except (ValueError, TypeError):
+        return 0
+    finally:
+        try:
+            r.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _try_parallel(url: str, dest: str, *, timeout: int, progress, headers,
+                  cancel) -> bool:
+    """大文件 → 分片多线程；小文件 / 拿不到长度 / 分片失败 → 返回 False。
+
+    返回 False 时调用方继续走单流 ``download_file`` —— 只做加速，不改变语义
+    （分片内部失败也会自己回退到单流）。
+    """
+    size = _remote_size(url, headers, timeout)
+    if size < _PARALLEL_MIN_BYTES:
+        return False
+    try:
+        parallel_download_file(url, dest, progress=progress, headers=headers,
+                               timeout=timeout, cancel=cancel)
+        return True
+    except Exception:  # noqa: BLE001 - 加速路径失败，退回单流
+        return False
+
+
 
 class _TransientDownloadError(NetError):
     """网络抖动 / 内容不完整：值得清空重试或续传；4xx 等确定性错误不抛它。"""
@@ -198,6 +270,7 @@ def _download_once(
                     raise NetError(_t_err("err.download_cancel", default="下载已取消"))  # .part 保留，下次断点续传
                 f.write(chunk)
                 sofar += len(chunk)
+                _note_bytes(len(chunk))
                 if progress:
                     try:
                         progress(sofar, total)
@@ -230,6 +303,7 @@ def download_file(
     headers: dict | None = None,
     timeout: int = 60,
     cancel=None,
+    _allow_parallel: bool = True,
 ) -> str:
     """下载 ``url`` 到 ``dest``，支持断点续传 + 进度回调 + 有限退避重试。
 
@@ -242,7 +316,16 @@ def download_file(
     网络类失败最多重试 ``_MAX_DOWNLOAD_RETRIES`` 次（抖动退避，对齐主流）；
     重试期间 .part 断点续传，最终仍失败抛 NetError（.part 保留可再续传）。
     返回 dest。
+
+    round-110 D：大于 ``_PARALLEL_MIN_BYTES`` 的文件先试分片多线程（单连接在
+    跨境链路上只有 ~0.3MB/s，大文件必须并行才吃得满带宽）。``_allow_parallel``
+    只由分片下载器的单流回退路径传 False，避免「单流 → 分片 → 单流」递归。
     """
+    # 有 .part 残留时优先保住断点续传（分片路径会重建 .part，不继承已有进度）。
+    if (_allow_parallel and not (resume and os.path.exists(dest + ".part"))
+            and _try_parallel(url, dest, timeout=timeout, progress=progress,
+                              headers=headers, cancel=cancel)):
+        return dest
     dest_tmp = dest + ".part"
     last: Exception | None = None
     for attempt in range(_MAX_DOWNLOAD_RETRIES):
@@ -287,6 +370,10 @@ def parallel_download_file(
     """
     import time as _time
 
+    # round-110 A：分片的工作线程没有安装上下文（thread-local），所以必须在
+    # **本线程**先把速度计量器取出来，再交给下面各分块线程喂数。
+    meter = _active_meter()
+
     hdrs = dict(_HEADERS)
     if headers:
         hdrs.update(headers)
@@ -298,11 +385,13 @@ def parallel_download_file(
         r = requests.get(url, headers=probe, timeout=timeout, stream=True, proxies=_proxies())
     except requests.RequestException:
         return download_file(url, dest, resume=True, progress=progress,
-                             headers=headers, timeout=timeout, cancel=cancel)
+                             headers=headers, timeout=timeout, cancel=cancel,
+                             _allow_parallel=False)
     if r.status_code != 206:
         r.close()
         return download_file(url, dest, resume=True, progress=progress,
-                             headers=headers, timeout=timeout, cancel=cancel)
+                             headers=headers, timeout=timeout, cancel=cancel,
+                             _allow_parallel=False)
     cr = r.headers.get("Content-Range", "")
     r.close()
     try:
@@ -311,7 +400,8 @@ def parallel_download_file(
         total = 0
     if total <= 0:
         return download_file(url, dest, resume=True, progress=progress,
-                             headers=headers, timeout=timeout, cancel=cancel)
+                             headers=headers, timeout=timeout, cancel=cancel,
+                             _allow_parallel=False)
 
     # 2) 智能容量：分块数不超过「每块至少 chunk_mb」，也不超过整数个并发上限
     ncpu = os.cpu_count() or 4
@@ -339,6 +429,8 @@ def parallel_download_file(
         with lock:
             done[0] += nbytes
             d = done[0]
+        if meter is not None:
+            meter.note(nbytes)
         if progress:
             try:
                 progress(d, total)
@@ -388,7 +480,8 @@ def parallel_download_file(
     except Exception:
         os.remove(part) if os.path.exists(part) else None
         return download_file(url, dest, resume=False, progress=progress,
-                             headers=headers, timeout=timeout, cancel=cancel)
+                             headers=headers, timeout=timeout, cancel=cancel,
+                             _allow_parallel=False)
     os.replace(part, dest)
     return dest
 

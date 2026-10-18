@@ -84,6 +84,30 @@ class Worker(QThread):
 
 # 无任何回调超过 _STALL_SECONDS 秒 → 提示用户「网络较慢，仍在等待」。
 _STALL_SECONDS = 45
+# round-110 A：速度轮询周期（秒）。太快会让 UI 频繁刷新，太慢又看不出波动。
+_SPEED_POLL_SECONDS = 0.5
+
+
+def _fmt_bytes(n: int) -> str:
+    """把字节数格式化成人类可读串（1.2 MB / 340 KB）。"""
+    if n >= 1 << 30:
+        return f"{n / float(1 << 30):.1f} GB"
+    if n >= 1 << 20:
+        return f"{n / float(1 << 20):.1f} MB"
+    if n >= 1 << 10:
+        return f"{n / float(1 << 10):.0f} KB"
+    return f"{n} B"
+
+
+def _speed_text(bps: float, total: int) -> str:
+    """速度行的文案；还没有任何字节时返回空串（不显示假速度）。"""
+    if not total:
+        return ""
+    got = _fmt_bytes(total)
+    if bps <= 0:
+        return t("dl.speed_idle", total=got)
+    return t("dl.speed", speed=_fmt_bytes(int(bps)) + "/s", total=got)
+
 # mll 以 "Download <name>" 报文件名；纯 40 位十六进制的是内容哈希，对用户无意义，
 # 折叠掉只留阶段与计数。
 _SHA1_NAME = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -154,6 +178,7 @@ class ProgressWorker(QThread):
     status = Signal(str)
     progress = Signal(int, int)  # value, max  (-1 = unknown)
     step = Signal(str)           # launch-stage key (check/install/...)
+    speed = Signal(str)          # round-110：人读速度行（"1.2 MB/s · 已下载 34 MB"）
     finished = Signal(object)
     error = Signal(str)
 
@@ -166,6 +191,7 @@ class ProgressWorker(QThread):
         self._ctx = None
         self._stall = None
         self._stall_lock = threading.Lock()
+        self._speed_stop = threading.Event()
 
     def abort(self) -> None:
         """取消本次安装：在途下载立即抛错退出（线程不再写盘）。"""
@@ -192,6 +218,23 @@ class ProgressWorker(QThread):
     def _on_stall(self) -> None:
         if not self.isInterruptionRequested():
             self.status.emit(t("status.download_stalled"))
+
+    def _speed_loop(self) -> None:
+        """每 ``_SPEED_POLL_SECONDS`` 秒把速度计量器快照发给 UI。
+
+        在本 worker 线程里跑，因为安装上下文（含计量器）是线程本地的；计量器本身
+        线程安全，所以读它没有问题。仅当数值变化时才发信号，避免无谓刷新。
+        """
+        last = ""
+        while not self._speed_stop.wait(_SPEED_POLL_SECONDS):
+            ctx = self._ctx
+            meter = getattr(ctx, "meter", None) if ctx is not None else None
+            if meter is None:
+                continue
+            text = _speed_text(*meter.snapshot())
+            if text and text != last:
+                last = text
+                self.speed.emit(text)
 
     def _mll_callback(self) -> dict:
         holder = self
@@ -232,7 +275,15 @@ class ProgressWorker(QThread):
             from .core.mirror import install_scope
             with install_scope() as ctx:
                 self._ctx = ctx
-                result = self._fn(*self._args, **kwargs)
+                self._speed_stop.clear()
+                ticker = threading.Thread(target=self._speed_loop, daemon=True,
+                                          name="AC-DlSpeed")
+                ticker.start()
+                try:
+                    result = self._fn(*self._args, **kwargs)
+                finally:
+                    self._speed_stop.set()
+                    ticker.join(1.0)
             if not self.isInterruptionRequested():
                 self.finished.emit(result)
         except Exception as e:  # noqa: BLE001 - surface to UI

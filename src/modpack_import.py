@@ -225,7 +225,7 @@ def import_curseforge_zip(
 
     # 失败继续但整包级别仍要收敛：任一失败 → NetError 汇总（保留原语义：
     # CurseForge API key 缺失时明确提示）
-    dl = BatchDownloader(batch, workers=4,
+    dl = BatchDownloader(batch, workers=8,
                          on_progress=_on_progress, on_finish=_on_finish)
     dl.start()
     dl.join()

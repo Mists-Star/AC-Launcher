@@ -123,6 +123,9 @@ _DEFAULTS = {
     "download_mirror": "bmclapi",   # official (官方 Mojang) / bmclapi (国内镜像，速度优先)
     # ---- network proxy for downloads ----
     "download_proxy": "",            # ""=system proxy, "none"=direct, or "http://host:port"
+    # round-110 C 下载诊断日志：每请求的 status/耗时/声明字节/是否走镜像写入
+    # data/logs/download.log，用于排查「慢 / 卡住到底卡在哪一跳」。默认关闭。
+    "download_diag_log": False,
     # round-68 Quilt 加载器显示开关（close → 新建实例页隐藏 Quilt）
     "show_quilt": True,
     # round-78 联机工具偏好（round-64 三选一弹窗完善）：ask=每次弹选择器；
@@ -964,6 +967,11 @@ class SettingsPage(QWidget):
         pl.addWidget(self.proxy_edit)
         # round-52 自适应：长 hint 文本必须换行，否则撑大 GroupBox 最小宽度。
         pl.addWidget(self._wrap_hint(t("settings.proxy_hint")))
+        # round-110 C：下载诊断日志（写入 data/logs/download.log），默认关闭。
+        self.diag_log_chk = QCheckBox(t("settings.dl_diag"))
+        self.diag_log_chk.setChecked(bool(self.cfg.get("download_diag_log", False)))
+        pl.addWidget(self.diag_log_chk)
+        pl.addWidget(self._wrap_hint(t("settings.dl_diag_hint")))
         lay.addWidget(proxy_grp)
         self._on_proxy_toggle()  # sync proxy_edit enabled state to the radio
 
@@ -2149,6 +2157,8 @@ class SettingsPage(QWidget):
                 ("" if key == "system" else key),
                 target["download_proxy"],
             )
+        target["download_diag_log"] = self._safe(
+            self.diag_log_chk.isChecked, bool(target.get("download_diag_log", False)))
         target["authlib_path"] = self._safe(
             lambda: self.authlib.text().strip(), target["authlib_path"])
         target["launch_sound"] = self._safe(

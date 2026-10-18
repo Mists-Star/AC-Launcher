@@ -19,6 +19,15 @@ SUPPORTED_LOADERS = [
 ]
 
 
+def _diag_enabled() -> bool:
+    """round-110 C：下载诊断日志开关（配置缺失或读取失败一律视为关闭）。"""
+    try:
+        from ..settings_dialog import load_config
+        return bool(load_config().get("download_diag_log", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirror: str = "official", proxy: str = "", callback=None) -> str:
     """Install (or repair) an instance's game version + loader into its mc_dir.
 
@@ -39,9 +48,10 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
             mirror = "official"
     # round-109：打补丁与走镜像解耦 —— 镜像与否由 set_mirror 在请求时决定，
     # 补丁本身永远打上，好让官方源也拿到「超时 + 重试 + 可取消」。
-    from .mirror import patch_install_session, set_mirror, set_proxy
+    from .mirror import patch_install_session, set_diag, set_mirror, set_proxy
     set_proxy(proxy or None)
     set_mirror(mirror == "bmclapi")
+    set_diag(_diag_enabled())
     patch_install_session()
 
     mc_dir = inst.mc_dir
@@ -153,9 +163,10 @@ def repair_minecraft_dir(mc_dir: str, callback=None) -> list[str]:
             mirror = "bmclapi" if "bmclapi" in _pick_auto_mirror() else "official"
         except Exception:
             mirror = "official"
-    from .mirror import patch_install_session, set_mirror, set_proxy
+    from .mirror import patch_install_session, set_diag, set_mirror, set_proxy
     set_proxy(cfg.get("download_proxy", "") or None)
     set_mirror(mirror == "bmclapi")
+    set_diag(bool(cfg.get("download_diag_log", False)))
     patch_install_session()
 
     repaired = []
@@ -182,9 +193,10 @@ def install_mrpack(mrpack_path: str, mc_dir: str, *, mirror: str = "official",
     The same bmclapi/proxy redirect as :func:`install_instance` is applied so
     any game-file downloads the pack triggers go through the chosen mirror.
     """
-    from .mirror import patch_install_session, set_mirror, set_proxy
+    from .mirror import patch_install_session, set_diag, set_mirror, set_proxy
     set_proxy(proxy or None)
     set_mirror(mirror == "bmclapi")
+    set_diag(_diag_enabled())
     patch_install_session()
     minecraft_launcher_lib.mrpack.install_mrpack(
         mrpack_path, mc_dir, callback=callback
