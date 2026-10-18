@@ -55,12 +55,17 @@
 
 | 级别 | 位置 | 问题 | 修法 | 状态 |
 |---|---|---|---|---|
-| P2 | `RELEASE_1.0.0_CHECKLIST.md` | 发布阻塞项写着「`_diag_all.py` 全部 exit=0」，但该脚本**从未入库**（`git log --all -- _diag_all.py` 为空）——回归套件此前不存在 | 已用 `regress.py` 取代；清单里的引用需同步改成 `regress.py` | **待改清单文案** |
+| ~~P2~~ | ~~`RELEASE_1.0.0_CHECKLIST.md`~~ | ~~发布阻塞项写着「`_diag_all.py` 全部 exit=0」，但该脚本**从未入库**（`git log --all -- _diag_all.py` 为空）——回归套件此前不存在~~ | **已解决**（round-112）：清单引用已改为 `regress.py`（原句保留为历史说明）；回归入口 11 项全绿 | ✅ 完成 |
 | ~~P2~~ | ~~`.gitignore` `_*` 规则~~ | ~~回归测试脚本全被忽略，换机/重 clone 就没了~~ | **已解决**（round-112）：脚本迁到受控的 `tests/`，`.gitignore` 加注说明别再写 `_` 开头 | ✅ 完成 |
 | P3 | `achievements_page.py` 网格 | 单卡分区的卡片只占左半宽，双卡分区占满宽——同一网格两种节奏 | 单卡时跨列（`grid.addWidget(card, r, 0, 1, 2)`）或统一卡片高度 | 待修 |
 | P3 | `pages_instances.py` 实例「路径」行 | 文字对比度偏低（截图中 `D:` 后几乎看不清） | 查该行样式，改用 `text_sub` 以上对比度 | 待确认真机表现 |
 | P4 | 30 个文件 | 未使用导入（`QColor` / `QSize` / `QFrame` 等） | 批量清理；注意别和 TRAE 改动打架 | 搁置 |
 | P4 | 11 个死函数 | `play_sfx` / `stop_bgm` / `read_json` / `write_json` / `ensure_dir` / `login_with_microsoft` 等 | 确认无人调用后删；`login_with_microsoft` 是旧包装，删前确认微软登录不受影响（目前走 `login_dialog` 自实现的 device-code 流） | 搁置 |
+
+**待用户（真机，AI 做不了）**：`RELEASE_1.0.0_CHECKLIST.md` A 组剩余两项——
+① 新建 Fabric+Forge 实例真实拉取/启动到主菜单一次通过（含镜像可用性）；
+② `build.bat`/PyInstaller 打包成品 + 安装后首次运行冒烟。
+离屏环境只能验逻辑与布局，真机启动链路（JVM 参数/内存/Acrylic 降级）必须人跑。
 
 ## 四、已知既存问题（非本轮引入，别当 bug 修）
 
