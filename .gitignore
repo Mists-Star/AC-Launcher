@@ -86,5 +86,7 @@ _diff_*.py
 _logo_probe.py
 # 一次性验证/测试脚本（跑完即弃，不入库）
 _test_*.py
+_smoke_*.py
+_font_*.py
 # MC 原版纹理（本地资源，版权属 Mojang，不入库）
 assets/mc_textures/
