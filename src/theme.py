@@ -553,7 +553,9 @@ QLabel[cls="group"] {
     font-size: ${f_lg}px;
     font-weight: 700;
     color: $text_main;
-    padding: 4px 2px;
+    /* round-111 修：padding 不计入 QLabel.sizeHint（Qt 已知行为），
+       布局只给字高 → 渲染溢出被下一个控件盖住（成就页分组标题被卡片压住）。
+       间距已改由 ui_kit.group_label() 的 contentsMargins 承担，这里不再设。 */
 }
 
 /* ---- push buttons ---- */

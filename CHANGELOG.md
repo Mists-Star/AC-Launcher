@@ -131,11 +131,64 @@ i18n 无新增键（沿用 `dl.speed` / `dl.speed_idle`），zh 1287 / en 1287 �
   `read_json` / `write_json` / `ensure_dir` / `login_with_microsoft` 等）
   —— 纯卫生问题，不影响功能，本批未动
 
+### 🐛 P1 布局 bug：成就页分组标题被卡片压住一半（全局性）
+
+视觉自验收截图时发现：成就页「启程」标题被第一张卡片盖掉一半、卡片自身上半
+被裁切。挖下去是**两个独立 bug 叠加**：
+
+**① QSS `padding` 不计入 `QLabel.sizeHint`（Qt 已知行为，影响全部 10 处调用点）**
+
+`QLabel[cls="group"]` 样式里有 `padding: 4px 2px`，而 Qt 的 sizeHint 只按当前
+font 度量、**不含样式表 padding** → 实测 sizeHint 高度只有 **13px**，渲染需要
+~24px → 溢出的 11px 被紧随其后的卡片盖住。`cls="group"` 共 10 处调用
+（成就页 / 实例页×6 / 资源中心 / 模组检查 / 扫描对话框），只是多数背景同色
+看不出来。
+
+修法：新增 `ui_kit.group_label()` 统一工厂 —— 间距改用
+`setContentsMargins`（**会**进 sizeHint）、字号字重在代码里显式设置
+（QSS `font-size` 同样不进 sizeHint）；QSS 规则删掉 padding 只留颜色。
+10 处调用点全部切换，实测 sizeHint 13 → **25px**，与渲染需求一致。
+
+**② 页面双重构建 + `deleteLater` 延迟删除（成就页独有）**
+
+`__init__` 里 `_build()` 之后又调 `_refresh()`，后者清空重建 —— 清空用的是
+`deleteLater()`，但 **DeferredDelete 在同一层事件循环 / `processEvents()`
+里不投递**：旧的一整套卡片继续活着，与新内容叠画（诊断证实 group 标签存在
+**两套**、几何各不相同）。表现为「音乐收藏家」卡片在启程组出现一份被裁切的
+幽灵副本。
+
+修法：`__init__` 只调 `_refresh_header()`（更新进度条，不重建）；清空逻辑
+改为 **先 `setParent(None)` 立即从视口摘除、再 `deleteLater()` 回收**。
+复测 group 标签从 14 个降到 **7 个（每分组恰好 1 个）**，截图确认无重叠、
+无裁切、无幽灵卡片。
+
+### ⚠️ 方法论：视觉自验收流水线（本轮新增能力）
+
+之前认为「离屏截图必出 tofu，视觉验收只能靠用户人眼」——**前提是错的**。
+tofu 的真因是 `QT_QPA_PLATFORM=offscreen` 下 **QFontDatabase 字体数为 0**
+（offscreen 插件不加载系统字体），一个环境变量即可修复：
+
+```
+QT_QPA_FONTDIR=C:\Windows\Fonts
+```
+
+修复后中文完美渲染（微软雅黑实测），于是 **AI 可以自己截图、自己看图、自己
+做视觉验收** —— 本轮的成就页布局 bug 就是这么抓到的（纯读代码读不出来）。
+流水线：`_shots_all.py` 覆盖全部 11 个 stack 页面（侧栏 4 页走导航 + 7 个
+隐藏页从 `STACK_INDEX` 直切 + 懒构建），输出到 `_shots_r112/`。
+
+按 design-review skill 清单过一遍已截图页面：无渐变 hero、无斜体标题、
+无 emoji 当图标、图标风格统一（全 SVG 线性）、导航为侧栏形态（非 AI
+top-nav）、文案无编造数据 —— 整体没有明显 AI 味；最该修的就是上面两个
+布局 bug（已修）。
+
 ### 验证
 
 * 设置页脏检测回归 **4/4**：`_sync_ui_to_cfg` 的键全部有默认值、
   `jvm_aikars` 与 `jvm_preset` 自洽、**新建页面 `is_dirty() == False`**、
   **改内存滑块后 `is_dirty() == True`**（确认没为了不弹窗而把检测废掉）
+* 成就页布局回归：group 标签 **每分组恰好 1 个**（原 2 套）、
+  sizeHint 25px 与渲染一致、截图无重叠无幽灵卡片
 * 全页面构造冒烟 16/16；compileall exit 0；i18n zh 1287 / en 1287 对称；
   PII 门禁零残留
 

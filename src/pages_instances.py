@@ -719,8 +719,7 @@ class NewInstanceDialog(QDialog):
             members = [v for v in versions if self._group_of(v) == g]
             if not members:
                 continue
-            hdr = QLabel(t(f"versions.group.{g}"))
-            hdr.setProperty("cls", "group")
+            hdr = ui_kit.group_label(t(f"versions.group.{g}"))
             self._ver_vbox.addWidget(hdr)
             show_all = expanded.get(g, False)
             if show_all or len(members) <= self._MAX_GROUP_VISIBLE:
@@ -844,8 +843,7 @@ class NewInstanceDialog(QDialog):
         ldver_lay = QVBoxLayout(ldver_box)
         ldver_lay.setContentsMargins(0, 0, 0, 0)
         ldver_lay.setSpacing(6)
-        ldver_title = QLabel(t("new_instance.loader_version"))
-        ldver_title.setProperty("cls", "group")
+        ldver_title = ui_kit.group_label(t("new_instance.loader_version"))
         ldver_lay.addWidget(ldver_title)
         self.ldver_combo = QComboBox()
         self.ldver_combo.setMinimumHeight(36)
@@ -856,8 +854,7 @@ class NewInstanceDialog(QDialog):
         lay.addWidget(ldver_box)
 
         # Java
-        java_title = QLabel(t("new_instance.java_section"))
-        java_title.setProperty("cls", "group")
+        java_title = ui_kit.group_label(t("new_instance.java_section"))
         lay.addWidget(java_title)
         self.java_default = QCheckBox(t("new_instance.java_use_default"))
         self.java_default.setChecked(True)
@@ -879,8 +876,7 @@ class NewInstanceDialog(QDialog):
         lay.addWidget(self.java_row_w)
 
         # name
-        name_lbl = QLabel(t("new_instance.name"))
-        name_lbl.setProperty("cls", "group")
+        name_lbl = ui_kit.group_label(t("new_instance.name"))
         lay.addWidget(name_lbl)
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText(t("new_instance.name_placeholder"))
@@ -1324,8 +1320,7 @@ class InstancesPage(QWidget):
 
         # 列表标题行（round-107：原「折叠按钮」上移到页头常驻 panel_btn，标题行只留标题）
         self._list_head = QHBoxLayout()
-        self.list_lbl = QLabel(t("instances.list_title"))
-        self.list_lbl.setProperty("cls", "group")
+        self.list_lbl = ui_kit.group_label(t("instances.list_title"))
         self._list_head.addWidget(self.list_lbl)
         self._list_head.addStretch(1)
         left_lay.addLayout(self._list_head)
@@ -1623,8 +1618,7 @@ class InstancesPage(QWidget):
         lay.addLayout(actions)
 
         # ── section entries ──
-        sec_title = QLabel(t("instances.sections"))
-        sec_title.setProperty("cls", "group")
+        sec_title = ui_kit.group_label(t("instances.sections"))
         lay.addWidget(sec_title)
         sec_grid = QGridLayout()
         sec_grid.setSpacing(10)

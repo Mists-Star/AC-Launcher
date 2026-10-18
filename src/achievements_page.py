@@ -118,7 +118,9 @@ class AchievementsPage(QWidget):
         root.addWidget(scroll, stretch=1)
 
         self._build()
-        self._refresh()
+        # round-112 修：只刷新数值，不再整页重建 —— 旧实现 __init__ 里
+        # _build() + _refresh() 连招会把全部卡片构建两遍（见 _rebuild 注释）。
+        self._refresh_header()
 
     def _build(self):
         if self._built:
@@ -128,8 +130,7 @@ class AchievementsPage(QWidget):
             ids = [a for a in ACHIEVEMENTS if ACHIEVEMENTS[a][2] == cat]
             if not ids:
                 continue
-            cat_lbl = QLabel(t(_CAT_LABEL[cat]))
-            cat_lbl.setProperty("cls", "group")
+            cat_lbl = ui_kit.group_label(t(_CAT_LABEL[cat]))
             self._content.addWidget(cat_lbl)
             grid = QGridLayout()
             grid.setSpacing(10)
@@ -138,21 +139,40 @@ class AchievementsPage(QWidget):
             self._content.addLayout(grid)
         self._content.addStretch(1)
 
+    def _refresh_header(self):
+        """只更新进度条与计数文本（不动卡片树）。"""
+        n, total = achievements.progress()
+        self.progress.setRange(0, total)
+        self.progress.setValue(n)
+        self.progress_lbl.setText(t("ach.progress", n=n, total=total))
+
     def _refresh(self):
         n, total = achievements.progress()
         self.progress.setRange(0, total)
         self.progress.setValue(n)
         self.progress_lbl.setText(t("ach.progress", n=n, total=total))
-        # rebuild cards (cheap at this scale)
+        self._rebuild()
+
+    def _rebuild(self):
+        """清掉旧卡片并重建。
+
+        round-112 修：旧控件必须先 :meth:`setParent(None)` **立即从视口摘除**，
+        再 ``deleteLater()`` 回收内存。只 ``deleteLater()`` 是不够的 ——
+        DeferredDelete 事件在**同一层**事件循环/``processEvents()`` 里不投递，
+        旧控件会继续活着叠画在新内容上（本页历史遗留的「第一张卡片被裁切、
+        与分组标题重叠」即此根因 + sizeHint 坑两者叠加）。
+        """
         while self._content.count():
             item = self._content.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.setParent(None)
                 w.deleteLater()
             elif item.layout() is not None:
                 self._clear_layout(item.layout())
         self._built = False
         self._build()
+        self._refresh_header()
 
     @staticmethod
     def _clear_layout(layout):
@@ -160,6 +180,7 @@ class AchievementsPage(QWidget):
             item = layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.setParent(None)
                 w.deleteLater()
             elif item.layout() is not None:
                 AchievementsPage._clear_layout(item.layout())

@@ -135,8 +135,7 @@ class HealthDialog(QDialog):
             return
 
         for g in groups:
-            head = QLabel(t(f"health.groups.{g['key']}"))
-            head.setProperty("cls", "group")
+            head = ui_kit.group_label(t(f"health.groups.{g['key']}"))
             self._list.addWidget(head)
             for f in g["findings"]:
                 self._list.addWidget(self._build_card(f))

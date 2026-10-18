@@ -180,8 +180,7 @@ class ScanPanel(QWidget):
         # ── instances column ──
         col_l = QVBoxLayout()
         col_l.setSpacing(6)
-        lbl_l = QLabel(t("scan.instances"))
-        lbl_l.setProperty("cls", "group")
+        lbl_l = ui_kit.group_label(t("scan.instances"))
         col_l.addWidget(lbl_l)
 
         # search box + manual import

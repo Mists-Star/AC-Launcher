@@ -395,3 +395,27 @@ class ChipGroup(QWidget):
         b = self.buttons.get(key)
         if b is not None:
             b.setText(text)
+
+
+def group_label(text: str) -> QLabel:
+    """分组标题（QSS 类 ``cls="group"``）的统一工厂。
+
+    round-112 修一个全局布局坑：QSS 的 ``padding`` **不计入 QLabel 的
+    sizeHint**（Qt 的 sizeHint 只按当前 font 度量），布局便只分配字高，
+    渲染时溢出的部分被紧随其后的控件盖住 —— 成就页「分组标题被卡片压住
+    一半」即此根因；全部 10 处调用点同病，只是多数背景同色看不出来。
+
+    因此：
+    * 垂直/水平间距改用 :meth:`setContentsMargins`（会进 sizeHint）；
+    * 字号/字重在代码里显式设置（QSS 的 ``font-size`` 同样不进 sizeHint）；
+    * QSS 规则只保留颜色。
+    """
+    from . import theme as _theme
+    lb = QLabel(text)
+    lb.setProperty("cls", "group")
+    f = lb.font()
+    f.setPixelSize(_theme.F_LG)
+    f.setBold(True)
+    lb.setFont(f)
+    lb.setContentsMargins(2, 4, 2, 4)
+    return lb

@@ -225,8 +225,7 @@ class VersionsPage(QWidget):
             if not members:
                 continue
             # group header
-            hdr = QLabel(t(f"versions.group.{g}"))
-            hdr.setProperty("cls", "group")
+            hdr = ui_kit.group_label(t(f"versions.group.{g}"))
             self._vbox.addWidget(hdr)
             for v in members:
                 self._vbox.addWidget(self._fade(self._make_card(v, v["id"] in installed)))
