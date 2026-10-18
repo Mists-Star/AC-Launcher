@@ -84,9 +84,7 @@ _pii_*.py
 _rewrite_*.py
 _diff_*.py
 _logo_probe.py
-# 一次性验证/测试脚本（跑完即弃，不入库）
-_test_*.py
-_smoke_*.py
-_font_*.py
+# round-112：回归测试已迁到受控的 tests/（随仓库走，见 regress.py）。
+# 这里保留 _* 规则只为一次性临时脚本——别再把正式回归脚本写成 _ 开头。
 # MC 原版纹理（本地资源，版权属 Mojang，不入库）
 assets/mc_textures/
