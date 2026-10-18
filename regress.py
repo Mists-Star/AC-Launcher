@@ -11,10 +11,8 @@ exit=0）」，但 _diag_all.py **从未入库** —— 回归套件一直是散
 换台机器或重新 clone 就没了，形不成「改 → 验 → 返工」的循环。本文件把
 所有检查收敛到一个入口，且对缺失脚本降级跳过（不会因少了哪个就整体失败）。
 
-⚠️ 现状限制：被它调用的 _test_*.py / _smoke_*.py / _audit_*.py 都命中
-.gitignore 的 `_*` 规则，**不在版本控制里**。若要让回归套件随仓库走，
-需把它们移到受控目录（如 tests/）并调整 .gitignore —— 这是待办，见
-docs/quality_punchlist.md。
+被它调用的脚本都在 `tests/`（**受版本控制**），换机 / 重新 clone 后
+照跑 —— 这是它取代历史上那个从未入库的 `_diag_all.py` 的意义。
 """
 from __future__ import annotations
 
@@ -35,18 +33,19 @@ if not os.path.isfile(PY):
     PY = sys.executable
 
 SUITES = [
-    ("编译", None, ["compileall"], "builtin"),
-    ("i18n 中英对称", None, None, "builtin"),
-    ("PII 门禁", "_pii_gate.py", None, "script"),
-    ("默认值缺漏审计", "_audit_defaults.py", None, "script"),
-    ("目标判定（mll 分片）", "_test_big_target.py", None, "script"),
-    ("mll 分片集成", "_test_mll_parallel.py", None, "script"),
-    ("整合包进度桥接", "_test_pack_progress.py", None, "script"),
-    ("mod 下载进度聚合", "_test_mod_progress.py", None, "script"),
-    ("设置页脏检测回归", "_test_settings_dirty.py", None, "script"),
-    ("核心功能冒烟", "_test_functional.py", None, "script"),
-    ("全页面构造冒烟", "_smoke_all.py", None, "script"),
+    ("编译", None, "builtin"),
+    ("i18n 中英对称", None, "builtin"),
+    ("PII 门禁（本地专属）", "_pii_gate.py", "script"),
+    ("默认值缺漏审计", "audit_defaults.py", "script"),
+    ("目标判定（mll 分片）", "test_big_target.py", "script"),
+    ("mll 分片集成", "test_mll_parallel.py", "script"),
+    ("整合包进度桥接", "test_pack_progress.py", "script"),
+    ("mod 下载进度聚合", "test_mod_progress.py", "script"),
+    ("设置页脏检测回归", "test_settings_dirty.py", "script"),
+    ("核心功能冒烟", "test_functional.py", "script"),
+    ("全页面构造冒烟", "smoke_all.py", "script"),
 ]
+SHOTS = "shots_all.py"
 
 
 def run_compileall() -> tuple[bool, str]:
@@ -90,7 +89,10 @@ def run_i18n() -> tuple[bool, str]:
 
 
 def run_script(fname: str) -> tuple[bool, str]:
-    path = os.path.join(HERE, fname)
+    # `_` 开头的脚本（如 PII 门禁，内含真实 PII 字面量、被 .gitignore 挡在
+    # 仓库外）放仓库根；其余正式回归脚本在受控的 tests/。
+    base = HERE if fname.startswith("_") else os.path.join(HERE, "tests")
+    path = os.path.join(base, fname)
     if not os.path.isfile(path):
         return None, "缺失（跳过）"          # type: ignore[return-value]
     try:
@@ -122,7 +124,7 @@ def main() -> int:
     print("AC Launcher 回归套件")
     print("=" * 74)
     rows = []
-    for label, script, _args, kind in SUITES:
+    for label, script, kind in SUITES:
         t0 = time.time()
         if kind == "builtin":
             ok, note = (run_compileall() if label == "编译" else run_i18n())
@@ -143,7 +145,7 @@ def main() -> int:
 
     if "--shots" in sys.argv or only_shots:
         print()
-        ok, note = run_script("_shots_all.py")
+        ok, note = run_script(SHOTS)
         print("  %s %-22s        %s" % (
             "OK  " if ok else "FAIL", "视觉截图", note))
 
