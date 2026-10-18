@@ -44,7 +44,11 @@ _SENSITIVE_CFG_KEYS = frozenset({
 _DEFAULTS = {
     # ---- quick ----
     "ram_mb": 4096,
-    "jvm_aikars": True,
+    # round-111 修：`jvm_aikars` 是 **派生键**（_sync_ui_to_cfg 里
+    # `target["jvm_aikars"] = target["jvm_preset"] == "aikar"`），必须与
+    # `jvm_preset` 一致。原先这里是 True 而 jvm_preset 默认是 "default"，
+    # 自相矛盾 → is_dirty() 恒为真 → 每次进设置页再离开都弹「有未保存的更改」。
+    "jvm_aikars": False,
     "window_mode": "windowed",       # windowed / borderless / fullscreen
     "language": "zh-CN",
     "accent_color": "#7C3AED",        # hex
@@ -144,6 +148,13 @@ _DEFAULTS = {
     "_jvm_module": "",                # 当前 JVM 预设来源模块 id
     "_sfx_module": "",                # 当前音效来源模块 id
     "_crash_module": "",              # 当前崩溃策略来源模块 id
+    # ---- round-111 补齐：_sync_ui_to_cfg 会写入但此前 _DEFAULTS 缺的 4 个键 ----
+    # 缺了它们，is_dirty() 会把「键不存在」当成「UI 改过」→ 每次进设置页再离开
+    # 都弹「有未保存的更改」。取值必须与 UI 初始态 / _sync_ui_to_cfg 一致。
+    "font_family": "",                # round-87 全局字体；空=跟随主题默认
+    "nav_layout": "ac",               # ac（侧边导航）/ pcl2（顶部，需 dev_mode）
+    "topmost": False,                 # 窗口置顶
+    "warn_non_ascii_path": True,      # 非 ASCII 路径警告
 }
 
 

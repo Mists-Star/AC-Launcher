@@ -87,6 +87,58 @@ i18n 无新增键（沿用 `dl.speed` / `dl.speed_idle`），zh 1287 / en 1287 �
 * ~~资源中心**单个 mod** 的下载仍是裸 `Worker`，无进度/速度 UI~~
   → **本批 C 项已补**
 
+## round-112（2026-10-18）— 修「没改设置也弹未保存」+ 全量审计
+
+> 仓库侧审计批次（非功能新增）。由 WorkBuddy 全页面离屏构造冒烟 + 静态扫描
+> + 默认值系统审计产出。
+
+### 🐛 P0 UX bug：进设置页什么都没改，离开时必弹「有未保存的更改」
+
+离屏构造冒烟时，导航 `settings → music` **直接挂死**在 `ask_save_dialog()` 的
+模态框上。挖下去发现不是模态框的问题，是 `is_dirty()` **恒为真**：
+
+| 键 | 原因 |
+| --- | --- |
+| `font_family` / `nav_layout` / `topmost` / `warn_non_ascii_path` | `_sync_ui_to_cfg` 会写这 4 个键，但 **`_DEFAULTS` 里根本没有** → 配置里缺键被当成「UI 改过」 |
+| `jvm_aikars` | **派生键自相矛盾**：`_DEFAULTS` 写 `jvm_aikars: True`，而 `jvm_preset: "default"`；同步逻辑是 `jvm_aikars = (jvm_preset == "aikar")` → 恒不相等 |
+
+即：**每次进设置页再离开都会被问一次是否保存**，对玩家是持续打断。
+
+修复（`src/settings_dialog.py`）：
+* 补齐 4 个默认键（取值与 UI 初始态 / `_sync_ui_to_cfg` 一致：
+  `font_family=""` / `nav_layout="ac"` / `topmost=False` /
+  `warn_non_ascii_path=True`）
+* `jvm_aikars` 默认改为 `False`，与 `jvm_preset="default"` 自洽
+* 顺带做了**系统审计**：解析 `_sync_ui_to_cfg` 里 47 个 `target[...]` 赋值，
+  与 `_DEFAULTS` 逐一比对 —— 确认只有这 4 个缺，无遗漏
+
+### 审计结论（其余维度）
+
+| 维度 | 结果 |
+| --- | --- |
+| 全页面/对话框离屏构造冒烟 | **16/16 全过**（MainWindow + 7 页导航 + 8 个对话框） |
+| 吞异常（`except: pass`） | 0 处（全部带 `noqa` 或显式处理） |
+| 可变默认参数 | 0 处（`callback={}` 是为兼容 mll 协议，非误用） |
+| 硬编码本机绝对路径 | 0 处（`java.py` 的 `C:\Program Files\...` 是 JDK 标准安装位，合理） |
+| 微软登录接线 | 正常（`login_dialog` 自走 device-code 流）；`core/auth.py` 里两个旧包装函数已死但**不影响功能** |
+| RELEASE 清单 | 5 项完成 / 23 项待办；**发布阻塞项**是「全量回归绿 + 真实启动冒烟」与「打包成品」 |
+
+### 已知非 bug（审计中排除的假阳性）
+
+* 导航到 **account** 会阻塞 —— 它不是页面而是弹模态 `LoginDialog`（`dlg.exec()`），
+  阻塞是预期行为
+* **30 个文件有未使用导入**、**11 个死函数**（`play_sfx` / `stop_bgm` /
+  `read_json` / `write_json` / `ensure_dir` / `login_with_microsoft` 等）
+  —— 纯卫生问题，不影响功能，本批未动
+
+### 验证
+
+* 设置页脏检测回归 **4/4**：`_sync_ui_to_cfg` 的键全部有默认值、
+  `jvm_aikars` 与 `jvm_preset` 自洽、**新建页面 `is_dirty() == False`**、
+  **改内存滑块后 `is_dirty() == True`**（确认没为了不弹窗而把检测废掉）
+* 全页面构造冒烟 16/16；compileall exit 0；i18n zh 1287 / en 1287 对称；
+  PII 门禁零残留
+
 ## round-110（2026-10-18）— 下载测速 + 大文件分片并行（+下载诊断日志）
 
 > 依据 `docs/round110_download_throughput.md`（TRAE 实测记录）整理。承接用户真机反馈
