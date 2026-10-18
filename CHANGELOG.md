@@ -9,6 +9,57 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-110（2026-10-18）— 下载测速 + 大文件分片并行（+下载诊断日志）
+
+> 依据 `docs/round110_download_throughput.md`（TRAE 实测记录）整理。承接用户真机反馈
+> 「下载怎么这么慢，而且看不到速度」，以及追问「为什么我 PCL-CE 的路线快到 10MB 左右（整合包）」。
+
+* **实测诊断**：`bmclapi2.bangbang93.com/libraries/...` 返回 **403 Cloudflare 拦截**
+  （`/assets/<hash>` 仍 200、`version_manifest_v2.json` 200）；Mojang 单文件 0.26 MB/s、
+  BMCLAPI client jar 0.37 MB/s；`Mojang → mirror` 每个库 3.03s = **403 白试 + 回退**。
+  而 `download_mirror` 默认值就是 `"bmclapi"`（`settings_dialog.py:123`），零状态包因此默认走镜像
+* **根因（本轮主因）**：慢不是网速，是**下载引擎的并发策略** —— 单条 TCP 的吞吐 ≈ 窗口 / RTT，
+  跨境链路常在 0.3~1 MB/s；整合包是「少数超大文件」，单文件单连接直接顶死上限。
+  AC 侧 `net_api.download_file` 单流、`BatchDownloader` `workers=4`（上限 8）且**每文件内部仍是单连接**、
+  mll 的并发只发生在文件与文件之间；PCL 则对每个大文件做分片多线程
+* **D 大文件自动分片（提速主体）** `src/net_api.py`：`download_file` 先以一次极小的
+  `Range: bytes=0-0` 探到远端总长，**≥8MB 自动改走 `parallel_download_file`**（HTTP Range 分片多线程）。
+  三条护栏 —— ①`_allow_parallel=False` 防「单流→分片→单流」递归（分片内部 4 处回退全传）；
+  ②**已有 `.part` 时不分片**，保住断点续传；③探测失败 / 服务器不支持分段（非 206）即回退单流
+* **D 并发上限** `src/batch_download.py` 上限 `8 → 16`；`src/modpack_import.py` 整合包导入 `4 → 8`
+* **A 速度可见（传输层记账）** `src/core/mirror.py`：mll 回调只有文件计数、拿不到字节数，
+  所以速度在传输层按响应字节记账 —— `_CountingRaw` 包住响应的 `raw`
+  （mll 用 `shutil.copyfileobj(r.raw, f)` 落盘，全程只调 `raw.read`），`SpeedMeter` 用滑动时间窗估 B/s，
+  窗口外样本丢弃、**长时间无新字节则速度自然归零**（不靠假时间戳）
+* **A 踩坑并修掉**：`install_scope()` 的令牌是 `threading.local()`，而分片的 `_tick` 跑在
+  `ThreadPoolExecutor` 工作线程里 —— 那些线程没有安装上下文，计量器收到 **0 字节**（离线测试第一轮即暴露）。
+  修法：在**调用线程**先取到计量器（`active_meter()`）再交给各分片线程
+* **A 显示** `src/worker.py` 新增 `ProgressWorker.speed` 信号 + `_speed_loop()` 轮询 + `_speed_text()`；
+  `src/launch_dialog.py` 进度对话框新增速度行；`src/main_window.py` 状态栏新增速度标签，
+  两处 `ProgressWorker` 均已接线（例：`1.2 MB/s · 已下载 34.5 MB`）
+* **B 镜像按主机失效（偏离原计划做法）**：原计划是「开局探测一次镜像、不可用则整体关闭」，
+  实际改为**请求级按主机闩锁** —— 某主机在镜像上返回 401/403/406 即记入本次安装的 `ctx.mirror_dead`，
+  后续该主机直连官方源。理由：不必硬编码脆弱的探测 URL、不多发请求、**404 不误伤整台主机**、
+  且能**保住 `/assets` 继续走镜像**（实测它是 200 且比官方快）—— 开局整体关闭做不到这个区分。
+  代价仅第一个库文件上那一次 403（~1.5s），而非每文件白试
+* **C 下载诊断日志（默认关）**：`set_diag(True)` 后每请求写一行
+  （时间 / status / 耗时 / 声明字节 / `mirror|direct` / 原始 URL）到 `data/logs/download.log`；
+  设置页网络分类新增「记录下载诊断日志」开关与 hint；
+  `install_instance` / `install_mrpack` / `repair_minecraft_dir` 三处入口均从配置读取
+* i18n +4 键 × zh/en（`dl.speed` / `dl.speed_idle` / `settings.dl_diag` / `settings.dl_diag_hint`），
+  合计 **1287 / 1287** 零单边
+* **验证**：`compileall` exit 0；i18n parity 1287/1287；**离线引擎测试 16 项全 PASS**
+  （本地 Range 服务器：20MB 走 4 次分片且 MD5 正确、512KB 只探一次不分片、`_allow_parallel=False` 纯单流、
+  已有 `.part` 时只发 1 次 Range 请求、`SpeedMeter` 累计/测速/停滞后归零）；
+  **镜像/日志测试 15 项全 PASS**（403 闩锁、404 不闩锁、`assets` 仍走镜像、计数包裹、日志门控）；
+  **离屏冒烟 11 项全 PASS**（状态栏标签、设置页新开关、对话框速度行、
+  `ProgressWorker` 产出 `10.8 MB/s · 已下载 11.0 MB`）
+* **已知取舍**：每次 `download_file` 多一次极小探测请求（小文件一发、大文件两发）；
+  嵌套并发瞬时峰值可能 ~64 条连接（8 批次 worker × 8 分片），属瞬态，过猛则调低 `_PARALLEL_MIN_BYTES`
+* **未做**：mll 自持的游戏文件路径（客户端 jar / 运行时）仍是单连接，本轮未接入分片
+  （需在 `_helper.download_file` 层包裹并兼顾 sha1 校验与 callback 协议，风险高于本轮范围）；
+  资源中心 store 整合包下载走裸 `Worker`，本轮只拿到提速、未加进度/速度 UI
+
 ## round-109（2026-10-17）— 下载止血 + PCL 式详细进度
 
 > 依据 `docs/round109_download_hardening.md`（TRAE 实测记录）整理。承接用户实测
