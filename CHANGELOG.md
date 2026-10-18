@@ -9,6 +9,66 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-111（2026-10-18）— mll 客户端 jar 分片并行 + 整合包下载进度/速度
+
+> 接手 round-110 CHANGELOG 末尾标注的两项「未做」。由 WorkBuddy 实现
+> （TRAE 批次之外的仓库侧攻坚）。
+
+### A. mll 客户端 jar 走分片并行（`src/core/mirror.py`）
+
+round-110 只给 **net_api 自己的下载**接了分片；mll 自持的游戏文件路径
+（客户端 jar / 运行时）仍是单连接。本项补上，但**刻意只对客户端 jar 生效**：
+
+* `_is_big_target()` 零网络成本判定，只认 `<mc>/versions/<id>/<id>.jar`
+  （正/反斜杠、Linux 路径均支持；`.part` 残件、同目录其它 jar 一律不认）
+* `_try_parallel_mll()` 与 mll `_helper.download_file` 语义逐条对齐：
+  路径安全检查、已存在且 sha1 通过则跳过、只发 `setStatus`
+  （**绝不发 setProgress/setMax** —— mll 的 install 用它们做「文件计数」进度，
+  掺入字节数会把进度条搞乱）、sha1 不符抛 mll 自己的 `InvalidChecksum`、
+  任何失败都回退原实现（不改变下载结果）
+* URL 先经 `_rewrite()` 做镜像重写再交给分片器 —— **net_api 不做 Mojang
+  主机重写**，不自己重写就会丢掉 BMCLAPI 镜像（隐藏回归点）
+* `chunk_mb=4`：阈值已是 8MB，按默认 16MB 切只会得 1~2 块，并行度太弱
+* ☠️ **为什么不给所有文件生效**：一次完整安装会调用 `download_file`
+  **数百到上千次**（libraries + assets 逐个下载），无差别加分片就要先探测
+  每个文件的大小 —— 那是几百上千个额外请求，在跨境链路上是几十秒到几分钟的
+  **净回归**。只认这一个确定是大文件的目标，其余零开销原样转发
+
+补丁方式：mll 的 install / fabric / forge / mrpack / quilt / runtime 都用
+`from ._helper import download_file` 拿了**直接引用**，所以逐个模块替换属性，
+只改 `_helper` 本身不够。由 `patch_install_session()` 统一调用（幂等）。
+
+### B. 整合包下载进度 + 速度（`src/net_api.py` / `src/pages_browse.py`）
+
+round-110 说「资源中心 store 整合包下载走裸 `Worker`，只拿到提速、未加进度/速度 UI」：
+
+* `download_modpack_to()` 新增 `callback` 参数，把 mll 风格 dict
+  （`setProgress` / `setMax`）桥接到 net_api 的 `progress(sofar, total)`；
+  `setMax` 只在总量首次已知时调一次
+* `StorePage` 新增 slim 进度条 + 速度标签（与启动/下载对话框同一范式），
+  平时隐藏，仅在下载整合包时出现；总量未知时走忙指示 `setRange(0, 0)`
+* `_install_modpack` 由裸 `Worker` 改用 `ProgressWorker`（它自动注入
+  mll 风格 callback，并在 `install_scope()` 内跑，速度计量天然可用）
+
+### 验证（全部离线，本地 HTTP 服务器）
+
+| 测试 | 结果 |
+| --- | --- |
+| `_is_big_target` 判定（12 例：正/反斜杠/Linux/part 残件/同目录其它 jar/空/None） | 12/12 |
+| mll 分片集成（17 项）：分块数与 offset 唯一性、字节正确、sha1 通过/不符抛 `InvalidChecksum`、无 Range 服务器回退且不留 `.part`、已存在零请求跳过、`setStatus` 有而 `setProgress`/`setMax` 无、**小文件零探测请求** | 17/17 |
+| 整合包进度桥接（8 项）：`setMax` 只一次且=总长、`setProgress` 单调不减至总量、`callback=None` 仍可下载、回调抛异常不拖垮下载 | 8/8 |
+| StorePage 离屏冒烟（12 项）：控件默认隐藏、忙指示/定长切换、速度行写入、错误路径收起、`show()` 无异常 | 12/12 |
+
+i18n 无新增键（沿用 `dl.speed` / `dl.speed_idle`），zh 1287 / en 1287 保持对称。
+
+### 仍未做（下轮候选）
+
+* mll 的 **runtime 文件**（`<mc>/runtime/...`，多个中小文件）与**大体积
+  library** 未接入分片 —— 前者单文件不够大，后者需先解决「无差别探测」
+  的开销问题（可考虑按 `.jar` + libraries 路径 + 已有 `.part` 大小启发）
+* 资源中心**单个 mod** 的下载（`_download` / `StoreDetailDialog`）仍是裸
+  `Worker`，无进度/速度 UI
+
 ## round-110（2026-10-18）— 下载测速 + 大文件分片并行（+下载诊断日志）
 
 > 依据 `docs/round110_download_throughput.md`（TRAE 实测记录）整理。承接用户真机反馈

@@ -34,6 +34,13 @@ round-110 三件事：
   就是被 Cloudflare 拦的）时，把该主机记进本次安装的失效集合，后续请求直接走官方
   源，不再逐文件白试一遍再回退；
 * C 诊断日志 —— 每请求的 status / 耗时 / 声明字节数，默认关闭（:func:`set_diag`）。
+
+round-111 大文件分片并行：把 mll 的 ``download_file`` 包一层，让**客户端 jar**
+（``versions/<id>/<id>.jar``，单次安装里最大的单文件）走我们的
+:func:`net_api.parallel_download_file`。刻意**不**对所有文件生效 ——
+一次完整安装有数百到上千次 ``download_file`` 调用，无差别探测大小会是净回归；
+只认这一个确定是大文件的目标，其余零开销原样转发。见
+:func:`_is_big_target` / :func:`_try_parallel_mll`。
 """
 from __future__ import annotations
 
@@ -450,6 +457,136 @@ def _rewrite(url):
     return url
 
 
+# ── round-111：mll 的大文件走分片并行 ─────────────────────────────────────
+# mll 的 install / fabric / forge / mrpack / quilt / runtime 都用
+# ``from ._helper import download_file`` 拿了**直接引用**，所以只改 ``_helper``
+# 本身不够，必须逐个模块替换属性。
+#
+# ⚠️ 为什么不给所有文件都加分片：一次完整安装会调用 ``download_file`` 数百到
+# 上千次（libraries + assets 逐个下载），而无差别加分片就要先探测每个文件的
+# 大小 —— 那是几百上千个额外请求，在跨境链路上是几十秒到几分钟的**净回归**。
+# 因此只对「确定是大文件」的目标做一次探测：客户端 jar
+# （``versions/<id>/<id>.jar``，通常 20~25MB，是单次安装里最大的单文件，
+# 且整个安装只出现 1 个）。其余一律零开销原样转发给 mll 原实现。
+_DL_PATCH_MODULES = ("_helper", "install", "runtime", "fabric", "forge",
+                     "mrpack", "quilt")
+
+
+def _is_big_target(path) -> bool:
+    """零网络成本判断「这个目标值得为它探测一次大小」。
+
+    只认客户端 jar：``<mc>/versions/<version>/<version>.jar``。
+    单次安装里最大的单文件，且只有 1 个 —— 探测开销可忽略，
+    换来的是把 20~25MB 从单连接（跨境 ~0.3MB/s）拉到多连接。
+    """
+    if not isinstance(path, str) or not path.endswith(".jar"):
+        return False
+    parts = os.path.normpath(path).replace("\\", "/").rstrip("/").split("/")
+    # .../versions/<id>/<id>.jar → versions 在倒数第 3 位，且文件名 == 目录名.jar
+    return (len(parts) >= 3 and parts[-3] == "versions"
+            and parts[-1] == parts[-2] + ".jar")
+
+
+def _try_parallel_mll(url, path, sha1, callback, minecraft_directory,
+                      overwrite) -> bool:
+    """尝试用分片并行下载 mll 的一个大文件。
+
+    返回 True = 已由本函数完成下载（调用方直接 ``return True``）；
+    返回 False = 不适用或失败，调用方应走 mll 原实现（单流，含镜像/重试/取消）。
+
+    与 mll ``_helper.download_file`` 的语义对齐点：
+    * 路径安全检查（``minecraft_directory``）；
+    * 已存在且（无 sha1 或校验通过）→ 不重复下载；
+    * 只发 ``setStatus``，**绝不发 setProgress/setMax** ——
+      mll 的 install 用它们做「文件计数」进度，掺入字节数会把进度条搞乱；
+    * sha1 不符时抛 mll 自己的 ``InvalidChecksum``；
+    * 任何失败都回退原实现，不改变下载结果。
+    """
+    from minecraft_launcher_lib._helper import (
+        check_path_inside_minecraft_directory,
+        get_sha1_hash,
+    )
+
+    if minecraft_directory is not None:
+        check_path_inside_minecraft_directory(minecraft_directory, path)
+    if os.path.isfile(path) and not overwrite:
+        # 与 mll 同语义：已存在且无需校验 / 校验通过 → 跳过。
+        # 返回 False，让 mll 原实现走它自己的跳过分支并返回 False。
+        if sha1 is None or get_sha1_hash(path) == sha1:
+            return False
+
+    # net_api 不做 Mojang 主机重写（只有这里的 _rewrite 做），所以必须自己先
+    # 重写，否则分片路径会丢掉 BMCLAPI 镜像。
+    real_url = _rewrite(url)
+
+    from .. import net_api
+    try:
+        size = net_api._remote_size(real_url, None, 30)
+    except Exception:  # noqa: BLE001 - 探测失败一律回退
+        return False
+    if size < net_api._PARALLEL_MIN_BYTES:
+        return False
+
+    callback.get("setStatus", lambda *a, **k: None)(
+        "Download " + os.path.basename(path))
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception:  # noqa: BLE001 - 与 mll 一致：建目录失败不阻断
+        pass
+
+    def _cancel():
+        ctx = active_context()
+        return ctx is not None and ctx.aborted()
+
+    try:
+        # chunk_mb=4：阈值已是 8MB，按默认 16MB 切只会得到 1~2 块，并行度太弱；
+        # 4MB 让 8MB 文件也至少 3 块，客户端 jar（20~25MB）能到 5~6 块。
+        net_api.parallel_download_file(real_url, path, timeout=120,
+                                       chunk_mb=4, cancel=_cancel)
+    except Exception:  # noqa: BLE001 - 分片失败一律回退 mll 原实现
+        ctx = active_context()
+        if ctx is not None and ctx.aborted():
+            raise  # 取消是协作式指令，不能被回退掩盖
+        return False
+
+    if sha1 is not None:
+        from minecraft_launcher_lib.exceptions import InvalidChecksum
+        checksum = get_sha1_hash(path)
+        if checksum != sha1:
+            raise InvalidChecksum(url, path, sha1, checksum)
+    return True
+
+
+def _wrap_download_file(orig):
+    """把 mll 的 ``download_file`` 包一层：大文件走分片并行，其余原样转发。"""
+
+    def download_file(url, path, callback={}, sha1=None, lzma_compressed=False,
+                      session=None, minecraft_directory=None, overwrite=False):
+        # lzma 内容是变换过的，不能分片；只对「确定是大文件」的目标探测一次。
+        if (not lzma_compressed and _is_big_target(path)
+                and _try_parallel_mll(url, path, sha1, callback,
+                                      minecraft_directory, overwrite)):
+            return True
+        return orig(url, path, callback, sha1, lzma_compressed, session,
+                    minecraft_directory, overwrite)
+
+    download_file._ac_parallel_wrapped = True  # type: ignore[attr-defined]
+    return download_file
+
+
+def _patch_download_file() -> None:
+    """把上述包裹应用到每个持有 ``download_file`` 直接引用的 mll 模块。"""
+    for name in _DL_PATCH_MODULES:
+        try:
+            mod = importlib.import_module("minecraft_launcher_lib." + name)
+        except ImportError:
+            continue
+        cur = getattr(mod, "download_file", None)
+        if cur is None or getattr(cur, "_ac_parallel_wrapped", False):
+            continue
+        setattr(mod, "download_file", _wrap_download_file(cur))
+
+
 # Process-wide proxy mode, shared by every MirrorSession spawned by the patched
 # install session factory. "none" = force direct (disable system proxy),
 # "system" = let requests use OS/env proxy (default), or a URL string.
@@ -504,6 +641,9 @@ def patch_install_session() -> None:
         real = getattr(mod, "requests", None)
         if real is not None and not isinstance(real, _RequestsShim):
             setattr(mod, "requests", _RequestsShim(real))
+    # round-111：大文件（客户端 jar）走分片并行。只对确定是大文件的目标探测
+    # 一次大小，其余零开销 —— 详见 _is_big_target 的说明。
+    _patch_download_file()
     _PATCHED = True
 
 

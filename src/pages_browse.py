@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QScrollArea, QLineEdit, QComboBox, QDialog,
+    QScrollArea, QLineEdit, QComboBox, QDialog, QProgressBar,
 )
 from PySide6.QtCore import Signal, QSize, QTimer, Qt
 from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
@@ -28,7 +28,7 @@ from .net_api import (
     fetch_versions, search_mods, download_mod_to, download_modpack_to,
     STORE_CATEGORIES,
 )
-from .worker import Worker
+from .worker import ProgressWorker, Worker
 from .async_image import ImageLoader, make_version_pixmap
 from .store_detail import StoreDetailDialog  # round-66 资源详情页（版本/翻译）
 
@@ -418,6 +418,19 @@ class StorePage(QWidget):
         self.status.setProperty("cls", "sub")
         root.addWidget(self.status)
 
+        # round-111：整合包下载的字节级进度 + 实时速度（与启动/下载对话框同一
+        # slim 进度条范式）。平时隐藏，只在下载整合包时出现。
+        self._dl_bar = QProgressBar()
+        self._dl_bar.setProperty("cls", "slim")
+        self._dl_bar.setTextVisible(False)
+        self._dl_bar.setFixedHeight(8)
+        self._dl_bar.setVisible(False)
+        root.addWidget(self._dl_bar)
+        self._dl_speed = QLabel("")
+        self._dl_speed.setProperty("cls", "sub")
+        self._dl_speed.setVisible(False)
+        root.addWidget(self._dl_speed)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
@@ -727,13 +740,34 @@ class StorePage(QWidget):
         self.status.setText(t("store.downloading_pack", slug=slug))
         from .paths import get_data_dir
         cache_dir = os.path.join(get_data_dir(), "cache")
-        self._pworker = Worker(download_modpack_to, project_id, cache_dir)
+        # round-111：改用 ProgressWorker（而非裸 Worker）——它会注入 mll 风格
+        # callback，经 net_api.download_modpack_to 桥接成字节级进度 + 实时速度。
+        self._pworker = ProgressWorker(download_modpack_to, project_id,
+                                       cache_dir)
+        self._pworker.progress.connect(self._on_pack_progress)
+        self._pworker.speed.connect(self._on_pack_speed)
         self._pworker.finished.connect(self._on_pack_downloaded)
-        self._pworker.error.connect(
-            lambda e: self.status.setText(t("store.download_fail", e=e)))
+        self._pworker.error.connect(self._on_pack_error)
+        self._dl_bar.setVisible(True)
+        self._dl_bar.setRange(0, 0)          # 未知总量 → 忙指示
+        self._dl_speed.setVisible(True)
+        self._dl_speed.setText("")
         self._pworker.start()
 
+    def _on_pack_progress(self, value: int, maximum: int):
+        """整合包下载进度：maximum <= 0 表示总量未知（忙指示）。"""
+        if maximum and maximum > 0:
+            self._dl_bar.setRange(0, maximum)
+            self._dl_bar.setValue(value)
+        else:
+            self._dl_bar.setRange(0, 0)
+
+    def _on_pack_speed(self, text: str):
+        self._dl_speed.setText(text)
+
     def _on_pack_downloaded(self, path: str):
+        self._dl_bar.setVisible(False)
+        self._dl_speed.setVisible(False)
         from .pages_instances import _MrpackDialog
         from .modpack_import import _parse_mrpack_info
         import minecraft_launcher_lib
@@ -747,6 +781,11 @@ class StorePage(QWidget):
             return
         dlg = _MrpackDialog(path, info_dict, self)
         dlg.exec()
+
+    def _on_pack_error(self, e):
+        self._dl_bar.setVisible(False)
+        self._dl_speed.setVisible(False)
+        self.status.setText(t("store.download_fail", e=e))
 
     def retranslate_ui(self):
         self.title_lbl.setText(t("store.title"))

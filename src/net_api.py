@@ -1288,15 +1288,38 @@ def search_mods(query: str = "", offset: int = 0, limit: int = 20,
     return hits
 
 
-def download_modpack_to(project_id: str, dest_dir: str) -> str:
+def download_modpack_to(project_id: str, dest_dir: str, callback=None) -> str:
     """Download a Modrinth modpack's primary file (a .mrpack) into dest_dir.
 
     Returns the local .mrpack path — the caller then installs it as a new
     instance via ``core.install.install_mrpack``.
+
+    round-111：``callback`` 收 mll 风格 dict（``setProgress`` / ``setMax``），
+    由 :class:`ProgressWorker` 自动注入。把它桥接到 net_api 的
+    ``progress(sofar, total)``，整合包下载从此有字节级进度与实时速度
+    （之前走裸 ``Worker``，只有提速没有可观测性）。
     """
     filename, url = get_mod_download(project_id)
     os.makedirs(dest_dir, exist_ok=True)
-    return download_file(url, os.path.join(dest_dir, filename), timeout=120)
+    dest = os.path.join(dest_dir, filename)
+
+    progress = None
+    if isinstance(callback, dict):
+        set_progress = callback.get("setProgress")
+        set_max = callback.get("setMax")
+        if set_progress is not None:
+            _maxed: list[int] = []
+
+            def progress(sofar, total):  # noqa: A002 - 对齐 net_api 签名
+                try:
+                    if total and not _maxed and set_max is not None:
+                        _maxed.append(1)
+                        set_max(total)
+                    set_progress(sofar)
+                except Exception:  # noqa: BLE001 - UI 回调绝不拖垮下载
+                    pass
+
+    return download_file(url, dest, timeout=120, progress=progress)
 
 
 
