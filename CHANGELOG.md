@@ -8,6 +8,404 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-115（2026-10-23）— 验收评审（代码设计 + 实际作用）
+
+> 验收标准不是「能跑、不报错」，而是**代码设计上有没有实质缺陷**、**功能是不是
+> 真的在起作用**。本轮只取证定性，**不改代码**。
+> 完整报告：[`docs/round115_acceptance_review.md`](docs/round115_acceptance_review.md)
+
+### A. P0 —— 启动前置预检的两处硬闸门
+
+* **低内存判据用错指标**：`main_window.py:2948-2962` 用 `GlobalMemoryStatusEx.ullAvailPhys`
+  （**当前可用物理内存**）去比 JVM 堆上限 `-Xmx`。本机 15.19GB 总量 / 0.82GB 可用
+  时判「内存不足」——别的程序占内存就误报。正确判据应是 commit headroom。
+* **默认按钮是「取消」**：`setDefaultButton(box.buttons()[-1])` 把「取消」设为默认，
+  误报时用户按回车 = 启动被取消。
+* **磁盘预检同类问题**：`main_window.py:2963-2987` 用 `ram + 2048` 推导磁盘需求
+  （内存与磁盘占用无因果关系），默认按钮同样是「取消」，且 `except Exception: pass`
+  把 `resolve_game_dir` 的真实失败一并吞掉。
+
+### B. P1 —— 视觉层的两个系统性缺陷
+
+* **图标颜色全部写死**：56 个 SVG 中 55 个把颜色写死、**0 个**用 `currentColor`。
+  其中 32 个用 `#475569`（暗色描边）→ 暗色主题 `bg_card #2A2A2E` 下对比度仅
+  **1.89:1**、「控制中枢」`#141B28` 下 **2.28:1**，低于图形对象 3:1 门槛 → 切暗色
+  后约 1/3 图标糊进背景。另有 6 个用旧强调色 `#6366F1`（当前 accent 是 `#7C3AED` /
+  `#00E5FF`），与全站强调色对不上。
+* **按钮图标尺寸被静默压成 16×16**：`QPushButton(icon(k), text)` 的 `iconSize`
+  实测 = 16×16（Qt 样式默认 `PM_ButtonIconSize`），全项目无 QSS `icon-size` 规则。
+  音乐页 44×44 的播放按钮里只画了 16×16 的小三角。此前截图里的「小方块」由此而来
+  ——**不是缺 SVG**（56 个文件全在、全部 `isNull=False`）。
+* **中文侧栏两个「联机」**：`nav.group.multiplayer` 与 `lobby.nav_lobby` 中文同名
+  （英文分别是 Multiplayer / Lobby，不重复）→ 纯中文 i18n 缺陷。
+* **联机页文案承诺的输入框不存在**：`lobby.join_help` 说「在下方输入大厅编号」，
+  但页面层只有「加入/创建」两个按钮（都跳同一个弹窗），`QLineEdit` 只在
+  `lobby_dialog.py` 里。
+
+### C. P2
+
+* 首页 hero 内「26.2」重复 3 次（标题 / detail 行 / combo 当前项）。
+* `aclive.py` 6 项：主线程 JPEG 编码、主线程 sleep 打字、`eval` 无超时无沙箱、
+  控件坐标相对主窗口但抓帧目标可能是弹窗（坐标系不一致）、`_cmd_nav` 调私有方法
+  `_switch_stack`、WS 广播无背压。
+
+### D. ✅ round-113 下载源改造复核通过
+
+逐行对照 mll 安装源码确认：并发 48 注入生效（模块级全局查找）、连接池 64 生效
+（`install_libraries`/`install_assets` 各自建**一个** session 复用全部文件）、
+`_forge` 单独替换必要且已做、13 条镜像路径规则正确。
+`BMCLAPI_OPTIFINE_LIST` **不是残留死代码**（仍服务于「新建实例→加载器」入口）。
+唯一打折点：`_RequestsShim.get()` 每次新建 Session，mll 未传 session 的分支
+（版本 json / client jar）不跨调用复用连接池。
+
+### E. 撤回的两条旧结论
+
+* 「开始游戏堵死 UI 线程」→ **不准确**：`QMessageBox.exec()` 是嵌套事件循环，
+  用户界面仍可交互；实际发生的是 live view `/ctl` 通道 10s 超时。真因是
+  **预检弹窗 + 误报**，非 `on_play` 路径上的同步网络调用。
+* 「侧栏分组标题与条目视觉权重相同」→ **不准确**：`nav-group` 为小字号 + 灰 +
+  700 字重 + 1px 字距，层级是分开的。
+
+---
+
+## round-116（2026-10-23）— 验收整改 + MC 全景背景 + 退出闪退根治
+
+> 接 round-115 验收结论。本轮把 P0/P1/P2 里**当时就定下的部分**全部落地，
+> 并新增「版本全景背景」功能；另在验证过程中发现并根治了一个**退出即闪退**
+> （0xC0000409）的线程生命周期缺陷。
+
+### A. 新功能：版本全景背景（真全景图 + 伪 3D + 整合包覆盖）
+
+设置 → 壁纸的「版本主题背景」升级为「版本全景」：直接使用**该 MC 版本原版主界面
+那张全景图**（`assets/.../gui/title/background/panorama_0..5.png`，立方体贴图
+6 面），在首页做**伪 3D 透视**缓慢环绕旋转，而不是程序生成的渐变。
+
+* `src/panorama.py`（新增）
+  * `locate_faces()` 取面顺序：**整合包资源包（zip 里的 `assets/.../panorama_N.png`）
+    → 整合包 `overrides/` → 原版资产索引**（`assets/indexes/<assetIndex.id>.json`
+    的 objects 映射 → `assets/objects/<hash[:2]>/<hash>`），整合包换过背景就用
+    整合包自己那张。
+  * 渲染：相机在立方体中心 → 立方体面是平面，纹理 (u,v) → 屏幕是**单应矩阵**；
+    近平面 + 四条屏幕边界用 Sutherland–Hodgman 半平面裁剪（可见区是纹理空间里的
+    凸多边形，直接当 clip region）。
+* `src/wallpaper.py`：全景作为壁纸层的一个分支，半分辨率缓冲 + `SmoothPixmapTransform`
+  放大，实测 **3.25 ms/帧**（20fps 预算 50ms，约占单核 6.5%），页面不可见时停表。
+* **可读性**：全景是整屏媒体背板，落在背板上的文字（品牌行、修复日志行）必须
+  仍可读。蒙版强度**由美术自身平均亮度自适应**（不是写死数值）：暗色主题朝黑压
+  到 luma ≤ 0.44，亮色主题朝白提到 luma ≈ 0.55；深色洞穴在暗色主题下几乎原样
+  呈现（顶 24% 黑 / 底 0%），亮色主题呈柔和淡彩（顶 47% 白 / 底 30% 白）。
+  两侧都满足 WCAG 对比度（浅色主题下次级文字升级为 `text_main`）。
+* 找不到全景（版本没装 / 资产索引缺失）→ 静默退回原程序渐变，不留黑洞。
+
+### B. P0 整改（启动前置预检）
+
+* **P0-1 低内存判据**：`GlobalMemoryStatusEx.ullAvailPhys`（当前可用物理内存）
+  → **`CommitLimit - CommitTotal`（可提交内存余量）**。堆是虚拟预留 + 按需提交，
+  别的程序占着物理内存不代表提交不了新内存；提交额度用尽才是真失败。
+  读 `psapi.GetPerformanceInfo`，结构体按指针宽度自适应（x64 内核计数器是 64 位，
+  MSDN 那份全 DWORD 的 56 字节布局只在 x86 成立）。
+* **P0-1 默认按钮**：`setDefaultButton(box.buttons()[-1])` 把「取消」设成默认 →
+  改为显式持有「仍然启动」按钮并 `setDefaultButton(它)`。误报时按回车 = 直接启动。
+* **P0-2 磁盘预检**：`ram + 2048`（内存与磁盘需求无因果关系）→ 固定常量
+  `MIN_FREE_DISK_MB = 3072`；`resolve_game_dir` 的失败不再被 `except: pass`
+  一起吞掉（路径解析失败与取不到空间分成两处处理）；默认按钮同样落在「继续」。
+
+### C. P1 整改（视觉）
+
+* **P1-3 图标配色**：`icons.py` 新增 `_TintedIconEngine`——把 SVG 按控件要求的
+  尺寸光栅化后用 `CompositionMode_SourceIn` 整体染成主题色（保留抗锯齿边缘）。
+  单色图标默认取 `text_sub`、强调类取 `text_accent`，随主题联动；
+  品牌 / 状态类（`_KEEP_COLOR`）保留原色。
+* **P1-4 图标尺寸**：`QPushButton(icon(k), text)` 的图标被 Qt 样式默认
+  `PM_ButtonIconSize`（Windows 16×16）静默压小 → `AcSliderStyle` 统一把该指标
+  抬到 **18px**（显式 `setIconSize` 的按钮仍以显式值为准），关键大按钮另加显式
+  `setIconSize`。
+
+### D. P2 整改
+
+* **P2-5 中文侧栏两个「联机」**：`lobby.nav_lobby` 中文改为「大厅」，与分组标题
+  「联机」区分（英文 Multiplayer / Lobby 本就不重复，是纯中文 i18n 缺陷）。
+* **P2-7 首页 hero 版本号重复 3 次**：detail 行不再无条件写版本号——实例名里
+  已经含版本号时（AC 自建实例名 = 版本号）省掉，只在实例名不含版本号时补上，
+  保证「版本信息至少可见一次」而不重复三遍。
+
+### E. 退出闪退根治（0xC0000409）
+
+round-115 之前就存在的缺陷：解释器析构**仍在运行的 QThread** → Windows 上
+fail-fast。本轮定位到三处设计问题并根治：
+
+1. **注册时机**：`Worker` / `ProgressWorker` / 下载队列线程都在 `run()` **内部**
+   才注册进 `worker._LIVE`——`start()` 与 `run()` 之间存在窗口，那段时间里
+   `drain_workers()` 看不到它。→ 新增 `TrackedThread` 基类，**在 `start()` 里注册**。
+2. **注销时机**：原来在 `run()` 的 `finally` 里注销——那一刻线程还在收尾，注销后
+   注册表就不再持有最后一个引用，owner（对话框/页面）被销毁时线程会被从脚下抽走。
+   → 改为**线程真正停止后**（`finished` 信号）才注销。
+3. **覆盖范围**：全景加载线程（`PanoramaLoader`）此前不在任何关停流程里，
+   `main.py` 的 `os._exit()` 又会跳过 atexit → 在 `panorama.py` 加模块级线程注册表
+   + `wait_for_loaders()`，并挂到 `main.py` 的 `aboutToQuit`。
+
+附带收益：**对话框在后台任务进行中被销毁不再闪退**（注册表保证线程存活）。
+
+### F. 验证
+
+* `python -m compileall src main.py tests` 全量通过。
+* `tests/smoke_all.py`：16/16 构造成功，**退出码 0**（此前稳定 0xC0000409）。
+* 离屏渲染截图（暗/亮）确认全景构图与配色。
+* **有头实跑**（`tools/aclive` live view，`--headful`）：真窗口截图确认全景渲染、
+  中文排版、深浅两套主题下落在背板上的文字均清晰可读。
+* 实测性能：1600×900 下 3.25 ms/帧（p95 4.62 ms）。
+
+---
+
+## round-117（2026-10-23）— 联机页输入框 + live view 六项缺陷整改（外加两处新发现）
+
+> 承接 round-115 验收报告里留到本轮处理的两项：**P1 联机页大厅编号输入框**
+> 与 **P2 `aclive.py` 六项设计缺陷**。
+> 整改过程又挖出两处**报告里没写、但更要命**的问题（见 C、D）。
+
+### A. 联机页：文案承诺的输入框真的存在了
+
+* `lobby.join_help` 写着「在下方输入大厅编号」，而页面层根本没有输入框——
+  编号只藏在后面对话框里。**现在大厅页直接有编号输入框**：输入后按回车或点
+  「加入大厅」，编号带进 `LobbyDialog` 并在窗口显示后**自动加入**（不再让人
+  在对话框里再输一遍）。
+* 新增 i18n 键 `lobby.join_help_page`：页面上的按钮叫「加入大厅」而对话框里的
+  按钮叫「加入」，同一句帮助文案不能同时对两者成立，故页面用独立文案
+  （英文同理 `[Join Lobby]`）。
+* 卡片 `minWidth=460`、按钮 `minWidth=116`：原先卡片按内容收缩到 300px 宽，
+  输入框只剩 128px，占位文案「编号应长得像这样：U/NNNN-AAAA-SSSS-EEEE」被截断。
+
+### B. `aclive.py` 六项设计缺陷
+
+| 项 | 缺陷 | 修法 |
+|---|---|---|
+| a | GUI 主线程做 JPEG 编码 | 新增 `_JpegEncoder` 线程：输入队列 `maxsize=1` 只留最新帧，**GUI 线程只做 `grab()`**。注意 `QPixmap` 与 `QImage` 共享缓冲，跨线程前必须 `.copy()` |
+| b | 主线程 `time.sleep` 逐字符打字 | 改为 `QTimer` 逐 tick 推字符，**目标控件在首个 tick 锁定**（避免焦点漂移）；非 ASCII 字符走 `QInputMethodEvent` 提交 |
+| c | `eval`/`exec` 无超时无沙箱 | `sys.settrace` 设 deadline（默认 5s，可 `timeout_ms` 调）+ 受限 builtins（剔除 `open`/`__import__`/`exec`/`eval`/`compile`/`input`/`globals`/`locals`/`vars`/`setattr`/`delattr`），提供 `import_module()` 助手 |
+| d | 坐标相对主窗口，但抓帧目标可能是弹窗 | 新增 `_capture_target()`：所有报坐标的接口（click/move/wheel/find）统一以**当前抓帧窗口**为原点；`find` 响应里带 target 身份 |
+| e | `_cmd_nav` 调私有方法 `_switch_stack` | 改调 `MainWindow.show_page(key)` 公开 API（新增于 `main_window.py`），未知页面返回可读错误 + 页面清单 |
+| f | WebSocket 广播无背压 | 每个客户端独立**有界队列（maxsize=4，满则丢最旧）+ 独立写线程**，`select` 探可写性 + 5s 超时 + 自行处理部分写；一个卡住的客户端不再拖死其他人 |
+
+### C. 新发现①：点击弹模态框会让整个控制口失声（本轮最关键修复）
+
+现象：点「创建大厅」后 `/ctl` 全部 `main-thread timeout`，而**帧流照常**
+（面板仍在刷新）。
+
+根因：Qt 中**同一个 QTimer 在其槽函数执行期间不会再次触发**（实测：
+槽内进入嵌套 `QDialog.exec()` 后，同一定时器再未触发，别的定时器照常）。
+点击是在泵槽里同步投递的 → 按钮弹出模态框 → 泵槽被嵌套事件循环占住 →
+泵定时器再也不触发 → 命令队列无人消费 → 控制口全线超时（帧流因为是另一个
+定时器而幸存，这正是「看得见动、却发不出命令」的原因）。
+
+修法：**点击/按键不再在命令槽里同步执行**，改由 `QTimer.singleShot(0, …)`
+投递给事件循环。模态框在事件循环的回调栈里打开，泵定时器不被占住 →
+**弹窗打开期间控制口照常可用**（已实测：弹窗状态下 `info`/`find`/`shot` 均正常）。
+点击响应改为 `{"deferred": true}`，目标控件在**投递时**解析（避免待投递的点击
+还没落地就取焦点）。
+
+### D. 新发现②：帧像素 vs 逻辑像素（125% 缩放下点偏 25%）
+
+`grab()` 出来的是**设备像素**（本机 125% 缩放：窗口 1100×720 逻辑 → 帧
+1375×900 物理），而控件几何是逻辑像素。浏览器面板按帧像素回传坐标，
+控制口却按逻辑像素解释 → **每个点击都偏 25%**。
+
+修法：控制口对外统一使用**帧像素**——`find` 返回的坐标乘以
+`devicePixelRatioF()`，`click`/`move`/`wheel` 的入参除以它；`find`/`info`
+响应里附 `dpr` 与 `frame` 尺寸，调用方可直接核对。
+
+### E. 其它
+
+* `_cmd_click` 补 `setFocus()`：合成鼠标事件不会移动键盘焦点，真实点击会——
+  不补的话「点击输入框 → 打字」会把字打到别的控件里。
+* `type` 命令新增 `wait_ms`：等打完再返回（等待发生在 HTTP 线程，不占 GUI 线程）。
+* `live.py` CLI 补 `--wait-ms` / `--timeout-ms` / `--cls`。
+
+### F. 验证
+
+* `python -m compileall` 全量通过；`tests/smoke_all.py` 16/16，**退出码 0**。
+* live view 真窗口实跑：`nav` → `find` → `click` → `type` → `shot` 全链路；
+  输入框实收到 `U/1234-ABCD-5678-EFGH`；点「加入大厅」→ 对话框带编号自动加入
+  → 编号不存在时正确弹出「未找到该编号的大厅」告警。
+* 死循环防护实测：`exec --code "while True: pass"` **5.0 s 后**返回
+  `timeout: evaluation exceeded 5.0s`，界面随后仍可正常响应。
+* 沙箱实测：`open(...)` → `NameError: name 'open' is not defined`，
+  `__import__(...)` 同理被拒。
+* 打字不卡帧流实测：1.4 s 打字任务进行中，`shot` 命令 **475 ms** 返回。
+* 模态框存活实测：弹窗打开期间 `info` 360 ms 返回、`find`/`shot` 正常。
+
+---
+
+## round-118（2026-10-23）— 新手教程「外观风格」档位 + 占用参考条
+
+> 玩家要求：教程里加一个「简洁 / 正常 / 复杂 / 自定义」的外观风格选择，
+> 直接决定手动打开哪些外观效果（进而决定 AC 占用），并给玩家一条可视化占用参考。
+
+### A. 教程新增「外观风格」步骤（语言 → 主题色 → **外观风格** → 内存 → Java）
+
+* **档位就是五组开关本身**，不额外存一个「档位」键：简洁 = 全关；正常 =
+  页面切换 + 成就弹窗；复杂 = 五项全开；自定义 = 逐项勾选。再次打开教程时
+  按当前配置反推档位（`_derive_style_tier`），配置与 UI 不会各说各话。
+* **占用参考条**：内存 / 单核 CPU 两条 6px 细条 + 数值（`+21 MB` / `+4.5%`），
+  随档位与勾选实时变化。权重按各效果的绘制路径折算（流光独占 30fps 重绘表、
+  亚克力把模糊交给 DWM、毛玻璃/切换只在绘制期、成就弹窗平时闲置），
+  **界面明确标注「估算、非实测」**，避免把参考值当 benchmark。
+* **选择即安装模块**：选中档位会安装对应的内置特效包（`effect-frosted-glass`
+  等五个）并按档位写开关；「模块」页因此仍有真实的卸载开关。取消选择的模块
+  保留在本地（不替玩家删东西），只把开关与 `_effect_owners` 清掉，避免模块页
+  继续显示「已应用」而效果其实是关的。
+
+### B. 顺带修掉教程设置从不落盘（这条不修，上面的档位重启就没了）
+
+* 教程此前**从不调用 `save_config`**：语言 / 主题色 / 内存只在进程里生效；
+  而主窗口的 `closeEvent` 会用自己的**教程前**配置副本整个写盘 →
+  重启后教程里的选择全部丢失。
+* 现在完成教程时保存配置，并调用新增的
+  `MainWindow.apply_appearance_config(cfg)`：主窗口在教程弹出前就已构造，
+  不重新读取并应用的话，第一帧画面不会反映刚选的档位（毛玻璃/透底/流光/
+  页面动画都要重设 + `apply_qss`）。
+* `_prev()` 也补了 `_save_step()`：此前「上一步 → 下一步」会把单选悄悄
+  复位成 cfg 里的旧值。
+* `apply_effect_module(mod, reapply=False)`：教程一次可能装五个特效包，
+  逐个全窗口重应用会把 QSS 与首页重建跑五遍。
+
+### C. 验证
+
+* `compileall` 全量通过；`tests/smoke_all.py` 16/16、退出码 0。
+* 离屏断言：档位与读数（简洁 `+0 MB / +0.0%`、正常 `+4 MB / +0.3%`、
+  复杂 `+21 MB / +4.5%`）、自定义勾选联动、`_save_step` 写入开关。
+* 端到端（临时目录、真实拷包）：选「复杂」→ 五个特效包全部装好、
+  `_effect_owners` 五条齐全；再选「简洁」→ 开关全关、所有权清空、
+  已装模块不被删除。
+* i18n zh/en **1304 / 1304** 零单边；教程对话框按新步骤加高到 640×600。
+* 离屏几何检查：四张档位卡 126×64 等宽、两条进度条与三行复选框无重叠；
+  说明文字按三行预留高度（wordWrap 的 QLabel 只报一行 sizeHint，之前会被裁掉）。
+  离屏字体是方框，排版仍需真机目检。
+
+### D. 真机目检揪出的四处问题（都是既有代码，不是本轮新写出来的）
+
+* **教程正文从来没显示过**：`_show_step` 用 `for item in step_def[1:]`，而
+  `step_def` 是 `(key, [items])` —— 遍历到的是「包着列表的单元素元组」，
+  `key_type` 本身是个元组，永远匹配不到 `"body"`。所有步骤的说明文字都被静默
+  吞掉。改成遍历 `step_def[1]` 后正文恢复（欢迎/Java 步骤同样受益）。
+* **浅色主题下占用条不可见**：轨道用了 `bg_input`，而浅色主题 `bg_input` 与
+  `bg_panel` 同为 `#F8F9FA` —— 空条与卡片同色，只剩两串数字。轨道改用
+  `border` token。
+* **无实例时「版本全景」把主页染绿**：`wallpaper_mode="version"` 且没有实例时，
+  代码仍画程序化壁纸，`_theme_for_version(None)` 落 `overworld` → 绿色光晕；
+  叠加 `glow.setColorAt(0.55, QColor(theme.glow))` 用了**全不透明**中间色标，
+  整屏铺一层实色。现在：无实例（且无自定义图）直接不显示背板；无版本时回退
+  用品牌 accent；0.55 色标保持半透明。
+* **草方块图标顶面发灰**：原版 `grass_block_top.png` 是**灰度遮罩**，由生物群系
+  在运行时染色；直接贴图渲染出来像「带绿边的石方块」。新增按面染色表
+  （`_FACE_TINTS`，平原草色 `#91BD59`，Multiply），草方块恢复绿色顶面。
+
+### E. 清理
+
+真机验证期间生成的 `data/`、`launcher_config.json`、锁文件与 `_startup.log`
+已再次删除，保留「全清后首启」的干净状态。
+
+---
+
+## round-114（2026-10-23）— live view：给 Agent 的「实际体验」工具
+
+> 对标共享工具目录里的 liveview（Chromium CDP 版）。此前 AC 只有
+> `regress.py --shots` 的**一次性离屏截图**（每次重起进程），没有
+> 「看着画面 → 操作 → 再看」的闭环，也就无法「自己操作应用实验功能」。
+>
+> **正式启动完全不受影响** —— 只有 `AC_LIVE=1` 时才挂载。
+
+### A. `src/aclive.py`（新增）—— 帧流 + 控制口 + 输入注入
+
+* **帧**：QTimer 定时 `win.grab()` → JPEG → WebSocket 广播（二进制帧，非 base64）
+* **输入**：`QMouseEvent` / `QKeyEvent` / `QWheelEvent` 经 `QApplication.sendEvent`
+  注入 —— **不抢系统焦点**，离屏模式下照样能点
+* **控制口**：`POST /ctl`，命令集 `shot / nav / click / move / wheel / key / keys /
+  type / eval / exec / info / wait`
+* **eval 通道**：在应用进程里跑 Python（AC 是 Python，比 liveview 的 JS eval 更强），
+  预置 `win` / `app` / `Qt*` / `find(text=…, cls=…)` / `click_text(…)`
+* 所有碰 QWidget 的命令统一**回 Qt 主线程**执行（HTTP 线程入队 → 20ms 定时器
+  取件 → `Event` 回传结果）
+* 抓取目标按「弹出菜单 > 模态框 > 焦点顶层窗口 > 主窗口」取优先级——弹窗是独立
+  顶层窗口，`win.grab()` 抓不到
+
+### B. `tools/aclive/panel.html` + `tools/aclive/live.py`（新增）
+
+* 面板：canvas 画帧 + 假光标 + 鼠标/键盘/滚轮实时回传 + 页面下拉跳转
+* CLI：`start`（`--headful` / `--fps` / `--page`）、`stop`、`restart`、`ctl`、`shot`
+
+### C. `main.py`（三处钩子）
+
+* live 实例用**独立锁文件** `ac.live.lock` —— 用户正常启动器可照常开着，
+  且 live 模式跳过「提升已有窗口」（否则直接退出）
+* `AC_NO_SPLASH=1` 跳过启动动画，第一帧即主窗口
+* `_show_main()` 里 `if os.environ.get("AC_LIVE") == "1": attach_live(win)`
+
+### D. 验证
+
+`compileall` EXIT=0 · `regress.py` 通过 10/失败 1（PII 门禁，根因**本机未装 git**）·
+PII 手工核验 0 残留 · click 注入生效（主题 `浅色`→`深色`，截图同步变化）·
+WS 帧流 8.3fps、单帧 27KB JPEG · 真实浏览器打开面板 7fps、canvas 正常、控制台无报错 ·
+有头模式窗口 1375×900 截图正常。
+
+### E. 已知限制
+
+* 主线程被业务代码占死时，`/ctl` 全部返回 `main-thread timeout`（10s），
+  帧流与截图同时停 —— 这与真实用户看到的「界面卡死」是同一件事，liveview 如实反映。
+* 离屏模式下导航栏分组小字（游戏/资源/联机/系统）渲染发糊，是离屏字体 artifact，
+  **有头模式正常**，勿当 UI bug 修。
+
+## round-113（2026-10-22）— 官方源提速 + 镜像路径修正 + loader maven 补全
+
+> 前一轮只做了实测没动代码（见 `2026-10-22_AC启动器_官方源加速实测.md`），
+> 本轮把实测结论落进代码。样本为 MC 1.21.11 的真实资源对象，均在本机实测。
+
+### A. 默认下载源 `bmclapi` → `official`（实测结论翻转）
+
+同口径 80 个真实资源对象（41.9MB）：**官方 8.35MB/s vs BMCLAPI 0.84MB/s**，
+官方快约 10 倍。round-110 时期「BMCL 更快」的结论已不成立——官方 CDN 响应带
+`X-Cache: TCP_HIT` 无 302 抖动，BMCLAPI 单连接速度在 0.02~1.35MB/s 之间乱跳。
+
+* `settings_dialog.py` 的 `DEFAULTS` 改默认值，**10 处散落的兜底默认值同步对齐**
+  （老配置缺字段会回落旧默认）
+* `pages_instances.py` 的整合包导入原本**硬编码** BMCLAPI，改为跟随用户设置
+
+### B. mll 库/资源并发 16 → 48（新增 `_patch_install_concurrency()`）
+
+mll 的 `install_libraries` / `install_assets` 支持 `max_workers`，但
+`do_version_install` **不传** → 落到 `ThreadPoolExecutor` 默认 `min(32, cpu+4)` = 16。
+
+* 二者在 mll 内部是**模块级全局查找**，替换模块属性即生效
+* `_forge.py` 用 `from ..install import install_libraries` **直接引用**，替换模块属性无效，
+  需单独替换 `_forge.install_libraries`
+* 包装器保留调用方显式传入的 `max_workers`，并打标记保证**幂等**
+
+### C. HTTP 连接池 10 → 64
+
+`requests` 默认 `pool_maxsize=10`，并发 48 时其余 38 条每次重新握手。
+同 32 workers 下 pool=10 比 pool=32 慢 16%。在 `MirrorSession` 挂自建 `HTTPAdapter`。
+
+### D. 镜像重写表改为**路径感知**（12 条规则 / 12 主机）
+
+* **补 `piston-meta.mojang.com`** —— 之前漏了，导致镜像模式下版本 json 与 assetIndex
+  一直直连官方。真实路径是 `/v1/packages/<sha1>/<id>.json`
+* **`libraries.minecraft.net` 路径修正为 `/maven`**（原 `/libraries`，与 PCL2 一致）
+* **补全 loader maven**：Fabric / Quilt / Forge / NeoForge 的 meta 与 maven 端点
+* NeoForge 上游 `maven.neoforged.net` 在本机 ConnectTimeout，**走镜像才装得上**
+* 前缀匹配加**路径边界保护**，不再误伤 `libraries.minecraft.net.evil.com`
+
+### E. 大文件分片：`chunk_mb` 4 → 2 + 显式 `threads=16`
+
+客户端 jar（40.1MB）：单连接 0.39MB/s、4 路 1.62MB/s、8 路 1.39MB/s（反而慢）、
+**16 路 3.19MB/s（最优）**。关键陷阱：`parallel_download_file` 的 `cap = threads or min(ncpu, 8)`，
+不显式传 `threads` 就永远只有 8 路。
+
+### F. 验证
+
+`compileall` EXIT=0；`tests/test_round113.py`（44 断言）ALL PASS；
+`tests/test_round113_live.py` 真机 **MirrorSession/48 比基线快 2.06×**；
+`regress.py` 通过 10 / 失败 1（唯一失败是 PII 门禁，根因**本机未装 git**，
+与改动无关，已手工核验 0 条 PII 残留）；i18n parity 1287=1287 差异=0。
+
 ## round-112（2026-10-19）— 回归套件入库 + 质量开放项清单（返工循环）
 
 > WorkBuddy 侧收尾批次。动机：此前「哪些地方没做好」只存在于聊天上下文，

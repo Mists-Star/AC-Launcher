@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QListWidget, QListWidgetItem, QStackedWidget,
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QProgressBar, QGridLayout, QMenu, QComboBox, QScrollArea, QSizePolicy,
+    QLineEdit,
 )
 from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject, QPropertyAnimation, QEasingCurve, QRectF, QByteArray
 from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QColor, QPixmap, QLinearGradient, QCursor
@@ -23,7 +24,7 @@ from .theme import (COLORS, RoundedCard, set_theme_mode, get_theme_mode,
 from .effects import (
     LightTrailCard, set_effects_enabled, set_window_opacity, fade_page_transition,
 )
-from .icons import icon
+from .icons import icon, on_accent
 from .i18n import t
 from src.instances import manager, Instance
 from src.pages_instances import InstancesPage, ModsPage
@@ -129,32 +130,58 @@ PCL2_SIDEBAR = {
 # Fallback account used when the user hasn't logged in (offline single-player).
 OFFLINE_ACCOUNT = {"username": "Player", "uuid": "", "token": ""}
 
+# Minimum free space (MB) required on the game disk before launching.
+# Covers world saves, logs, region files and mod caches. Deliberately a fixed
+# constant: the old formula (RAM + 2 GB) had no causal relation to disk need.
+MIN_FREE_DISK_MB = 3072
 
-def _available_memory_mb() -> int | None:
-    """当前可用物理内存（MB）。Windows 用 GlobalMemoryStatusEx 的 AvailPhys；
-    其他平台/失败返回 None（调用方跳过警告——宁可漏报不误报）。"""
+
+def _commit_headroom_mb() -> int | None:
+    """可提交内存余量（MB）= CommitLimit - CommitTotal。
+
+    判断「能不能给 JVM 分配 N MB 堆」的正确指标。JVM 堆是*虚拟预留 + 按需提交*，
+    别的进程占着物理内存并不代表提交不了新内存；反过来，提交额度用尽时哪怕物理
+    内存还空着，分配也会立刻失败。Windows 用 psapi.GetPerformanceInfo 读提交
+    计数器（CommitLimit = 物理内存 + 页面文件），其他平台/失败返回 None（调用方
+    跳过警告——宁可漏报不误报）。
+
+    历史教训：曾用 GlobalMemoryStatusEx.ullAvailPhys（当前可用物理内存）去比
+    -Xmx 堆上限，在 16GB 机器上被别的程序吃掉 13GB 时误报「内存不足」。
+
+    注意结构体布局：x64 内核的计数器是 64 位（sizeof = 104），MSDN 上那份
+    全 DWORD 的 56 字节布局只在 x86 成立——用错布局 GetPerformanceInfo 直接
+    返回 FALSE。这里用 c_size_t（x64=8 / x86=4）自适应，指针宽度与内核一致。
+    """
     try:
         if os.name == "nt":
             import ctypes
             from ctypes import wintypes
 
-            class _MEMORYSTATUSEX(ctypes.Structure):
+            class _PERFORMANCE_INFORMATION(ctypes.Structure):
                 _fields_ = [
-                    ("dwLength", wintypes.DWORD),
-                    ("dwMemoryLoad", wintypes.DWORD),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                    ("cb", wintypes.DWORD),
+                    ("CommitTotal", ctypes.c_size_t),
+                    ("CommitLimit", ctypes.c_size_t),
+                    ("CommitPeak", ctypes.c_size_t),
+                    ("PhysicalTotal", ctypes.c_size_t),
+                    ("PhysicalAvailable", ctypes.c_size_t),
+                    ("SystemCache", ctypes.c_size_t),
+                    ("KernelTotal", ctypes.c_size_t),
+                    ("KernelPaged", ctypes.c_size_t),
+                    ("KernelNonpaged", ctypes.c_size_t),
+                    ("PageSize", ctypes.c_size_t),
+                    ("HandleCount", wintypes.DWORD),
+                    ("ProcessCount", wintypes.DWORD),
+                    ("ThreadCount", wintypes.DWORD),
                 ]
 
-            m = _MEMORYSTATUSEX()
-            m.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
-                return int(m.ullAvailPhys // (1024 * 1024))
+            pi = _PERFORMANCE_INFORMATION()
+            pi.cb = ctypes.sizeof(_PERFORMANCE_INFORMATION)
+            ok = ctypes.windll.psapi.GetPerformanceInfo(ctypes.byref(pi), pi.cb)
+            if ok and pi.PageSize:
+                # CommitTotal / CommitLimit 单位是「页」，要乘 PageSize 才是字节
+                headroom = (int(pi.CommitLimit) - int(pi.CommitTotal)) * int(pi.PageSize)
+                return max(0, headroom // (1024 * 1024))
         return None
     except Exception:  # noqa: BLE001 - 取不到就跳过警告
         return None
@@ -241,7 +268,7 @@ class _InstanceCard(LightTrailCard):
         last_lbl.setProperty("cls", "sub")
         bot.addWidget(last_lbl, stretch=1)
         play_btn = QPushButton()
-        play_btn.setIcon(icon("play"))
+        play_btn.setIcon(on_accent("play"))
         play_btn.setIconSize(QSize(20, 20))
         play_btn.setProperty("cls", "accent")
         play_btn.setCursor(Qt.PointingHandCursor)
@@ -296,6 +323,17 @@ class HomePage(QWidget):
         self.backdrop = WallpaperWidget(self)
         _boot_trace("6.51 wallpaper ok")
         self.backdrop.setGeometry(self.rect())
+        # 全景图是异步加载的，到货后要把落在壁纸上的文字重新配色。
+        self.backdrop.panorama_ready.connect(self._refresh_overlay_style)
+        # 主题切换后壁纸上的文字颜色要跟着变（内联颜色不随 QSS 走）。
+        try:
+            from .theme import on_theme_change
+            on_theme_change(self._refresh_overlay_style)
+        except Exception:  # noqa: BLE001
+            pass
+        # 退出时若全景加载线程还在跑，销毁运行中的 QThread 会直接 abort——
+        # 退出前等它结束。挂在 main.py 的 aboutToQuit 上（统一收口），这里
+        # 只负责把首页这块壁纸接好。
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -391,6 +429,8 @@ class HomePage(QWidget):
         self._build_ac_default(lay)
         _boot_trace("7.5 build done")
         lay.addStretch(1)
+        # 控件是重建出来的，落到壁纸上的文字样式要再套一次。
+        self._refresh_overlay_style()
 
     def _replace_content(self):
         """Swap ``self.content`` out for a fresh QWidget, deleting the old one
@@ -452,6 +492,9 @@ class HomePage(QWidget):
         row.addWidget(sub, alignment=Qt.AlignBottom)
         row.addStretch(1)
         lay.addLayout(row)
+        # 品牌副语直接落在壁纸上（不在卡片里）——全景背景时需提亮，
+        # 由 _refresh_overlay_style() 统一处理。
+        self.brand_sub = sub
 
     def _on_inst_changed(self, index: int):
         if index < 0:
@@ -477,7 +520,7 @@ class HomePage(QWidget):
         b.setMinimumWidth(160)
         b.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
         b.setCursor(Qt.PointingHandCursor)
-        b.setIcon(icon("play"))
+        b.setIcon(on_accent("play"))
         b.setIconSize(QSize(24, 24))
         b.clicked.connect(self._on_play)
         return b
@@ -671,10 +714,18 @@ class HomePage(QWidget):
                 self.src_badge.setText(launcher_label(src, show_original=True))
                 self.src_badge.setVisible(True)
         if hasattr(self, "detail_lbl") and self._alive(self.detail_lbl):
-            self.detail_lbl.setText(
-                f"{t('home.version')} {inst.game_version}  ·  "
-                f"{t('home.loader')} {inst.loader}"
-            )
+            # round-116：版本号不再无条件出现在 detail 行。实例名通常已经
+            # 就是版本号（AC 自建实例名 = 版本号），此时标题 + 下拉当前项
+            # 已经各出现一次，detail 再写一遍会让同一屏出现三次同一个版本号，
+            # 稀释 hero 的视觉重心。只有实例名里不含版本号时才补上，
+            # 保证「版本信息至少可见一次」。
+            ver = str(inst.game_version or "")
+            iname = str(inst.name or "")
+            parts = []
+            if ver and ver not in iname:
+                parts.append(f"{t('home.version')} {ver}")
+            parts.append(f"{t('home.loader')} {inst.loader}")
+            self.detail_lbl.setText("  ·  ".join(parts))
 
     # ── 实例卡片网格 ──
     def _make_instance_card(self, inst, is_current):
@@ -861,17 +912,64 @@ class HomePage(QWidget):
         inst = self.get_current_instance()
         return getattr(inst, "version_id", None) if inst is not None else None
 
+    def _panorama_source(self) -> tuple[str, str, str]:
+        """Where the panorama of the current instance lives.
+
+        Returns ``(mc_dir, game_dir, version)``.  The version is the folder
+        name inside ``versions/`` -- for AC-created instances ``version_id`` is
+        empty and ``game_version`` *is* that folder, so both are consulted.
+        """
+        inst = self.get_current_instance()
+        if inst is None:
+            return "", "", ""
+        try:
+            mc_dir = inst.mc_dir or ""
+            game_dir = inst.game_dir or mc_dir
+        except Exception:  # noqa: BLE001 - a broken instance must not kill the page
+            return "", "", ""
+        version = (getattr(inst, "version_id", "") or
+                   getattr(inst, "game_version", "")) or ""
+        return mc_dir, game_dir, version
+
     def _apply_wallpaper(self, cfg: dict | None = None, version_id: str | None = None):
         """Re-apply the backdrop (solid / image / animated GIF / video / version theme)."""
         if cfg is not None:
             self.cfg = cfg
         try:
             # 毛玻璃已删除（round-32）——壁纸层始终正常绘制
-            self.backdrop.apply(self.cfg, version_id)
+            self.backdrop.apply(self.cfg, version_id, *self._panorama_source())
             self.backdrop.setGeometry(self.rect())
             self.backdrop.lower()
+            self._refresh_overlay_style()
         except Exception:  # noqa: BLE001 - a bad wallpaper must not kill the page
             pass
+
+    def _refresh_overlay_style(self) -> None:
+        """Keep the labels that sit *directly* on the wallpaper readable.
+
+        The brand line and the repair-log line are drawn on the backdrop, not
+        on a card.  With the real Minecraft panorama behind them the soft
+        secondary grey loses contrast, so they fall back to the theme's
+        strongest text colour while a media backdrop is on screen.
+        """
+        media = bool(getattr(self, "backdrop", None) and
+                     self.backdrop.panorama_active)
+        try:
+            from .theme import COLORS
+            color = COLORS.get("text_main", "#1A1A2E")
+        except Exception:  # noqa: BLE001
+            color = "#1A1A2E"
+        targets = (
+            (getattr(self, "brand_sub", None), "font-size: 12px;"),
+            (getattr(self, "log_stream", None), ""),
+        )
+        for lbl, base in targets:
+            if lbl is None or not self._alive(lbl):
+                continue
+            if media:
+                lbl.setStyleSheet(f"{base} color: {color};".strip())
+            else:
+                lbl.setStyleSheet(base)
 
 
 class _TitleBarDragFilter(QObject):
@@ -1253,6 +1351,45 @@ class MainWindow(QMainWindow):
             self._preheat_worker = w               # 防 GC（退出时 drain_workers 兜底）
             w.start()
         except Exception:
+            pass
+
+    def apply_appearance_config(self, cfg: dict) -> None:
+        """Adopt appearance values written after this window was constructed.
+
+        The main window is built while the splash plays, i.e. *before* the
+        onboarding wizard edits the config. Without re-reading and re-applying
+        here, the first visible frame would ignore the appearance profile the
+        player just picked (and the window's exit-time save would overwrite the
+        wizard's values with its pre-wizard copy).
+        """
+        try:
+            self.cfg.update(cfg or {})
+        except Exception:  # noqa: BLE001 - a bad cfg dict must not break startup
+            return
+        try:
+            from .theme import (apply_qss, set_accent_color,
+                                set_app_background_translucent, set_font_family,
+                                set_frosted)
+            set_theme_mode(self.cfg.get("theme_mode", "light"))
+            set_accent_color(self.cfg.get("accent_color", "#7C3AED"))
+            set_font_family(self.cfg.get("font_family", ""))
+            set_frosted(self.cfg.get("frosted_theme", False))
+            set_app_background_translucent(
+                self.cfg.get("transparent_window", False))
+            set_effects_enabled(self.cfg.get("effect_light_trail", False))
+            set_window_opacity(self, self.cfg.get("window_opacity", 1.0))
+            apply_qss()
+            # RoundedCard snapshots its fill colour at construction, so cards
+            # built before the wizard ran keep the un-frosted palette until
+            # they are rebuilt. Home is the first visible page — rebuild it now.
+            try:
+                home = getattr(self, "home", None)
+                if home is not None and hasattr(home, "rebuild"):
+                    home.rebuild()
+            except Exception:  # noqa: BLE001 - rebuild must not block the rest
+                pass
+            self._apply_transparent_window()
+        except Exception:  # noqa: BLE001 - appearance is never fatal
             pass
 
     def _apply_transparent_window(self) -> None:
@@ -1665,7 +1802,7 @@ class MainWindow(QMainWindow):
             install_instance, inst,
             java_auto=settings.get("java_auto", True),
             java_path=(getattr(inst, "java_path", "") or settings.get("java_path", "")),
-            mirror=settings.get("download_mirror", "bmclapi"),
+            mirror=settings.get("download_mirror", "official"),
             proxy=settings.get("download_proxy", ""),
         )
         w.status.connect(self.statusBar().showMessage)
@@ -2508,6 +2645,7 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(40, 32, 40, 32)
         ll.addStretch(1)
         _card = RoundedCard(radius=16)
+        _card.setMinimumWidth(460)
         _card.setMaximumWidth(560)
         _cl = QVBoxLayout(_card)
         _cl.setContentsMargins(36, 30, 36, 30)
@@ -2518,20 +2656,32 @@ class MainWindow(QMainWindow):
         self._lobby_title = QLabel(t("lobby.title"))
         self._lobby_title.setProperty("cls", "title")
         _cl.addWidget(self._lobby_title)
-        self._lobby_join_help = QLabel(t("lobby.join_help"))
+        self._lobby_join_help = QLabel(t("lobby.join_help_page"))
         self._lobby_join_help.setProperty("cls", "sub")
         self._lobby_join_help.setWordWrap(True)
         _cl.addWidget(self._lobby_join_help)
-        btn_row = QHBoxLayout()
+        # round-117：帮助文案承诺「在下方输入大厅编号」，所以编号输入框必须
+        # 就在这一页上——原先只有按钮，编号输入藏在后面对话框里，文案是骗人的。
+        code_row = QHBoxLayout()
+        code_row.setSpacing(8)
+        self._lobby_code_input = QLineEdit()
+        self._lobby_code_input.setPlaceholderText(t("lobby.join_code_ph"))
+        self._lobby_code_input.setMinimumHeight(40)
+        self._lobby_code_input.returnPressed.connect(self._join_lobby_code)
+        code_row.addWidget(self._lobby_code_input, stretch=1)
         self._lobby_join = QPushButton(icon("login"), t("lobby.join"))
         self._lobby_join.setMinimumHeight(40)
-        self._lobby_join.clicked.connect(self._open_lobby)
-        btn_row.addWidget(self._lobby_join)
-        self._lobby_create = QPushButton(icon("add"), t("lobby.create"))
+        self._lobby_join.setMinimumWidth(116)
+        self._lobby_join.clicked.connect(self._join_lobby_code)
+        code_row.addWidget(self._lobby_join)
+        _cl.addLayout(code_row)
+        btn_row = QHBoxLayout()
+        self._lobby_create = QPushButton(on_accent("add"), t("lobby.create"))
         self._lobby_create.setProperty("cls", "accent")
         self._lobby_create.setMinimumHeight(40)
         self._lobby_create.clicked.connect(self._open_lobby)
         btn_row.addWidget(self._lobby_create)
+        btn_row.addStretch(1)
         _cl.addLayout(btn_row)
         self._lobby_create_help = QLabel(t("lobby.create_help"))
         self._lobby_create_help.setProperty("cls", "sub")
@@ -2695,6 +2845,22 @@ class MainWindow(QMainWindow):
         idx = STACK_INDEX.get(key)
         if idx is not None:
             self._switch_stack(idx)
+
+    def show_page(self, key: str) -> bool:
+        """Public page switch (nav key → page).
+
+        Used by the live-view control port so the tool never has to reach
+        into private internals (``_switch_stack`` / ``_show_page``), which
+        break the moment the window is refactored.  Returns False when the
+        key names no page.
+        """
+        key = (key or "").strip()
+        if not key:
+            return False
+        if key not in STACK_INDEX and key not in getattr(self, "_nav_row_map", {}):
+            return False
+        self._show_page(key)
+        return True
 
     def _on_account_btn_clicked(self):
         """Top-bar account button: no account → straight to login; has account
@@ -2863,7 +3029,8 @@ class MainWindow(QMainWindow):
         # 6. Lobby page (embedded, also needs refresh)
         if hasattr(self, '_lobby_title'):
             self._lobby_title.setText(t("lobby.title"))
-            self._lobby_join_help.setText(t("lobby.join_help"))
+            self._lobby_join_help.setText(t("lobby.join_help_page"))
+            self._lobby_code_input.setPlaceholderText(t("lobby.join_code_ph"))
             self._lobby_join.setText(t("lobby.join"))
             self._lobby_create.setText(t("lobby.create"))
             self._lobby_create_help.setText(t("lobby.create_help"))
@@ -2916,10 +3083,23 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - 直连失败不能崩启动器
             pass
 
-    def _open_lobby(self):
+    def _join_lobby_code(self):
+        """大厅页输入编号 → 打开大厅窗口并自动加入。
+
+        编号从页面带进对话框，省掉「再点一次加入按钮」这一步；加入成功后
+        对话框里能看到成员、编号与虚拟局域网状态。
+        """
+        code = ""
+        try:
+            code = self._lobby_code_input.text().strip()
+        except Exception:  # noqa: BLE001 - 控件可能已被重建
+            pass
+        self._open_lobby(code=code)
+
+    def _open_lobby(self, code: str = ""):
         from .lobby_dialog import LobbyDialog
 
-        LobbyDialog(self).exec()
+        LobbyDialog(self, code=code).exec()
 
     def _open_diagnostics(self):
         from .diagnostics_dialog import DiagnosticsDialog
@@ -2945,46 +3125,57 @@ class MainWindow(QMainWindow):
                 return
         account = self.current_account or OFFLINE_ACCOUNT
         settings = load_config()
-        # round-79e 低内存警告：实例覆盖内存优先，超可用物理内存时警告
+        # round-116 P0-1 低内存警告：实例覆盖内存优先，超「可提交内存余量」时警告。
+        # 判据用 commit headroom（CommitLimit - CommitTotal），不用「当前可用物理
+        # 内存」——堆是虚拟预留+按需提交，别的程序占着物理内存不代表提交不了。
         ram = int(getattr(inst, "ram_mb", 0) or 0) or int(settings.get("ram_mb", 4096) or 0)
-        avail = _available_memory_mb()
-        if ram > 0 and avail is not None and ram > avail * 1.05:
+        headroom = _commit_headroom_mb()
+        if ram > 0 and headroom is not None and ram > headroom:
             from PySide6.QtWidgets import QMessageBox
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Icon.Warning)
             box.setWindowTitle(t("launch.low_mem_title"))
-            box.setText(t("launch.low_mem_msg", ram=ram, avail=avail))
+            box.setText(t("launch.low_mem_msg", ram=ram, avail=headroom))
             dont = box.addButton(t("launch.low_mem_continue"), QMessageBox.ButtonRole.AcceptRole)
             box.addButton(t("common.cancel"), QMessageBox.ButtonRole.RejectRole)
-            box.setDefaultButton(box.buttons()[-1])
+            # 默认按钮必须落在「仍然启动」：误报时用户按回车 = 直接启动。
+            # （buttons() 顺序为插入序，[−1] 是「取消」——旧代码在这里取反了。）
+            box.setDefaultButton(dont)
             box.exec()
             if box.clickedButton() is not dont:
                 return
-        # round-80 磁盘空间预检：游戏盘剩余空间 < (堆内存 + 2GB 余量) 时弹警告。
-        # 世界存档/日志/Mod 缓存都要写盘，空间不足会让游戏静默损坏存档。
+        # round-116 P0-2 磁盘空间预检：剩余空间不足时弹警告。
+        # 判据是固定的最小可用空间常量，不再由内存大小推导（内存与磁盘需求
+        # 没有因果关系）。世界存档/日志/Mod 缓存都要写盘，空间不足会让游戏
+        # 静默损坏存档。
+        _free_mb = None
+        _gdir = ""
         try:
-            import shutil
             from .launch import resolve_game_dir
             _gdir = resolve_game_dir(inst, settings)
-            _du = shutil.disk_usage(_gdir)
-            _free_mb = _du.free // (1024 * 1024)
-            _need_mb = ram + 2048
-            if _free_mb < _need_mb:
-                from PySide6.QtWidgets import QMessageBox
-                _box = QMessageBox(self)
-                _box.setIcon(QMessageBox.Icon.Warning)
-                _box.setWindowTitle(t("launch.low_disk_title"))
-                _box.setText(t("launch.low_disk_msg",
-                                need=_need_mb, ram=ram, path=_gdir, free=_free_mb))
-                _continue = _box.addButton(
-                    t("launch.low_disk_continue"), QMessageBox.ButtonRole.AcceptRole)
-                _box.addButton(t("common.cancel"), QMessageBox.ButtonRole.RejectRole)
-                _box.setDefaultButton(_box.buttons()[-1])
-                _box.exec()
-                if _box.clickedButton() is not _continue:
-                    return
-        except Exception:  # noqa: BLE001 - 取不到盘符/空间就跳过（宁可漏报不误报）
-            pass
+        except Exception:  # noqa: BLE001 - 路径解析失败就跳过磁盘检查
+            _gdir = ""
+        if _gdir:
+            try:
+                import shutil
+                _du = shutil.disk_usage(_gdir)
+                _free_mb = _du.free // (1024 * 1024)
+            except Exception:  # noqa: BLE001 - 取不到空间就跳过（宁可漏报不误报）
+                _free_mb = None
+        if _free_mb is not None and _free_mb < MIN_FREE_DISK_MB:
+            from PySide6.QtWidgets import QMessageBox
+            _box = QMessageBox(self)
+            _box.setIcon(QMessageBox.Icon.Warning)
+            _box.setWindowTitle(t("launch.low_disk_title"))
+            _box.setText(t("launch.low_disk_msg",
+                            need=MIN_FREE_DISK_MB, path=_gdir, free=_free_mb))
+            _continue = _box.addButton(
+                t("launch.low_disk_continue"), QMessageBox.ButtonRole.AcceptRole)
+            _box.addButton(t("common.cancel"), QMessageBox.ButtonRole.RejectRole)
+            _box.setDefaultButton(_continue)
+            _box.exec()
+            if _box.clickedButton() is not _continue:
+                return
         log_dir = get_data_dir()
         # round-71 借鉴主流实现：保存本次登录 token，console 展示打码用
         self._game_token = account.get("token", "")

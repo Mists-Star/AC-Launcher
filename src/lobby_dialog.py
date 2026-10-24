@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QComboBox, QGroupBox, QListWidget, QListWidgetItem,
     QWidget, QProgressBar, QPushButton, QCheckBox,
 )
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices
 from .theme import COLORS
 from .i18n import t
@@ -126,7 +126,11 @@ class _ToolPicker(QDialog):
 
 
 class LobbyDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, code: str = ""):
+        """``code`` 非空时自动带编号并在显示后立即加入。
+
+        大厅页把用户输入的编号传进来，省掉「在对话框里再输一遍」。
+        """
         super().__init__(parent)
         self.setWindowTitle(t("lobby.title"))
         self.resize(620, 560)
@@ -164,6 +168,7 @@ class LobbyDialog(QDialog):
         self.code_input = QLineEdit()
         self.code_input.setPlaceholderText(t("lobby.join_code_ph"))
         self.code_input.setMinimumHeight(36)
+        self.code_input.setText((code or "").strip())
         code_row.addWidget(self.code_input, stretch=1)
         for txt, slot in [
             (t("lobby.clear"), lambda: self.code_input.clear()),
@@ -258,6 +263,11 @@ class LobbyDialog(QDialog):
         self._frameless.set_titlebar(self.titlebar)
         from .win_rounded import enable_win11_round_corners
         enable_win11_round_corners(self)
+
+        # 带了编号进来 → 窗口显示后立即加入（等 exec() 起来再跑，
+        # 否则弹窗还没显示就弹「未找到该编号」的警告）。
+        if self.code_input.text().strip():
+            QTimer.singleShot(0, self._do_join)
 
     def _paste_code(self):
         from PySide6.QtWidgets import QApplication

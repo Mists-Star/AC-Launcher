@@ -123,8 +123,11 @@ _DEFAULTS = {
     # round-92 默认改「关闭即退出」：玩家点 X 即退出是主流直觉；想藏托盘可勾选。
     "tray_minimize": False,
     # ---- download mirror ----
-    # round-46 用户要求"全部优先镜像/速度优先"——默认 BMCLAPI（国内镜像速度快）
-    "download_mirror": "bmclapi",   # official (官方 Mojang) / bmclapi (国内镜像，速度优先)
+    # round-113 实测改默认：官方源 8.35MB/s vs BMCLAPI 0.84MB/s（同口径
+    # 80 个资源对象），官方 CDN 是 TCP_HIT 无 302 抖动，BMCLAPI 单连接只有
+    # 0.02~1.35MB/s 剧烈波动（旧结论基于跨境链路，本机实测已反转）。
+    # BMCLAPI 仍可在设置里手动选。
+    "download_mirror": "official",  # official (官方 Mojang) / bmclapi (国内镜像) / auto (测速选优)
     # ---- network proxy for downloads ----
     "download_proxy": "",            # ""=system proxy, "none"=direct, or "http://host:port"
     # round-110 C 下载诊断日志：每请求的 status/耗时/声明字节/是否走镜像写入
@@ -906,7 +909,7 @@ class SettingsPage(QWidget):
             ("bmclapi", t("settings.mirror_bmclapi")),
         ]:
             rb = QRadioButton(label)
-            rb.setChecked(self.cfg.get("download_mirror", "bmclapi") == key)
+            rb.setChecked(self.cfg.get("download_mirror", "official") == key)
             rb.mirror_key = key
             self.mirror_btns.addButton(rb)
             mrow.addWidget(rb)

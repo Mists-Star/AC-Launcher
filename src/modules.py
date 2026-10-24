@@ -486,11 +486,14 @@ def active_crash_policy() -> Optional[dict]:
     return _cfg().get("crash_policy")
 
 
-def apply_effect_module(mod: ModuleInfo) -> bool:
+def apply_effect_module(mod: ModuleInfo, reapply: bool = True) -> bool:
     """应用「视觉特效」模块：把 effect.json 的 settings 写进 config 并立即重应用。
 
     载荷：``{"settings": {"frosted_theme": true, "transparent_window": true}}``；
     键必须在 :data:`EFFECT_CONFIG_KEYS` 白名单内。默认不装 → 特效默认关闭。
+
+    ``reapply=False``：只写配置与所有权，不触发全窗口重应用——新手教程一次
+    可能要装多个特效包，逐个重应用会把 QSS 与首页重建跑五六遍。
     """
     payload = module_payload(mod)
     if not payload:
@@ -508,7 +511,8 @@ def apply_effect_module(mod: ModuleInfo) -> bool:
         owners[key] = mod.id
     c["_effect_owners"] = owners
     _save(c)
-    _reapply_appearance()
+    if reapply:
+        _reapply_appearance()
     return True
 
 

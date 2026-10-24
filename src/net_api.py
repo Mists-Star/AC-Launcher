@@ -570,7 +570,7 @@ def _manifest_url() -> str:
     """Pick the version-manifest endpoint per the download_mirror setting."""
     try:
         from .settings_dialog import load_config
-        mode = load_config().get("download_mirror", "bmclapi")
+        mode = load_config().get("download_mirror", "official")
         if mode == "auto":
             return _pick_auto_mirror()
         if mode == "bmclapi":

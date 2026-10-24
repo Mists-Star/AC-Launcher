@@ -384,6 +384,35 @@ def _load_block_tex(name: str) -> "QPixmap | None":
     return pm
 
 
+# Some vanilla textures are grayscale masks that Minecraft tints at runtime.
+# Drawing them raw makes the grass block read as a stone block with a green
+# stripe, so tint the top face with the plains grass colour before mapping it.
+_FACE_TINTS = {
+    "grass_block_top": "#91BD59",
+}
+_tint_cache: dict[tuple[str, str], "QPixmap"] = {}
+
+
+def _tinted_block_tex(name: str, tint: str) -> "QPixmap | None":
+    pm = _load_block_tex(name)
+    if pm is None or not tint:
+        return pm
+    key = (name, tint)
+    if key in _tint_cache:
+        return _tint_cache[key]
+    out = QPixmap(pm.size())
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    try:
+        p.drawPixmap(0, 0, pm)
+        p.setCompositionMode(QPainter.CompositionMode_Multiply)
+        p.fillRect(out.rect(), QColor(tint))
+    finally:
+        p.end()
+    _tint_cache[key] = out
+    return out
+
+
 def _paint_face(p: QPainter, quad: list, tf: QTransform,
                 pm: "QPixmap | None", col: QColor, shade: int) -> None:
     """Paint one isometric face: textured (mapped via ``tf``) or flat fill,
@@ -436,7 +465,7 @@ def make_version_pixmap(version_id: str, vtype: str, size: int = 56) -> QPixmap:
     ``version_id`` 保留在签名里以兼容旧调用点（图标由 ``vtype`` 决定）。
     """
     names = _BLOCK_FACES.get(vtype) or _BLOCK_FALLBACK
-    top_pm = _load_block_tex(names[0])
+    top_pm = _tinted_block_tex(names[0], _FACE_TINTS.get(names[0], ""))
     side_pm = _load_block_tex(names[1])
     right_pm = _load_block_tex(names[2]) if names[2] else None
     cols = _ISO_BLOCK.get(vtype) or _ISO_BLOCK["old_alpha"]

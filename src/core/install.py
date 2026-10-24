@@ -156,7 +156,7 @@ def repair_minecraft_dir(mc_dir: str, callback=None) -> list[str]:
         cfg = load_config()
     except Exception:  # noqa: BLE001 - config may be unavailable in some contexts
         cfg = {}
-    mirror = cfg.get("download_mirror", "bmclapi")
+    mirror = cfg.get("download_mirror", "official")
     if mirror == "auto":
         try:
             from ..net_api import _pick_auto_mirror

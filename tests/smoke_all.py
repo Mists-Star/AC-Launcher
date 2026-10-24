@@ -113,6 +113,13 @@ def main():
     for label, _, err in bad:
         print("  FAIL %-28s %s" % (label, err[:170]))
     print()
+    # 退出前收掉后台线程（真机由 main.py 的 aboutToQuit 负责）：
+    # 否则解释器析构仍在运行的 QThread → 0xC0000409。
+    try:
+        from src.worker import drain_workers
+        drain_workers(4000)
+    except Exception:
+        pass
     print("SMOKE OK" if not bad else "SMOKE FAILED (%d)" % len(bad))
     return 1 if bad else 0
 

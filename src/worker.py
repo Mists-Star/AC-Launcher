@@ -15,6 +15,7 @@ round-109：mll 的裸状态串（``"Download 4ab9e7d1…"``，对资源文件�
 """
 from __future__ import annotations
 
+import atexit
 import re
 import threading
 
@@ -23,11 +24,11 @@ from PySide6.QtCore import QThread, Signal
 from .i18n import t
 
 # ── live worker registry ─────────────────────────────────────────────────────
-# Every started Worker/ProgressWorker registers here and unregisters when its
-# run() finishes. main.py calls drain_workers() on aboutToQuit so no QThread is
-# ever destroyed while still running at interpreter shutdown — that used to
-# raise "QThread destroyed while still running" → heap corruption (0xc0000374)
-# when the user closed the launcher with a fetch in flight.
+# Every started Worker/ProgressWorker registers here and leaves it again once
+# the thread has *stopped*. main.py calls drain_workers() on aboutToQuit so no
+# QThread is ever destroyed while still running at interpreter shutdown — that
+# used to raise "QThread destroyed while still running" → heap corruption
+# (0xc0000374) when the user closed the launcher with a fetch in flight.
 _LIVE: set[QThread] = set()
 _LOCK = threading.Lock()
 
@@ -39,14 +40,20 @@ def drain_workers(timeout_ms: int = 4000) -> None:
     with _LOCK:
         items = list(_LIVE)
     for w in items:
-        w.requestInterruption()
+        try:
+            w.requestInterruption()
+        except Exception:  # noqa: BLE001 - already deleted C++ object
+            pass
     deadline = time.time() + timeout_ms / 1000.0
     for w in items:
-        remaining = max(0.0, deadline - time.time())
-        if remaining > 0:
-            w.wait(int(remaining * 1000))
-        if w.isRunning():
-            w.wait(500)  # final short grace before the interpreter tears down
+        try:
+            remaining = max(0.0, deadline - time.time())
+            if remaining > 0:
+                w.wait(int(remaining * 1000))
+            if w.isRunning():
+                w.wait(500)  # final short grace before the interpreter tears down
+        except Exception:  # noqa: BLE001 - already deleted C++ object
+            pass
 
 
 def _register(w: QThread) -> None:
@@ -59,7 +66,46 @@ def _unregister(w: QThread) -> None:
         _LIVE.discard(w)
 
 
-class Worker(QThread):
+atexit.register(drain_workers)
+
+
+class TrackedThread(QThread):
+    """A QThread whose wrapper cannot be garbage collected while it runs.
+
+    Two rules, both learned from "QThread: Destroyed while thread is still
+    running" (0xC0000409):
+
+    * register *before* the thread starts -- registering inside ``run()``
+      leaves a window in which a started thread is invisible to
+      :func:`drain_workers`;
+    * unregister only when the thread has actually stopped -- unregistering
+      from the end of ``run()`` would drop the last reference while the
+      thread is still winding down, and the wrapper would be destroyed
+      underneath it.
+
+    The registry is what keeps the wrapper alive when its owner (a dialog,
+    a page) is destroyed while the background job is still in flight.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        # Queued into the owning thread: the slot runs after the thread has
+        # stopped, so the wrapper is only released when it is safe to.
+        self.finished.connect(self._forget)
+
+    def _forget(self) -> None:
+        _unregister(self)
+
+    def start(self, *args, **kwargs) -> None:
+        _register(self)
+        try:
+            super().start(*args, **kwargs)
+        except Exception:
+            _unregister(self)
+            raise
+
+
+class Worker(TrackedThread):
     finished = Signal(object)
     error = Signal(str)
 
@@ -70,7 +116,6 @@ class Worker(QThread):
         self._kwargs = kwargs
 
     def run(self) -> None:
-        _register(self)
         try:
             result = self._fn(*self._args, **self._kwargs)
             if not self.isInterruptionRequested():
@@ -78,8 +123,6 @@ class Worker(QThread):
         except Exception as e:  # noqa: BLE001 - surface to UI
             if not self.isInterruptionRequested():
                 self.error.emit(str(e))
-        finally:
-            _unregister(self)
 
 
 # 无任何回调超过 _STALL_SECONDS 秒 → 提示用户「网络较慢，仍在等待」。
@@ -168,7 +211,7 @@ class _DlStatus:
         return f"{text} · {self._file}" if self._file else text
 
 
-class ProgressWorker(QThread):
+class ProgressWorker(TrackedThread):
     """Runs a blocking fn that reports progress via an mll callback dict.
 
     ``fn`` must accept ``callback`` as a keyword (the mll dict) plus any extra
@@ -268,7 +311,6 @@ class ProgressWorker(QThread):
                 "setMax": set_max, "setStep": set_step}
 
     def run(self) -> None:
-        _register(self)
         kwargs = dict(self._kwargs)
         kwargs["callback"] = self._mll_callback()
         try:
@@ -292,4 +334,3 @@ class ProgressWorker(QThread):
         finally:
             self._ctx = None
             self._disarm_stall()
-            _unregister(self)

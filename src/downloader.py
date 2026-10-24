@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import queue as _queue
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Signal
 
-from .worker import _register, _unregister
+from .worker import TrackedThread
 
 
 class DownloadTask:
@@ -38,7 +38,7 @@ class DownloadTask:
         self.cancelled = False
 
 
-class _QueueWorker(QThread):
+class _QueueWorker(TrackedThread):
     """消费队列的线程：取任务 → download_file → 发信号。"""
 
     finished_one = Signal(object, str)   # task, dest
@@ -50,33 +50,29 @@ class _QueueWorker(QThread):
         self._q = q
 
     def run(self) -> None:
-        _register(self)
-        try:
-            from .net_api import download_file
-            while True:
-                task = self._q.get()
-                if task is None:  # 关闭信号
-                    self._q.task_done()
-                    break
-                try:
-                    def _prog(sofar: int, total: int, _t=task):
-                        self.progressed.emit(_t, sofar, total)
+        from .net_api import download_file
+        while True:
+            task = self._q.get()
+            if task is None:  # 关闭信号
+                self._q.task_done()
+                break
+            try:
+                def _prog(sofar: int, total: int, _t=task):
+                    self.progressed.emit(_t, sofar, total)
 
-                    dest = download_file(
-                        task.url, task.dest,
-                        headers=task.headers or None,
-                        progress=_prog if task.progress else None,
-                        cancel=lambda t=task: t.cancelled,  # round-40 P2-10
-                    )
-                    if not task.cancelled:
-                        self.finished_one.emit(task, dest)
-                except Exception as e:  # noqa: BLE001 - 单个任务失败不影响队列
-                    if not task.cancelled:
-                        self.failed_one.emit(task, str(e))
-                finally:
-                    self._q.task_done()
-        finally:
-            _unregister(self)
+                dest = download_file(
+                    task.url, task.dest,
+                    headers=task.headers or None,
+                    progress=_prog if task.progress else None,
+                    cancel=lambda t=task: t.cancelled,  # round-40 P2-10
+                )
+                if not task.cancelled:
+                    self.finished_one.emit(task, dest)
+            except Exception as e:  # noqa: BLE001 - 单个任务失败不影响队列
+                if not task.cancelled:
+                    self.failed_one.emit(task, str(e))
+            finally:
+                self._q.task_done()
 
 
 class DownloadQueue(QObject):
