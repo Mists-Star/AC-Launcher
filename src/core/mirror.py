@@ -55,14 +55,43 @@ import requests
 
 _BMCL_BASE = "https://bmclapi2.bangbang93.com"
 
-# (host, replacement-prefix) — only exact https://<host>/... URLs are rewritten.
-_MOJANG_HOSTS: list[tuple[str, str]] = [
-    ("launchermeta.mojang.com", _BMCL_BASE),
-    ("launcher.mojang.com", _BMCL_BASE),
-    ("piston-data.mojang.com", _BMCL_BASE),
-    ("libraries.minecraft.net", _BMCL_BASE + "/libraries"),
-    ("resources.download.minecraft.net", _BMCL_BASE + "/assets"),
+# round-113 路径感知重写表：(完整 URL 前缀, 替换前缀)。
+# 前缀匹配后必须紧跟 "/" 或 URL 结束，避免把同前缀的其它主机误伤。
+#
+# 依据实测（2026-10-22，本机 12 核）：
+#   piston-meta/piston-data 的真实路径是 /v1/packages/<sha>/<id>.json 与
+#   /v1/objects/<sha>/client.jar（不再是旧的 /mc/game/<id>.json），
+#   BMCLAPI 同构路径全部 200/206 —— 之前漏掉 piston-meta，镜像模式下
+#   版本 json 与 assetIndex 一直直连官方。
+#   libraries.minecraft.net 按 PCL2 的映射走 /maven（实测与 /libraries
+#   命中同一批文件，字节数一致）。
+#   loader 的 maven/meta 端点 BMCLAPI 只镜像了一部分，逐条探测结论：
+#     /fabric-meta      → meta.fabricmc.net     ✓
+#     /quilt-meta       → meta.quiltmc.org      ✓
+#     /maven            → maven.minecraftforge.net ✓（md + installer）
+#     /maven            → maven.fabricmc.net    ✓（loader jar；installer 404 会回退官方）
+#     /maven            → maven.quiltmc.org/repository/release ✓（同上游路径）
+#     /maven/net/neoforged → maven.neoforged.net/releases/net/neoforged ✓
+#   未被镜像的（neoforge 的 /api/maven/versions JSON）保持原样走官方。
+_MIRROR_RULES: list[tuple[str, str]] = [
+    ("https://launchermeta.mojang.com", _BMCL_BASE),
+    ("https://launcher.mojang.com", _BMCL_BASE),
+    ("https://piston-meta.mojang.com", _BMCL_BASE),
+    ("https://piston-data.mojang.com", _BMCL_BASE),
+    ("https://libraries.minecraft.net", _BMCL_BASE + "/maven"),
+    ("https://resources.download.minecraft.net", _BMCL_BASE + "/assets"),
+    ("https://meta.fabricmc.net", _BMCL_BASE + "/fabric-meta"),
+    ("https://meta.quiltmc.org", _BMCL_BASE + "/quilt-meta"),
+    ("https://maven.minecraftforge.net", _BMCL_BASE + "/maven"),
+    ("https://maven.fabricmc.net", _BMCL_BASE + "/maven"),
+    ("https://maven.quiltmc.org/repository/release", _BMCL_BASE + "/maven"),
+    ("https://maven.neoforged.net/releases/net/neoforged", _BMCL_BASE + "/maven/net/neoforged"),
 ]
+
+# 失效闩锁按主机记账（round-110 B）：从重写表派生。
+_MIRROR_HOSTS: tuple[str, ...] = tuple(dict.fromkeys(
+    p.split("/")[2] for p, _ in _MIRROR_RULES
+))
 
 # Manifest URLs consumed by our own net_api.fetch_versions().
 MANIFEST_OFFICIAL = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
@@ -79,6 +108,18 @@ _RETRIES = 1
 # 是否把 Mojang 主机重写为 BMCLAPI。由 install_instance / install_mrpack 按用户
 # 的 download_mirror 设置在每个安装开始前设定。
 _MIRROR_ON = False
+
+# round-113：mll 库/资源下载的并发上限与 HTTP 连接池大小。
+#
+# 实测（本机 12 核，官方源，80 个真实资源对象共 41.9MB）：
+#   workers=8  → 2.67MB/s     workers=32 → 7.71MB/s
+#   workers=16 → 6.03MB/s     workers=48 → 8.35MB/s（最快）
+#   workers=64 → 7.27MB/s     workers=96 → 6.76MB/s（开始回落）
+# 48 是拐点，再往上延迟（p50 1779ms → 1934ms → 2453ms）反而拖慢整体。
+# 16 是 mll 里 ThreadPoolExecutor 的默认值（min(32, cpu+4)），我们一直在吃这个亏。
+_MAX_WORKERS = 48
+# 连接池要能同时容纳全部并发，否则多余的请求每次都要重新握手。
+_POOL_SIZE = 64
 
 
 # ── round-110 A：字节记账 + 滑动时间窗测速 ──────────────────────────────────
@@ -257,6 +298,14 @@ class MirrorSession(requests.Session):
         self._ctx = active_context()
         self._last_status = None
         _apply_proxy(self, _PROXY)
+        # round-113 P0-c：requests 的默认 HTTPAdapter 连接池只有 10 条
+        # （pool_maxsize=10, pool_block=False）。并发 48 时其余 38 条每次都要
+        # 重新握手 —— 实测同口径下 pool=10 比 pool=32 慢 15%（6.29s vs 5.30s，
+        # 80 个资源对象）。把池放大到 64，让并发数与可复用连接数匹配。
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=_POOL_SIZE, pool_maxsize=_POOL_SIZE, pool_block=False)
+        self.mount("https://", adapter)
+        self.mount("http://", adapter)
 
     def request(self, method, url, *args, **kwargs):  # type: ignore[override]
         # 原样构建 PreparedRequest（保留原始 URL 供 send() 做回退判断）
@@ -302,7 +351,7 @@ class MirrorSession(requests.Session):
         ctx = self._ctx
         if ctx is None:
             return
-        for host, _repl in _MOJANG_HOSTS:
+        for host in _MIRROR_HOSTS:
             prefix = "https://" + host
             if original_url == prefix or original_url.startswith(prefix + "/"):
                 ctx.mirror_dead.add(host)
@@ -448,12 +497,17 @@ def _rewrite(url):
         return url
     ctx = active_context()
     dead = ctx.mirror_dead if ctx is not None else None
-    for host, repl in _MOJANG_HOSTS:
+    for prefix, repl in _MIRROR_RULES:
+        host = prefix.split("/")[2]
         if dead and host in dead:
             continue  # round-110 B：该主机已被镜像拒绝，本次安装直接走官方源
-        prefix = "https://" + host
-        if url == prefix or url.startswith(prefix + "/"):
-            return repl + url[len(prefix):]
+        if not url.startswith(prefix):
+            continue
+        rest = url[len(prefix):]
+        # 前缀必须落在路径边界上，否则 https://host/a 会被 https://host/ab 命中
+        if rest and not rest.startswith("/"):
+            continue
+        return repl + rest
     return url
 
 
@@ -539,10 +593,16 @@ def _try_parallel_mll(url, path, sha1, callback, minecraft_directory,
         return ctx is not None and ctx.aborted()
 
     try:
-        # chunk_mb=4：阈值已是 8MB，按默认 16MB 切只会得到 1~2 块，并行度太弱；
-        # 4MB 让 8MB 文件也至少 3 块，客户端 jar（20~25MB）能到 5~6 块。
+        # round-113 P1-c：chunk_mb 4 → 2，threads 显式给 16。
+        # 实测客户端 jar（40.1MB）单连接 0.39MB/s，4 路 1.62MB/s，
+        # 8 路 1.39MB/s（反而慢），16 路 3.19MB/s —— 分片不是越多越好，
+        # 跨境链路 RTT 才是瓶颈，8 路起内耗占比就上来了。
+        # net_api 的默认 cap 是 min(cpu, 8)，本机 12 核也只给 8 路，
+        # 必须显式传 threads=16 才能落到实测最优点。
+        # 2MB 切块让 40MB 文件有 21 个候选块，配合 cap=16 正好 16 路；
+        # 8MB 阈值文件则自然落到 5 路，不会过切。
         net_api.parallel_download_file(real_url, path, timeout=120,
-                                       chunk_mb=4, cancel=_cancel)
+                                       threads=16, chunk_mb=2, cancel=_cancel)
     except Exception:  # noqa: BLE001 - 分片失败一律回退 mll 原实现
         ctx = active_context()
         if ctx is not None and ctx.aborted():
@@ -621,6 +681,57 @@ def _apply_proxy(session: requests.Session, proxy) -> None:
 _PATCHED = False
 
 
+def _patch_install_concurrency() -> None:
+    """round-113 P0-b：给 mll 的库/资源下载注入更高的并发。
+
+    ``minecraft_launcher_lib.install`` 里的 ``install_libraries`` 与
+    ``install_assets`` 都接受 ``max_workers``，但 ``do_version_install``
+    调用它们时**不传**，于是落到 ``ThreadPoolExecutor`` 的默认值
+    ``min(32, cpu_count + 4)`` —— 本机 12 核只有 16 并发。
+
+    实测（同口径 80 个资源对象）：16 并发 6.03MB/s，48 并发 8.35MB/s。
+    48 是拐点，再往上 p50 延迟开始拖慢整体。
+
+    这两个函数在 mll 内部是**模块级全局查找**（``install_libraries(...)``
+    而非 ``install.install_libraries(...)``），所以直接替换模块属性即可生效；
+    其它模块（forge / fabric / quilt）用的是 ``from .install import
+    install_libraries`` 的直接引用，需一并替换。
+    """
+    try:
+        import minecraft_launcher_lib.install as mll_install
+    except ImportError:
+        return
+
+    def _wrap(fn):
+        def wrapper(*args, **kwargs):
+            # 显式传入的 max_workers 优先，不覆盖调用方的意图
+            if kwargs.get("max_workers") is None:
+                kwargs["max_workers"] = _MAX_WORKERS
+            return fn(*args, **kwargs)
+        wrapper._ac_concurrency_patched = True  # type: ignore[attr-defined]
+        return wrapper
+
+    for name in ("install_libraries", "install_assets"):
+        fn = getattr(mll_install, name, None)
+        if fn is None or getattr(fn, "_ac_concurrency_patched", False):
+            continue
+        setattr(mll_install, name, _wrap(fn))
+
+    # forge 模块用 `from ..install import install_libraries` 直接引用，
+    # 替换 install 模块的属性对它无效，必须单独替换。
+    for mod_name, attr in (
+        ("minecraft_launcher_lib.mod_loader._forge", "install_libraries"),
+    ):
+        try:
+            mod = importlib.import_module(mod_name)
+        except ImportError:
+            continue
+        fn = getattr(mod, attr, None)
+        if fn is None or getattr(fn, "_ac_concurrency_patched", False):
+            continue
+        setattr(mod, attr, _wrap(fn))
+
+
 def patch_install_session() -> None:
     """Route every mll download through MirrorSession.
 
@@ -644,6 +755,8 @@ def patch_install_session() -> None:
     # round-111：大文件（客户端 jar）走分片并行。只对确定是大文件的目标探测
     # 一次大小，其余零开销 —— 详见 _is_big_target 的说明。
     _patch_download_file()
+    # round-113 P0-b：库/资源下载并发 16 → 48。
+    _patch_install_concurrency()
     _PATCHED = True
 
 

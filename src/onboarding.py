@@ -19,8 +19,9 @@ import os
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QRadioButton, QButtonGroup, QWidget, QFrame, QComboBox, QProgressBar,
+    QCheckBox, QGridLayout,
 )
-from PySide6.QtCore import Qt, Signal, QThread
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor
 
 from .theme import COLORS, RoundedCard, set_accent_color, build_qss
@@ -29,6 +30,7 @@ from .i18n import t, set_language
 from .frameless import FramelessHelper, TitleBar
 from .settings_dialog import load_config, save_config, ACCENT_PRESETS
 from .paths import get_data_dir
+from .worker import TrackedThread
 
 
 # Hardcoded defaults for the onboarding wizard. We deliberately do NOT read
@@ -40,6 +42,51 @@ ONBOARDING_DEFAULTS = {
     "accent_color": "#7C3AED",
     "ram_mb": 4096,
 }
+
+# ── appearance profiles ─────────────────────────────────────────────────────
+# Each profile is exactly the switch set the bundled effect modules write, so
+# the tutorial and the Modules page agree (picking a profile installs the
+# matching bundles; uninstalling them later turns the effect off again).
+#
+# (config key, label key, est. RAM MB, est. single-core CPU %)
+# The two numbers are rough per-effect weights for the relative meter only —
+# they come from each effect's paint/compositing path, not from benchmarks:
+#   * light trail owns a shared 30 fps repaint ticker (the only steady cost),
+#   * acrylic hands blur to DWM (GPU-heavy, little CPU),
+#   * frosted/transition are QSS/paint-time only, toasts are idle until shown.
+_APPEARANCE_EFFECTS = [
+    ("page_transition", "settings.page_transition", 2, 0.3),
+    ("achievement_toasts", "settings.achievement_toasts", 2, 0.0),
+    ("frosted_theme", "settings.frosted_theme", 4, 0.2),
+    ("transparent_window", "settings.transparent_window", 5, 1.0),
+    ("effect_light_trail", "settings.effect_light_trail", 8, 3.0),
+]
+_STYLE_ORDER = ("minimal", "normal", "fancy", "custom")
+_STYLE_TIERS = {
+    "minimal": set(),
+    "normal": {"page_transition", "achievement_toasts"},
+    "fancy": {key for key, _, _, _ in _APPEARANCE_EFFECTS},
+    "custom": set(),      # resolved from the checkboxes instead
+}
+_EFFECT_MODULES = {
+    "page_transition": "effect-page-transition",
+    "achievement_toasts": "effect-achievement-toast",
+    "frosted_theme": "effect-frosted-glass",
+    "transparent_window": "effect-acrylic-window",
+    "effect_light_trail": "effect-liquid-trail",
+}
+
+
+def _derive_style_tier(cfg: dict) -> str:
+    """Name the profile a config currently matches (custom when it matches none)."""
+    on = {key for key, _, _, _ in _APPEARANCE_EFFECTS if cfg.get(key, False)}
+    if not on:
+        return "minimal"
+    for tier in ("normal", "fancy"):
+        if on == _STYLE_TIERS[tier]:
+            return tier
+    return "custom"
+
 
 
 def mark_onboarding_done() -> None:
@@ -83,6 +130,10 @@ class OnboardingDialog(QDialog):
         ("color", [
             ("title", "onboard.step_color"),
         ]),
+        ("style", [
+            ("title", "onboard.step_style"),
+            ("body", "onboard.style_text"),
+        ]),
         ("ram", [
             ("title", "onboard.step_ram"),
         ]),
@@ -99,10 +150,11 @@ class OnboardingDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("onboard.title"))
-        self.resize(620, 520)
+        self.resize(640, 600)
         self.cfg = load_config()
         self._step = 0
         self._selected_color: str = ONBOARDING_DEFAULTS["accent_color"]
+        self._style_tier: str = "minimal"
 
         # Round window corners on Win11 — same as MainWindow does. Without
         # this the wizard renders as a sharp rectangle (用户反馈"新手教程没圆角").
@@ -228,7 +280,10 @@ class OnboardingDialog(QDialog):
         self.title_lbl.setText(t(title_key))
 
         body_texts = []
-        for item in step_def[1:]:
+        # step_def is (key, [items]); iterate the item list itself. The earlier
+        # `step_def[1:]` iterated the one-element tuple wrapping that list, so
+        # `key_type` was itself a tuple and **no body text ever rendered**.
+        for item in step_def[1]:
             if isinstance(item, (list, tuple)) and len(item) == 2:
                 key_type, key = item
                 if key_type == "body":
@@ -340,6 +395,9 @@ class OnboardingDialog(QDialog):
             row.addStretch(1)
             self.step_layout.addLayout(row)
 
+        elif step_key == "style":
+            self._build_style_step()
+
         elif step_key == "ram":
             self.ram_grp, ram_w = _radio_group(
                 [(2048, t("settings.ram_2g")), (4096, t("settings.ram_4g")),
@@ -430,8 +488,274 @@ class OnboardingDialog(QDialog):
         from .theme import apply_qss
         apply_qss()
 
+    # ── appearance style step ─────────────────────────────────────────────
+    def _build_style_step(self):
+        """Tier picker + live cost meter (+ per-effect switches for custom).
+
+        The profile is stored as the five config switches the effect modules
+        write, so there is no extra "tier" key to keep in sync later.
+        """
+        self._style_tier = _derive_style_tier(self.cfg)
+        self._style_cards = {}
+        self._style_checks = {}
+        self._style_syncing = False
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._style_group = QButtonGroup(self)
+        self._style_group.buttonClicked.connect(
+            lambda rb: self._on_style_tier(rb.tier_val))
+        for tier in _STYLE_ORDER:
+            card = RoundedCard(radius=10, fill=QColor(COLORS["bg_input"]),
+                               border_color=COLORS["border"], border_width=2)
+            card.setCursor(Qt.PointingHandCursor)
+            card.setFixedWidth(126)
+            card.setFixedHeight(64)
+            card.mousePressEvent = (
+                lambda e, tier=tier: self._pick_style_tier(tier))
+            card.enterEvent = lambda e, c=card: c.set_border(COLORS["accent"], 2)
+            card.leaveEvent = lambda e: self._refresh_style_borders()
+            lay = QVBoxLayout(card)
+            lay.setContentsMargins(10, 8, 10, 8)
+            lay.setSpacing(2)
+            rb = QRadioButton(t("onboard.style_" + tier))
+            rb.setStyleSheet("background: transparent; border: none;")
+            rb.tier_val = tier
+            rb.setChecked(tier == self._style_tier)
+            self._style_group.addButton(rb)
+            hint = QLabel(t("onboard.style_%s_hint" % tier))
+            hint.setProperty("cls", "sub")
+            hint.setWordWrap(False)
+            hint.setStyleSheet("background: transparent; border: none;")
+            lay.addWidget(rb)
+            lay.addWidget(hint)
+            row.addWidget(card)
+            self._style_cards[tier] = card
+        row.addStretch(1)
+        self.step_layout.addLayout(row)
+
+        # ── cost meter: two slim bars (RAM / single-core CPU) ──
+        meter = RoundedCard(radius=8, fill=QColor(COLORS["bg_panel"]))
+        ml = QVBoxLayout(meter)
+        ml.setContentsMargins(12, 8, 12, 8)
+        ml.setSpacing(4)
+        cap = QLabel(t("onboard.style_estimate"))
+        cap.setStyleSheet(
+            "color: %s; font-size: 12px; font-weight: 600;"
+            " background: transparent; border: none;" % COLORS["text_sub"])
+        ml.addWidget(cap)
+        self._style_mem_bar, self._style_mem_lbl = self._meter_row(
+            ml, t("onboard.style_mem_cap"))
+        self._style_cpu_bar, self._style_cpu_lbl = self._meter_row(
+            ml, t("onboard.style_cpu_cap"))
+        note = QLabel(t("onboard.style_note"))
+        note.setProperty("cls", "sub")
+        note.setWordWrap(True)
+        note.setStyleSheet("font-size: 11px; background: transparent;"
+                           " border: none;")
+        # A word-wrapped QLabel reports one text line through sizeHint, so a
+        # content-sized card used to clip the note to a single line. Reserve
+        # three lines instead — enough for both zh and en at this width.
+        note.setMinimumHeight(note.fontMetrics().lineSpacing() * 3)
+        ml.addWidget(note)
+        self.step_layout.addWidget(meter)
+
+        # ── per-effect switches (only visible for "custom") ──
+        self._style_custom_box = QWidget()
+        self._style_custom_box.setStyleSheet("background: transparent;")
+        gl = QGridLayout(self._style_custom_box)
+        gl.setContentsMargins(2, 0, 2, 0)
+        gl.setHorizontalSpacing(16)
+        gl.setVerticalSpacing(4)
+        for i, (key, name_key, mem_mb, cpu_pct) in enumerate(_APPEARANCE_EFFECTS):
+            cb = QCheckBox(t(name_key))
+            cb.effect_key = key
+            cb.setChecked(bool(self.cfg.get(key, False)))
+            cb.setToolTip("+%d MB / +%.1f%%" % (mem_mb, cpu_pct))
+            cb.stateChanged.connect(self._on_style_check)
+            self._style_checks[key] = cb
+            gl.addWidget(cb, i // 2, i % 2)
+        self.step_layout.addWidget(self._style_custom_box)
+
+        self._style_custom_box.setVisible(self._style_tier == "custom")
+        self._refresh_style_borders()
+        self._update_style_meter()
+
+    def _meter_row(self, layout, caption: str):
+        """One slim bar row: caption | bar | value. Returns (bar, value label)."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        cap = QLabel(caption)
+        cap.setFixedWidth(34)
+        cap.setStyleSheet(
+            "color: %s; font-size: 11px; background: transparent; border: none;"
+            % COLORS["text_sub"])
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        bar.setValue(0)
+        bar.setFixedHeight(6)
+        bar.setTextVisible(False)
+        bar.setStyleSheet(
+            "QProgressBar { background: %s; border: none; border-radius: 3px; }"
+            "QProgressBar::chunk { background: %s; border-radius: 3px; }"
+            # Track uses the border token, not bg_input: in the light theme
+            # bg_input and bg_panel are the same #F8F9FA, so an empty bar was
+            # invisible (only the numbers showed).
+            % (COLORS["border"], COLORS["accent"]))
+        val = QLabel("+0")
+        val.setFixedWidth(64)
+        val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        val.setStyleSheet(
+            "color: %s; font-size: 11px; background: transparent; border: none;"
+            % COLORS["text_main"])
+        row.addWidget(cap)
+        row.addWidget(bar, 1)
+        row.addWidget(val)
+        layout.addLayout(row)
+        return bar, val
+
+    def _selected_effect_keys(self) -> set:
+        """Switches implied by the current tier / checkbox state."""
+        if self._style_tier == "custom":
+            return {key for key, cb in self._style_checks.items()
+                    if cb.isChecked()}
+        return set(_STYLE_TIERS.get(self._style_tier, ()))
+
+    def _pick_style_tier(self, tier: str):
+        for rb in self._style_group.buttons():
+            if rb.tier_val == tier:
+                rb.setChecked(True)
+                break
+        self._on_style_tier(tier)
+
+    def _on_style_tier(self, tier: str):
+        self._style_tier = tier
+        if tier != "custom":
+            self._style_syncing = True
+            wanted = set(_STYLE_TIERS[tier])
+            for key, cb in self._style_checks.items():
+                cb.setChecked(key in wanted)
+            self._style_syncing = False
+        self._style_custom_box.setVisible(tier == "custom")
+        self._refresh_style_borders()
+        self._update_style_meter()
+
+    def _on_style_check(self, _state: int = 0):
+        """A single switch was toggled → the profile is custom by definition."""
+        if self._style_syncing:
+            return
+        self._style_tier = "custom"
+        for rb in self._style_group.buttons():
+            if rb.tier_val == "custom":
+                rb.setChecked(True)
+                break
+        self._refresh_style_borders()
+        self._update_style_meter()
+
+    def _refresh_style_borders(self):
+        for tier, card in getattr(self, "_style_cards", {}).items():
+            try:
+                card.set_border(
+                    COLORS["accent"] if tier == self._style_tier
+                    else COLORS["border"], 2)
+            except Exception:  # noqa: BLE001 - mid-teardown widget
+                pass
+
+    def _update_style_meter(self):
+        if not hasattr(self, "_style_mem_bar"):
+            return
+        keys = self._selected_effect_keys()
+        mem = sum(c[2] for c in _APPEARANCE_EFFECTS if c[0] in keys)
+        cpu = sum(c[3] for c in _APPEARANCE_EFFECTS if c[0] in keys)
+        max_mem = sum(c[2] for c in _APPEARANCE_EFFECTS)
+        max_cpu = sum(c[3] for c in _APPEARANCE_EFFECTS)
+        self._style_mem_bar.setValue(
+            int(round(mem * 100.0 / max_mem)) if max_mem else 0)
+        self._style_cpu_bar.setValue(
+            int(round(cpu * 100.0 / max_cpu)) if max_cpu else 0)
+        self._style_mem_lbl.setText(t("onboard.style_mem_val", mb=mem))
+        self._style_cpu_lbl.setText(
+            t("onboard.style_cpu_val", cpu=("%.1f" % cpu)))
+
+    def _sync_effect_modules(self, wanted: set) -> None:
+        """Install the bundles the player picked so the Modules page keeps a
+        real switch for them (installed → uninstall turns the effect off).
+
+        Failures are tolerated: ``_commit_appearance`` writes the same switches
+        straight into the config, so the chosen look still applies even when a
+        bundle cannot be copied (read-only / portable layouts).
+        """
+        try:
+            from . import modules as M
+        except Exception:  # noqa: BLE001 - modules are optional bookkeeping
+            return
+        try:
+            entries = {e.get("id"): e for e in M.load_catalog()
+                       if e.get("type") == "effect"}
+        except Exception:  # noqa: BLE001
+            entries = {}
+        for key, mid in _EFFECT_MODULES.items():
+            if key not in wanted:
+                continue
+            try:
+                mod = M.find_module(mid)
+                if mod is None:
+                    entry = entries.get(mid)
+                    if entry is None:
+                        continue
+                    mod = M.install_bundle(entry)
+                M.apply_effect_module(mod, reapply=False)
+            except Exception:  # noqa: BLE001 - keep the rest of the profile
+                continue
+
+    def _commit_appearance(self) -> None:
+        """Persist the wizard's picks and hand them to the (hidden) main window.
+
+        Until now the wizard never wrote the config: language / accent / RAM
+        lived only in this process, and the main window's exit-time save
+        re-wrote its pre-wizard copy over anything that did land on disk. The
+        appearance profile needs the same treatment — the window was built
+        before this dialog opened.
+        """
+        keys = {key for key, _, _, _ in _APPEARANCE_EFFECTS
+                if self.cfg.get(key, False)}
+        for key, _, _, _ in _APPEARANCE_EFFECTS:
+            self.cfg[key] = key in keys
+        try:
+            save_config(self.cfg)
+        except Exception:  # noqa: BLE001 - read-only install → session-only
+            pass
+        self._sync_effect_modules(keys)
+        # Module payloads write their own switch on apply; re-read so the final
+        # state is exactly the chosen profile (an installed but deselected
+        # effect stays off) and drop stale ownership claims, otherwise the
+        # Modules page would keep showing "applied" for a switch that is off.
+        try:
+            cfg = load_config()
+            for key, _, _, _ in _APPEARANCE_EFFECTS:
+                cfg[key] = key in keys
+            owners = dict(cfg.get("_effect_owners") or {})
+            for key, mid in _EFFECT_MODULES.items():
+                if key not in keys:
+                    owners.pop(key, None)
+            cfg["_effect_owners"] = owners
+            save_config(cfg)
+        except Exception:  # noqa: BLE001
+            cfg = self.cfg
+        win = self.parent()
+        try:
+            if win is not None and hasattr(win, "apply_appearance_config"):
+                win.apply_appearance_config(cfg)
+        except Exception:  # noqa: BLE001 - appearance must not block finishing
+            pass
+
     def _prev(self):
         if self._step > 0:
+            # Commit the current step before rebuilding it: without this, a
+            # choice survives only if it was applied globally (colour/theme),
+            # and stepping back then forward silently reset radios to the
+            # values that were already in cfg.
+            self._save_step()
             self._show_step(self._step - 1)
 
     def _next(self):
@@ -441,9 +765,11 @@ class OnboardingDialog(QDialog):
             self._show_step(self._step + 1)
         else:
             self._save_step()
+            # Persist the picks and push them into the main window, which was
+            # constructed before the wizard opened.
+            self._commit_appearance()
             # User finished the wizard — mark it done so the next launch
-            # skips past ``should_show_onboarding()``. The live main window
-            # already reflects the picks via signals / global setters.
+            # skips past ``should_show_onboarding()``.
             mark_onboarding_done()
             self.accept()
 
@@ -468,6 +794,10 @@ class OnboardingDialog(QDialog):
             chk = self.ob_theme_grp.checkedButton()
             if chk and hasattr(chk, "theme_mode_val"):
                 self.cfg["theme_mode"] = chk.theme_mode_val
+        elif key == "style" and hasattr(self, "_style_checks"):
+            keys = self._selected_effect_keys()
+            for effect_key, _, _, _ in _APPEARANCE_EFFECTS:
+                self.cfg[effect_key] = effect_key in keys
 
     # ── Java install (step) ──
     def _on_java_scan_done(self, result: tuple):
@@ -592,7 +922,7 @@ def _radio_group(options, default_val) -> tuple:
     return grp, container
 
 
-class _JavaScanThread(QThread):
+class _JavaScanThread(TrackedThread):
     """Async Java detection (PATH + os.walk over install roots).
 
     Running this off the GUI thread keeps the onboarding wizard responsive —
@@ -603,10 +933,6 @@ class _JavaScanThread(QThread):
     done = Signal(object)  # (sys_java, ours_dict)
 
     def run(self) -> None:
-        # round-34 加固：注册到 worker._LIVE，关窗时 drain_workers 能 join，
-        # 否则解释器退出销毁运行中 QThread → heap corruption 0xc0000374。
-        from .worker import _register, _unregister
-        _register(self)
         try:
             from .core.java import find_java
             from .core import java_install
@@ -615,11 +941,9 @@ class _JavaScanThread(QThread):
             self.done.emit((sys_java, ours))
         except Exception:  # noqa: BLE001 - treat as "no java detected"
             self.done.emit((None, {}))
-        finally:
-            _unregister(self)
 
 
-class _JavaInstallThread(QThread):
+class _JavaInstallThread(TrackedThread):
     """Download + unpack a portable Java runtime off the GUI thread.
 
     Bridges ``java_install.install_java``'s (done, total, phase) callback to Qt
@@ -635,9 +959,6 @@ class _JavaInstallThread(QThread):
         self._major = major
 
     def run(self) -> None:
-        # round-34 加固：注册到 worker._LIVE（同 _JavaScanThread）
-        from .worker import _register, _unregister
-        _register(self)
         try:
             from .core import java_install
 
@@ -648,5 +969,3 @@ class _JavaInstallThread(QThread):
             self.done.emit(path)
         except Exception as e:  # noqa: BLE001 - surface to the UI
             self.failed.emit(str(e))
-        finally:
-            _unregister(self)

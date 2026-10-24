@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from .theme import COLORS, RoundedCard
-from .icons import icon
+from .icons import icon, on_accent
 from .i18n import t
 from . import ui_kit
 from .core.sound import music
@@ -88,22 +88,25 @@ class MusicPage(QWidget):
         self.now_lbl = QLabel(t("music.none"))
         self.now_lbl.setProperty("cls", "sub")
         nl.addWidget(self.now_lbl, stretch=1)
-        self.prev_btn = QPushButton(icon("skip_prev"), "")
+        self.prev_btn = QPushButton(on_accent("skip_prev"), "")
         self.prev_btn.setFixedSize(40, 40)
+        self.prev_btn.setIconSize(QSize(20, 20))
         self.prev_btn.setProperty("cls", "accent")
         self.prev_btn.setCursor(Qt.PointingHandCursor)
         self.prev_btn.setToolTip(t("music.prev"))
         self.prev_btn.clicked.connect(lambda: (self._player.prev(), self._sync_ui()))
         nl.addWidget(self.prev_btn)
-        self.play_btn = QPushButton(icon("play"), "")
+        self.play_btn = QPushButton(on_accent("play"), "")
         self.play_btn.setFixedSize(44, 44)
+        self.play_btn.setIconSize(QSize(24, 24))
         self.play_btn.setProperty("cls", "accent")
         self.play_btn.setCursor(Qt.PointingHandCursor)
         self.play_btn.setToolTip(t("music.play"))
         self.play_btn.clicked.connect(self._toggle_play)
         nl.addWidget(self.play_btn)
-        self.next_btn = QPushButton(icon("skip_next"), "")
+        self.next_btn = QPushButton(on_accent("skip_next"), "")
         self.next_btn.setFixedSize(40, 40)
+        self.next_btn.setIconSize(QSize(20, 20))
         self.next_btn.setProperty("cls", "accent")
         self.next_btn.setCursor(Qt.PointingHandCursor)
         self.next_btn.setToolTip(t("music.next"))
@@ -212,7 +215,7 @@ class MusicPage(QWidget):
         self.list.setCurrentRow(idx if 0 <= idx < len(self._tracks) else -1)
         # round-66：播放/暂停按钮图标随状态切换（此前固定显示播放图标，
         # 点击后无任何视觉反馈）。
-        self.play_btn.setIcon(icon("pause" if self._player.is_playing() else "play"))
+        self.play_btn.setIcon(on_accent("pause" if self._player.is_playing() else "play"))
 
     def retranslate_ui(self):
         self._rebuild_list()

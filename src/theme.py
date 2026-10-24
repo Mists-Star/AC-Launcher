@@ -1295,11 +1295,26 @@ from PySide6.QtGui import QPainter, QColor
 
 
 class AcSliderStyle(QProxyStyle):
-    """自绘横向 QSlider：圆角 groove + 圆角 sub-page + 圆形 handle。
+    """App-wide style tweaks: rounded QSlider + a sane default button icon size.
 
-    解决 QSS 无法给 sub-page 圆角的问题（Qt 样式表对 sub-page 只认
-    background，border-radius 静默忽略 → 满格右端是直边）。
+    1) 自绘横向 QSlider：圆角 groove + 圆角 sub-page + 圆形 handle。
+       解决 QSS 无法给 sub-page 圆角的问题（Qt 样式表对 sub-page 只认
+       background，border-radius 静默忽略 → 满格右端是直边）。
+
+    2) PM_ButtonIconSize = 18。Qt 的 QPushButton 在没有显式 setIconSize()
+       时会用样式的 PM_ButtonIconSize（Windows 默认 16×16），把图标静默压成
+       16px —— 44×44 的按钮里只画一个小三角。逐个按钮补 setIconSize 容易漏，
+       改成在这里统一给出默认值：没设过的按钮自动得到 18px，显式设过的
+       （15/16/20/24 等）依然以显式值为准（实测 setIconSize 优先级高于本指标）。
     """
+
+    #: Default icon size (px) for buttons that never call setIconSize().
+    BUTTON_ICON_SIZE = 18
+
+    def pixelMetric(self, metric, option=None, widget=None):
+        if metric == QStyle.PixelMetric.PM_ButtonIconSize:
+            return self.BUTTON_ICON_SIZE
+        return super().pixelMetric(metric, option, widget)
 
     def drawComplexControl(self, cc, opt, p, widget=None):
         if cc == QStyle.ComplexControl.CC_Slider and widget is not None:

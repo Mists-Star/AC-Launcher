@@ -25,7 +25,7 @@ from PySide6.QtGui import QDesktopServices, QIcon, QTransform
 from .theme import COLORS, RoundedCard, with_alpha
 from .effects import LightTrailCard, fade_in_widget  # round-50 卡片混合：实例详情卡流光；round-100 列表淡入
 from . import ui_kit
-from .icons import icon
+from .icons import icon, on_accent
 from .frameless import FramelessHelper, TitleBar
 from .win_rounded import enable_win11_round_corners, confirm, pick_files, info, warn, toast
 from .i18n import t, loader_name
@@ -1512,7 +1512,7 @@ class InstancesPage(QWidget):
         launch_btn = QPushButton(t("instances.launch"))
         launch_btn.setProperty("cls", "accent")
         launch_btn.setMinimumHeight(36)
-        launch_btn.setIcon(icon("play"))
+        launch_btn.setIcon(on_accent("play"))
         launch_btn.setIconSize(QSize(16, 16))
         launch_btn.clicked.connect(lambda: self._launch(inst.id))
         name_row.addWidget(launch_btn)
@@ -2970,9 +2970,11 @@ class _MrpackDialog(QDialog):
         self.mgr._persist(inst)
         self._inst = inst
         from .core import install
+        # round-113：跟随用户设置的下载源，不再硬编码 BMCLAPI
+        _cfg = load_config()
         self._worker = Worker(
             install.install_mrpack, self.path, inst.mc_dir,
-            mirror="bmclapi")
+            mirror=_cfg.get("download_mirror", "official"))
         self._worker.finished.connect(self._done)
         self._worker.error.connect(self._err)
         self._worker.start()

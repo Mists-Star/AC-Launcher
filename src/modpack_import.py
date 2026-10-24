@@ -114,7 +114,7 @@ def _parse_mrpack_info(raw: dict) -> dict:
     }
 
 
-def import_mrpack(path: str, mgr, mirror: str = "bmclapi") -> object:
+def import_mrpack(path: str, mgr, mirror: str = "official") -> object:
     """Install a Modrinth .mrpack into a fresh AC instance."""
     import minecraft_launcher_lib
     from .core import install
@@ -145,7 +145,7 @@ def import_mrpack(path: str, mgr, mirror: str = "bmclapi") -> object:
 def import_curseforge_zip(
     path: str,
     mgr,
-    mirror: str = "bmclapi",
+    mirror: str = "official",
     progress: Callable[[str, int, int], bool] | None = None,
 ) -> object:
     """Install a CurseForge-format .zip modpack into a fresh AC instance.

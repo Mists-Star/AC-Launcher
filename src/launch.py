@@ -610,7 +610,7 @@ def launch_instance(
             inst,
             java_auto=settings.get("java_auto", True),
             java_path=user_java,
-            mirror=settings.get("download_mirror", "bmclapi"),
+            mirror=settings.get("download_mirror", "official"),
             proxy=settings.get("download_proxy", ""),
             callback=callback,
         )

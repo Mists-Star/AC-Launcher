@@ -209,7 +209,10 @@ def main():
     from src.paths import get_config_path
     from PySide6.QtCore import QLockFile
     from src.brand import APP_DISPLAY
-    _lock = QLockFile(get_config_path("ac.lock"))
+    # round-114 live view：live 实例用独立锁文件——用户的正常启动器可以照常
+    # 开着，live 实例照常起，两者互不干扰。
+    _live = os.environ.get("AC_LIVE") == "1"
+    _lock = QLockFile(get_config_path("ac.live.lock" if _live else "ac.lock"))
     _lock.setStaleLockTime(30_000)  # 30 s: released on clean exit; stale after crash
     if not _lock.tryLock(100):
         # A lock exists. If the other instance's window is still visible, just
@@ -217,7 +220,7 @@ def main():
         # window is found the lock is stale/orphaned — take over and start.
         # round-40 P3 修复：窗口标题用品牌名（APP_DISPLAY），不硬编码——
         # 改品牌后单实例"提升已有窗口"仍有效。
-        if _raise_existing_instance(APP_DISPLAY):
+        if not _live and _raise_existing_instance(APP_DISPLAY):
             _log.write("3.5 another instance already running — raised it\n"); _log.flush()
             return
         _log.write("3.5 stale/orphaned lock — taking over\n"); _log.flush()
@@ -232,7 +235,8 @@ def main():
         # 形成双实例并存：旧启动器主窗口还留着，教程弹窗叠在上面。
         # 这里拿到锁后再按窗口标题扫一遍：此刻本进程尚未创建任何窗口，
         # FindWindow 命中的必然是在跑的旧实例 → 提升它并退出，绝不双开。
-        if _raise_existing_instance(APP_DISPLAY):
+        # round-114 live 实例例外：不能提升用户的窗口，否则 live 直接退出。
+        if not _live and _raise_existing_instance(APP_DISPLAY):
             _log.write("3.5 window found for a free lock — raising existing instance\n")
             _log.flush()
             try:
@@ -279,7 +283,9 @@ def main():
     _log.write("5 qss ok\n"); _log.flush()
 
     splash = None
-    if cfg.get("splash_enabled", True):
+    # round-114 live view：live 实例跳过启动动画——画面第一帧就该是主窗口，
+    # 否则 Agent 截图时看到的是 splash。
+    if cfg.get("splash_enabled", True) and os.environ.get("AC_NO_SPLASH") != "1":
         _log.write("6 splash construct\n"); _log.flush()
         # round-63：接入 SplashWindow 完整品牌动画（AC 字母自绘 + 旋转光晕
         # + 标语打字 + 进度条）。AC 用 MC 像素字体渲染（用户指定 round-62），
@@ -349,6 +355,15 @@ def main():
         def _show_main():
             """真正显示主窗口 + 预加载资源中心 + 强制前台。"""
             win.show()
+            # round-114 live view：挂上实时遥控台（帧流 + /ctl 控制口）。
+            # 仅 AC_LIVE=1 时启用，正式启动不受影响。
+            if os.environ.get("AC_LIVE") == "1":
+                try:
+                    from src.aclive import attach_live
+                    attach_live(win)
+                except Exception:
+                    import traceback as _tb
+                    _tb.print_exc()
             # round-95 修复：强制前台必须放在 win.show() 之后。此前这段在
             # 教程分支之前执行，_force_foreground 内部 ShowWindow(SW_RESTORE)
             # 会把「尚未显示」的主窗口直接拉成可见 → 教程弹窗背后露出启动器
@@ -487,6 +502,14 @@ def main():
     try:
         from src.worker import drain_workers
         app.aboutToQuit.connect(lambda: drain_workers(4000))
+    except Exception:
+        pass
+    # Same for the panorama loader: it decodes six 1024x1024 textures and can
+    # still be running when the user closes the launcher.  os._exit() below
+    # skips the atexit net, so this connection is the one that matters.
+    try:
+        from src.panorama import wait_for_loaders
+        app.aboutToQuit.connect(wait_for_loaders)
     except Exception:
         pass
     # round-37 轴心2：关窗时关闭默认下载队列（终止消费线程）
