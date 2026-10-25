@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QWidget, QLabel, QGraphicsOpacityEffect
 from PySide6.QtCore import Qt, QUrl, QSize, QPointF, QRectF, QTimer, Signal
 from PySide6.QtGui import (
     QPixmap, QMovie, QPainter, QColor,
-    QRadialGradient, QLinearGradient, QBrush, QPen,
+    QRadialGradient, QLinearGradient, QBrush,
 )
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".jfif")
@@ -61,6 +61,16 @@ PANO_YAW_STEP = 0.2
 # The cubemap is rendered into a half-resolution buffer and scaled up: the
 # art is soft anyway and it halves the per-frame cost.
 PANO_BUFFER_DIV = 2
+
+# ── loop-seam fade ──────────────────────────────────────────────────────
+# GIFs and videos restart abruptly at the loop point; the jump from the last
+# frame back to the first reads as a hard cut. Dip the backdrop to the theme
+# background and fade back in so the seam is covered. This only paints *inside*
+# the backdrop widget, which sits below every page, so it can never hide UI.
+LOOP_FADE_MS = 380          # full cover → clear (and clear → full cover)
+LOOP_FADE_TICK_MS = 24
+LOOP_FADE_LEAD_MS = 420     # video: start covering this long before the end
+LOOP_FADE_GIF_FRAMES = 3    # gif: start covering this many frames before the end
 
 
 def _mean_luma(images) -> float:
@@ -229,6 +239,86 @@ def draw_version_wallpaper(version_id: str | None, size: QSize) -> QPixmap | Non
     return pm
 
 
+# ── readability veil for still / animated media ─────────────────────────
+# The veil keeps text that sits directly on the artwork legible.  Like the
+# panorama scrim it is luminance-adaptive: art whose brightness is far from
+# the theme's own polarity (a pale sky in the light theme, a bright photo in
+# the dark theme) needs a heavier scrim, otherwise grey hint labels wash out
+# (round-120).  ``VEIL_ALPHA`` is the fallback for media whose luma cannot be
+# sampled (video) and the floor for everything else.
+MEDIA_TARGET_LUMA = {"light": 0.86, "dark": 0.18}
+MEDIA_VEIL_MIN = 0.46       # == _Veil.VEIL_ALPHA / 255
+MEDIA_VEIL_MAX = 0.92       # never fully hide the artwork
+
+
+class _Veil(QWidget):
+    """Theme-coloured scrim between the artwork and the UI (round-119).
+
+    Pages are plain widgets with a transparent background, so without a scrim
+    the artwork would sit *directly* behind page titles and hint labels and
+    murder their contrast. The veil keeps the wallpaper clearly visible while
+    guaranteeing a legible surface for text; cards stay fully opaque on top.
+    """
+
+    VEIL_ALPHA = 118
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._alpha = self.VEIL_ALPHA
+
+    def set_alpha(self, alpha: int) -> None:
+        alpha = max(0, min(255, int(alpha)))
+        if alpha == self._alpha:
+            return
+        self._alpha = alpha
+        self.update()
+
+    def paintEvent(self, e):
+        try:
+            from .theme import COLORS
+            color = QColor(COLORS["bg_app"])
+        except Exception:  # noqa: BLE001
+            color = QColor("#1E1E1E")
+        color.setAlpha(self._alpha)
+        p = QPainter(self)
+        p.fillRect(self.rect(), color)
+        p.end()
+
+
+class _LoopFade(QWidget):
+    """Theme-coloured cover that animates across a media loop seam.
+
+    Lives inside ``WallpaperWidget`` (below every page), so it dims only the
+    artwork — never the UI on top of it.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._value = 0.0
+
+    def set_value(self, value: float) -> None:
+        value = max(0.0, min(1.0, float(value)))
+        if abs(value - self._value) < 0.004:
+            return
+        self._value = value
+        self.update()
+
+    def paintEvent(self, e):
+        if self._value <= 0.004:
+            return
+        try:
+            from .theme import COLORS
+            color = QColor(COLORS["bg_app"])
+        except Exception:  # noqa: BLE001
+            color = QColor("#1E1E1E")
+        color.setAlpha(int(round(self._value * 255)))
+        p = QPainter(self)
+        p.fillRect(self.rect(), color)
+        p.end()
+
+
 class WallpaperWidget(QWidget):
     """Backdrop that renders a colour / image / GIF / video / panorama."""
 
@@ -258,8 +348,17 @@ class WallpaperWidget(QWidget):
         self._pano_buffer: QPixmap | None = None
         self._pano_yaw = 0.0
         self._pano_luma = 0.0           # mean luminance of the artwork
+        self._media_luma: float | None = None  # mean luminance of still art
         self._pano_timer: QTimer | None = None
         self._pano_key: tuple | None = None
+        # ── loop-seam fade state ──
+        self._veil: _Veil | None = None
+        self._fade: _LoopFade | None = None
+        self._fade_value = 0.0
+        self._fade_target = 0.0
+        self._fade_timer: QTimer | None = None
+        self._last_gif_frame = -1
+        self._last_video_pos = -1
 
     # ------------------------------------------------------------- config
     def apply(self, cfg: dict, version_id: str | None = None,
@@ -281,6 +380,7 @@ class WallpaperWidget(QWidget):
         self._mode = mode
         self._pixmap = None
         self._scaled = None
+        self._media_luma = None
         # A "version" wallpaper needs something to show. With no instance (and
         # no custom image) there is no version to draw, and the procedural
         # fallback tinted the whole home page with a version hue the player
@@ -292,6 +392,8 @@ class WallpaperWidget(QWidget):
             pm = QPixmap(path)
             self._pixmap = pm if not pm.isNull() else None
             self._scaled = None  # invalidate scaled cache
+            if self._pixmap is not None:
+                self._media_luma = _mean_luma([pm.toImage()])
         elif mode == "gif" and path and os.path.exists(path):
             self._stop_panorama()
             self._start_gif(path)
@@ -305,18 +407,22 @@ class WallpaperWidget(QWidget):
                 pm = QPixmap(path)
                 self._pixmap = pm if not pm.isNull() else None
                 self._scaled = None
+                if self._pixmap is not None:
+                    self._media_luma = _mean_luma([pm.toImage()])
             elif not mc_dir:
                 # No instance yet → nothing to draw (see `visible` above).
                 self._stop_panorama()
             else:
-                # Real cubemap of the instance's own version; the procedural
-                # gradient below only fills the gap until the textures are in.
+                # Real cubemap of the instance's own version. Do NOT paint the
+                # procedural fallback while the textures load: on light themes
+                # it is a flat lavender wash that reads as a broken background
+                # (round-126: "点击启动后出现淡紫色底色"). Stay hidden until the
+                # actual panorama arrives; a version without usable assets now
+                # simply keeps the normal page background.
                 self._start_panorama(mc_dir, game_dir, version)
-                size = self.size()
-                if not size.isValid() or size.width() < 2 or size.height() < 2:
-                    size = QSize(1920, 1080)
-                self._pixmap = draw_version_wallpaper(version_id, size)
-                self._scaled = None
+                # A cubemap that is already loaded (same instance) stays visible;
+                # otherwise wait for the loader's ready signal.
+                visible = self._panorama is not None
         else:
             self._stop_panorama()
 
@@ -324,13 +430,150 @@ class WallpaperWidget(QWidget):
                 path and os.path.exists(path)):
             visible = False
         self.setVisible(visible)
+        self._sync_veil()
+        # A fresh wallpaper starts clear; the loop seam handles its own fades.
+        self._reset_fade()
         self.update()
+
+    # -------------------------------------------------------- readability veil
+    def _sync_veil(self) -> None:
+        """Keep the theme scrim aligned with the current artwork (round-119)."""
+        media = (self._mode in ("image", "gif", "video", "version")
+                 and self._panorama is None)
+        if not media:
+            if self._veil is not None:
+                self._veil.hide()
+            return
+        if self._veil is None:
+            self._veil = _Veil(self)
+        self._veil.set_alpha(self._veil_alpha())
+        self._veil.setGeometry(self.rect())
+        self._veil.show()
+        self._veil.raise_()
+        if self._fade is not None and self._fade.isVisible():
+            self._fade.raise_()
+
+    def _veil_alpha(self) -> int:
+        """Luminance-adaptive scrim strength for still / animated art.
+
+        Panorama mode has its own vertical scrim; video has no cheap way to
+        sample a frame, so both keep the historical constant.  For images and
+        GIFs push the scrim only as far as the theme's polarity needs, clamped
+        so the artwork always stays visible.
+        """
+        luma = self._media_luma
+        if luma is None:
+            return _Veil.VEIL_ALPHA
+        try:
+            from .theme import get_theme_mode
+            dark = get_theme_mode() == "dark"
+        except Exception:  # noqa: BLE001
+            dark = True
+        target = MEDIA_TARGET_LUMA["dark" if dark else "light"]
+        if dark:
+            need = 1.0 - target / luma if luma > 0 else 0.0
+        else:
+            need = (target - luma) / (1.0 - luma) if luma < 1.0 else 0.0
+        need = max(MEDIA_VEIL_MIN, min(MEDIA_VEIL_MAX, need))
+        return int(round(need * 255))
+
+    # -------------------------------------------------------- loop-seam fade
+    def _reset_fade(self) -> None:
+        self._fade_value = 0.0
+        self._fade_target = 0.0
+        if self._fade_timer is not None:
+            self._fade_timer.stop()
+        if self._fade is not None:
+            self._fade.set_value(0.0)
+            self._fade.hide()
+
+    def _ensure_fade(self) -> "_LoopFade":
+        if self._fade is None:
+            self._fade = _LoopFade(self)
+            self._fade.setGeometry(self.rect())
+        self._fade.setGeometry(self.rect())
+        self._fade.show()
+        self._fade.raise_()
+        return self._fade
+
+    def _fade_to(self, target: float) -> None:
+        """Animate the seam cover towards ``target`` (0 = clear, 1 = covered)."""
+        target = max(0.0, min(1.0, float(target)))
+        if abs(target - self._fade_target) < 0.02:
+            return
+        self._fade_target = target
+        self._ensure_fade()
+        if self._fade_timer is None:
+            self._fade_timer = QTimer(self)
+            self._fade_timer.setInterval(LOOP_FADE_TICK_MS)
+            self._fade_timer.timeout.connect(self._fade_tick)
+        self._fade_timer.start()
+
+    def _fade_tick(self) -> None:
+        step = LOOP_FADE_TICK_MS / float(LOOP_FADE_MS)
+        if self._fade_value < self._fade_target:
+            self._fade_value = min(self._fade_target, self._fade_value + step)
+        else:
+            self._fade_value = max(self._fade_target, self._fade_value - step)
+        if self._fade is not None:
+            self._fade.set_value(self._fade_value)
+        if abs(self._fade_value - self._fade_target) < 1e-6:
+            if self._fade_timer is not None:
+                self._fade_timer.stop()
+            if self._fade_value <= 0.004 and self._fade is not None:
+                self._fade.hide()
+
+    def _on_gif_frame(self, frame: int) -> None:
+        """Cover the GIF loop seam (QMovie wraps back to frame 0)."""
+        movie = self._movie
+        if movie is None:
+            return
+        try:
+            count = movie.frameCount()
+        except Exception:  # noqa: BLE001
+            return
+        if self._media_luma is None and frame == 0:
+            # First frame is enough to pick the veil strength (round-120).
+            try:
+                img = movie.currentImage()
+                if not img.isNull():
+                    self._media_luma = _mean_luma([img])
+                    self._sync_veil()
+            except Exception:  # noqa: BLE001
+                pass
+        if count > LOOP_FADE_GIF_FRAMES * 2:
+            if frame >= count - LOOP_FADE_GIF_FRAMES:
+                self._fade_to(1.0)
+        if 0 <= frame < self._last_gif_frame:
+            self._fade_to(0.0)      # wrapped → fade the new loop back in
+        self._last_gif_frame = frame
+
+    def _on_video_pos(self, pos: int) -> None:
+        """Cover the video loop seam (QMediaPlayer rewinds to 0)."""
+        player = self._player
+        if player is None:
+            return
+        try:
+            dur = player.duration()
+        except Exception:  # noqa: BLE001
+            return
+        if dur > 3000:
+            if pos >= 0 and dur - pos <= LOOP_FADE_LEAD_MS:
+                self._fade_to(1.0)
+            if 0 <= pos < self._last_video_pos and self._last_video_pos > dur * 0.5:
+                self._fade_to(0.0)
+        self._last_video_pos = pos
 
     # ------------------------------------------------------------ panorama
     @property
     def panorama_active(self) -> bool:
         """True while the real Minecraft panorama is on screen."""
         return self._panorama is not None
+
+    @property
+    def has_backdrop(self) -> bool:
+        """True while any wallpaper (colour / image / GIF / video / panorama) is up."""
+        return self._mode != "none" and self.isVisible()
 
     def _start_panorama(self, mc_dir: str, game_dir: str, version: str) -> None:
         """Load the cubemap of an instance in the background.
@@ -384,7 +627,12 @@ class WallpaperWidget(QWidget):
         self._pano_luma = _mean_luma(images)
         self._pano_buffer = None
         self._pano_yaw = 0.0
+        # The backdrop was held hidden while the cubemap loaded; now there is
+        # real artwork to show.
+        if self._mode == "version" and not self.isVisible():
+            self.setVisible(True)
         self._start_pano_timer()
+        self._sync_veil()      # the panorama brings its own luminance-adaptive scrim
         self.panorama_ready.emit()
         self.update()
 
@@ -430,6 +678,8 @@ class WallpaperWidget(QWidget):
             return
         movie.setCacheMode(QMovie.CacheAll)
         lbl.setMovie(movie)
+        self._last_gif_frame = -1
+        movie.frameChanged.connect(self._on_gif_frame)
         movie.start()
         if self._opacity < 1.0:
             eff = QGraphicsOpacityEffect(lbl)
@@ -456,6 +706,8 @@ class WallpaperWidget(QWidget):
         player.setVideoOutput(vw)
         player.setLoops(QMediaPlayer.Loops.Infinite)
         player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
+        self._last_video_pos = -1
+        player.positionChanged.connect(self._on_video_pos)
         if self._opacity < 1.0:
             eff = QGraphicsOpacityEffect(vw)
             eff.setOpacity(self._opacity)
@@ -471,12 +723,10 @@ class WallpaperWidget(QWidget):
             self._movie_label.setGeometry(self.rect())
         if self._video is not None:
             self._video.setGeometry(self.rect())
-        if self._mode == "version" and self._panorama is None:
-            size = self.size()
-            if size.isValid() and size.width() >= 2 and size.height() >= 2:
-                self._pixmap = draw_version_wallpaper(self._version_id, size)
-                self._scaled = None
-                self.update()
+        if self._fade is not None:
+            self._fade.setGeometry(self.rect())
+        if self._veil is not None:
+            self._veil.setGeometry(self.rect())
 
     def paintEvent(self, e):
         if self._mode == "none":

@@ -29,6 +29,14 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:10]
 
 
+class SkinUploadError(Exception):
+    """Mojang rejected a skin upload (bad file, expired token, ...)."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
 def _http_bytes(url: str, timeout: int = 20) -> bytes:
     import urllib.request
 
@@ -52,6 +60,10 @@ class SkinManager:
         self._meta = os.path.join(get_data_dir(), "skins.json")
         self._skins: dict[str, dict] = {}
         self._active: dict[str, str] = {}   # account_id -> skin_id
+        # round-119: capes live in the same library (data/skins/), stored as a
+        # second collection so the existing skin bookkeeping stays untouched.
+        self._capes: dict[str, dict] = {}
+        self._active_cape: dict[str, str] = {}  # account_id -> cape_id
         self._load()
 
     # ---- persistence ----
@@ -68,11 +80,17 @@ class SkinManager:
             if os.path.exists(os.path.join(self._dir, raw.get("file", ""))):
                 self._skins[raw["id"]] = raw
         self._active = data.get("active", {})
+        for raw in data.get("capes", []):
+            if os.path.exists(os.path.join(self._dir, raw.get("file", ""))):
+                self._capes[raw["id"]] = raw
+        self._active_cape = data.get("active_cape", {})
 
     def _save(self) -> None:
         with open(self._meta, "w", encoding="utf-8") as f:
             json.dump(
-                {"skins": list(self._skins.values()), "active": self._active},
+                {"skins": list(self._skins.values()), "active": self._active,
+                 "capes": list(self._capes.values()),
+                 "active_cape": self._active_cape},
                 f, ensure_ascii=False, indent=2,
             )
 
@@ -210,6 +228,77 @@ class SkinManager:
             raise ValueError(f"无法下载皮肤：{name}")
         return self.add_bytes(data, name or uuid, "download", player=name, model="auto")
 
+    # ---- premium account skin: refresh / upload (round-123) ----
+    def fetch_account_skin(self, name: str, uuid: str = "") -> dict | None:
+        """Pull the account's current Mojang skin into the library.
+
+        The name route is preferred because only the Mojang texture property
+        carries ``metadata.model`` (slim vs classic).  Returns the stored entry
+        or ``None`` when both routes fail, so callers can show a real error
+        instead of silently falling back to Steve.
+        """
+        entry = None
+        if name:
+            try:
+                entry = self.download(name)
+            except Exception:
+                entry = None
+        if entry is None and uuid:
+            try:
+                entry = self.download_by_uuid(uuid, name)
+            except Exception:
+                entry = None
+        return entry
+
+    def upload(self, access_token: str, path: str, variant: str = "classic") -> dict:
+        """Replace the skin on the *real* Mojang account with a local PNG.
+
+        Hits ``POST /minecraft/profile/skins``; this is a destructive action on
+        the player's account, so the caller must confirm before invoking it.
+        Raises ``SkinUploadError`` with the server's message on rejection.
+        """
+        import urllib.error
+        import urllib.request
+
+        with open(path, "rb") as f:
+            data = f.read()
+        if not data or data[:8] != b"\x89PNG\r\n\x1a\n":
+            raise SkinUploadError("not a PNG file")
+        variant = "slim" if variant == "slim" else "classic"
+        boundary = "----ACLauncher" + uuid.uuid4().hex
+        head = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="variant"\r\n\r\n'
+            f"{variant}\r\n"
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="skin.png"\r\n'
+            "Content-Type: image/png\r\n\r\n"
+        ).encode("utf-8")
+        body = head + data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.minecraftservices.com/minecraft/profile/skins",
+            data=body,
+            method="POST",
+            headers={
+                **_HEADERS,
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as e:
+            msg = ""
+            try:
+                payload = json.loads(e.read().decode("utf-8"))
+                msg = payload.get("errorMessage") or payload.get("error") or ""
+            except Exception:
+                msg = ""
+            raise SkinUploadError(msg or f"HTTP {e.code}", e.code) from None
+        except Exception as e:
+            raise SkinUploadError(str(e) or type(e).__name__) from None
+
     @staticmethod
     def _decode_texture(profile_json: dict) -> dict | None:
         for prop in profile_json.get("properties", []):
@@ -218,15 +307,103 @@ class SkinManager:
             try:
                 raw = base64.b64decode(prop["value"])
                 tex = json.loads(raw.decode("utf-8"))
+                out: dict = {}
                 skin = tex.get("textures", {}).get("SKIN")
                 if skin and skin.get("url"):
-                    return {
+                    out = {
                         "url": skin["url"],
                         "model": skin.get("metadata", {}).get("model", "auto"),
                     }
+                cape = tex.get("textures", {}).get("CAPE")
+                if cape and cape.get("url"):
+                    out["cape"] = cape["url"]
+                return out or None
             except Exception:
                 return None
         return None
+
+    # ---- capes (round-119) ----
+    def list_capes(self) -> list[dict]:
+        return list(self._capes.values())
+
+    def cape_path_of(self, cape_id: str) -> str | None:
+        c = self._capes.get(cape_id)
+        return os.path.join(self._dir, c["file"]) if c else None
+
+    def active_cape_of(self, account_id: str) -> dict | None:
+        cid = self._active_cape.get(account_id)
+        return self._capes.get(cid) if cid else None
+
+    def active_cape_path(self, account_id: str) -> str | None:
+        c = self.active_cape_of(account_id)
+        return os.path.join(self._dir, c["file"]) if c else None
+
+    def add_cape_bytes(self, data: bytes, name: str, source: str = "download",
+                       player: str = "") -> dict:
+        cid = _new_id()
+        fname = cid + ".png"
+        with open(os.path.join(self._dir, fname), "wb") as f:
+            f.write(data)
+        cape = {"id": cid, "name": name, "source": source,
+                "player": player, "file": fname}
+        self._capes[cid] = cape
+        self._save()
+        return cape
+
+    def add_cape_file(self, src_path: str, name: str | None = None) -> dict:
+        with open(src_path, "rb") as f:
+            data = f.read()
+        if data[:8] != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("不是有效的 PNG 披风贴图")
+        return self.add_cape_bytes(
+            data, name or os.path.splitext(os.path.basename(src_path))[0],
+            source="local")
+
+    def set_active_cape(self, account_id: str, cape_id: str | None) -> None:
+        if cape_id is None:
+            self._active_cape.pop(account_id, None)
+        else:
+            self._active_cape[account_id] = cape_id
+        self._save()
+
+    def remove_cape(self, cape_id: str) -> None:
+        c = self._capes.pop(cape_id, None)
+        if c:
+            try:
+                os.remove(os.path.join(self._dir, c["file"]))
+            except OSError:
+                pass
+        for acc, cid in list(self._active_cape.items()):
+            if cid == cape_id:
+                self._active_cape.pop(acc, None)
+        self._save()
+
+    def download_cape(self, name: str) -> dict:
+        """Resolve a player name to their cape. Raises if they have none."""
+        name = name.strip()
+        if not name:
+            raise ValueError("玩家名为空")
+        url = ""
+        try:
+            prof = _http_json(
+                f"https://api.mojang.com/users/profiles/minecraft/{name}")
+            uid = prof.get("id")
+            if uid:
+                pj = _http_json(
+                    f"https://sessionserver.mojang.com/session/minecraft/"
+                    f"profile/{uid}?unsigned=false")
+                tex = self._decode_texture(pj)
+                url = (tex or {}).get("cape", "")
+                if not url:
+                    url = f"https://crafatar.com/capes/{uid}"
+        except Exception:  # noqa: BLE001 - fall back to crafatar below
+            url = ""
+        if not url:
+            url = f"https://crafatar.com/capes/{name}"
+        data = _http_bytes(url)
+        if not data or len(data) < 64 or data[:8] != b"\x89PNG\r\n\x1a\n":
+            raise ValueError(f"该玩家没有可用披风：{name}")
+        return self.add_cape_bytes(data, name, player=name)
 
 
 _manager = SkinManager()

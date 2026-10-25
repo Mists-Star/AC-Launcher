@@ -8,6 +8,367 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-126（2026-10-25）— 第三批回归：角色 / 加载器 / Cleanroom / 壁纸 / 双页
+
+### A. 首页角色（「角色直接看不到了，变成紫色柔光」）
+
+* **根因**：`HomePage.rebuild()`（语言、主题、设置保存都会触发）会重建
+  `_CharStage`，但 `_char_key` 仍留在 HomePage 上；`_refresh_character()`
+  发现 key 未变就跳过渲染，新 stage 永远是空的 —— 只剩背后的紫色 spotlight。
+* **修复**：新建 stage 时清空 `_char_key`；`_refresh_character()` 在
+  `char_stage._frames` 为空时强制重渲；渲染抛异常时回退到单帧
+  `render_skin_3d`，不再留空台。
+* **同步刷新**：启动补拉皮肤完成、关闭皮肤库后，首页角色一起重渲
+  （之前只刷头像）。
+
+### B. 角色/图片「低清」
+
+* **3D 采样**：皮肤是 64×64 像素画，显示到 ~9 device px/texel。双线性会把
+  每个 texel 抹成灰雾（读起来就是低清）→ 纹理改回最近邻，轮廓仍由
+  抗锯齿 + 2× 超采样保证，观感回到像素画而不是糊图。
+* **2D 预览**：皮肤库卡片 / 披风预览按控件 `devicePixelRatioF()` 渲染
+  （1.25 缩放下不再被 Qt 二次放大）。
+* **版本方块图标**：`make_version_pixmap` 按物理像素渲染并 `setDevicePixelRatio`。
+* **卡片封面图标**：`ImageLoader._round` 原来只按逻辑像素出图（DPR 恒 1），
+  在 125% / 150% 缩放下被 Qt 二次放大 → 资源中心 / 实例卡封面发虚。改为按
+  目标控件的 `devicePixelRatioF()` 出物理像素并 `setDevicePixelRatio`，
+  磁盘缓存文件名带 `@dpr` 后缀（旧缓存自然失效，不会混用）。
+* **皮肤网格**：16×32 上采样走最近邻（原来 smooth 把 1px 描边拉成灰边），
+  仅缩小时才平滑。
+
+### C. 加载器卡片重叠（「选择部分加载器会出现被压缩」）
+
+* `_update_compatible_loaders()` 对仍在 `QGridLayout` 里的卡片再次
+  `addWidget` 不会移动旧格 item → 两张卡叠画。改为先 `removeWidget` 再按
+  3 列重排。
+* `_LoaderCard` 固定高 82：描述换两行时行高不齐，视觉上像被压扁。
+
+### D. Cleanroom 下载/安装报错（「cleanroom 下载报错」「首页开始游戏才报错」）
+
+* **构建源**：`api.github.com` 在用户网络 404/被阻断 → 改为抓官方
+  `download.cleanroommc.com` 的安装器文件名（实测 10 个 0.7.x 构建），
+  下载走 `repo.cleanroommc.com` Maven 镜像；两条 host 失败互备。
+* **安装命令**：旧代码用的是 pre-0.7 的 Forge 式 `--installClient <dir>`，
+  0.7.x 只认 `client -d <dir> --version <id> -y`（实测 installer `--help`
+  与 `--dry-run --json` 验证），且安装前先补 vanilla 1.12.2 底座。
+* **Java**：0.7.x 安装器只接受 **Java 25**（24/26 都被拒）。新增
+  `required_java_major_for()`：cleanroom → 25，`select_java` 支持
+  `need_override`（25 的兼容区间仅 25）；无 25 时安装器
+  `--provision-java` 自带一份到 `~/.cleanroom/java`，并把该目录加进
+  Java 扫描根 + 清扫描缓存，安装完立即能选到。
+* **版本目录**：0.7.x 写的是 `versions/Cleanroom-<build>/`，旧逻辑按
+  `<mc>-` 前缀找不到 → 改为任意含 cleanroom 的版本目录。
+
+### E. 启动后整窗淡紫（「点击一次启动后就出现淡紫色背景底色」）
+
+* `wallpaper` version 模式在有实例时会先画 `draw_version_wallpaper`
+  （浅色主题是 `#F7F6FB→#ECEAF7` 淡紫渐变）。实例 assets 不完整 →
+  panorama 永远失败 → 整窗永久淡紫。
+* 现在不再画 fallback：panorama 真就绪才 `setVisible(True)`，没有就保持
+  正常页面底色。
+
+### F. 版本列表变少 / 退出后双页
+
+* **版本清单**：网络抖动 + 30 分钟内存 TTL 过期会让 `fetch_versions()`
+  直接抛错 → 下拉变空/变少。新增 `_stale()` 七天兜底，磁盘缓存也保留
+  ｜过期条目，离线时仍能列出全部版本。
+* **双页**：内嵌「新建 / 扫描」面板关闭时 `deleteLater()` 要等下一轮事件
+  循环，期间仍在绘制 → 先 `hide()` 再延迟删除。
+
+### G. LabyMod 直连下载
+
+* 官方不发行独立 Forge mod jar（只有安装器，内含客户端 jar + 版本配置）。
+* 「点击即跳浏览器」改为：确认框说明后，应用内直接下载官方安装器
+  （`releases.r2.labymod.net/.../LabyModLauncherSetup-latest.exe`）并启动，
+  装完可用「扫描并导入」接管；非正版账号无法进游戏的限制在确认框写明。
+
+### 验证
+
+* `py_compile` + `pyflakes`（本轮触及的全部文件）全过；
+  `regress.py` 11/11 通过。
+* live view 实测：首页角色 30 帧非空且像素清晰、无淡紫底；加载器页 6 张卡
+  不重叠；Cleanroom 下拉 10 个真实构建；cleanroom 安装器 CLI 用
+  `--dry-run --json` 实测 exit 0 并确认写入
+  `versions/Cleanroom-0.7.12-alpha/`。
+* 壁纸离屏实测：`version` 模式 + 不存在的实例目录 → `isVisible()=False`、
+  `_pixmap=None`、`_panorama=None`（不再画淡紫渐变）；无实例同样隐藏。
+* 内嵌向导离屏实测：打开 → 关闭后 `_body_stack` 只剩 1 个可见页、
+  `_new_panel=None`，无残留大尺寸可见控件（双页复验）。
+* 图标 DPR 实测：`ImageLoader._round(48, dpr=1.25)` → 60 物理像素 +
+  `devicePixelRatio=1.25`（逻辑 48）；DPR 1.0 仍是 48。
+
+## round-124（2026-10-25）— 审计清单 10 项收尾
+
+### A. 视觉/文案修复
+
+* **侧栏分组标题**：`.nav-group` 的 `padding: 14px 0 4px` 在 26px 行高 + 11px
+  字号下只剩 8px 内容区，文字被压成灰条 → 改为 `5px 0 4px`（内容区 17px），
+  实测「游戏/资源/联机/其他/系统」五行高度均 24px 且完整可读。
+* **实例详情路径**：QFormLayout 只按 wordWrap 标签的单行 sizeHint 分配行高，
+  长 `mc_dir` 被裁到只剩盘符 → 路径（标题 + 值）改由纵向布局承载，
+  `heightForWidth` 生效；窄窗实测 488px 宽时高 36px（两行完整显示）。
+* **崩溃分析空态**：同一句「未发现崩溃记录…」原先在正文与状态行各写一次，
+  且无实例时也复述「该实例最近一次运行看起来正常」→ 空态只在正文出现一次，
+  无实例改为「请先选择一个实例」，状态行隐藏；标题不再拼接重复提示。
+* **实例详情分区图标**：`icon("image")` / `icon("sparkles")` 不存在 →
+  改 `resourcepack` / `shader`，四个分区按钮图标均非空。
+* **设置页页脚**：`[cls="page-footer"]` 用 `$bg_panel`，浅色主题下与内容白底
+  差半档、像一条独立白条 → 改 `$bg_card`，只留上边框分隔线。
+
+### B. 入口与加载态
+
+* **百宝箱入口**：AC 侧栏此前无此页入口（仅顶部导航布局可达）→ 新增「其他」
+  分组 + 百宝箱项，`toolbox` 图标回退到 `tools`；实测侧栏第 8 行可达。
+* **首帧骨架屏**：版本库 / 资源中心首次网络往返 0.6–1.2s 内整页空白 →
+  分别铺 6 行静态骨架（图标块 + 两条占位条），数据到达后整页清空重绘；
+  失败路径会主动清掉骨架，不会留在错误提示下面。
+
+### C. 资源与卫生
+
+* **图标资源路径**：`icons.qrc` 的 `<file>` 带了 `assets/icons/` 前缀，嵌入后的
+  资源路径实际是 `:/icons/assets/icons/<name>.svg`，与代码查找的
+  `:/icons/<name>.svg` 不符 —— 每次查找都触发 `Cannot open file
+  ':/icons/logo.svg'` 警告并退回磁盘。改为 `<file alias="...">` 并重新
+  `pyside6-rcc` 生成 `src/icons_rc.py`；同步 `assets/icons.qrc`。
+  复验 8 个图标 `:/icons/*.svg` 全部 `exists=True`。
+* 删除 `settings_dialog._on_style_combo_changed`（pass-only 死方法，无连接）。
+* 实例详情「来源启动器」为空（AC 自有实例）时不再插入空值行，消除 8×19 的
+  空白 label；六个页面扫描空文本可见 label 均为 0。
+
+**验证**：`py_compile` OK；`pyflakes src main.py regress.py` 0；`regress.py`
+11/11；离屏截图（`_shots/audit/r124-*.png`）逐项对照通过。
+
+## round-123（2026-10-25）— 正版账号皮肤：手动刷新 / 上传换肤 / 失败可见
+
+### A. 刷新我的皮肤
+
+* 皮肤库工具栏新增「刷新我的皮肤」，只对正版（Microsoft）账号显示。
+  走新的 `SkinManager.fetch_account_skin(name, uuid)`：先按玩家名请求 Mojang
+  （纹理属性带 `metadata.model`），失败再回退 crafatar。成功后设为当前皮肤，
+  并通知主窗口即时重绘顶栏头像与首页角色卡。
+* 登录时的自动拉取改为复用同一入口，不再有两份重复逻辑。
+
+### B. 上传到正版账号
+
+* 皮肤卡片（正版账号）新增「上传到账号」：`POST /minecraft/profile/skins`，
+  multipart 提交 `variant`（slim/classic，由条目元数据或像素探测决定）+ `file`。
+* 上传前二次确认——这会真实修改账号在 Minecraft 里的皮肤。
+* 401 时用 refresh_token 静默续期，再重试一次；服务端拒绝时把
+  `errorMessage` 原样显示在状态行。成功后本地也把该皮肤设为当前。
+
+### C. 失败不再静默
+
+* 登录后若正版账号始终没拿到皮肤，状态栏提示「未能获取正版皮肤……皮肤库点
+  『刷新我的皮肤』可重试」，而不是无声地显示默认 Steve。
+
+**验证**：`pyflakes` 0；`regress.py` 11/11；离屏构造确认刷新按钮仅正版账号可见、
+游客不可见；非 PNG 上传在联网前即被拒（`SkinUploadError`）。
+真实上传需用户自己的正版账号端到端确认。
+
+## round-122（2026-10-24）— 审计修复：模组页样式级联 / 皮肤模型判定 / 登录信号重复 / 仓库卫生
+
+### A. 模组管理页：操作行背景再次被父容器级联抹掉
+
+* `ModsPage` 的 `action_widget` 上仍留着 `setStyleSheet("background: transparent;")`，
+  父规则优先于应用级 QSS，把 `inst_combo`（#F8F9FA）与 accent「添加」按钮
+  （#7C3AED）的背景一并清成 alpha 0 —— 白字配白底，按钮等于隐形。
+* 删掉该内联样式（QWidget 默认不画背景，无需声明）。离屏采样复验：
+  `add_btn` #7C3AED α255、`update_btn` #FFFFFF α255、`inst_combo` #F8F9FA α255。
+
+### B. 皮肤渲染：slim 判定恒为 True + 左臂 UV 偏移
+
+* `_is_slim` 原实现对任何 64×64 皮肤恒返回 `True`（把 46–47 列的探测写反了）。
+  改为**元数据优先**（`skins.json` 的 `model` 字段 / Mojang `metadata.model`），
+  未知时才探测：slim 手臂 3px 宽，其展开只用到 32–45 列，46–47 恒透明。
+* 新增 `_SLIM_LARM_UV`：front `36..38`、back `43..45`、left `39..42`、
+  top/bottom 同步左移。旧代码把 classic 矩形硬裁成 3px，back 取 44 正好落在
+  透明列 46，slim 角色后背会画出一条空条。
+* `render_skin`（平面图）左臂采样错误：取 `(36,20)` 实为**躯干背面**，
+  回退 `(40,20)` 是右臂侧面 —— 所有现代皮肤的右手都是一块躯干补丁。
+  改为 legacy 64×32 镜像右臂 `(44,20)`，1.8+ 取 `(36,52,3|4,12)`，空则回退镜像。
+* `render_skin` / `render_skin_3d` / `skin_model` 全部接受 `model=` 透传；
+  首页从 `skin_manager().active_of()` 取条目元数据，皮肤库卡片把
+  `skin.get("model")` 传给缩略图，默认 Steve/资源目录素材固定 `classic`。
+* 登录后拉取皮肤改走 `download(name)`：Mojang 纹理属性里带 `metadata.model`，
+  而 crafatar 不返回该字段 —— 此前微软账号皮肤永远按 classic 渲染；
+  失败再回退 `download_by_uuid`。
+
+### C. 微软登录：重试时信号重复连接
+
+* `ms_user_code_ready.connect(self._on_ms_user_code)` 写在 `_start_microsoft` 里，
+  每点一次登录就叠加一条连接，第 N 次重试时同一个设备码会触发 N 次
+  （重复开浏览器 / 重复写剪贴板）。连接移到 `__init__`，只连一次。
+
+### D. 仓库卫生
+
+* `.gitignore` 补 `ac.live.lock`（live view 专用锁）与 `_startup.log`。
+
+**验证**：`regress.py` 11/11；`pyflakes src main.py regress.py` 0；离屏渲染
+四份皮肤（wide/slim × Steve/Alex）确认左右臂贴图正确、slim 无空条；
+`skin_model` 自动判定 wide→classic、slim→slim；模组页三控件背景 alpha 采样 255。
+
+## round-121（2026-10-24）— 首页玩家角色重做 / 单卡启动面板 / 滚动区样式污染修复
+
+### A. 玩家角色：真 2.5D 方盒渲染（学主流启动器的账号视觉锚点）
+
+* 用户反馈：「去学别的启动器怎么做玩家角色的，我们这个是来搞笑的吗」——旧版
+  首页是 96px 正面贴纸 + 36px 披风缩略图 + 一个「—」占位，像未完成的占位图。
+* `skin_render.render_skin_3d`：头/躯干/双臂/双腿各按 6 个面取皮肤 UV
+  （含帽子叠层、slim 3px 手臂、64×32 老皮肤回退），Y 轴 26° + X 轴 8° 正交
+  投影，按平均深度排序后逐面 `quadToQuad` 贴图，3× 超采样再缩小；披风作为
+  躯干后方微外扩平面一起绘制（top half-width 5.2 → bottom 6.9，贴身不外飘）。
+* `skin_model` 暴露 classic / slim，首页徽章显示「经典 / 纤细」。
+
+### B. 首页：角色并入启动主卡（不再「卡中卡」）
+
+* 原「实例卡 + 我的角色卡」两张卡合并为一张 400px 的 hero：左侧「当前实例」+
+  下拉 + 下载版本（空状态）+ 开始游戏锚在左下；右侧账号信息（我的角色 /
+  名称 / 模型徽章 / 账号类型 · 披风）在上、200×240 角色立绘居中、
+  「更换皮肤与披风」在脚下。等距台座换成无边框柔光 + 脚底径向阴影，点角色
+  本体也可打开皮肤库。
+* 空状态：名称由「—」改为「未选择实例」，无实例时不显示只有一项的下拉框，
+  并给出「下载版本」入口，避免一个禁用的开始游戏成为死路。
+* 角色素材无披风时保持透明；披风纹理按 `(1,1) 10×16` 贴在背后。
+
+### C. 样式污染：滚动区 inline QSS 清空了所有子控件背景
+
+* 首页 `QScrollArea.setStyleSheet("background: transparent; border: none;")`
+  会级联到全部子控件，把 `QComboBox` / `QLineEdit` 等的背景和边框一起抹掉
+  ——实例下拉框因此看起来像一行裸文字（离屏像素采样确认透明）。
+* 改为只依赖全局 `QScrollArea` 规则 + `viewport().setAutoFillBackground(False)`；
+  壁纸仍能从首页透出（带壁纸离屏验证）。
+* `QPushButton[cls="secondary"]` 描边由 `$border` 提到 `$border_light` 并补
+  `$bg_btn` 底，浅色主题下「更换皮肤与披风」不再像纯文字。
+* 自定义 `_Combo` 画下拉箭头：全局 QSS 给 `::drop-down` 定了宽度却没给
+  `::down-arrow` 图片，Qt 就不画箭头，全应用的 combo 都缺可点击暗示。
+* 禁用的「开始游戏」图标从 `on_accent`（白）换成 `text_disabled` 灰。
+
+**验证**：`regress.py` 11/11；`pyflakes src main.py` 0；离屏渲染验证
+light / dark / guest / 有实例 / 带披风 / 带壁纸六种状态；live 125% DPI 真机
+截图确认字体、描边、角色比例与下拉箭头。
+
+## round-120（2026-10-24）— CurseForge 资源详情 / 返回首页修复 / 壁纸薄纱自适应 / 卫生清零
+
+### A. 资源中心：CurseForge 也有版本选择
+
+* `net_api` 新增 `_curseforge_versions`（官方 `/v1/mods/{id}/files`，需 Key）与
+  `_curseforge_versions_keyless`（cfwidget，免 Key），两者都把文件映射成
+  Modrinth 版本的同一形状（`game_versions` / `loaders` / `files` / `date_published`），
+  详情页一套渲染器通吃两种源。
+* 新增 `download_curseforge_file`：官方 `files/{fileId}/download-url` 拿直链，
+  作者禁止第三方分发时回退列表里的 `downloadUrl`；免 Key 走
+  `download_cfwidget_file`。
+* 搜索 / 免 Key 链接解析的结果统一带 `source`（`modrinth` / `curseforge`），
+  `StoreDetailDialog` 按来源选版本列表与下载器；无实例时两种源都能「不选版本
+  另存为」或直接按版本下载。
+* 详情对话框尺寸修复：`setMinimumSize(880, 760) / resize(920, 800)`。此前强制
+  680 高小于布局真实最小高度（753），「加载更多」压住版本行、翻译框盖住状态行。
+
+### B. 导航：从版本库返回首页
+
+* `_show_page` 在目标导航行已选中时不再空转：若侧栏行没变但栈仍在无行子页面
+  （版本库 / 模组 / 成就等），直接 `_switch_stack`。修复「首页高亮却停在版本库、
+  点首页没反应」。
+
+### C. 壁纸薄纱自适应
+
+* `_Veil` 支持 `set_alpha`；图片 / GIF 载入后按美术平均亮度算薄纱强度
+  （浅色主题目标 luma 0.86、深色 0.18，下限 0.46 上限 0.92），GIF 取首帧采样。
+  此前固定 alpha 118 让亮灰壁纸上的「找到 N 个结果」等裸标签发灰。
+* 视频无法低成本取帧，保留固定强度；全景仍走自带的自适应遮罩。
+
+### D. 质量清单收尾（P3 / P4）
+
+* 成就页单数分区最后一张卡跨两列，网格节奏统一。
+* 实例「路径」行由 `text_sub` 改为 `text_main`。
+* `pyflakes src main.py` 清零（含 `main.py` 的 `src.paths` 与未用 `e`）。
+* 删除全仓确认无人调用的死函数：`read_json` / `write_json` / `ensure_dir` /
+  `stop_bgm` / `play_sfx` / `stop_preview` / `validate_client_id` /
+  `login_with_microsoft` / `login_with_microsoft_code_display` / `docs_url` /
+  `node_running` / `recommended_majors` / `note_bytes` / `version_theme` 及
+  `VERSION_THEMES` 常量。
+
+**验证**：`regress.py` 11/11；pyflakes 0；live 截图复核侧栏收起态（56px 图标
+居中、无溢出）、正式版/快照/愚人节/远古四类版本图标比例、皮肤/披风双页、
+资源中心带壁纸的裸文字对比度。
+
+## round-119（2026-10-24）— 全窗动态壁纸 / 皮肤与披风 / 资源中心无实例下载 / 侧栏与版本图标收尾
+
+### A. 动态壁纸：覆盖全启动器 + 首尾淡入淡出 + 不挡内容
+
+* **背板上移到主窗口**：`WallpaperWidget` 从 `HomePage` 移到 `MainWindow`
+  （`central` 的子控件、`lower()`、`WA_TransparentForMouseEvents`），跟着
+  `central` 尺寸走；`panorama_ready` 仍转发到首页做文字对比度刷新。此前只有
+  首页有壁纸，实例/资源/设置等页面是裸背景。
+* **可读性薄纱**：新增 `_Veil`（主题底色 alpha 118，盖在媒体之上、UI 之下），
+  页面本身是全透明的，文字直接压在壁纸上会低对比；实测首页 / 资源中心
+  标题、提示、筛选行均可读，卡片保持实色。全景（panorama）自带亮度自适应
+  遮罩，此时薄纱自动隐藏。
+* **循环接缝**：新增 `_LoopFade`（壁纸内部的一层主题色渐变遮罩，永远盖不到
+  UI）＋ GIF 末尾帧 / 视频末尾 `positionChanged` 回绕检测——循环前 3 帧
+  （GIF）或最后 420ms（视频）盖到全不透明，回绕后再淡回。状态机（cover→1、
+  clear→0、回绕触发）已用离屏脚本逐项验证。
+* 图片模式实测：首页与资源中心整窗可见壁纸；视频模式在 `grab()` 里拿不到
+  画面（QVideoWidget 原生表面），只能真机目检。
+
+### B. 左侧栏收起态
+
+* **图标画不出来的真因**：PySide6 的 `QStyleOptionViewItem.icon` getter 与
+  成员共享数据指针——先捕获 `ic = opt.icon`、再 `opt.icon = QIcon()` 会把
+  已捕获的 `ic` 一起清空（「背景画了、图标没画」）。修法：**先取 pixmap**，
+  再在另一个 `QStyleOptionViewItem` 副本上清 icon/text 调 `CE_ItemViewItem`。
+* 收起态行高统一 48、`ScrollBarAlwaysOff`（消除 56 > 55 视口造成的横向
+  溢出）、图标居中、选中行用 `QIcon.Selected` 白色变体、分组标题在收起态
+  不再生成（不再有被压扁的「游戏/资源/联机/系统」小字）。真机截图复核：
+  无横向滚动条、无水波纹。
+
+### C. 版本页等距方块
+
+* 几何修正：侧棱 `vh = hypot(cx, hh)`，剪影高 `s(2+√5)/4`，由目标高度反推
+  宽度 `s = box*4/(2+√5)`——草方块不再被压扁。
+* 愚人节版本由「蛋糕」换成 `crafting_table`（语义仍贴合「愚人节=工作台彩蛋」
+  且贴图比例正常）；快照=命令方块、旧版=铁砧/圆石保持不变。五类图标离屏
+  拼条复核通过。
+
+### D. 资源中心：版本/目标选择 + 不选实例也能下载
+
+* `StoreDetailDialog` 新增「下载到」下拉：实例列表 + 「不指定版本 · 另存为…」；
+  未选实例时弹目录选择器（默认 `data/downloads`），直接把选中的资源版本存盘。
+* 无实例时也允许打开详情（此前直接 info 拦截），资源卡的下载按钮在无实例
+  Modrinth 源下改为打开详情，等价于「先选版本/目标再下载」。
+* i18n 新增 `store.detail_target` / `store.detail_target_save` /
+  `store.detail_save_title` / `store.detail_save_confirm` / `store.detail_no_folder`。
+  离屏验证：有实例时下拉 3 项且默认当前实例；无实例时仅 1 项 `__save__`。
+
+### E. 玩家皮肤与披风
+
+* `skins.py`：披风库与皮肤库同目录（`data/skins/` + `skins.json` 的 `capes` /
+  `active_cape`）；新增 `list_capes` / `add_cape_file` / `set_active_cape` /
+  `remove_cape` / `download_cape`（Mojang profile CAPE → crafatar 回退，校验
+  PNG 头）。
+* 登录成功自动拉取皮肤与披风（`login_dialog._fetch_skin`），多数账号没有披风
+  时静默跳过。
+* `skin_render.render_cape()`：取披风背面 `(1,1) 10x16`，按 10:16 缩放，
+  兼容 64x32 / 64x64 两种披风文件。
+* **首页新增「我的角色」卡**：全身皮肤预览（未设置时回退内置 Steve）＋披风
+  缩略图＋账号名/账号类型/披风名＋「更换皮肤与披风」入口（未登录时改为「登录」）。
+  账号切换、登录、关闭皮肤库后都会即时刷新。
+* `SkinDialog` 改为「皮肤 / 披风」双页：披风页支持导入 PNG、按玩家名下载、
+  装备 / 装备中、卸下披风、删除；无账号时装备按钮禁用并给出提示。
+* 新增 i18n：`skin.tab_skin|cape`、`skin.cape_*`、`home.char_*`。
+
+### F. 其他收尾
+
+* 首页「开始游戏」禁用态原本被 QSS 级联成近白底浅灰字（视觉上像不存在），
+  新增 `QPushButton[cls="play"]:disabled` 规则：浅底 + 灰字 + 边框，明确
+  「可点但当前不可用」。
+* `_pii_gate.py` 在无 git 的机器上从 `WinError 2` 崩溃改为打印 `SKIP` 退出 0；
+  `regress.py` 11/11 通过。
+* 卫生项：清掉 `main_window` / `wallpaper` / `login_dialog` / `store_detail` /
+  `pages_browse` / `onboarding` 六处顶层未使用导入。
+* 复核 round-102 设置页裁切：设置 → 网络 / 第三方服务截图无裁切、长提示
+  正常换行、滚动到底正常（详见 `docs/quality_punchlist.md`）。
+
 ## round-115（2026-10-23）— 验收评审（代码设计 + 实际作用）
 
 > 验收标准不是「能跑、不报错」，而是**代码设计上有没有实质缺陷**、**功能是不是

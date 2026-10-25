@@ -18,7 +18,7 @@ except ImportError:  # non-Windows builds won't have ctypes.windll, but the
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QWidget, QSizePolicy, QFileDialog, QLineEdit, QFormLayout,
+    QSizePolicy, QFileDialog, QLineEdit,
 )
 from PySide6.QtCore import Qt
 
@@ -126,7 +126,6 @@ def _msgbox(
     row = QHBoxLayout()
     row.setSpacing(16)
     from .icons import icon as _load_icon
-    from PySide6.QtGui import QPixmap
     px = _load_icon(_ICON_MAP.get(icon, "dialog_warning")).pixmap(40, 40)
     icon_lbl = QLabel()
     icon_lbl.setPixmap(px)

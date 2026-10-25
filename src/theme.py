@@ -138,6 +138,24 @@ def set_frosted(on: bool) -> None:
 # ── 让 DWM 的桌面模糊透出来。关闭时恢复实色（round-32 的默认行为）。
 _app_bg_translucent = False
 
+# ── 壁纸透底（round-119）：壁纸是整窗背景，不是某一页的私有图层。页面容器
+# ── 与窗口容器都必须让壁纸透出来，否则只有首页看得到。这里只把
+# ── ``bg_app_frost``（QWidget/QMainWindow 的底色）调成半透明；卡片仍走
+# ── 实色 ``$glassy``，文字依旧落在不透明底上，可读性不受影响。
+# ── 对话框必须保持实色（独立顶层窗口，没有壁纸垫底），走 ``$bg_app_solid``。
+_wallpaper_surface = False
+
+
+def set_wallpaper_surface(on: bool) -> None:
+    """Toggle the translucent app surface used while a wallpaper is active."""
+    global _wallpaper_surface
+    on = bool(on)
+    if on == _wallpaper_surface:
+        return
+    _wallpaper_surface = on
+    _QSS_CACHE.clear()
+    _notify_theme_change()
+
 
 def set_app_background_translucent(on: bool) -> None:
     """透底模式：应用层 QSS 背景改为半透明（否则 Acrylic 被实色盖住）。
@@ -484,7 +502,7 @@ QMainWindow {
 
 /* ---- CRITICAL: dialogs must NOT be white ---- */
 QDialog {
-    background: $bg_app_frost;
+    background: $bg_app_solid;
     color: $text_main;
     /* no border — FramelessHelper handles chrome */
 }
@@ -601,6 +619,14 @@ QPushButton[cls="play"] {
 }
 QPushButton[cls="play"]:hover { background: $accent_hover; border-color: $accent_press; }
 QPushButton[cls="play"]:pressed { background: $accent_press; border-color: $accent; }
+/* round-119: with no instance selected the play button is disabled — without
+   this rule the accent/disabled cascade left it near-white on white (an
+   invisible button). Keep it visible but clearly muted. */
+QPushButton[cls="play"]:disabled {
+    background: $bg_input;
+    color: $text_disabled;
+    border-color: $border;
+}
 /* danger outline */
 QPushButton[cls="danger"] {
     background: transparent;
@@ -608,10 +634,12 @@ QPushButton[cls="danger"] {
     color: $danger;
 }
 QPushButton[cls="danger"]:hover { background: $danger_hover; }
-/* secondary outline button (visible on both light and dark themes) */
+/* secondary outline button (visible on both light and dark themes).
+   round-121: $border (#E5E7EB on white) made the outline invisible — the
+   home character action looked like bare text. Use the stronger outline tier. */
 QPushButton[cls="secondary"] {
-    background: transparent;
-    border: 1px solid $border;
+    background: $bg_btn;
+    border: 1px solid $border_light;
     color: $text_main;
 }
 QPushButton[cls="secondary"]:hover {
@@ -746,8 +774,9 @@ QListWidget::item:selected {
     letter-spacing: 1px;
     background: transparent;
     border: none;
-    padding: 14px 0 4px 18px;
-    padding-left: 18px;
+    /* round-124：分组行高 26px、字号 11px，原 padding 上下合计 18px 只剩
+     * 8px 内容区，文字被压成 2–3px 的灰条。改为 5px/4px，内容区 17px。 */
+    padding: 5px 0 4px 18px;
 }
 
 /* ---- AC left sidebar (scoped by object name) ---- */
@@ -972,7 +1001,9 @@ QStatusBar {
     padding: 0 20px;
 }
 [cls="page-footer"] {
-    background: $bg_panel;
+    /* round-124：原先用 $bg_panel，浅色主题下与页面内容的白底差半档，
+     * 底栏看起来像一条独立的灰白条。改为与内容同色，只留分隔线。 */
+    background: $bg_card;
     border-top: 1px solid $border;
 }
 [cls="surface"] {
@@ -1148,8 +1179,15 @@ def build_qss() -> str:
     # 透出来；关闭时保持实色（round-32 默认）。
     if _app_bg_translucent:
         subst["bg_app_frost"] = _to_translucent(COLORS["bg_app"], 205)
+    elif _wallpaper_surface:
+        # Wallpaper behind every page: keep the surface translucent enough for
+        # the artwork to read through while cards stay solid ($glassy).
+        subst["bg_app_frost"] = _to_translucent(COLORS["bg_app"], 185)
     else:
         subst["bg_app_frost"] = COLORS["bg_app"]
+    # Dialogs are separate top-level windows with no wallpaper behind them —
+    # they must stay fully opaque or they would show the desktop through.
+    subst["bg_app_solid"] = COLORS["bg_app"]
     # round-44 dark 主题按钮对比度：$bg_frost 走新 bg_btn（dark=#33333A，
     # light=#FFFFFF），避免按钮底色与面板同色导致边框融背景看不清。
     subst["bg_frost"] = COLORS.get("bg_btn", COLORS["bg_card"])
@@ -1176,7 +1214,7 @@ _QSS_TIMER: "QTimer | None" = None
 
 def apply_qss() -> None:
     """Re-apply the global theme stylesheet (cached + change-guarded + debounced)."""
-    global _QSS_APPLIED, _QSS_TIMER
+    global _QSS_TIMER
     app = QApplication.instance()
     if app is None:
         return
@@ -1289,9 +1327,8 @@ if __name__ == "__main__":
 #   groove 圆角条（$border）→ sub-page 圆角条（$accent）→ 圆形 handle。
 # 挂载：app.setStyle(AcSliderStyle())（main.py 在 apply_qss 后调用）。
 # ═══════════════════════════════════════════════════════════════════════
-from PySide6.QtWidgets import QProxyStyle, QStyle, QSlider
-from PySide6.QtCore import Qt, QRectF, QPointF
-from PySide6.QtGui import QPainter, QColor
+from PySide6.QtWidgets import QProxyStyle, QStyle
+from PySide6.QtCore import QPointF
 
 
 class AcSliderStyle(QProxyStyle):

@@ -15,7 +15,7 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QGroupBox, QCheckBox, QFrame, QSizePolicy, QMenu,
+    QGroupBox, QCheckBox, QFrame, QMenu,
 )
 
 from . import modules as M

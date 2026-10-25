@@ -6,7 +6,9 @@ memory for the session.
 """
 from __future__ import annotations
 
+import html
 import os
+import re
 import time
 import random
 import hashlib
@@ -48,6 +50,10 @@ APRIL_FOOLS_IDS = {
 _cache: dict[str, tuple[float, object]] = {}
 _CACHE_TTL = 1800  # seconds (round-47: 300→1800，版本清单极少变化，30分钟足够)
 _DISK_CACHE_TTL = 86400  # keep disk cache for 24h so startup feels instant
+# Stale-but-usable window: when the network is down, an expired manifest is
+# still far better than an empty version picker (round-126: "删版本后新建里
+# 版本显示变少了" was a failed manifest refresh, not an actual deletion).
+_DISK_CACHE_MAX_AGE = 7 * 86400
 
 
 _CACHE_DISK_PATH: str | None = None
@@ -78,7 +84,9 @@ def _load_disk_cache():
             if not isinstance(v, (list, tuple)) or len(v) != 2:
                 continue
             ts, val = v
-            if now - ts < _DISK_CACHE_TTL:
+            # Keep entries up to a week old in memory: fresh ones are used
+            # normally, expired ones only as an offline fallback (_stale).
+            if now - ts < _DISK_CACHE_MAX_AGE:
                 _cache[k] = (ts, val)
     except Exception:  # noqa: BLE001
         pass
@@ -94,7 +102,7 @@ def _save_disk_cache():
         with _CACHE_LOCK:
             data = {
                 k: (ts, v) for k, (ts, v) in _cache.items()
-                if now - ts < _DISK_CACHE_TTL
+                if now - ts < _DISK_CACHE_MAX_AGE
             }
         with open(path, "w", encoding="utf-8") as f:
             _json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
@@ -119,6 +127,17 @@ def _cached(key: str, ttl: float = _CACHE_TTL):
     # _load_disk_cache() 在模块 import 时已把 24h 内的磁盘缓存全部读入
     # _cache（ts 不变），_cache 里过期 = 磁盘里同样过期，无需再 revive。
     # round-65：调用方可按 key 放宽 TTL（如版本清单走磁盘 24h 语义）。
+    return None
+
+
+def _stale(key: str, max_age: float = _DISK_CACHE_MAX_AGE):
+    """Expired but still reasonable cached value (offline fallback)."""
+    now = time.time()
+    with _CACHE_LOCK:
+        if key in _cache:
+            ts, val = _cache[key]
+            if now - ts < max_age:
+                return val
     return None
 
 
@@ -598,16 +617,20 @@ def fetch_versions() -> tuple[str, list[dict]]:
 
     Ordered: latest release first, then other releases, then snapshots/old.
     """
-    cached = _cached("versions", _DISK_CACHE_TTL)
-    if cached is not None:
+    def _valid_payload(payload):
         # round-57 修：磁盘缓存来自历史版本（schema 曾为 list[str]）或损坏时
         # 直接返回会让新代码 v.get("id") 崩溃（新建实例一刷新版本列表必炸）。
         # 仅当是 (latest, [{id,...}...]) 结构才信任；否则走网络重新拉取。
-        if isinstance(cached, tuple) and len(cached) == 2:
-            latest, versions = cached
+        if isinstance(payload, tuple) and len(payload) == 2:
+            _latest, versions = payload
             if isinstance(versions, list) and all(
                     isinstance(v, dict) and v.get("id") for v in versions):
-                return cached
+                return payload
+        return None
+
+    cached = _valid_payload(_cached("versions", _DISK_CACHE_TTL))
+    if cached is not None:
+        return cached
     try:
         r = requests.get(
             _manifest_url(), headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
@@ -616,6 +639,11 @@ def fetch_versions() -> tuple[str, list[dict]]:
         r.raise_for_status()
         data = r.json()
     except requests.RequestException as e:
+        # Offline / mirror hiccup: an expired manifest still lets the user pick
+        # a version. Only surface an error when there is no usable cache at all.
+        stale = _valid_payload(_stale("versions"))
+        if stale is not None:
+            return stale
         raise NetError(_t_err("err.fetch_versions", default="无法获取版本列表：{err}", err=e)) from e
 
     latest = data.get("latest", {}).get("release", "")
@@ -870,17 +898,73 @@ def download_mod_version_to(
 
 
 # ── 模组翻译（round-66）───────────────────────────────────────────────
-# 资源中心详情页"获取翻译"：免费 Google gtx 接口（无需 API key），
-# 把项目简介 / README 翻译成目标语言。结果本地缓存 24h（md5 摘要键）。
+# 资源中心详情页"获取翻译"：免费接口，无需 API key。
+# round-125：Google gtx 在国内网络直接超时（用户「资源中心获取翻译失败」），
+# 所以改为「Google 优先 + MyMemory 兜底」——MyMemory 无需 key、国内可达。
+# 结果本地缓存 24h（md5 摘要键）。
 
 _TRANSLATE_API = "https://translate.googleapis.com/translate_a/single"
+_TRANSLATE_FALLBACK = "https://api.mymemory.translated.net/get"
 _TRANSLATE_TTL = 24 * 3600
+
+
+def _google_translate(text: str, target: str) -> str:
+    r = requests.get(
+        _TRANSLATE_API,
+        params={"client": "gtx", "sl": "auto", "tl": target,
+                "dt": "t", "q": text},
+        headers=_HEADERS, timeout=5, proxies=_proxies(),
+    )
+    r.raise_for_status()
+    data = r.json()
+    return "".join(seg[0] for seg in data[0] if seg and seg[0])
+
+
+def _chunk_text(text: str, limit: int = 450) -> list[str]:
+    """Split on line boundaries so MyMemory's per-request cap is respected."""
+    chunks, buf = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if buf and len(buf) + 1 + len(line) > limit:
+            chunks.append(buf)
+            buf = line
+        else:
+            buf = f"{buf}\n{line}" if buf else line
+    if buf.strip():
+        chunks.append(buf)
+    return chunks
+
+
+def _mymemory_translate(text: str, target: str) -> str:
+    lang = "zh-CN" if target.lower().startswith("zh") else target
+    out_parts = []
+    for chunk in _chunk_text(text):
+        r = requests.get(
+            _TRANSLATE_FALLBACK,
+            params={"q": chunk, "langpair": f"en|{lang}"},
+            headers=_HEADERS, timeout=12, proxies=_proxies(),
+        )
+        r.raise_for_status()
+        data = r.json()
+        if str(data.get("responseStatus")) != "200":
+            raise NetError(str(data.get("responseDetails") or "mymemory error"))
+        piece = (data.get("responseData") or {}).get("translatedText") or ""
+        if not piece:
+            raise NetError("mymemory: empty result")
+        out_parts.append(html.unescape(piece))
+    return "\n".join(out_parts)
 
 
 def translate_text(text: str, target: str = "zh-CN") -> str:
     """Translate a chunk of text to ``target`` (默认中文)。
 
-    免费 gtx 端点无 key 即用；超长截断到 5000 字符；失败抛 NetError。
+    先试 Google gtx（境外网络最快），失败再走 MyMemory（无 key、国内可用）；
+    都失败才抛 NetError。超长截断到 5000 字符。
     """
     text = (text or "").strip()
     if not text:
@@ -891,23 +975,21 @@ def translate_text(text: str, target: str = "zh-CN") -> str:
     cached = _cached(key, _TRANSLATE_TTL)
     if cached is not None:
         return cached
-    try:
-        r = requests.get(
-            _TRANSLATE_API,
-            params={"client": "gtx", "sl": "auto", "tl": target,
-                    "dt": "t", "q": text},
-            headers=_HEADERS, timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
-        )
-        r.raise_for_status()
-        data = r.json()
-        out = "".join(seg[0] for seg in data[0] if seg and seg[0])
-    except requests.RequestException as e:
-        raise NetError(
-            _t_err("err.translate", default="翻译失败：{err}", err=e)) from e
-    if not out:
-        raise NetError(_t_err("err.translate_empty", default="翻译结果为空"))
-    _store(key, out)
-    return out
+    last_err = None
+    for fn in (_google_translate, _mymemory_translate):
+        try:
+            out = fn(text, target)
+        except requests.RequestException as e:
+            last_err = e
+            continue
+        except NetError as e:
+            last_err = e
+            continue
+        if out:
+            _store(key, out)
+            return out
+    raise NetError(
+        _t_err("err.translate", default="翻译失败：{err}", err=last_err or ""))
 
 
 # 资源中心支持的 Modrinth project_type（对齐主流下载分类：模组/整合包/光影/资源包/数据包）
@@ -1005,6 +1087,7 @@ def search_curseforge(query: str = "", offset: int = 0, limit: int = 20) -> list
             "downloads": m.get("downloadCount", 0),
             "icon_url": logo,
             "author": (m.get("authors") or [{}])[0].get("name", ""),
+            "source": "curseforge",
         })
     _store(cache_key, hits)
     return hits
@@ -1040,6 +1123,136 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, filename)
     return download_file(url, dest, timeout=120,
+                         progress=_cb_progress(callback))
+
+
+# ---- CurseForge 版本列表 / 指定文件下载（round-120）----
+# detail dialog used to be Modrinth-only; these normalise CurseForge files into
+# the same version-dict shape so one row renderer serves both sources.
+_CF_LOADER_NAMES = {
+    "forge", "fabric", "quilt", "neoforge", "liteloader", "rift",
+}
+
+
+def _cf_version_entry(entry_id, display, filename, size, date,
+                      game_versions, url="") -> dict:
+    """Map one CurseForge file onto the Modrinth version shape."""
+    gv = [g for g in (game_versions or []) if isinstance(g, str)]
+    return {
+        "id": str(entry_id or ""),
+        "version_number": display or filename or "—",
+        "game_versions": [g for g in gv if g[:1].isdigit()],
+        "loaders": [g.lower() for g in gv if g.lower() in _CF_LOADER_NAMES],
+        "files": [{
+            "id": entry_id,
+            "filename": filename or "mod.jar",
+            "size": size or 0,
+            "url": url,
+            "primary": True,
+        }],
+        "date_published": (date or "")[:19],
+        "source": "curseforge",
+    }
+
+
+def _curseforge_versions(project_id: str, limit: int | None = None,
+                         offset: int = 0) -> list[dict]:
+    """List a CurseForge project's files via the official API (needs a key).
+
+    ``gameVersions`` mixes MC versions and loader names, so they are split
+    into ``game_versions`` / ``loaders`` before rendering.
+    """
+    key = _curseforge_key()
+    if not key:
+        raise NetError("未配置 CurseForge API Key（设置 → 第三方服务）")
+    cache_key = f"cfv:{project_id}:{limit}:{offset}"
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+    params = {"pageSize": limit or 50}
+    if offset:
+        params["index"] = offset
+    try:
+        r = requests.get(
+            f"{CURSEFORGE_API}/mods/{project_id}/files",
+            params=params,
+            headers={**_HEADERS, "x-api-key": key, "Accept": "application/json"},
+            timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
+        )
+        r.raise_for_status()
+        data = r.json().get("data", [])
+    except requests.RequestException as e:
+        raise NetError(f"无法获取 CurseForge 版本：{e}") from e
+    out = [
+        _cf_version_entry(f.get("id"), f.get("displayName"), f.get("fileName"),
+                          f.get("fileLength"), f.get("fileDate"),
+                          f.get("gameVersions"), f.get("downloadUrl", ""))
+        for f in data if isinstance(f, dict)
+    ]
+    _store(cache_key, out)
+    return out
+
+
+def _curseforge_versions_keyless(slug: str, limit: int | None = None,
+                                 offset: int = 0) -> list[dict]:
+    """List files via cfwidget (no API key) — same shape as the API path."""
+    if not slug:
+        raise NetError("缺少 CurseForge 项目标识")
+    cache_key = f"cfvw:{slug}:{limit}:{offset}"
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        r = requests.get(CFWIDGET_URL.format(slug=slug), headers=_HEADERS,
+                         timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+        if r.status_code != 200:
+            raise NetError(_t_err("err.curseforge_missing",
+                                  default="CurseForge 未找到「{slug}」（或链接无效）",
+                                  slug=slug))
+        d = r.json()
+    except requests.RequestException as e:
+        raise NetError(f"无法获取 CurseForge 信息：{e}") from e
+    files = [f for f in (d.get("files") or []) if isinstance(f, dict)]
+    if limit:
+        files = files[offset:offset + limit]
+    out = [
+        _cf_version_entry(f.get("id"), f.get("display"), f.get("name"),
+                          f.get("filesize"), f.get("uploaded_at"),
+                          f.get("versions"))
+        for f in files
+    ]
+    _store(cache_key, out)
+    return out
+
+
+def download_curseforge_file(project_id: str, file_id, dest_dir: str,
+                             filename: str = "", url: str = "",
+                             callback=None) -> str:
+    """Download one specific CurseForge file into ``dest_dir``.
+
+    Uses the official ``download-url`` endpoint when a key is configured
+    (respects author distribution consent); ``url`` from the file listing is a
+    fallback for keys whose endpoint is unavailable.
+    """
+    key = _curseforge_key()
+    link = url
+    if key and project_id and file_id:
+        try:
+            r = requests.get(
+                f"{CURSEFORGE_API}/mods/{project_id}/files/{file_id}/download-url",
+                headers={**_HEADERS, "x-api-key": key, "Accept": "application/json"},
+                timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
+            )
+            r.raise_for_status()
+            link = r.json().get("data") or link
+        except requests.RequestException:
+            if not link:
+                raise NetError("该文件没有可用的下载链接（作者可能禁止第三方分发）")
+    if not link:
+        raise NetError("该文件没有可用的下载链接")
+    name = filename or f"{project_id}-{file_id}.jar"
+    os.makedirs(dest_dir, exist_ok=True)
+    return download_file(link, os.path.join(dest_dir, name), timeout=120,
                          progress=_cb_progress(callback))
 
 
@@ -1092,6 +1305,7 @@ def curseforge_link_search(query: str, limit: int = 8) -> list[dict]:
         "downloads": d.get("downloads", 0),
         "icon_url": d.get("thumbnail", ""),
         "author": "CurseForge",
+        "source": "curseforge",
         "_cf_file": {
             "id": f.get("id"),
             "name": f.get("name", f"{slug}.jar"),
@@ -1303,6 +1517,7 @@ def search_mods(query: str = "", offset: int = 0, limit: int = 20,
             "downloads": h.get("downloads", 0),
             "icon_url": h.get("icon_url", ""),
             "author": h.get("author", ""),
+            "source": "modrinth",
         }
         for h in data.get("hits", [])
     ]
@@ -1369,14 +1584,14 @@ def download_modpack_to(project_id: str, dest_dir: str, callback=None) -> str:
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, filename)
 
-    progress = None
+    progress_cb = None
     if isinstance(callback, dict):
         set_progress = callback.get("setProgress")
         set_max = callback.get("setMax")
         if set_progress is not None:
             _maxed: list[int] = []
 
-            def progress(sofar, total):  # noqa: A002 - 对齐 net_api 签名
+            def _on_progress(sofar, total):  # noqa: A002 - 对齐 net_api 签名
                 try:
                     if total and not _maxed and set_max is not None:
                         _maxed.append(1)
@@ -1385,7 +1600,9 @@ def download_modpack_to(project_id: str, dest_dir: str, callback=None) -> str:
                 except Exception:  # noqa: BLE001 - UI 回调绝不拖垮下载
                     pass
 
-    return download_file(url, dest, timeout=120, progress=progress)
+            progress_cb = _on_progress
+
+    return download_file(url, dest, timeout=120, progress=progress_cb)
 
 
 
@@ -1457,41 +1674,74 @@ def legacy_fabric_games_cached():
     return _cached("legacyfab:games")
 
 
-CLEANROOM_RELEASES_API = "https://api.github.com/repos/CleanroomMC/Cleanroom/releases"
+# Cleanroom ships on its own download site and mirrors every installer to
+# repo.cleanroommc.com. GitHub's API is frequently unreachable from CN
+# networks (which is exactly the "missing installer URL" failure in round-126),
+# so scrape the official page and prefer the Maven mirror it links.
+CLEANROOM_DOWNLOAD_PAGE = "https://download.cleanroommc.com/"
+CLEANROOM_MAVEN_BASE = (
+    "https://repo.cleanroommc.com/releases/com/cleanroommc/cleanroom")
+# Last known-good build, used when both the page and the cache are unavailable
+# so the loader picker never ends up with a URL-less "latest" entry.
+CLEANROOM_LATEST_FALLBACK = "0.7.12-alpha"
+
+_CR_VERSION_RE = re.compile(
+    r"cleanroom-(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)-installer\.jar")
+
+
+def cleanroom_installer_url(version: str, maven: bool = True) -> str:
+    """Direct installer URL for a Cleanroom build.
+
+    ``maven=True`` returns the official Maven mirror (fast in CN); the GitHub
+    release URL is the fallback for mirrors that have not synced a build yet.
+    """
+    ver = (version or "").strip()
+    if maven:
+        return (f"{CLEANROOM_MAVEN_BASE}/{ver}/"
+                f"cleanroom-{ver}-installer.jar")
+    return ("https://github.com/CleanroomMC/Cleanroom/releases/download/"
+            f"{ver}/cleanroom-{ver}-installer.jar")
 
 
 def fetch_cleanroom_builds():
     key = "cleanroom:releases"
     cached = _cached(key)
-    if cached is not None:
+    if cached:  # an empty cached list is a failed fetch — retry, don't reuse
         return cached
+    versions: list[str] = []
     try:
-        r = requests.get(
-            CLEANROOM_RELEASES_API,
-            params={"per_page": 20},
-            headers={**_HEADERS, "Accept": "application/vnd.github+json"},
-            timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
-        )
+        r = requests.get(CLEANROOM_DOWNLOAD_PAGE, headers=_HEADERS,
+                         timeout=_REQUEST_TIMEOUT, proxies=_proxies())
         r.raise_for_status()
-        data = r.json()
-    except requests.RequestException as e:
-        raise NetError("Cannot fetch Cleanroom builds: " + str(e)) from e
-    out = []
-    for rel in data:
-        tag = rel.get("tag_name", "")
-        installer = ""
-        for a in rel.get("assets", []):
-            if a.get("name", "").endswith("-installer.jar"):
-                installer = a.get("browser_download_url", "")
-                break
-        if not installer:
-            continue
-        out.append({
-            "title": tag,
-            "description": "Cleanroom · 1.12.2 on Java 21",
-            "_installer_url": installer,
-            "downloads": 0,
-            "author": "CleanroomMC",
-        })
+        for v in _CR_VERSION_RE.findall(r.text):
+            if v not in versions:
+                versions.append(v)
+    except requests.RequestException:
+        pass
+    if not versions:
+        versions = [CLEANROOM_LATEST_FALLBACK]
+    out = [{
+        "title": v,
+        "description": "Cleanroom · 1.12.2 on Java 25",
+        "_installer_url": cleanroom_installer_url(v),
+        "downloads": 0,
+        "author": "CleanroomMC",
+    } for v in versions]
     _store(key, out)
     return out
+
+
+# LabyMod 4 has no standalone Forge jar — the official installer is the only
+# distribution (it writes the client jar + a dedicated version JSON). Round-126
+# request: no browser detour, fetch it inside the launcher and run it there.
+LABYMOD_INSTALLER_URL = (
+    "https://releases.r2.labymod.net/launcher/win32/x64/"
+    "LabyModLauncherSetup-latest.exe")
+
+
+def download_labymod_installer(dest_dir: str, progress=None) -> str:
+    """Download the official LabyMod installer into ``dest_dir``; return path."""
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, "LabyModLauncherSetup-latest.exe")
+    return parallel_download_file(LABYMOD_INSTALLER_URL, dest,
+                                  progress=progress, timeout=60)

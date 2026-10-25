@@ -12,15 +12,18 @@ import os
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QListWidget, QListWidgetItem, QStackedWidget,
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QProgressBar, QGridLayout, QMenu, QComboBox, QScrollArea, QSizePolicy,
-    QLineEdit,
+    QProgressBar, QMenu, QComboBox, QScrollArea, QSizePolicy,
+    QLineEdit, QStyledItemDelegate, QStyleOptionViewItem, QStyle, QListView,
+    QApplication,
 )
-from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject, QPropertyAnimation, QEasingCurve, QRectF, QByteArray
-from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QColor, QPixmap, QLinearGradient, QCursor
+from PySide6.QtCore import (Qt, QSize, QPoint, QPointF, QTimer, QEvent, QObject,
+                            QRectF, QByteArray, Signal)
+from PySide6.QtGui import (QFont, QIcon, QPainter, QPainterPath, QColor, QPixmap,
+                           QCursor, QRadialGradient)
 from PySide6.QtSvg import QSvgRenderer
 
 from .theme import (COLORS, RoundedCard, set_theme_mode, get_theme_mode,
-                    on_theme_change, F_MD, with_alpha)
+                    on_theme_change, F_MD, F_SM, with_alpha)
 from .effects import (
     LightTrailCard, set_effects_enabled, set_window_opacity, fade_page_transition,
 )
@@ -34,9 +37,9 @@ from .worker import ProgressWorker
 from .launch import launch_instance
 from .settings_dialog import load_config, save_config, SettingsPage
 from .accounts import manager as accounts_manager, type_label
-from .paths import get_data_dir
+from .paths import get_data_dir, get_resource_path
 from .skins import manager as skin_manager
-from .skin_render import render_head
+from .skin_render import render_head, render_skin_frames, skin_model
 from .brand import APP_DISPLAY, APP_VERSION
 from .win_rounded import enable_win11_round_corners
 
@@ -78,6 +81,8 @@ NAV_GROUPS = [
     ("nav.group.game", [("nav.instances", "instances")]),
     ("nav.group.resource", [("nav.store", "store")]),
     ("nav.group.multiplayer", [("lobby.nav_lobby", "lobby")]),
+    # round-124：百宝箱此前只有顶部导航布局能进，AC 侧栏没有入口 → 补在「其他」
+    ("nav.group.other", [("pcl2.nav_toolbox", "toolbox")]),
     ("nav.group.system", [("nav.account", "account"), ("nav.settings", "settings")]),
 ]
 
@@ -295,6 +300,132 @@ class _InstanceCard(LightTrailCard):
         super().mouseReleaseEvent(e)
 
 
+class _CharStage(QWidget):
+    """Borderless character showcase: soft accent spotlight behind the model
+    and a radial ground shadow under the feet.  No card / plinth outline — the
+    previous version painted a pale filled panel inside the character card,
+    which read as a "card inside a card" (user feedback).  Clicking the model
+    opens the skin library, like mainstream launchers treat the avatar as a
+    live profile surface."""
+
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pm: QPixmap | None = None
+        # round-125: pre-rendered turntable frames + idle spin (the card used
+        # to show one frozen frame, which read as a statue next to PCL2/HMCL).
+        self._frames: list[QPixmap] = []
+        self._frame_idx = 0
+        self._anim = QTimer(self)
+        self._anim.setInterval(55)          # ≈18 fps for a 30-frame turn
+        self._anim.timeout.connect(self._advance_frame)
+        self.setFixedSize(216, 248)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_skin(self, pm: QPixmap | None) -> None:
+        self._pm = pm if (pm is not None and not pm.isNull()) else None
+        self._frames = []
+        self._anim.stop()
+        self.update()
+
+    def set_frames(self, frames: list[QPixmap] | None) -> None:
+        """Show a pre-rendered idle-spin turntable (falls back to none)."""
+        self._frames = [f for f in (frames or []) if f is not None and not f.isNull()]
+        self._frame_idx = 0
+        if self._frames and self.isVisible():
+            self._anim.start()
+        else:
+            self._anim.stop()
+        self.update()
+
+    def _advance_frame(self) -> None:
+        if not self._frames:
+            self._anim.stop()
+            return
+        self._frame_idx = (self._frame_idx + 1) % len(self._frames)
+        self.update()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._frames:
+            self._anim.start()
+
+    def hideEvent(self, e):
+        self._anim.stop()
+        super().hideEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Spotlight: soft accent halo centred on the body, fading to nothing.
+        glow = QRadialGradient(w / 2.0, h * 0.42, w * 0.54)
+        glow.setColorAt(0.0, QColor(with_alpha(COLORS["accent"], 40)))
+        glow.setColorAt(0.55, QColor(with_alpha(COLORS["accent"], 13)))
+        glow.setColorAt(1.0, QColor(with_alpha(COLORS["accent"], 0)))
+        p.setPen(Qt.NoPen)
+        p.setBrush(glow)
+        p.drawEllipse(QPointF(w / 2.0, h * 0.42), w * 0.54, h * 0.47)
+
+        pm = (self._frames[self._frame_idx] if self._frames else self._pm)
+        if pm is not None:
+            dark = get_theme_mode() == "dark"
+            # Ground shadow: radial gradient squashed into an ellipse so the
+            # falloff is soft on every edge (a flat ellipse looked like a pill).
+            p.save()
+            # Centre the ellipse on the feet line (the model is drawn 10px
+            # above the stage bottom) so the lower half reads as floor contact
+            # instead of a smudge hidden behind the legs.
+            p.translate(w / 2.0, h - 10.0)
+            p.scale(1.0, 0.2)
+            shadow = QRadialGradient(0, 0, 58)
+            a = 110 if dark else 52
+            shadow.setColorAt(0.0, QColor(0, 0, 0, a))
+            shadow.setColorAt(0.6, QColor(0, 0, 0, int(a * 0.32)))
+            shadow.setColorAt(1.0, QColor(0, 0, 0, 0))
+            p.setBrush(shadow)
+            p.drawEllipse(QPointF(0, 0), 58, 58)
+            p.restore()
+            # Pixmaps carry devicePixelRatio, so use their *logical* size.
+            lw = pm.width() / max(1e-3, pm.devicePixelRatio())
+            lh = pm.height() / max(1e-3, pm.devicePixelRatio())
+            p.drawPixmap(int((w - lw) / 2), int(h - lh - 10), pm)
+        p.end()
+
+
+class _Combo(QComboBox):
+    """QComboBox with an explicit chevron.
+
+    The global QSS styles ``QComboBox::drop-down`` (width 24, no image), which
+    makes Qt skip the native arrow — every combo in the app looked like a plain
+    text field.  Painting the chevron ourselves keeps it theme-aware without
+    shipping per-theme arrow assets.
+    """
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = p.pen()
+        pen.setColor(QColor(COLORS["text_sub"]))
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        cx = self.width() - 16
+        cy = self.height() / 2.0
+        p.drawLine(QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2))
+        p.drawLine(QPointF(cx, cy + 2), QPointF(cx + 4, cy - 2))
+        p.end()
+
+
 class HomePage(QWidget):
     def __init__(self, on_play, get_current_instance, cfg,
                  on_open_settings=None, on_open_instances=None,
@@ -317,20 +448,9 @@ class HomePage(QWidget):
         self.inst_mgr = inst_mgr  # optional; used by the "refresh list" chip
         self._rebuilding = False  # guard against rapid-fire rebuild() calls
         self._scan_panel = None  # embedded ScanPanel, when active
-        # Backdrop sits behind everything and never eats clicks.
-        from .wallpaper import WallpaperWidget
-
-        self.backdrop = WallpaperWidget(self)
-        _boot_trace("6.51 wallpaper ok")
-        self.backdrop.setGeometry(self.rect())
-        # 全景图是异步加载的，到货后要把落在壁纸上的文字重新配色。
-        self.backdrop.panorama_ready.connect(self._refresh_overlay_style)
-        # 主题切换后壁纸上的文字颜色要跟着变（内联颜色不随 QSS 走）。
-        try:
-            from .theme import on_theme_change
-            on_theme_change(self._refresh_overlay_style)
-        except Exception:  # noqa: BLE001
-            pass
+        # The wallpaper backdrop lives on the main window (round-119) so it
+        # spans every page and the title bar, not just the home page. HomePage
+        # only keeps the label-contrast helper for text drawn on top of it.
         # 退出时若全景加载线程还在跑，销毁运行中的 QThread 会直接 abort——
         # 退出前等它结束。挂在 main.py 的 aboutToQuit 上（统一收口），这里
         # 只负责把首页这块壁纸接好。
@@ -363,9 +483,10 @@ class HomePage(QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if hasattr(self, "backdrop"):
-            self.backdrop.setGeometry(self.rect())
-            self.backdrop.lower()
+        _bd = self._backdrop_ref()
+        if _bd is not None:
+            _bd.setGeometry(self.rect())
+            _bd.lower()
 
     # ── (re)build the ac_default home layout ──
     @staticmethod
@@ -414,7 +535,13 @@ class HomePage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("background: transparent; border: none;")
+        # round-121: an inline stylesheet here ("background: transparent;
+        # border: none;") cascades to EVERY descendant and wiped the styled
+        # background/border of the instance combo and any input on the home
+        # page (the selector made it look like bare text). The global QSS
+        # already styles QScrollArea itself; only the viewport needs to be
+        # see-through for the wallpaper.
+        scroll.viewport().setAutoFillBackground(False)
         inner = QWidget()
         inner.setAttribute(Qt.WA_TranslucentBackground, True)
         scroll.setWidget(inner)
@@ -533,52 +660,74 @@ class HomePage(QWidget):
         # round-107 极简首页：删除「统御统计条」（已接管/来源/待修复）——信息与
         # 实例页重复，且首页越堆越繁杂（用户反馈「首页太复杂」）。
 
-        # ── hero 实例卡（round-100 极简：中性底 + 左侧 3px accent 竖条）──
-        # 旧版是 accent→青 大面积渐变 + 白字白 pill：强调色铺底、浅色主题下
-        # 白字压白底读不清。改为中性卡 + 全局 token 文字 + accent 竖条点缀。
-        hero = RoundedCard(radius=16, accent_border=3)
-        hero.setMinimumHeight(176)
+        # ── hero 单卡（round-121）：左「实例 + 启动」，右「角色立绘」──
+        # 旧版把实例卡与角色卡拆成两张：角色卡里 96px 平面小人 + 36px 披风
+        # 缩略图 + 一片空白台座，观感像占位图（用户反馈「来搞笑的」）。主流
+        # 启动器（PCL2 / HMCL / BakaXL）都把大尺寸角色放进启动面板本身，作为
+        # 账号区的视觉锚点——合并为一张卡后不再有「卡中卡」和小空台，右侧
+        # 200×240 三分之四视角角色直接站在柔光台上，披风穿在身上。
+        hero = RoundedCard(radius=18, accent_border=3)
+        hero.setMinimumHeight(400)
         hl = QHBoxLayout(hero)
-        hl.setContentsMargins(28, 22, 28, 22)
-        hl.setSpacing(24)
+        hl.setContentsMargins(32, 24, 26, 22)
+        hl.setSpacing(26)
 
-        # 左：当前实例身份（文字色走全局 token）
+        # 左：当前实例身份 + 启动（文字色走全局 token）
         left = QVBoxLayout()
         left.setSpacing(8)
+        inst_eyebrow = QLabel(t("home.instance"))
+        inst_eyebrow.setStyleSheet(
+            f"color: {COLORS['accent']}; font-size: 11px; font-weight: 600;"
+            " letter-spacing: 1px;")
+        left.addWidget(inst_eyebrow)
         name_row = QHBoxLayout()
         name_row.setSpacing(10)
         name = QLabel("—")
-        name.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
+        name.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
         name_row.addWidget(name)
         # 来源徽章（各主流启动器…）——控制中枢叙事：这个实例从哪个启动器接管
         self.src_badge = QLabel("")
         self.src_badge.setProperty("cls", "badge")
         self.src_badge.setVisible(False)
-        name_row.addWidget(self.src_badge)
+        name_row.addWidget(self.src_badge, alignment=Qt.AlignBottom)
         name_row.addStretch(1)
         left.addLayout(name_row)
         detail = QLabel("")
         detail.setProperty("cls", "sub")
+        detail.setStyleSheet("font-size: 12px;")
         left.addWidget(detail)
-        left.addSpacing(8)
-        self.inst_combo = QComboBox()
+        left.addSpacing(6)
+        self.inst_combo = _Combo()
         self.inst_combo.setMinimumHeight(38)
+        self.inst_combo.setMaximumWidth(420)
         self.inst_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         # 全局 instance-selector 类（与侧栏实例下拉同一视觉）
         self.inst_combo.setProperty("cls", "instance-selector")
         self.inst_combo.currentIndexChanged.connect(self._on_inst_changed)
         left.addWidget(self.inst_combo)
+        left.addSpacing(12)
+        # Empty-state next step: a disabled "Play" with nothing to play is a
+        # dead end. Offer the actual first action instead.
+        self.empty_cta = QPushButton(t("home.download_version"))
+        self.empty_cta.setProperty("cls", "secondary")
+        self.empty_cta.setMinimumHeight(38)
+        self.empty_cta.setMinimumWidth(128)
+        self.empty_cta.setCursor(Qt.PointingHandCursor)
+        self.empty_cta.setVisible(False)
+        self.empty_cta.clicked.connect(self._open_versions)
+        left.addWidget(self.empty_cta, alignment=Qt.AlignLeft)
         left.addStretch(1)
-        hl.addLayout(left, stretch=1)
 
-        # 右：启动按钮（accent 主按钮，样式来自 _make_play_btn）+ 结束游戏
+        # 启动 / 结束：卡片左下角落位，形成「身份在上、行动在下」的锚点
+        play_row = QHBoxLayout()
+        play_row.setSpacing(12)
         play = self._make_play_btn()
         play.setMinimumHeight(56)
         play.setMinimumWidth(200)
         play.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         play.setFont(QFont("Segoe UI", 17, QFont.Weight.Bold))
         self.play_btn = play
-        hl.addWidget(play, alignment=Qt.AlignVCenter | Qt.AlignRight)
+        play_row.addWidget(play)
         kill = QPushButton(t("home.kill_game"))
         kill.setMinimumHeight(40)
         kill.setCursor(Qt.PointingHandCursor)
@@ -586,7 +735,55 @@ class HomePage(QWidget):
         kill.setProperty("cls", "danger")
         kill.clicked.connect(self._on_kill_game)
         self.kill_btn = kill
-        hl.addWidget(kill, alignment=Qt.AlignVCenter | Qt.AlignRight)
+        play_row.addWidget(kill, alignment=Qt.AlignVCenter)
+        play_row.addStretch(1)
+        left.addStretch(1)
+        left.addLayout(play_row)
+        hl.addLayout(left, stretch=1)
+
+        # 右：角色展示——账号信息在立绘上方，更换入口在脚下，均右对齐
+        right = QVBoxLayout()
+        right.setSpacing(0)
+        char_eyebrow = QLabel(t("home.char_section"))
+        char_eyebrow.setStyleSheet(
+            f"color: {COLORS['accent']}; font-size: 11px; font-weight: 600;"
+            " letter-spacing: 1px;")
+        right.addWidget(char_eyebrow, alignment=Qt.AlignRight)
+        char_name_row = QHBoxLayout()
+        char_name_row.setSpacing(8)
+        char_name_row.addStretch(1)
+        self.char_name_lbl = QLabel(t("home.char_guest"))
+        self.char_name_lbl.setFont(QFont("Segoe UI", 19, QFont.Weight.Bold))
+        char_name_row.addWidget(self.char_name_lbl)
+        self.char_model_lbl = QLabel("")
+        self.char_model_lbl.setProperty("cls", "badge")
+        self.char_model_lbl.setVisible(False)
+        char_name_row.addWidget(self.char_model_lbl, alignment=Qt.AlignBottom)
+        right.addLayout(char_name_row)
+        self.char_meta_lbl = QLabel("")
+        self.char_meta_lbl.setProperty("cls", "sub")
+        self.char_meta_lbl.setStyleSheet("font-size: 11px;")
+        right.addWidget(self.char_meta_lbl, alignment=Qt.AlignRight)
+        right.addSpacing(6)
+        self.char_stage = _CharStage()
+        # A rebuilt home page owns a brand-new stage. Drop the cached render
+        # stamp so the next _refresh_character() fills the new stage instead of
+        # skipping it (round-126: "紫色柔光" = skip → empty frames).
+        self._char_key = None
+        self.char_stage.clicked.connect(self._on_char_btn)
+        right.addWidget(self.char_stage, alignment=Qt.AlignHCenter)
+        right.addSpacing(10)
+        self.char_btn = QPushButton(t("home.char_login"))
+        self.char_btn.setProperty("cls", "secondary")
+        self.char_btn.setMinimumHeight(34)
+        self.char_btn.setMinimumWidth(150)
+        self.char_btn.setFont(QFont("Segoe UI", 12))
+        self.char_btn.setCursor(Qt.PointingHandCursor)
+        self.char_btn.setIcon(icon("skin"))
+        self.char_btn.setIconSize(QSize(16, 16))
+        self.char_btn.clicked.connect(self._on_char_btn)
+        right.addWidget(self.char_btn, alignment=Qt.AlignRight)
+        hl.addLayout(right)
 
         self.inst_lbl = name
         self.detail_lbl = detail
@@ -596,7 +793,7 @@ class HomePage(QWidget):
 
         # ── 一行修复 / 异常提示（原「修复日志卡 + 快捷操作行」压缩为单行）──
         # round-107：首页只保留「当前实例 + 开始游戏 + 一行提示」。实例网格与
-        # 快捷操作行与其他页重复，删掉。3D 皮肤小人位后续单独立项补上。
+        # 快捷操作行与其他页重复，删掉。
         hint_row = QHBoxLayout()
         hint_row.setSpacing(10)
         self.log_stream = QLabel(t("home.repair_log_empty"))
@@ -613,6 +810,114 @@ class HomePage(QWidget):
         lay.addLayout(hint_row)
         lay.addStretch(1)
         _boot_trace("7.45 home minimal done")
+
+    # ── home character card ──
+    _DEFAULT_SKIN = os.path.join(
+        "assets", "mc_textures", "entity", "player", "wide", "steve.png")
+
+    def _on_char_btn(self):
+        """Home character card → skin/cape library (or login when guest)."""
+        win = self.window()
+        if win is None or win is self:
+            return
+        if getattr(win, "current_account", None):
+            win._open_skin_library()
+        else:
+            win._open_account()
+
+    def _refresh_character(self):
+        """Repaint the home character showcase.
+
+        The account, its skin and its cape can change without a home rebuild
+        (login, account switch, closing the skin dialog), so this is re-run
+        from ``_refresh`` and from the main window's account hooks.
+        """
+        if not self._alive(getattr(self, "char_stage", None)):
+            return
+        win = self.window()
+        acc = getattr(win, "current_account", None) if win is not self else None
+
+        entry = skin_manager().active_of(acc["id"]) if acc else None
+        skin_path = skin_manager().active_path(acc["id"]) if acc else None
+        # The skin variant (classic vs slim) is per-entry metadata; never
+        # guess it from the PNG when the library already knows the answer.
+        model = (entry or {}).get("model")
+        if not (skin_path and os.path.isfile(skin_path)):
+            skin_path = get_resource_path(self._DEFAULT_SKIN)
+            model = "classic"
+        cape = skin_manager().active_cape_of(acc["id"]) if acc else None
+        cape_path = skin_manager().active_cape_path(acc["id"]) if acc else None
+        if not (cape_path and os.path.isfile(cape_path)):
+            cape_path = None
+
+        if skin_path and os.path.isfile(skin_path):
+            # round-125：按设备像素比渲染（本机 dpr=1.25，旧的 200×240 pixmap
+            # 被 Qt 放大 1.25 倍，是「低清」的另一半原因）；同时预渲染一圈
+            # 转台帧做待机旋转。按文件身份缓存，普通刷新不会重算 30 帧。
+            dpr = float(self.char_stage.devicePixelRatioF() or 1.0)
+            pw = max(120, int(round(200 * dpr)))
+            ph = max(150, int(round(240 * dpr)))
+            model_used = skin_model(skin_path, model)
+            try:
+                stamp = (skin_path, os.path.getmtime(skin_path),
+                         os.path.getmtime(cape_path) if cape_path else 0.0,
+                         model_used, pw, ph)
+            except OSError:
+                # An unreadable mtime must not disable the whole render pass;
+                # a stable "unknown" stamp still lets us draw the skin once.
+                stamp = (skin_path, -1, -1, model_used, pw, ph)
+            # Re-render when the skin/cape/size changed, and also whenever the
+            # current stage has no frames. The stage is recreated by every home
+            # rebuild (language/theme/settings) while ``_char_key`` lives on the
+            # page, so key-only caching used to leave the new stage empty →
+            # the card showed just the purple spotlight (round-126 bug).
+            if stamp != getattr(self, "_char_key", None) or not self.char_stage._frames:
+                try:
+                    frames = render_skin_frames(skin_path, pw, ph, cape_path,
+                                                model=model, count=30)
+                    frames = [f for f in frames
+                              if f is not None and not f.isNull()]
+                    if frames:
+                        for f in frames:
+                            f.setDevicePixelRatio(dpr)
+                        self.char_stage.set_frames(frames)
+                        self._char_key = stamp
+                    else:
+                        self._char_key = None
+                except Exception:
+                    # Never let a render hiccup blank the whole showcase: fall
+                    # back to a single still frame, and retry next refresh.
+                    self._char_key = None
+                    try:
+                        from .skin_render import render_skin_3d
+                        pm = render_skin_3d(skin_path, pw, ph, cape_path,
+                                            model=model, supersample=2)
+                        pm.setDevicePixelRatio(dpr)
+                        self.char_stage.set_frames([pm])
+                    except Exception:
+                        self.char_stage.set_frames([])
+            self.char_model_lbl.setText(
+                t("home.char_model_slim" if model_used == "slim"
+                  else "home.char_model_classic"))
+            self.char_model_lbl.setVisible(bool(acc))
+        else:
+            self.char_stage.set_skin(None)
+            self._char_key = None
+            self.char_model_lbl.setVisible(False)
+
+        if acc:
+            self.char_name_lbl.setText(acc.get("name", ""))
+            self.char_meta_lbl.setText(
+                f"{type_label(acc.get('type', ''))}   ·   "
+                + (t("home.char_cape_on", name=cape["name"]) if cape
+                   else t("home.char_cape_none"))
+            )
+            self.char_btn.setText(t("home.char_manage"))
+        else:
+            self.char_name_lbl.setText(t("home.char_guest"))
+            self.char_meta_lbl.setText(t("home.char_guest_hint"))
+            self.char_btn.setText(t("home.char_login"))
+        self.char_stage.setToolTip(self.char_btn.text())
 
     # ── navigation callbacks ──
     def _open_settings(self):
@@ -663,6 +968,9 @@ class HomePage(QWidget):
         inst = self.get_current_instance()
         instances = self.list_instances()
 
+        # 角色卡：账号/皮肤/披风可能在首页未重建时变化（见 _refresh_character）。
+        self._refresh_character()
+
         # ── 统御统计条（direction A）──
         self._refresh_stats(instances)
         # 实例卡片网格（无论是否有当前实例都刷新）
@@ -687,20 +995,30 @@ class HomePage(QWidget):
             elif not instances:
                 self.inst_combo.addItem(t("home.no_instance"), "")
             self.inst_combo.blockSignals(False)
+            # With zero instances the one-item combo is pure noise — hide it
+            # and let the label + hint carry the empty state.
+            self.inst_combo.setVisible(bool(instances))
+
+        if hasattr(self, "empty_cta") and self._alive(self.empty_cta):
+            self.empty_cta.setVisible(inst is None)
 
         if inst is None:
             if hasattr(self, "inst_lbl") and self._alive(self.inst_lbl):
-                self.inst_lbl.setText("—")
+                self.inst_lbl.setText(t("home.no_inst_name"))
             if hasattr(self, "src_badge") and self._alive(self.src_badge):
                 self.src_badge.setVisible(False)
             if hasattr(self, "detail_lbl") and self._alive(self.detail_lbl):
-                self.detail_lbl.setText("")
+                self.detail_lbl.setText(t("home.no_instance"))
             if hasattr(self, "play_btn") and self._alive(self.play_btn):
                 self.play_btn.setEnabled(False)
+                # on_accent icons stay white; on the muted disabled background
+                # that is invisible. Swap in a disabled-grey glyph.
+                self.play_btn.setIcon(icon("play", COLORS["text_disabled"]))
             return
 
         if hasattr(self, "play_btn") and self._alive(self.play_btn):
             self.play_btn.setEnabled(True)
+            self.play_btn.setIcon(on_accent("play"))
         if hasattr(self, "inst_lbl") and self._alive(self.inst_lbl):
             self.inst_lbl.setText(inst.name)
         # 来源徽章：实例从哪里接管。round-86 导入实例显示真实来源名
@@ -907,6 +1225,11 @@ class HomePage(QWidget):
         # Defer refresh so any pending focus-change / nav signals settle first.
         QTimer.singleShot(100, self.on_scan_done or self._refresh)
 
+    def _backdrop_ref(self):
+        """The window-level wallpaper widget (``None`` before it exists)."""
+        win = self.window()
+        return getattr(win, "backdrop", None) if win is not self else None
+
     def _current_version_id(self) -> str | None:
         """Version id of the currently selected instance (for version-theme bg)."""
         inst = self.get_current_instance()
@@ -932,17 +1255,20 @@ class HomePage(QWidget):
         return mc_dir, game_dir, version
 
     def _apply_wallpaper(self, cfg: dict | None = None, version_id: str | None = None):
-        """Re-apply the backdrop (solid / image / animated GIF / video / version theme)."""
+        """Re-apply the window backdrop (kept as the settings dialog's entry point).
+
+        The widget itself lives on the main window; this forwards the call and
+        keeps HomePage's copy of ``cfg`` in sync.
+        """
         if cfg is not None:
             self.cfg = cfg
-        try:
-            # 毛玻璃已删除（round-32）——壁纸层始终正常绘制
-            self.backdrop.apply(self.cfg, version_id, *self._panorama_source())
-            self.backdrop.setGeometry(self.rect())
-            self.backdrop.lower()
+        win = self.window()
+        if win is not None and win is not self:
+            try:
+                win._apply_wallpaper(cfg, version_id)
+            except Exception:  # noqa: BLE001 - a bad wallpaper must not kill the page
+                pass
             self._refresh_overlay_style()
-        except Exception:  # noqa: BLE001 - a bad wallpaper must not kill the page
-            pass
 
     def _refresh_overlay_style(self) -> None:
         """Keep the labels that sit *directly* on the wallpaper readable.
@@ -952,8 +1278,9 @@ class HomePage(QWidget):
         secondary grey loses contrast, so they fall back to the theme's
         strongest text colour while a media backdrop is on screen.
         """
-        media = bool(getattr(self, "backdrop", None) and
-                     self.backdrop.panorama_active)
+        backdrop = self._backdrop_ref()
+        media = bool(backdrop is not None and
+                     (backdrop.panorama_active or backdrop.has_backdrop))
         try:
             from .theme import COLORS
             color = COLORS.get("text_main", "#1A1A2E")
@@ -1130,6 +1457,74 @@ class _WinBtn(QPushButton):
         super().leaveEvent(event)
 
 
+def _nav_item_icon(name: str, px: int) -> QIcon:
+    """Sidebar glyph with a selected-state variant.
+
+    ``QIcon`` keeps one pixmap per (mode, state); without a ``Selected`` entry
+    Qt reuses the grey ``text_sub`` glyph on top of the accent-filled pill
+    (~2:1 contrast). Two scales keep it crisp on HiDPI screens.
+    """
+    ic = QIcon()
+    for mode, src in ((QIcon.Normal, icon(name)),
+                      (QIcon.Selected, on_accent(name))):
+        for scale in (1, 2):
+            pm = src.pixmap(QSize(px * scale, px * scale))
+            if pm.isNull():
+                continue
+            pm.setDevicePixelRatio(scale)
+            ic.addPixmap(pm, mode, QIcon.Off)
+    return ic
+
+
+class _IconNavDelegate(QStyledItemDelegate):
+    """Icon-only sidebar rows (collapsed rail).
+
+    ``QStyledItemDelegate`` places the decoration at the *text* start offset by
+    an icon→text gap, which leaves the glyph visibly left of the pill centre in
+    a text-less row. Paint the row background through the style (so the QSS
+    pill/hover still applies) with the decoration cleared, then draw the glyph
+    ourselves dead-centre in the row rect.
+
+    NOTE: ``QStyledItemDelegate.paint()`` re-applies ``initStyleOption`` to a
+    copy of the option, which restores the model's icon — so the background is
+    painted with ``QStyle.drawControl`` instead of calling super().paint().
+    """
+
+    ROW_H = 48
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        # Resolve the glyph pixmap BEFORE touching ``opt.icon``: in PySide6 the
+        # ``icon`` property getter shares the member's data pointer, so
+        # ``opt.icon = QIcon()`` also nulls a previously captured reference
+        # (the "background paints but no glyph" bug).
+        size = opt.decorationSize if opt.decorationSize.isValid() else QSize(22, 22)
+        mode = QIcon.Selected if (opt.state & QStyle.State_Selected) else QIcon.Normal
+        dev = painter.device()
+        dpr = dev.devicePixelRatioF() if dev is not None else 1.0
+        pm = opt.icon.pixmap(size, dpr, mode)
+        # Background only — strip icon/text on a *separate* copy so the source
+        # option stays intact.
+        bg = QStyleOptionViewItem(opt)
+        bg.icon = QIcon()
+        bg.text = ""
+        style = (bg.widget.style() if bg.widget is not None
+                 else QApplication.style())
+        style.drawControl(QStyle.CE_ItemViewItem, bg, painter, bg.widget)
+        if pm.isNull():
+            return
+        w = pm.width() / max(dpr, 0.1)
+        h = pm.height() / max(dpr, 0.1)
+        r = opt.rect
+        painter.drawPixmap(QPointF(r.x() + (r.width() - w) / 2.0,
+                                   r.y() + (r.height() - h) / 2.0), pm)
+
+    def sizeHint(self, option, index):
+        s = super().sizeHint(option, index)
+        return QSize(s.width(), self.ROW_H)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1206,6 +1601,16 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # ── wallpaper backdrop (round-119) ────────────────────────────────
+        # One layer behind the title bar, the nav rail and *every* page — a
+        # wallpaper has to cover the whole launcher, not just the home page.
+        # It is transparent for mouse events and sits at the bottom of the
+        # stacking order, so it can never cover buttons or text.
+        from .wallpaper import WallpaperWidget
+        self.backdrop = WallpaperWidget(central)
+        self.backdrop.setGeometry(central.rect())
+        self.backdrop.lower()
+
         # ── full-width custom title bar (drag area + window controls) ──
         self.titlebar = self._build_titlebar()
         _boot_trace("6 titlebar ok")
@@ -1243,6 +1648,9 @@ class MainWindow(QMainWindow):
         )
         self.stack.addWidget(self.home)  # 0 Home
         _boot_trace("6.6 home built")
+        # The panorama arrives asynchronously; re-colour the labels that sit
+        # directly on the artwork once it is on screen.
+        self.backdrop.panorama_ready.connect(self.home._refresh_overlay_style)
 
         # ── 延迟加载：仅主页（index 0）立即构建；其余页面（1-9）用轻量占位
         # QWidget 占住 QStackedWidget 的索引，首次切换到该页时（_ensure_page）
@@ -1432,7 +1840,7 @@ class MainWindow(QMainWindow):
             return
 
         from PySide6.QtGui import QPainter, QLinearGradient, QFont
-        from PySide6.QtCore import QPropertyAnimation, QEasingCurve, Qt as _Qt
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
 
         W, H = 320, 110
         # 自绘 toast widget —— 比 RoundedCard 更可控（金边/渐变/不裁剪 icon）
@@ -1716,6 +2124,57 @@ class MainWindow(QMainWindow):
     def _current_version_id(self) -> str | None:
         inst = self.current_instance()
         return getattr(inst, "version_id", None) if inst is not None else None
+
+    def _panorama_source(self) -> tuple[str, str, str]:
+        """``(mc_dir, game_dir, version)`` of the current instance (round-119)."""
+        inst = self.current_instance()
+        if inst is None:
+            return "", "", ""
+        try:
+            mc_dir = inst.mc_dir or ""
+            game_dir = inst.game_dir or mc_dir
+        except Exception:  # noqa: BLE001 - a broken instance must not kill the backdrop
+            return "", "", ""
+        version = (getattr(inst, "version_id", "") or
+                   getattr(inst, "game_version", "")) or ""
+        return mc_dir, game_dir, version
+
+    def _apply_wallpaper(self, cfg: dict | None = None,
+                         version_id: str | None = None) -> None:
+        """Re-apply the full-window backdrop.
+
+        Also toggles the translucent app surface: with a wallpaper behind the
+        pages, ``bg_app_frost`` must let the artwork through while cards keep
+        their solid surface (see ``theme.set_wallpaper_surface``).
+        """
+        if cfg is not None:
+            self.cfg = cfg
+        backdrop = getattr(self, "backdrop", None)
+        if backdrop is None:
+            return
+        try:
+            from .theme import apply_qss, set_wallpaper_surface
+            mode = str(self.cfg.get("wallpaper_mode", "none") or "none")
+            set_wallpaper_surface(mode != "none")
+            apply_qss()
+            backdrop.apply(self.cfg, version_id, *self._panorama_source())
+            central = self.centralWidget()
+            backdrop.setGeometry(central.rect() if central is not None
+                                 else self.rect())
+            backdrop.lower()
+            home = getattr(self, "home", None)
+            if home is not None:
+                home._refresh_overlay_style()
+        except Exception:  # noqa: BLE001 - a bad wallpaper must not kill the window
+            pass
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        backdrop = getattr(self, "backdrop", None)
+        central = self.centralWidget()
+        if backdrop is not None and central is not None:
+            backdrop.setGeometry(central.rect())
+            backdrop.lower()
 
     def _on_current_changed(self, _id: str):
         if getattr(self, "mods_page", None) is not None:
@@ -2277,6 +2736,9 @@ class MainWindow(QMainWindow):
         nav.setMinimumWidth(_w)
         nav.setMaximumWidth(_w)
         nav.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 图标模式的条目宽度跟视口一致（否则比视口宽 1px → 底部横向滚动条冒出来）
+        nav.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        nav.setResizeMode(QListView.Adjust)
         nav.setIconSize(QSize(22, 22))
         nav.setSpacing(0)  # 不要额外间距，留给 QSS padding
         nav.setContentsMargins(6, 4, 6, 4)
@@ -2345,6 +2807,9 @@ class MainWindow(QMainWindow):
         self._nav_row_map: dict[int, str] = {}
         # round-107 图标模式：隐藏分组标题、条目只留居中图标，hover 出 tooltip。
         icons_only = getattr(self, "_nav_icons_only", False)
+        # 只有图标时要自己居中画图标（默认委托会把图标推到文字起始处）
+        nav.setItemDelegate(
+            _IconNavDelegate(nav) if icons_only else QStyledItemDelegate(nav))
         for group_title, items in NAV_GROUPS:
             if group_title is not None and not icons_only:
                 hdr = QListWidgetItem()
@@ -2356,10 +2821,12 @@ class MainWindow(QMainWindow):
                 nav.setItemWidget(hdr, hlabel)
             for label_key, key in items:
                 label = t(label_key)
-                it = QListWidgetItem(icon(key), "" if icons_only else label)
+                it = QListWidgetItem(_nav_item_icon(key, 22),
+                                     "" if icons_only else label)
                 if icons_only:
                     it.setTextAlignment(Qt.AlignCenter)
                     it.setToolTip(label)
+                    it.setSizeHint(QSize(0, _IconNavDelegate.ROW_H))
                 nav.addItem(it)
                 self._nav_row_map[nav.count() - 1] = key
         # select the home row (first entry, no header above it → row 0)
@@ -2476,7 +2943,7 @@ class MainWindow(QMainWindow):
         don't exist yet (联机 / 更多 …). Keeps the top-pill reachable while the
         real page ships later."""
         if not hasattr(self, "_pcl2_placeholder_widget"):
-            from PySide6.QtWidgets import QVBoxLayout, QLabel, QFrame
+            from PySide6.QtWidgets import QVBoxLayout, QLabel
             w = QWidget()
             lay = QVBoxLayout(w)
             lay.setContentsMargins(48, 40, 48, 40)
@@ -2840,7 +3307,16 @@ class MainWindow(QMainWindow):
         # 移除，没有对应导航行——此时直接切栈，不再去点不存在的行（否则会误落到首页）。
         rows = {k: r for r, k in self._nav_row_map.items()}
         if key in rows:
-            self.nav.setCurrentRow(rows[key])
+            row = rows[key]
+            if self.nav.currentRow() == row:
+                # round-120：从「版本库」等无导航行的子页面返回时，侧栏仍高亮
+                # 父行（如首页）。setCurrentRow 到同一行不会再发 currentRowChanged
+                # → 页面永远切不回去；此时必须直接切栈。
+                idx = STACK_INDEX.get(key)
+                if idx is not None:
+                    self._switch_stack(idx)
+            else:
+                self.nav.setCurrentRow(row)
             return
         idx = STACK_INDEX.get(key)
         if idx is not None:
@@ -2893,9 +3369,69 @@ class MainWindow(QMainWindow):
             if skin_w is not None:
                 try:
                     skin_w.finished.connect(
-                        lambda _r=None: self._refresh_account_avatar()
+                        lambda _r=None: self._after_login_skin()
                     )
                 except Exception:
+                    pass
+
+    def _after_login_skin(self):
+        """Repaint after the login-time skin fetch, and say so if it failed."""
+        self._refresh_account_avatar()
+        acc = self.current_account
+        if (acc and acc.get("type") == "microsoft"
+                and not skin_manager().active_path(acc["id"])):
+            # Silent fallback to Steve is confusing — tell the player why and
+            # where to retry (skin library has a manual refresh button now).
+            self.statusBar().showMessage(t("status.skin_fetch_failed"), 10000)
+
+    def _startup_skin_refresh(self):
+        """Boot-time skin fetch for an already-signed-in premium account.
+
+        round-125（用户反馈「识别不到我的皮肤」）：登录时 LoginDialog 会拉一次
+        皮肤，但那是上一次会话的事。重启后 ``skins.json`` 里可能根本没有 active
+        条目，首页只能退回默认 Steve，皮肤库也显示为空——用户会以为启动器认不出
+        他的账号。这里只在「正版账号 + 本地无 active 皮肤」时后台补拉一次，
+        已有缓存就不打扰 Mojang。
+        """
+        acc = self.current_account
+        if not acc or acc.get("type") != "microsoft":
+            return
+        if not (acc.get("access_token") or "").strip():
+            return
+        if skin_manager().active_path(acc["id"]):
+            return
+        from .worker import Worker
+        w = Worker(skin_manager().fetch_account_skin,
+                   acc.get("name", ""), acc.get("uuid") or "")
+        self._startup_skin_worker = w  # 挂引用防 QThread 被回收
+        w.finished.connect(
+            lambda entry, aid=acc["id"]: self._after_startup_skin(entry, aid))
+        w.error.connect(lambda _e: None)  # 网络失败不打扰用户
+        w.start()
+
+    def _after_startup_skin(self, entry, account_id: str):
+        """Apply the boot-time fetched skin and repaint anything showing it."""
+        if entry:
+            try:
+                skin_manager().set_active(account_id, entry["id"])
+            except Exception:  # noqa: BLE001 - a bad write must not break the UI
+                pass
+        self._refresh_account_avatar()
+        # The fetched skin must also land on the home showcase (round-126:
+        # previously only the top-bar avatar was refreshed).
+        try:
+            self.home._refresh_character()
+        except Exception:
+            pass
+        # A skin dialog may already be open (the user opened it before the fetch
+        # landed, which is exactly how "皮肤库为空" was reported) — rebuild it.
+        from .skin_dialog import SkinDialog
+        for wdg in QApplication.topLevelWidgets():
+            if isinstance(wdg, SkinDialog) and wdg.isVisible():
+                try:
+                    wdg._rebuild()
+                    wdg._rebuild_capes()
+                except Exception:  # noqa: BLE001
                     pass
 
     def _open_skin_library(self):
@@ -2905,6 +3441,13 @@ class MainWindow(QMainWindow):
             self,
             self.current_account["id"] if self.current_account else None,
         ).exec()
+        # The dialog may have changed the active skin / cape — repaint the
+        # top-bar avatar and the home character card immediately.
+        self._refresh_account_avatar()
+        try:
+            self.home._refresh_character()
+        except Exception:
+            pass
 
     def _build_account_menu(self):
         """Populate the account dropdown with saved identities + add/remove."""
@@ -2961,6 +3504,11 @@ class MainWindow(QMainWindow):
             self.account_btn.setIcon(render_head(path, 24))
         else:
             self.account_btn.setIcon(icon("account"))
+        # Keep the home character card in sync with the account/skin change.
+        try:
+            self.home._refresh_character()
+        except Exception:  # noqa: BLE001 - home may be mid-rebuild
+            pass
 
     def _open_settings(self):
         """Open the embedded settings page (nav row triggers reload + switch)."""

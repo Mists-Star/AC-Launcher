@@ -11,7 +11,6 @@ Both are Qt-aware; keep them out of the Qt-free ``core`` layer.
 from __future__ import annotations
 
 import os
-import re
 import math
 import hashlib
 from collections import OrderedDict
@@ -30,6 +29,11 @@ from .paths import get_data_dir, get_resource_path
 
 
 # ----------------------------------------------------------------------- loader
+def _dpr_tag(dpr: float) -> int:
+    """Stable integer key for a device pixel ratio (125% → 125)."""
+    return int(round(max(1.0, float(dpr or 1.0)) * 100))
+
+
 class ImageLoader(QObject):
     """Download + cache remote images, render them rounded into a QLabel."""
 
@@ -42,10 +46,10 @@ class ImageLoader(QObject):
         # Bumped on every UI teardown (e.g. store category switch / new search)
         # so in-flight replies know their target widget may already be dead.
         self._token = 0
-        # In-memory cache: (url, size) -> rounded QPixmap. Makes revisiting a
+        # In-memory cache: (url, size, dpr) -> rounded QPixmap. Makes revisiting a
         # page or rebuilding a list with the same icons effectively instant.
         # round-40 P2-7：LRU 上限 256——OrderedDict 访问即置顶，超限丢最老。
-        self._mem: "OrderedDict[tuple[str, int], QPixmap]" = OrderedDict()
+        self._mem: "OrderedDict[tuple[str, int, int], QPixmap]" = OrderedDict()
         self._mem_max = 256
         # Pending request registry: request-id -> (target QLabel, size).
         # CRITICAL: never store the target widget pointer as a QNetworkReply
@@ -81,12 +85,14 @@ class ImageLoader(QObject):
 
         Lookup order: memory cache → disk cache (pre-rounded) → network.
         """
+        dpr = self._dpr_for(target)
+        tag = _dpr_tag(dpr)
         if not url:
             if fallback is not None and isValid(target):
-                target.setPixmap(self._round(fallback, size))
+                target.setPixmap(self._round(fallback, size, dpr))
             return
 
-        cache_key = (url, size)
+        cache_key = (url, size, tag)
         # 1) Memory cache: instant, no disk I/O / no rounding.
         if cache_key in self._mem:
             pm = self._mem_get(cache_key)
@@ -96,15 +102,16 @@ class ImageLoader(QObject):
 
         # Show fallback immediately while we read disk or fetch network.
         if fallback is not None and isValid(target):
-            target.setPixmap(self._round(fallback, size))
+            target.setPixmap(self._round(fallback, size, dpr))
 
         key = hashlib.md5(url.encode("utf-8")).hexdigest()
-        # 缓存文件按尺寸保存已经 round 好的 48×48 PNG，下次加载直接 setPixmap，
-        # 不需要再缩放/裁圆角，比存原图快得多。
-        path = os.path.join(self._cache_dir, f"{key}_{size}.png")
+        # 缓存文件按「逻辑尺寸 @ DPR」保存已经 round 好的 PNG，下次加载直接
+        # setPixmap，不需要再缩放/裁圆角，比存原图快得多。
+        path = os.path.join(self._cache_dir, f"{key}_{size}@{tag}.png")
         if os.path.exists(path):
             pm = QPixmap(path)
             if not pm.isNull():
+                pm.setDevicePixelRatio(dpr)
                 self._mem_put(cache_key, pm)
                 if isValid(target):
                     target.setPixmap(pm)
@@ -116,7 +123,7 @@ class ImageLoader(QObject):
         # into QVariant properties (safe to read back). See __init__ note.
         self._rid += 1
         rid = self._rid
-        self._pending[rid] = (target, size)
+        self._pending[rid] = (target, size, dpr)
         reply = self._mgr.get(req)
         reply.setProperty("rid", rid)
         reply.setProperty("url", url)
@@ -136,19 +143,21 @@ class ImageLoader(QObject):
         """
         if not url:
             return
-        cache_key = (url, size)
+        dpr = self._screen_dpr()
+        tag = _dpr_tag(dpr)
+        cache_key = (url, size, tag)
         if cache_key in self._mem:
             self._mem_get(cache_key)  # touch for LRU freshness
             return
         key = hashlib.md5(url.encode("utf-8")).hexdigest()
-        path = os.path.join(self._cache_dir, f"{key}_{size}.png")
+        path = os.path.join(self._cache_dir, f"{key}_{size}@{tag}.png")
         if os.path.exists(path):
             return  # already on disk — the later load() reads it straight in
         req = QNetworkRequest(QUrl(url))
         req.setHeader(QNetworkRequest.UserAgentHeader, "MC-Launcher/0.1")
         self._rid += 1
         rid = self._rid
-        self._pending[rid] = (None, size)
+        self._pending[rid] = (None, size, dpr)
         reply = self._mgr.get(req)
         reply.setProperty("rid", rid)
         reply.setProperty("url", url)
@@ -166,18 +175,18 @@ class ImageLoader(QObject):
             token = reply.property("token")
             # Look up the target wrapper in the Python dict (never via a
             # QVariant property — that path segfaults on dangling pointers).
-            target, size = self._pending.pop(rid, (None, None))
+            target, size, dpr = self._pending.pop(rid, (None, None, 1.0))
             if reply.error() == QNetworkReply.NoError:
                 data = reply.readAll()
                 pm = QPixmap()
                 if pm.loadFromData(data):
-                    rounded = self._round(pm, size)
+                    rounded = self._round(pm, size, dpr)
                     try:
                         rounded.save(path, "PNG")
                     except OSError:
                         pass
                     if url:
-                        self._mem_put((url, size), rounded)
+                        self._mem_put((url, size, _dpr_tag(dpr)), rounded)
                     if token == self._token and target is not None and isValid(target):
                         try:
                             target.setPixmap(rounded)
@@ -202,17 +211,45 @@ class ImageLoader(QObject):
                 pass
 
     @staticmethod
-    def _round(pm: QPixmap, size: int) -> QPixmap:
-        scaled = pm.scaled(size, size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        out = QPixmap(size, size)
+    def _screen_dpr() -> float:
+        try:
+            from PySide6.QtGui import QGuiApplication
+            scr = QGuiApplication.primaryScreen()
+            return max(1.0, float(scr.devicePixelRatio()) if scr else 1.0)
+        except Exception:  # noqa: BLE001
+            return 1.0
+
+    @classmethod
+    def _dpr_for(cls, target) -> float:
+        """Device pixel ratio of the widget that will show the pixmap.
+
+        A QPixmap carrying DPR 1.0 gets upscaled by Qt on a 1.25×/1.5× display,
+        which is exactly what made card covers look low-res (round-126).
+        """
+        try:
+            if target is not None and isValid(target):
+                return max(1.0, float(target.devicePixelRatioF() or 1.0))
+        except Exception:  # noqa: BLE001 - widget may be gone
+            pass
+        return cls._screen_dpr()
+
+    @staticmethod
+    def _round(pm: QPixmap, size: int, dpr: float = 1.0) -> QPixmap:
+        # Render at physical pixels and tag the DPR so a fractional-scaling
+        # display draws it 1:1 instead of blurring a Qt upscale.
+        px = max(4, int(round(size * max(1.0, dpr))))
+        scaled = pm.scaled(px, px, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        out = QPixmap(px, px)
         out.fill(Qt.transparent)
         p = QPainter(out)
         p.setRenderHint(QPainter.Antialiasing)
         path = QPainterPath()
-        path.addRoundedRect(0, 0, size, size, size * 0.18, size * 0.18)
+        r = px * 0.18
+        path.addRoundedRect(0, 0, px, px, r, r)
         p.setClipPath(path)
         p.drawPixmap(0, 0, scaled)
         p.end()
+        out.setDevicePixelRatio(max(1.0, dpr))
         return out
 
 
@@ -233,84 +270,15 @@ _TYPE_THEME: dict[str, tuple[str, str]] = {
 
 # round-53：版本图标改为 MC 风格 3D 等距方块（对齐官方启动器/主流启动器的方块
 # 图标）。每种版本类型配一组「顶面/左面/右面」的经典 MC 贴图配色：
-#   release → 草方块；snapshot → 紫珀块；april → 樱花木；old_beta → 铁砧；
-#   old_alpha / 未知 → 圆石。
+#   release → 草方块；snapshot → 紫珀块；april → 工作台；old_beta → 砖块；
+#   old_alpha / 未知 → 圆石。这些只是贴图缺失时的纯色回退。
 _ISO_BLOCK: dict[str, tuple[str, str, str]] = {
     "release": ("#7EC850", "#5B3A1E", "#8B5A2B"),   # grass block
     "snapshot": ("#C084FC", "#6D28D9", "#A78BFA"),  # purpur
-    "april": ("#F9A8D4", "#9D174D", "#DB2777"),     # cherry planks
-    "old_beta": ("#CBD5E1", "#4B5563", "#94A3B8"),  # anvil/iron
+    "april": ("#C9A06B", "#6B4423", "#8B5E34"),     # crafting table
+    "old_beta": ("#B45309", "#7C2D12", "#92400E"),  # brick block
     "old_alpha": ("#9CA3AF", "#374151", "#6B7280"), # cobblestone
 }
-
-# major.minor -> theme. c1/c2 gradient, en/zh update name, motif (bottom band),
-# deco (list of eco chips painted around the rim).
-VERSION_THEMES: dict[str, dict] = {
-    "1.21": {"c1": "#F59E0B", "c2": "#B45309", "motif": "trials",
-             "en": "Tricky Trials", "zh": "巧密试炼",
-             "deco": ["crate", "copper", "breeze"]},
-    "1.20": {"c1": "#FBCFE8", "c2": "#DB2777", "motif": "cherry",
-             "en": "Trails & Tales", "zh": "足迹与故事",
-             "deco": ["petal", "branch", "sniffer"]},
-    "1.19": {"c1": "#34D399", "c2": "#065F46", "motif": "wild",
-             "en": "Wild Update", "zh": "荒野更新",
-             "deco": ["frog", "mangrove", "warden"]},
-    "1.18": {"c1": "#A78BFA", "c2": "#5B21B6", "motif": "caves",
-             "en": "Caves & Cliffs", "zh": "洞穴与山崖",
-             "deco": ["amethyst", "spike", "copper"]},
-    "1.17": {"c1": "#C4B5FD", "c2": "#6D28D9", "motif": "caves",
-             "en": "Caves & Cliffs", "zh": "洞穴与山崖",
-             "deco": ["amethyst", "spike", "copper"]},
-    "1.16": {"c1": "#FB7185", "c2": "#9F1239", "motif": "nether",
-             "en": "Nether Update", "zh": "下界更新",
-             "deco": ["piglin", "lava", "netherite"]},
-    "1.15": {"c1": "#FDE047", "c2": "#CA8A04", "motif": "bees",
-             "en": "Buzzy Bees", "zh": "嗡嗡蜂群",
-             "deco": ["bee", "honey", "flower"]},
-    "1.14": {"c1": "#86EFAC", "c2": "#15803D", "motif": "village",
-             "en": "Village & Pillage", "zh": "村庄与掠夺",
-             "deco": ["village", "pillage", "iron"]},
-    "1.13": {"c1": "#38BDF8", "c2": "#0369A1", "motif": "aquatic",
-             "en": "Update Aquatic", "zh": "海洋更新",
-             "deco": ["fish", "kelp", "bubble"]},
-    "1.12": {"c1": "#F472B6", "c2": "#7C3AED", "motif": "color",
-             "en": "World of Color", "zh": "多彩世界更新",
-             "deco": ["color", "glazed", "parrot"]},
-    "1.11": {"c1": "#D6B98C", "c2": "#92400E", "motif": "exploration",
-             "en": "Exploration Update", "zh": "探索更新",
-             "deco": ["shulker", "llama", "map"]},
-    "1.10": {"c1": "#BAE6FD", "c2": "#0EA5E9", "motif": "frost",
-             "en": "Frostburn Update", "zh": "霜燃更新",
-             "deco": ["polar", "stray", "ice"]},
-    "1.9":  {"c1": "#F87171", "c2": "#B91C1C", "motif": "combat",
-             "en": "Combat Update", "zh": "战斗更新",
-             "deco": ["sword", "shield", "elytra"]},
-    "1.8":  {"c1": "#4ADE80", "c2": "#15803D", "motif": "bountiful",
-             "en": "Bountiful Update", "zh": "丰饶更新",
-             "deco": ["wheat", "rabbit", "banner"]},
-    "1.7":  {"c1": "#34D399", "c2": "#0F766E", "motif": "color",
-             "en": "The Update that Changed the World",
-             "zh": "改变世界的更新",
-             "deco": ["color", "rabbit", "acacia"]},
-    "1.6":  {"c1": "#FCD34D", "c2": "#B45309", "motif": "bountiful",
-             "en": "Horse Update", "zh": "马匹更新",
-             "deco": ["horse", "armor", "hay"]},
-    "1.5":  {"c1": "#F87171", "c2": "#DC2626", "motif": "redstone",
-             "en": "Redstone Update", "zh": "红石更新",
-             "deco": ["redstone", "repeater", "hopper"]},
-    "1.4":  {"c1": "#A78BFA", "c2": "#6D28D9", "motif": "nether",
-             "en": "Halloween Update", "zh": "万圣节更新",
-             "deco": ["pumpkin", "bat", "nether"]},
-}
-
-
-def version_theme(version_id: str) -> dict | None:
-    """Return the curated update theme for a version id, or None (e.g. a
-    snapshot like ``25w14craftmine`` has no themed release)."""
-    m = re.match(r"^(\d+)\.(\d+)", version_id or "")
-    if not m:
-        return None
-    return VERSION_THEMES.get(f"{m.group(1)}.{m.group(2)}")
 
 
 # ---------------------------------------------------- real MC texture overlay
@@ -349,15 +317,20 @@ _tex_miss: set[str] = set()
 
 
 # round-107 版本图标回归「MC 3D 等距方块」：正式版草方块 / 快照命令方块 /
-# 愚人节蛋糕 / 旧版铁砧·圆石，对齐主流启动器。此前 round-92 压成「纯色方块 +
+# 愚人节工作台 / 旧版砖块·圆石，对齐主流启动器。此前 round-92 压成「纯色方块 +
 # 版本号文字」，长版本号被省略号截断且毫无辨识度。这里改用随包的真实 MC 贴图
 # （assets/mc_textures/block）渲染 3D 方块，缺贴图时回退纯色向量块。
 _BLOCK_FACES: dict[str, tuple[str, str, str | None]] = {
     # vtype -> (top texture, side texture, right face texture or None)
     "release":   ("grass_block_top", "grass_block_side", None),
     "snapshot":  ("command_block_side", "command_block_side", "command_block_front"),
-    "april":     ("cake_top", "cake_side", None),
-    "old_beta":  ("anvil_top", "anvil", None),
+    # April Fools versions are joke updates; a cake reads as "birthday" noise and
+    # its side texture is mostly white, so swap it for the crafting table —
+    # the theme of the most recent April Fools update ("Craftmine").
+    "april":     ("crafting_table_top", "crafting_table_side", "crafting_table_front"),
+    # Anvil textures are largely transparent (the sprite only covers the anvil
+    # shape), which punched holes in the cube — use an opaque old-school block.
+    "old_beta":  ("bricks", "bricks", None),
     "old_alpha": ("cobblestone", "cobblestone", None),
 }
 _BLOCK_FALLBACK = ("bedrock", "bedrock", None)
@@ -435,12 +408,18 @@ def _paint_face(p: QPainter, quad: list, tf: QTransform,
 
 def _draw_iso_block(p: QPainter, s: float, top_pm, side_pm, right_pm,
                     top_col: QColor, side_col: QColor, right_col: QColor) -> None:
-    """Draw a 2:1 isometric cube filling an s×s box (top vertex at origin)."""
+    """Draw an isometric cube of width ``s`` (top vertex at the origin).
+
+    ``hh`` is the half-height of the top diamond (2:1, the MC pixel-art
+    standard). The vertical side edges must be as long as the slanted top
+    edges — ``hypot(cx, hh)`` ≈ 0.559·s — otherwise the same 16×16 texture is
+    stretched horizontally on the sides and the whole cube reads as squashed.
+    Total silhouette height = 2·hh + vh ≈ 1.059·s.
+    """
     cx = s / 2.0
     hh = s * 0.25
-    vh = s * 0.5
+    vh = math.hypot(cx, hh)
     A = QPointF(cx, 0.0)
-    B = QPointF(s, hh)
     C = QPointF(cx, hh * 2.0)
     D = QPointF(0.0, hh)
 
@@ -460,7 +439,7 @@ def _draw_iso_block(p: QPainter, s: float, top_pm, side_pm, right_pm,
 def make_version_pixmap(version_id: str, vtype: str, size: int = 56) -> QPixmap:
     """Draw a 3D isometric MC block icon for a version (HMCL / PCL2 style).
 
-    round-107：正式版草方块、快照命令方块、愚人节蛋糕、旧版铁砧 / 圆石。用
+    round-107：正式版草方块、快照命令方块、愚人节工作台、旧版砖块 / 圆石。用
     随包真实 MC 贴图渲染；任何贴图缺失都会回退到纯色向量块，绝不画出坏图标。
     ``version_id`` 保留在签名里以兼容旧调用点（图标由 ``vtype`` 决定）。
     """
@@ -470,14 +449,30 @@ def make_version_pixmap(version_id: str, vtype: str, size: int = 56) -> QPixmap:
     right_pm = _load_block_tex(names[2]) if names[2] else None
     cols = _ISO_BLOCK.get(vtype) or _ISO_BLOCK["old_alpha"]
 
-    pm = QPixmap(size, size)
+    # Render at the physical pixel size and carry the DPR on the pixmap, so a
+    # 1.25×/1.5× display gets a crisp icon instead of a Qt-upscaled blur.
+    try:
+        from PySide6.QtGui import QGuiApplication
+        _scr = QGuiApplication.primaryScreen()
+        dpr = float(_scr.devicePixelRatio()) if _scr is not None else 1.0
+    except Exception:
+        dpr = 1.0
+    dpr = max(1.0, dpr)
+    px = max(8, int(round(size * dpr)))
+    pm = QPixmap(px, px)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    # 2px padding so the AA edges of the top vertex aren't clipped
-    p.translate(2, 2)
-    _draw_iso_block(p, float(size - 4), top_pm, side_pm, right_pm,
+    # 2px padding so the AA edges of the top vertex aren't clipped. The cube is
+    # taller than wide (height = s·(2+√5)/4 ≈ 1.059·s), so derive the width from
+    # the available height instead of stuffing it into a square — that was the
+    # "grass block looks squashed" bug.
+    box = float(px - 4 * dpr)
+    s = box * 4.0 / (2.0 + math.sqrt(5.0))
+    p.translate((px - s) / 2.0, 2.0 * dpr)
+    _draw_iso_block(p, s, top_pm, side_pm, right_pm,
                     QColor(cols[0]), QColor(cols[1]), QColor(cols[2]))
     p.end()
+    pm.setDevicePixelRatio(dpr)
     return pm
 

@@ -55,7 +55,7 @@ _PERF_EXPECT_FORGE = [
 ]
 
 # Java 兼容区间（对齐 core.java.select_java 的 max_ok 表）
-_JAVA_MAX_OK = {8: 8, 16: 17, 17: 21, 21: 24}
+_JAVA_MAX_OK = {8: 8, 16: 17, 17: 21, 21: 24, 25: 25}
 
 
 # --------------------------------------------------------------------------- #
@@ -268,13 +268,14 @@ def _java_major_for(javas: list[dict], path: str) -> int:
 
 
 def _check_java(inst, settings) -> list[Finding]:
-    from .java import required_java_major, select_java, scan_javas
+    from .java import required_java_major_for, select_java, scan_javas
 
     findings: list[Finding] = []
     gv = (getattr(inst, "game_version", "") or "").strip()
     if not gv:
         return findings
-    need = required_java_major(gv)
+    # Loader-aware: Cleanroom is 1.12.2 on Java 21.
+    need = required_java_major_for(gv, getattr(inst, "loader", "") or "")
     max_ok = _JAVA_MAX_OK.get(need, need + 3)
 
     settings = settings or {}
@@ -290,7 +291,7 @@ def _check_java(inst, settings) -> list[Finding]:
         # 只有能从扫描结果确认版本、且确实不兼容时才报（路径不在扫描表里
         # 说明是玩家手填的 JDK，不运行无法得知版本 → 不误报）。
         if major and not (need <= major <= max_ok):
-            fixed = select_java(gv, java_auto=True)
+            fixed = select_java(gv, java_auto=True, need_override=need)
             fix = (_fix("set_java_path", "health.fixlabel.set_java_path",
                         {"path": fixed}) if fixed
                    else _fix("clear_java_path", "health.fixlabel.clear_java_path"))
@@ -303,7 +304,7 @@ def _check_java(inst, settings) -> list[Finding]:
                 fix=fix))
     else:
         # 跟随自动：连一个兼容 JDK 都找不到才报（无法自动修 → 只提示装 Java）
-        if select_java(gv, java_auto=True) is None:
+        if select_java(gv, java_auto=True, need_override=need) is None:
             findings.append(Finding(
                 kind="java_missing", severity=SEV_CRITICAL,
                 title="health.kind.java_missing",

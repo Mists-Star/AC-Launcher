@@ -78,6 +78,8 @@ _*_tmp.py
 _shot*
 _shots/
 ac.lock
+ac.live.lock
+_startup.log
 _*.png
 # 脱敏审计/历史改写模拟脚本（内含真实 PII 字面量，绝不入库）
 _pii_*.py

@@ -929,6 +929,9 @@ def discover_javas(deep: bool = False, progress=None) -> list[JavaInstall]:
             os.path.expanduser("/usr/lib/jvm"),
             os.path.expanduser("/usr/local/lib/jvm"),
         ])
+    # Cleanroom's installer provisions its own JRE here (--provision-java);
+    # find it like any portable JDK so the launcher can run what it installed.
+    portable_roots.append(os.path.join(profile, ".cleanroom", "java"))
     for root in portable_roots:
         if not os.path.isdir(root):
             continue

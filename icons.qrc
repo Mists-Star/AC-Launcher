@@ -1,47 +1,47 @@
 <RCC>
   <qresource prefix="/icons">
-    <file>assets/icons/ac_launcher_icon.svg</file>
-    <file>assets/icons/ac_launcher_icon_white.svg</file>
-    <file>assets/icons/account.svg</file>
-    <file>assets/icons/achievements.svg</file>
-    <file>assets/icons/add.svg</file>
-    <file>assets/icons/check.svg</file>
-    <file>assets/icons/console.svg</file>
-    <file>assets/icons/crash.svg</file>
-    <file>assets/icons/delete.svg</file>
-    <file>assets/icons/dialog_info.svg</file>
-    <file>assets/icons/dialog_question.svg</file>
-    <file>assets/icons/dialog_success.svg</file>
-    <file>assets/icons/dialog_warning.svg</file>
-    <file>assets/icons/download.svg</file>
-    <file>assets/icons/export.svg</file>
-    <file>assets/icons/external.svg</file>
-    <file>assets/icons/folder.svg</file>
-    <file>assets/icons/home.svg</file>
-    <file>assets/icons/import.svg</file>
-    <file>assets/icons/instances.svg</file>
-    <file>assets/icons/java.svg</file>
-    <file>assets/icons/language.svg</file>
-    <file>assets/icons/lobby.svg</file>
-    <file>assets/icons/login.svg</file>
-    <file>assets/icons/logo.svg</file>
-    <file>assets/icons/microsoft.svg</file>
-    <file>assets/icons/modpack.svg</file>
-    <file>assets/icons/mods.svg</file>
-    <file>assets/icons/moon.svg</file>
-    <file>assets/icons/music.svg</file>
-    <file>assets/icons/play.svg</file>
-    <file>assets/icons/refresh.svg</file>
-    <file>assets/icons/repair.svg</file>
-    <file>assets/icons/resourcepack.svg</file>
-    <file>assets/icons/search.svg</file>
-    <file>assets/icons/server.svg</file>
-    <file>assets/icons/settings.svg</file>
-    <file>assets/icons/shader.svg</file>
-    <file>assets/icons/skin.svg</file>
-    <file>assets/icons/store.svg</file>
-    <file>assets/icons/sun.svg</file>
-    <file>assets/icons/tools.svg</file>
-    <file>assets/icons/versions.svg</file>
+    <file alias="ac_launcher_icon.svg">assets/icons/ac_launcher_icon.svg</file>
+    <file alias="ac_launcher_icon_white.svg">assets/icons/ac_launcher_icon_white.svg</file>
+    <file alias="account.svg">assets/icons/account.svg</file>
+    <file alias="achievements.svg">assets/icons/achievements.svg</file>
+    <file alias="add.svg">assets/icons/add.svg</file>
+    <file alias="check.svg">assets/icons/check.svg</file>
+    <file alias="console.svg">assets/icons/console.svg</file>
+    <file alias="crash.svg">assets/icons/crash.svg</file>
+    <file alias="delete.svg">assets/icons/delete.svg</file>
+    <file alias="dialog_info.svg">assets/icons/dialog_info.svg</file>
+    <file alias="dialog_question.svg">assets/icons/dialog_question.svg</file>
+    <file alias="dialog_success.svg">assets/icons/dialog_success.svg</file>
+    <file alias="dialog_warning.svg">assets/icons/dialog_warning.svg</file>
+    <file alias="download.svg">assets/icons/download.svg</file>
+    <file alias="export.svg">assets/icons/export.svg</file>
+    <file alias="external.svg">assets/icons/external.svg</file>
+    <file alias="folder.svg">assets/icons/folder.svg</file>
+    <file alias="home.svg">assets/icons/home.svg</file>
+    <file alias="import.svg">assets/icons/import.svg</file>
+    <file alias="instances.svg">assets/icons/instances.svg</file>
+    <file alias="java.svg">assets/icons/java.svg</file>
+    <file alias="language.svg">assets/icons/language.svg</file>
+    <file alias="lobby.svg">assets/icons/lobby.svg</file>
+    <file alias="login.svg">assets/icons/login.svg</file>
+    <file alias="logo.svg">assets/icons/logo.svg</file>
+    <file alias="microsoft.svg">assets/icons/microsoft.svg</file>
+    <file alias="modpack.svg">assets/icons/modpack.svg</file>
+    <file alias="mods.svg">assets/icons/mods.svg</file>
+    <file alias="moon.svg">assets/icons/moon.svg</file>
+    <file alias="music.svg">assets/icons/music.svg</file>
+    <file alias="play.svg">assets/icons/play.svg</file>
+    <file alias="refresh.svg">assets/icons/refresh.svg</file>
+    <file alias="repair.svg">assets/icons/repair.svg</file>
+    <file alias="resourcepack.svg">assets/icons/resourcepack.svg</file>
+    <file alias="search.svg">assets/icons/search.svg</file>
+    <file alias="server.svg">assets/icons/server.svg</file>
+    <file alias="settings.svg">assets/icons/settings.svg</file>
+    <file alias="shader.svg">assets/icons/shader.svg</file>
+    <file alias="skin.svg">assets/icons/skin.svg</file>
+    <file alias="store.svg">assets/icons/store.svg</file>
+    <file alias="sun.svg">assets/icons/sun.svg</file>
+    <file alias="tools.svg">assets/icons/tools.svg</file>
+    <file alias="versions.svg">assets/icons/versions.svg</file>
   </qresource>
 </RCC>

@@ -49,6 +49,7 @@ _SIZE = 24
 # SVG. Keep this list small — new icons should be added as their own .svg.
 _FALLBACKS = {
     "lobby": "server",
+    "toolbox": "tools",   # round-124：AC 侧栏「其他」分组新增百宝箱入口
 }
 
 # Icons whose artwork carries meaning and must NOT be recoloured: brand marks

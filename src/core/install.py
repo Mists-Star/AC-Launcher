@@ -8,10 +8,11 @@ is exactly the engine behind the "auto-repair" feature: point it at any
 from __future__ import annotations
 
 import os
+import shutil
 
 import minecraft_launcher_lib
 
-from .java import select_java
+from .java import java25_path, select_java
 
 SUPPORTED_LOADERS = [
     "vanilla", "fabric", "forge", "quilt", "neoforge", "liteloader",
@@ -56,7 +57,16 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
 
     mc_dir = inst.mc_dir
     loader = inst.loader if inst.loader in SUPPORTED_LOADERS else "vanilla"
-    java = select_java(inst.game_version, java_auto=java_auto, user_path=java_path) or "java"
+    # Cleanroom runs 1.12.2 on Java 25 and its installer demands exactly that
+    # major. When no 25 is installed the installer itself only needs a modern
+    # JVM to run — it provisions the 25 the client will use.
+    _need = 25 if loader == "cleanroom" else 0
+    java = select_java(inst.game_version, java_auto=java_auto,
+                       user_path=java_path, need_override=_need)
+    if not java and loader == "cleanroom":
+        java = select_java(inst.game_version, java_auto=java_auto,
+                           user_path=java_path, need_override=21)
+    java = java or "java"
 
     # Persist the resolved loader version so later runs are deterministic.
     # Only lib-managed loaders (fabric/forge/quilt/neoforge) expose
@@ -96,9 +106,9 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
         )
 
     if loader == "cleanroom":
-        # Cleanroom: Forge continuation fork (1.12.2 on Java 21 + LWJGL3).
-        # Official installer jar does the whole job (it writes its own version
-        # json into versions/). We just run it with --installClient.
+        # Cleanroom: Forge continuation fork (1.12.2 on Java 25 + LWJGL3).
+        # Official 0.7.x installer does the whole job (it writes its own version
+        # json into versions/ and can provision the Java 25 runtime).
         return _install_cleanroom(
             inst.game_version, mc_dir,
             installer_url=inst.loader_version or "",
@@ -404,33 +414,96 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
     Cleanroom targets 1.12.2. The installer writes its own version entry under
     versions/<mc>-Cleanroom; we then return that id for launch.
     """
+    import re
     import subprocess
     import tempfile
-    from ..net_api import parallel_download_file
+    from ..net_api import (CLEANROOM_LATEST_FALLBACK, cleanroom_installer_url,
+                           fetch_cleanroom_builds, parallel_download_file)
 
+    # The wizard may pass a bare build version, or nothing at all when the
+    # build list failed to load. Resolve a real installer URL here instead of
+    # aborting with "missing installer URL" (round-126).
+    if installer_url and "://" not in installer_url:
+        installer_url = cleanroom_installer_url(installer_url.strip())
     if not installer_url:
-        raise RuntimeError("Cleanroom: missing installer URL (need loader_version)")
+        try:
+            builds = fetch_cleanroom_builds()
+            installer_url = (builds[0]["_installer_url"] if builds
+                             else cleanroom_installer_url(CLEANROOM_LATEST_FALLBACK))
+        except Exception:
+            installer_url = cleanroom_installer_url(CLEANROOM_LATEST_FALLBACK)
+    _m = re.search(r"cleanroom-(\d[\w.\-]*)-installer\.jar", installer_url)
+    build = _m.group(1) if _m else ""
+    # Cleanroom's version json inherits from vanilla 1.12.2, so the base has to
+    # be present before its installer merges the profile in.
+    minecraft_launcher_lib.install.install_minecraft_version(
+        mc_version, mc_dir, callback=callback
+    )
     tmp_dir = tempfile.mkdtemp(prefix="ac_cleanroom_")
+    cleanroom_java = False
     try:
         jar_path = os.path.join(tmp_dir, "cleanroom-installer.jar")
-        parallel_download_file(installer_url, jar_path, timeout=180)
+        try:
+            parallel_download_file(installer_url, jar_path, timeout=180)
+        except Exception:
+            # GitHub release vs Maven mirror: retry on the other host before
+            # surfacing the download error (CN networks often block one).
+            alt = cleanroom_installer_url(
+                build or CLEANROOM_LATEST_FALLBACK,
+                maven=("repo.cleanroommc.com" not in installer_url))
+            parallel_download_file(alt, jar_path, timeout=180)
         if callback:
-            callback({"stage": "cleanroom", "progress": 0.6, "status": "运行 Cleanroom 安装器…"})
-        subprocess.run(
-            [java, "-jar", jar_path, "--installClient", mc_dir],
-            check=True, capture_output=True, timeout=300,
-        )
+            callback({"stage": "cleanroom", "progress": 0.6,
+                      "status": "运行 Cleanroom 安装器…"})
+        # 0.7.x installer CLI: `client -d <dir> --version <id> -y --json`.
+        # It insists on Java 25; `--provision-java` fetches one into
+        # ~/.cleanroom/java when the machine has none (round-126: the old
+        # `--installClient <dir>` call is from the pre-0.7 Forge-style
+        # installer and made every Cleanroom install fail).
+        cmd = [java, "-jar", jar_path, "client", "-d", mc_dir, "-y",
+               "--json", "--quiet"]
+        if build:
+            cmd += ["--version", build]
+        j25 = java25_path()
+        if j25:
+            cmd += ["--java", j25]
+        else:
+            cmd += ["--provision-java"]
+            cleanroom_java = True
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        if r.returncode != 0:
+            # Pre-0.7 builds still use the Forge-style installer, which
+            # installs into its working directory.
+            r2 = subprocess.run([java, "-jar", jar_path, "--installClient"],
+                                cwd=mc_dir, capture_output=True, text=True,
+                                timeout=900)
+            if r2.returncode != 0:
+                detail = ((r.stderr or "") + (r.stdout or "")).strip()
+                raise RuntimeError(
+                    "Cleanroom installer failed (exit "
+                    f"{r.returncode}): {detail[-400:] or 'no output'}")
     finally:
         # round-40 P2 泄漏修复：清理临时安装器（10-100MB jar）
         shutil.rmtree(tmp_dir, ignore_errors=True)
-    # Locate the produced version id: <mc>-Cleanroom_<build> or similar
+    if cleanroom_java:
+        # The freshly provisioned JRE lives in ~/.cleanroom/java; drop the
+        # scan cache so select_java() sees it on the very next launch.
+        try:
+            from .java import reset_scan_cache
+            reset_scan_cache()
+        except Exception:
+            pass
+    # Locate the produced version id: "Cleanroom-<build>" (0.7.x) or
+    # "<mc>-Cleanroom" (legacy installer) — match any cleanroom folder.
     version_id = f"{mc_version}-Cleanroom"
     vdir = os.path.join(mc_dir, "versions")
     if os.path.isdir(vdir):
         for name in os.listdir(vdir):
-            if name.lower().startswith(mc_version.lower()) and "cleanroom" in name.lower():
-                if os.path.isfile(os.path.join(vdir, name, f"{name}.json")):
-                    version_id = name
+            if "cleanroom" not in name.lower():
+                continue
+            if os.path.isfile(os.path.join(vdir, name, f"{name}.json")):
+                version_id = name
+                if build and build.lower() in name.lower():
                     break
     return version_id
 

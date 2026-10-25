@@ -24,7 +24,6 @@ from PySide6 import __version__ as _pyside_version
 from src.main_window import MainWindow, STACK_INDEX
 from src.theme import set_theme_mode, apply_qss
 from src.settings_dialog import load_config
-from src import paths  # noqa: F401  ensure packaging path helpers are importable
 
 
 def _app_icon() -> QIcon:
@@ -324,7 +323,7 @@ def main():
                 win = MainWindow()
                 holder.append(win)
                 _log.write("10 MainWindow built (on-demand after welcome)\n"); _log.flush()
-            except Exception as e:
+            except Exception:
                 import traceback as _tb
                 QMessageBox.critical(
                     None, "AC Launcher",
@@ -390,6 +389,13 @@ def main():
                 _w = Worker(_acct_mgr().refresh_current_silently)
                 win._token_refresh_worker = _w  # 挂到 win 防 GC（QThread 被回收=崩溃）
                 _w.start()
+            except Exception:
+                pass
+            # round-125：已登录正版账号重启后自动补拉皮肤。皮肤只在登录时拉过一次，
+            # 下次启动若本地无 active 条目，首页会退回 Steve、皮肤库显示为空——
+            # 用户会以为启动器认不出账号（见 MainWindow._startup_skin_refresh）。
+            try:
+                QTimer.singleShot(1500, win._startup_skin_refresh)
             except Exception:
                 pass
             # round-40 资源中心秒加载：后台预取各分类首页（search 结果 24h 磁盘

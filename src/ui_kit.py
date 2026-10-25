@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QComboBox,
 )
 
-from .theme import COLORS, RoundedCard, R_CARD, R_BTN, F_SM, F_MD, F_LG, with_alpha
+from .theme import COLORS, RoundedCard, R_CARD, F_SM, F_LG, with_alpha
 from .icons import icon
 
 

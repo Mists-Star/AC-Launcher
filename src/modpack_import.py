@@ -18,7 +18,6 @@ import zipfile
 from typing import Callable
 
 from .i18n import t
-from .net_api import NetError
 
 
 def detect_pack_format(path: str) -> str | None:

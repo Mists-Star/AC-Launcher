@@ -188,17 +188,6 @@ def active_meter():
     return getattr(ctx, "meter", None) if ctx is not None else None
 
 
-def note_bytes(nbytes: int) -> None:
-    """把字节计入**当前线程所属安装**的速度计量（无安装上下文则忽略）。
-
-    net_api 自家的下载循环用它在每个 chunk 落盘时喂数，这样「自建下载」与
-    「mll 下载」共用同一个速度口径。
-    """
-    meter = active_meter()
-    if meter is not None:
-        meter.note(nbytes)
-
-
 # ── round-110 C：每请求诊断日志（默认关，绝不打断下载）────────────────────
 _DIAG = False
 _DIAG_LOCK = threading.Lock()

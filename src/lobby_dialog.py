@@ -8,7 +8,7 @@ LobbyDialog — out-of-game lobby UI (join / create / members / copy code).
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QComboBox, QGroupBox, QListWidget, QListWidgetItem,
-    QWidget, QProgressBar, QPushButton, QCheckBox,
+    QWidget, QProgressBar, QCheckBox,
 )
 from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices

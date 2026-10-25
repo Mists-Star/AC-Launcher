@@ -4,7 +4,7 @@ Renders all achievements grouped by category, with an overall progress
 header. Unlocked items get a filled badge; locked ones stay dimmed with a
 hint. Listens to the singleton's toast signal for live updates.
 """
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QScrollArea,
     QProgressBar, QGridLayout,
@@ -134,8 +134,11 @@ class AchievementsPage(QWidget):
             self._content.addWidget(cat_lbl)
             grid = QGridLayout()
             grid.setSpacing(10)
+            # round-120：单数分区最后一张卡跨两列，避免半宽空档破坏网格节奏。
             for i, aid in enumerate(ids):
-                grid.addWidget(_AchCard(aid, achievements.is_unlocked(aid)), i // 2, i % 2)
+                span = 2 if (len(ids) % 2 == 1 and i == len(ids) - 1) else 1
+                grid.addWidget(_AchCard(aid, achievements.is_unlocked(aid)),
+                               i // 2, i % 2, 1, span)
             self._content.addLayout(grid)
         self._content.addStretch(1)
 

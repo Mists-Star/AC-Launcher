@@ -7,13 +7,11 @@ the worker-thread pattern for anything network-ish.
 """
 from __future__ import annotations
 
-import os
-
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QProgressBar, QWidget,
 )
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt
 
 from .theme import COLORS, RoundedCard
 from .icons import icon
@@ -187,12 +185,16 @@ class CrashAnalyzerDialog(QDialog):
 
     # ------------------------------------------------------------- analyze
     def _update_header(self):
-        name = getattr(self.inst, "name", "?") if self.inst else t("crash.no_instance")
-        self.inst_lbl.setText(f"{t('crash.title')} — {name}")
+        # round-124：无实例时不再把「请先选择一个实例」拼进标题（与正文重复）
+        if self.inst is not None:
+            self.inst_lbl.setText(f"{t('crash.title')} — {self.inst.name}")
+        else:
+            self.inst_lbl.setText(t("crash.title"))
 
     def _run_analyze(self):
         self.analyze_btn.setEnabled(False)
         self.bar.setVisible(True)
+        self.status.setVisible(True)
         self.status.setText(t("crash.analyzing"))
         # analysis is file-I/O only, but keep it off the UI thread anyway
         self._worker = Worker(self._analyze)
@@ -217,14 +219,23 @@ class CrashAnalyzerDialog(QDialog):
             if w is not None:
                 w.deleteLater()
         if not findings:
-            ok = QLabel(t("crash.no_crash"))
+            # round-124：空态只在正文说一次，头部状态行不再复述同一句话；
+            # 无实例时给「请先选择一个实例」，而不是误报「最近一次运行正常」。
+            if self.inst is None:
+                msg, color = t("crash.no_instance"), COLORS["text_sub"]
+            else:
+                msg, color = t("crash.no_crash"), COLORS["success"]
+            ok = QLabel(msg)
             ok.setProperty("cls", "sub")
             ok.setAlignment(Qt.AlignCenter)
-            ok.setStyleSheet(f"color:{COLORS['success']}; font-size:14px;")
+            ok.setWordWrap(True)
+            ok.setStyleSheet(f"color:{color}; font-size:14px;")
             self._vbox.addWidget(ok)
-            self.status.setText(t("crash.no_crash"))
+            self.status.clear()
+            self.status.setVisible(False)
             self.repair_all_btn.setEnabled(False)
             return
+        self.status.setVisible(True)
         self.status.setText(t("crash.found", n=len(findings)))
         repairable = 0
         for f in findings:

@@ -11,14 +11,13 @@ back through ``self.account`` for the main window.
 """
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QFrame, QStackedWidget, QScrollArea,
+    QLineEdit, QStackedWidget, QScrollArea,
 )
-from PySide6.QtCore import Qt, QSize, QUrl, Signal, QTimer
+from PySide6.QtCore import Qt, QSize, Signal
 import os
 import webbrowser
-import secrets
 
-from PySide6.QtGui import QDesktopServices, QPixmap  # round-100：QColor/QLinearGradient 已随 hero 中性化移除
+from PySide6.QtGui import QPixmap  # round-100：QColor/QLinearGradient 已随 hero 中性化移除
 
 from .theme import COLORS, RoundedCard
 from .icons import icon
@@ -53,6 +52,9 @@ class LoginDialog(QDialog):
         # Guard against worker callbacks firing on a closed/destroyed dialog
         # (e.g. user pressed × while the loopback was still waiting).
         self._closed = False
+        # Connect once, here: wiring this inside _start_microsoft stacked a new
+        # connection on every retry, so one device code fired the slot N times.
+        self.ms_user_code_ready.connect(self._on_ms_user_code)
         self._cfg = load_config()
         _cfg_cid = (self._cfg.get("ms_client_id") or "").strip().lower()
         # ms_client_id is hardcoded in brand.py — never user-configurable in
@@ -377,9 +379,8 @@ class LoginDialog(QDialog):
         import threading as _th
         self._ms_cancel = _th.Event()
 
-        # Signal connection: worker → UI thread, queued connection handles
-        # cross-thread delivery automatically (worker thread has no event loop).
-        self.ms_user_code_ready.connect(self._on_ms_user_code)
+        # Signal connection is set up once in __init__ (it used to be wired
+        # here, which stacked duplicate connections on every retry attempt).
 
         # Worker runs the entire device-code flow but emits the user_code via
         # the signal as soon as it's issued — UI updates + browser open happen
@@ -465,17 +466,6 @@ class LoginDialog(QDialog):
         self.code_status.setText(t("login.code_cancelled"))
         self.stack.setCurrentIndex(0)
 
-    def closeEvent(self, event):
-        """Dialog closed mid-login: cancel + join the worker thread so Qt never
-        emits into a destroyed QDialog (the 0xC0000409 crash)."""
-        if hasattr(self, "_ms_cancel"):
-            self._ms_cancel.set()
-        w = getattr(self, "_ms_worker", None)
-        if w is not None and w.isRunning():
-            w.wait(6000)
-        self._closed = True
-        super().closeEvent(event)
-
     def _on_ms_done(self, profile: dict):
         # Worker may finish after the user closed the dialog (X-button mid-
         # login). Silently drop the result so we don't disturb the main window.
@@ -508,18 +498,22 @@ class LoginDialog(QDialog):
             pass
 
     def _fetch_skin(self, acc_id: str, uuid: str, name: str):
+        # round-123: shared helper — name route first (it carries the model
+        # metadata), crafatar as the fallback.
+        entry = skin_manager().fetch_account_skin(name, uuid)
+        if entry is not None:
+            try:
+                skin_manager().set_active(acc_id, entry["id"])
+            except Exception:
+                pass
+        # round-119: pull the account's cape too, so the home character card
+        # has something to show without a manual trip to the skin dialog.
         try:
-            skin_manager().download_by_uuid(uuid, name)
-            for s in reversed(skin_manager().list()):
-                if s.get("player") == name:
-                    skin_manager().set_active(acc_id, s["id"])
-                    break
+            cape = skin_manager().download_cape(name)
+            if cape:
+                skin_manager().set_active_cape(acc_id, cape["id"])
         except Exception:
-            pass
-
-    def _open_browser(self):
-        if getattr(self, "_url", ""):
-            QDesktopServices.openUrl(QUrl(self._url))
+            pass    # most accounts have no cape — that is not an error
 
     def _start_external(self):
         self.error_lbl.setText("")
@@ -541,20 +535,52 @@ class LoginDialog(QDialog):
         self.accept()
 
     # ── close lifecycle ────────────────────────────────────────────────
+    def _ms_flow_active(self) -> bool:
+        w = getattr(self, "_ms_worker", None)
+        try:
+            return bool(w is not None and w.isRunning())
+        except RuntimeError:
+            return False
+
+    def _can_close(self) -> bool:
+        """Closing during the device-code poll silently dropped a completed
+        login (the browser says "done" seconds before the next poll notices).
+        Ask once so that is never lost by accident."""
+        if getattr(self, "_close_ok", False) or not self._ms_flow_active():
+            return True
+        from .win_rounded import confirm
+        return confirm(self, t("login.title"), t("login.close_confirm"))
+
     def reject(self):
         # X-button / Esc / dialog.close(). Worker may still be running.
+        if not self._can_close():
+            return
+        self._close_ok = True
         self._closed = True
         self._teardown_workers()
         super().reject()
 
     def closeEvent(self, event):
+        if not self._can_close():
+            event.ignore()
+            return
         # Same safety as reject(): if the dialog is being torn down, mark it
         # so worker callbacks bail out, then stop the worker cleanly.
+        self._close_ok = True
         self._closed = True
         self._teardown_workers()
         super().closeEvent(event)
 
     def _teardown_workers(self):
+        # Signal the poll loop first: ``cancel.wait`` wakes immediately, so the
+        # wait below is short in practice. 500 ms was not enough for a worker
+        # blocked in requests.post (timeout=10) — it stayed alive, the dialog
+        # dropped the last reference and Qt fast-failed on destruction.
+        if hasattr(self, "_ms_cancel"):
+            try:
+                self._ms_cancel.set()
+            except Exception:
+                pass
         for attr in ("_ms_worker", "_ext_worker"):
             w = getattr(self, attr, None)
             if w is None:
@@ -562,7 +588,7 @@ class LoginDialog(QDialog):
             try:
                 if w.isRunning():
                     w.quit()
-                    w.wait(500)
+                    w.wait(6000)
             except RuntimeError:
                 pass  # C++ object already gone
             setattr(self, attr, None)

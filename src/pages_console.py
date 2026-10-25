@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import (QFont, QTextCursor, QDesktopServices,
                            QTextCharFormat, QColor)
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit,
+    QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
     QLineEdit, QApplication, QFileDialog, QLabel, QTextEdit, QMenu,
 )
 

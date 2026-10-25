@@ -15,11 +15,11 @@ so an effect bug can never break the UI. A module-level ``EFFECTS_ENABLED``
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
+from PySide6.QtCore import QTimer, QRectF, QPointF
 from PySide6.QtGui import (
     QPainter, QPainterPath, QColor, QPen, QLinearGradient, QConicalGradient,
 )
-from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QStackedWidget, QApplication
+from PySide6.QtWidgets import QApplication
 
 from .theme import COLORS, RoundedCard
 

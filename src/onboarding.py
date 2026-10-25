@@ -18,13 +18,13 @@ import os
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QRadioButton, QButtonGroup, QWidget, QFrame, QComboBox, QProgressBar,
+    QRadioButton, QButtonGroup, QWidget, QComboBox, QProgressBar,
     QCheckBox, QGridLayout,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor
 
-from .theme import COLORS, RoundedCard, set_accent_color, build_qss
+from .theme import COLORS, RoundedCard, set_accent_color
 from .icons import icon
 from .i18n import t, set_language
 from .frameless import FramelessHelper, TitleBar
@@ -312,7 +312,7 @@ class OnboardingDialog(QDialog):
             self.step_layout.addWidget(lang_w)
 
         elif step_key == "theme":
-            from PySide6.QtWidgets import QRadioButton, QButtonGroup, QFrame
+            from PySide6.QtWidgets import QRadioButton, QButtonGroup
             self.ob_theme_grp = QButtonGroup()
             theme_row = QHBoxLayout()
             theme_row.setSpacing(20)
@@ -338,7 +338,6 @@ class OnboardingDialog(QDialog):
                 card_lay.setContentsMargins(18, 14, 18, 14)
                 card_lay.setSpacing(12)
 
-                from PySide6.QtGui import QPixmap
                 icon_lbl = QLabel()
                 icon_lbl.setPixmap(icon(icon_name).pixmap(28, 28))
                 icon_lbl.setStyleSheet("background: transparent; border: none;")
@@ -407,8 +406,6 @@ class OnboardingDialog(QDialog):
             self.step_layout.addWidget(ram_w)
 
         elif step_key == "java":
-            from .core.java import find_java
-            from .core import java_install
             # Detection status
             self.java_status = QLabel()
             self.java_status.setWordWrap(True)
@@ -478,7 +475,7 @@ class OnboardingDialog(QDialog):
         if rb is None or not hasattr(rb, "theme_mode_val"):
             return
         mode = rb.theme_mode_val
-        from .theme import set_theme_mode, apply_qss
+        from .theme import set_theme_mode
         set_theme_mode(mode)
         self.cfg["theme_mode"] = mode
         self._refresh_qss()

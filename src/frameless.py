@@ -120,13 +120,11 @@ class TitleBar(QWidget):
                         x = r.x() + (r.width() - s) / 2
                         y = r.y() + (r.height() - s) / 2
                         # 空心方框：先填白再画边
-                        from PySide6.QtGui import QColor
                         bg = self.palette().color(self.backgroundRole())
                         p.setBrush(bg)
                         p.drawRect(QRectF(x, y, s, s))
                         p.setBrush(self.palette().color(self.foregroundRole()))
                         pen = p.pen()
-                        from PySide6.QtCore import Qt as _Qt
                         p.setPen(self.palette().color(self.foregroundRole()))
                         p.drawRect(QRectF(x + 0.5, y + 0.5, s - 1, s - 1))
                         p.setPen(pen)
@@ -135,7 +133,6 @@ class TitleBar(QWidget):
                         x = r.x() + (r.width() - s) / 2
                         y = r.y() + (r.height() - s) / 2
                         # 双方框叠层
-                        from PySide6.QtGui import QColor
                         bg = self.palette().color(self.backgroundRole())
                         p.setBrush(bg)
                         p.drawRect(QRectF(x, y, s, s))

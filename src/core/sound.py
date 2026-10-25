@@ -178,7 +178,6 @@ class MusicPlayer(QObject):
 
 _player: SoundPlayer | None = None
 _music: MusicPlayer | None = None
-_sfx_pool: dict[str, SoundPlayer] = {}
 
 
 def _instance() -> SoundPlayer:
@@ -248,10 +247,6 @@ def start_bgm(cfg: dict) -> bool:
     return m.play_index(cur if cur >= 0 else 0, float(cfg.get("bgm_vol", 0.4)))
 
 
-def stop_bgm() -> None:
-    music().stop()
-
-
 def apply_bgm(cfg: dict) -> None:
     """Re-sync BGM with settings (called after the settings dialog saves)."""
     if not cfg.get("bgm_enabled", False):
@@ -261,30 +256,9 @@ def apply_bgm(cfg: dict) -> None:
 
 
 # --------------------------------------------------------------------- sfx
-def play_sfx(key: str, cfg: dict) -> None:
-    """Play a UI sound effect (click / hover / success / error).
-
-    Silent unless the user assigned a file to that key, so the launcher stays
-    quiet by default.
-    """
-    if not cfg.get("sfx_enabled", False):
-        return
-    path = cfg.get(f"sfx_{key}", "")
-    if not path or not os.path.exists(path):
-        return
-    p = _sfx_pool.get(key)
-    if p is None:
-        p = _sfx_pool[key] = SoundPlayer()
-    p.play(path, float(cfg.get("sfx_vol", 0.6)))
-
-
 def preview(path: str, volume: float = 0.8) -> bool:
     """Play an arbitrary file once (settings 'try it' buttons)."""
     return _instance().play(path or None, volume)
-
-
-def stop_preview() -> None:
-    _instance().stop()
 
 
 def ensure_default_exists() -> str:

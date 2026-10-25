@@ -38,29 +38,6 @@ def safe_json_loads(text: str | None, *, default=None, max_chars: int = 10_000_0
         return default
 
 
-def read_json(path: str, default=None):
-    """Read a JSON file safely; returns default if missing/corrupt."""
-    if not os.path.isfile(path):
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return safe_json_loads(f.read(), default=default)
-    except OSError:
-        return default
-
-
-def write_json(path: str, data) -> None:
-    """Write data as pretty JSON, creating parent dirs as needed."""
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def ensure_dir(path: str) -> str:
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
 def safe_extract_zip(zf, dest_dir: str) -> None:
     """Extract a zipfile with zip-slip protection (round-35).
 

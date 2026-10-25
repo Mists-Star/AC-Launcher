@@ -147,7 +147,6 @@ def disable_acrylic(widget, dark: bool = False) -> None:
             return
         _set_attr(hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, _DWMSBT_NONE)
         # 深色主题关 Acrylic 时的实色 = #151515（常见实现 GetOpaqueWindowBackgroundColor）
-        from PySide6.QtGui import QColor
         from PySide6.QtCore import Qt
         widget.setAttribute(Qt.WA_TranslucentBackground, False)
         # 恢复不透明背景需要重新设置 palette / repolish

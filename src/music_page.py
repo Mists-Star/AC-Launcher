@@ -9,12 +9,12 @@ import os
 
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QComboBox, QSlider,
 )
 
-from .theme import COLORS, RoundedCard
-from .icons import icon, on_accent
+from .theme import RoundedCard
+from .icons import on_accent
 from .i18n import t
 from . import ui_kit
 from .core.sound import music

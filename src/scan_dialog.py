@@ -19,6 +19,7 @@ from PySide6.QtCore import Qt, QSize, QTimer, Signal
 import time
 
 from .icons import icon
+from . import ui_kit
 from .theme import COLORS, with_alpha
 from .i18n import t
 from .worker import Worker

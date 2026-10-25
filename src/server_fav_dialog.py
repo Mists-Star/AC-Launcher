@@ -6,15 +6,13 @@ round-83: 收藏服务器列表（增删改）+ 双击直连。直连动作交�
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
-    QListWidgetItem, QLineEdit, QFormLayout, QDialogButtonBox, QPlainTextEdit,
-    QMessageBox,
+    QListWidgetItem, QLineEdit, QFormLayout, QDialogButtonBox,
+    QMessageBox, QWidget,
 )
 
 from .theme import COLORS
-from .icons import icon
 from .i18n import t
 from . import server_favorites as fav
 from .frameless import FramelessHelper, TitleBar

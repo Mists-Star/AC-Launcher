@@ -161,8 +161,3 @@ def install_java(major: int, progress=None, image_type: str = "jre") -> str:
             return path
     raise RuntimeError(f"解压后未找到 {exe_name}（{target}）")
 
-
-def recommended_majors(existing: list[int] | None = None) -> list[int]:
-    """Which majors a fresh machine should grab to cover all of Minecraft."""
-    have = set(existing or [])
-    return [m for m in _DEFAULT_MAJORS if m not in have]

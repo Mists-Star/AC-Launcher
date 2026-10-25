@@ -22,16 +22,16 @@ import re
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QTextEdit, QMessageBox, QFrame, QWidget, QButtonGroup,
-    QScrollArea,
+    QScrollArea, QFileDialog,
 )
-from PySide6.QtCore import Qt, QUrl, QSize, QPoint
-from PySide6.QtGui import QDesktopServices, QColor
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 
 from .theme import COLORS, with_alpha
 from .i18n import t
 from .worker import ProgressWorker, Worker
 from .async_image import ImageLoader
-from .win_rounded import info, enable_win11_round_corners
+from .win_rounded import enable_win11_round_corners
 from .frameless import FramelessHelper, TitleBar
 
 PAGE_SIZE = 50
@@ -212,11 +212,13 @@ class _VersionRow(QFrame):
 class StoreDetailDialog(QDialog):
     """资源中心详情：信息头 + 最新版本条 + 版本卡片流（分页）+ 翻译 + 下载。"""
 
-    def __init__(self, parent, card: dict, category: str, inst, subdir: str):
+    def __init__(self, parent, card: dict, category: str, inst, subdir: str,
+                 instances=None):
         super().__init__(parent)
         self._card = card
         self._category = category
         self._inst = inst
+        self._instances = list(instances) if instances is not None else []
         self._subdir = subdir
         self._versions: list[dict] = []      # 已分页累积的全量版本
         self._workers: list = []
@@ -226,8 +228,10 @@ class StoreDetailDialog(QDialog):
 
         self.setWindowTitle(t("store.detail_title"))
         self.setModal(True)
-        self.setMinimumSize(880, 620)
-        self.resize(900, 680)
+        # Height must cover the whole body: forcing 680 clipped the "load more"
+        # and translate rows into the version list (min hint is ~753).
+        self.setMinimumSize(880, 760)
+        self.resize(920, 800)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -245,6 +249,9 @@ class StoreDetailDialog(QDialog):
 
         # ── ① 信息头：图标 + 标题 + 徽章 + 简介 + 在线页面 ──
         bl.addWidget(self._build_header())
+
+        # ── ①b 下载目标（round-119）：实例列表 + 「不指定版本 · 另存为…」──
+        bl.addLayout(self._build_target_bar())
 
         # ── ② 最新版本条 ──
         bl.addWidget(self._build_latest())
@@ -321,6 +328,45 @@ class StoreDetailDialog(QDialog):
         self._load_first_page()
 
     # ---------------- UI 构建 ----------------
+    def _build_target_bar(self) -> QHBoxLayout:
+        """Pick where the file lands: an existing instance, or just a folder.
+
+        Round-119: the dialog used to be unreachable without an instance and
+        every download required one. Launchers like PCL2/HMCL let you grab a
+        file for *any* version — or simply save it without picking one — so
+        the combo offers every instance plus a "save as…" entry that needs no
+        instance at all.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = QLabel(t("store.detail_target"))
+        lbl.setProperty("cls", "sub")
+        row.addWidget(lbl)
+        self.target_combo = QComboBox()
+        self.target_combo.setMinimumHeight(32)
+        self.target_combo.setMinimumWidth(240)
+        for i in self._instances:
+            self.target_combo.addItem(i.name, i.id)
+        self.target_combo.addItem(t("store.detail_target_save"), "__save__")
+        want = getattr(self._inst, "id", "") if self._inst is not None else ""
+        idx = self.target_combo.findData(want) if want else -1
+        self.target_combo.setCurrentIndex(idx if idx >= 0
+                                          else self.target_combo.count() - 1)
+        row.addWidget(self.target_combo)
+        row.addStretch(1)
+        return row
+
+    def _current_inst(self):
+        """Instance picked in the target combo, or ``None`` for "save as…"."""
+        data = (self.target_combo.currentData()
+                if hasattr(self, "target_combo") else "")
+        if not data or data == "__save__":
+            return None
+        for i in self._instances:
+            if i.id == data:
+                return i
+        return None
+
     def _build_header(self) -> QFrame:
         card = self._card
 
@@ -519,9 +565,18 @@ class StoreDetailDialog(QDialog):
         self._fetch_page(offset=self._offset, append=True)
 
     def _fetch_page(self, offset: int, append: bool):
-        from .net_api import _modrinth_versions
-        w = Worker(_modrinth_versions, self._card.get("project_id", ""),
-                   "", "", PAGE_SIZE, offset)
+        from .net_api import (_curseforge_versions, _curseforge_versions_keyless,
+                              _modrinth_versions, curseforge_available)
+        if self._card.get("source") == "curseforge":
+            if curseforge_available():
+                w = Worker(_curseforge_versions,
+                           self._card.get("project_id", ""), PAGE_SIZE, offset)
+            else:
+                w = Worker(_curseforge_versions_keyless,
+                           self._card.get("slug", ""), PAGE_SIZE, offset)
+        else:
+            w = Worker(_modrinth_versions, self._card.get("project_id", ""),
+                       "", "", PAGE_SIZE, offset)
 
         def _on_ok(page: list):
             self.more_btn.setEnabled(True)
@@ -640,30 +695,64 @@ class StoreDetailDialog(QDialog):
             self._download_version(self._versions[0])
 
     def _download_version(self, v: dict):
-        if self._inst is None:
-            info(self, t("common.hint"), t("store.download_hint"))
-            return
-        reply = QMessageBox.question(
-            self, t("store.download_confirm_title"),
-            t("store.detail_ver_confirm",
-              slug=self._card.get("slug", ""),
-              ver=v.get("version_number", ""),
-              name=self._inst.name),
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        from .net_api import download_mod_version_to, NetError
-        dest = os.path.join(self._inst.game_dir, self._subdir)
-        self.status.setText(t("store.downloading",
-                              slug=self._card.get("slug", "")))
+        """Download one version into the picked instance — or into a folder.
+
+        Round-119: with "不指定版本 · 另存为…" selected the file is saved to a
+        folder the user picks, no instance (and therefore no MC version) needed.
+        """
+        inst = self._current_inst()
+        slug = self._card.get("slug", "")
+        ver = v.get("version_number", "")
+        if inst is None:
+            from .paths import get_data_dir
+            start = os.path.join(get_data_dir(), "downloads")
+            os.makedirs(start, exist_ok=True)
+            folder = QFileDialog.getExistingDirectory(
+                self, t("store.detail_save_title"), start)
+            if not folder:
+                self.status.setText(t("store.detail_no_folder"))
+                return
+            reply = QMessageBox.question(
+                self, t("store.download_confirm_title"),
+                t("store.detail_save_confirm", slug=slug, ver=ver,
+                  folder=folder))
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            dest = folder
+            mc_version, loader = "", ""
+        else:
+            reply = QMessageBox.question(
+                self, t("store.download_confirm_title"),
+                t("store.detail_ver_confirm",
+                  slug=slug, ver=ver, name=inst.name))
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            dest = os.path.join(inst.game_dir, self._subdir)
+            mc_version = getattr(inst, "game_version", "") or ""
+            loader = getattr(inst, "loader", "") or ""
+        from .net_api import (curseforge_available, download_cfwidget_file,
+                              download_curseforge_file, download_mod_version_to)
+        self.status.setText(t("store.downloading", slug=slug))
         # round-111：改用 ProgressWorker，速度行进已有 status 标签
         # （本对话框没有独立进度条，速度是用户明确要的可观测项）。
-        w = ProgressWorker(
-            download_mod_version_to,
-            self._card.get("project_id", ""), v.get("id", ""), dest,
-            getattr(self._inst, "game_version", "") or "",
-            getattr(self._inst, "loader", "") or "",
-        )
+        if self._card.get("source") == "curseforge":
+            f0 = (v.get("files") or [{}])[0]
+            fid = f0.get("id") or v.get("id")
+            fname = f0.get("filename", "")
+            if curseforge_available():
+                w = ProgressWorker(download_curseforge_file,
+                                   self._card.get("project_id", ""), fid, dest,
+                                   fname, f0.get("url", ""))
+            else:
+                # keyless channel: forgecdn resolves any file id directly
+                w = ProgressWorker(download_cfwidget_file,
+                                   {"id": fid, "name": fname}, dest)
+        else:
+            w = ProgressWorker(
+                download_mod_version_to,
+                self._card.get("project_id", ""), v.get("id", ""), dest,
+                mc_version, loader,
+            )
         w.speed.connect(lambda s: self.status.setText(s))
 
         def _ok(p: str):

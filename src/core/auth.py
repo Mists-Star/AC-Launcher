@@ -19,10 +19,6 @@ from __future__ import annotations
 
 import time
 import re
-import secrets
-import threading
-import http.server
-import urllib.parse
 
 import requests
 
@@ -123,37 +119,6 @@ _AADSTS_MESSAGES = {
 
 class MicrosoftAuthError(Exception):
     pass
-
-
-def validate_client_id(client_id: str) -> str | None:
-    """Return a warning message if *client_id* looks invalid, else None.
-
-    An empty value is OK — it means "use the built-in working default".
-    The built-in first-party Xbox ID is a 16-hex-digit legacy identifier (not a
-    GUID), so it must be whitelisted explicitly or the GUID regex below would
-    reject our own default and block every login with a red error.
-    """
-    cid = (client_id or "").strip().lower()
-    if not cid:
-        return None  # empty → use built-in default (already valid)
-    if cid == MICROSOFT_CLIENT_ID.lower():
-        return None  # our built-in default: always fine
-    if re.fullmatch(r"[0-9a-f]{16}", cid):
-        return None  # other Microsoft legacy first-party IDs
-    if cid in _BAD_CLIENT_IDS:
-        return (
-            "当前微软应用 ID 是占位符，无法登录。\n\n"
-            "两个选择：\n"
-            "  · 清空该字段 → 使用启动器内置的可用默认值（推荐，立即可用）\n"
-            "  · 或注册自己的 Azure AD 应用并填入其「应用程序(客户端) ID」"
-        )
-    # Be lenient: any string of hex digits + dashes is plausible.
-    # Microsoft itself does the strict GUID check on the OAuth side and
-    # returns a clear error — better that our local validator not block
-    # a near-correct value the user copy-pasted.
-    if not re.match(r"^[0-9a-f][0-9a-f-]+[0-9a-f]$", cid):
-        return f"微软应用 ID 格式不对（应仅含 0-9 a-f 与短横线），当前值：{client_id}"
-    return None
 
 
 # --------------------------------------------------------------------------
@@ -323,47 +288,6 @@ def complete_login_with_token(client_id: str, token: dict) -> dict:
     profile["refresh_token"] = token.get("refresh_token", "")
     profile["ms_access_token"] = access_token
     return profile
-
-
-def login_with_microsoft(client_id: str, cancel=None) -> dict:
-    """Device-code flow end-to-end. Blocking — run inside a Worker thread."""
-    code = request_device_code(client_id)
-    token = poll_for_token(
-        client_id,
-        code["device_code"],
-        interval=code.get("interval", 5),
-        expires_in=code.get("expires_in", 900),
-        cancel=cancel,
-    )
-    if token is None:
-        raise MicrosoftAuthError("登录已取消")
-    return complete_login_with_token(client_id, token)
-
-
-def login_with_microsoft_code_display(
-    client_id: str, on_user_code, cancel=None
-) -> dict:
-    """Device-code flow that also reports the 8-char user_code + verification URL.
-
-    ``on_user_code(user_code, verification_uri)`` is called as soon as the
-    device code is issued, so the UI can show the code + open the browser
-    *before* polling starts.
-    """
-    code = request_device_code(client_id)
-    try:
-        on_user_code(code["user_code"], code.get("verification_uri", ""))
-    except Exception:
-        pass  # UI callback must never break the login flow
-    token = poll_for_token(
-        client_id,
-        code["device_code"],
-        interval=code.get("interval", 5),
-        expires_in=code.get("expires_in", 900),
-        cancel=cancel,
-    )
-    if token is None:
-        raise MicrosoftAuthError("登录已取消")
-    return complete_login_with_token(client_id, token)
 
 
 # --------------------------------------------------------------------------

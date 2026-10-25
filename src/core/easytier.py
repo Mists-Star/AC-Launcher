@@ -78,10 +78,6 @@ def download_url() -> str:
     return EASYTIER_RELEASE_URL
 
 
-def docs_url() -> str:
-    return EASYTIER_DOCS_URL
-
-
 def download_easytier(dest_dir: str, progress=None) -> str:
     """Download + unzip easytier-core into dest_dir. Returns the exe path.
 
@@ -194,11 +190,6 @@ def stop_node() -> None:
                 except Exception:
                     pass
         _node_proc = None
-
-
-def node_running() -> bool:
-    global _node_proc
-    return _node_proc is not None and _node_proc.poll() is None
 
 
 def _probe_ip(network_name: str) -> str:

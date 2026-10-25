@@ -29,6 +29,11 @@ def _extra_dirs() -> list[str]:
     appdata = os.environ.get("LOCALAPPDATA")
     if appdata:
         dirs.append(os.path.join(appdata, "Programs"))
+    # Cleanroom's installer provisions its own JRE 25 here (--provision-java);
+    # without this root the launcher would never see the Java it just fetched.
+    home = os.path.expanduser("~")
+    if home:
+        dirs.append(os.path.join(home, ".cleanroom", "java"))
     return dirs
 
 
@@ -190,7 +195,42 @@ def required_java_major(game_version: str) -> int:
     return 8
 
 
-def select_java(game_version: str, *, java_auto: bool = True, user_path: str = "") -> str | None:
+def reset_scan_cache() -> None:
+    """Drop the cached scan results (call after provisioning a new JRE)."""
+    global _SCAN_CACHE_DEEP, _SCAN_CACHE_DEEP_AT, _SCAN_CACHE_FAST, _SCAN_CACHE_FAST_AT
+    _SCAN_CACHE_DEEP = None
+    _SCAN_CACHE_FAST = None
+    _SCAN_CACHE_DEEP_AT = 0.0
+    _SCAN_CACHE_FAST_AT = 0.0
+
+
+def java25_path() -> str | None:
+    """Path of an installed Java 25, if any.
+
+    Cleanroom 0.7.x's installer accepts exactly Java 25 (it rejects both 24
+    and 26), and its installer can provision one into ~/.cleanroom/java.
+    """
+    for j in scan_javas(deep=False):
+        if int(j.get("major") or 0) == 25 and os.path.isfile(j.get("path") or ""):
+            return j["path"]
+    return None
+
+
+def required_java_major_for(game_version: str, loader: str = "") -> int:
+    """Java major an *instance* needs, not just its game version.
+
+    Cleanroom is the exception to the version table: it is a 1.12.2 fork that
+    runs on a much newer JVM (0.7.x installers demand exactly Java 25 and
+    refuse newer ones), so the version-derived "1.12.2 → 8" answer would hand
+    it a JRE it cannot load.
+    """
+    if (loader or "").strip().lower() == "cleanroom":
+        return 25
+    return required_java_major(game_version)
+
+
+def select_java(game_version: str, *, java_auto: bool = True, user_path: str = "",
+                need_override: int = 0) -> str | None:
     """Pick the best Java executable for a game version.
 
     Priority:
@@ -201,17 +241,19 @@ def select_java(game_version: str, *, java_auto: bool = True, user_path: str = "
 
     round-46 修复：老版本（如 1.8.9 需 Java 8）用高版本（17/21）启动会直接
     崩溃 exit 1。兼容区间：need=8→仅 8；16→16-17；17→17-21；21→21-24。
+    ``need_override`` 用于看加载器而非 MC 版本的场景（Cleanroom → 21）。
     """
     if not java_auto and user_path:
         return user_path if os.path.isfile(user_path) else None
 
-    need = required_java_major(game_version)
+    need = need_override or required_java_major(game_version)
     javas = [j for j in scan_javas() if j["major"] > 0]  # drop unidentifiable stubs
     exact = [j for j in javas if j["major"] == need]
     if exact:
         return exact[0]["path"]
     # 兼容上限（借鉴主流做法：老版本拒绝高版本，新版本接受小范围更高）
-    max_ok = {8: 8, 16: 17, 17: 21, 21: 24}.get(need, need + 3)
+    # 25 只到 25：Cleanroom 0.7.x 的安装器明确拒绝 Java 24 和 26。
+    max_ok = {8: 8, 16: 17, 17: 21, 21: 24, 25: 25}.get(need, need + 3)
     compat = sorted(
         (j for j in javas if need <= j["major"] <= max_ok),
         key=lambda x: x["major"])

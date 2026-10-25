@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, QSize, QTimer, Qt
 from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
 
-from .theme import COLORS, RoundedCard
+from .theme import COLORS, with_alpha
 from .effects import LightTrailCard, fade_in_widget  # round-50 商店卡流光；round-100 列表淡入
 from . import ui_kit
 from .icons import icon
@@ -31,6 +31,43 @@ from .net_api import (
 from .worker import ProgressWorker, Worker
 from .async_image import ImageLoader, make_version_pixmap
 from .store_detail import StoreDetailDialog  # round-66 资源详情页（版本/翻译）
+
+
+# ── 首帧骨架屏（round-124）─────────────────────────────────────────────
+# 版本库 / 资源中心首次进入要等 0.6–1.2s 的网络往返，此前整页只有一行
+# 「正在获取…」，观感像卡死。先铺几行静态骨架占位，数据到达后整页清空重绘。
+def _skeleton_row(row_h: int = 56) -> QWidget:
+    w = QWidget()
+    w.setFixedHeight(row_h)
+    w.setProperty("skeleton", True)
+    w.setStyleSheet(f"background:{COLORS['bg_input']}; border-radius:10px;")
+    lay = QHBoxLayout(w)
+    lay.setContentsMargins(14, 10, 14, 10)
+    lay.setSpacing(12)
+    tile = QWidget()
+    tile.setFixedSize(32, 32)
+    tile.setStyleSheet(
+        f"background:{with_alpha(COLORS['border'], 0x80)}; border-radius:8px;")
+    lay.addWidget(tile)
+    bars = QVBoxLayout()
+    bars.setSpacing(6)
+    for width in (220, 120):
+        bar = QWidget()
+        bar.setFixedSize(width, 10)
+        bar.setStyleSheet(
+            f"background:{with_alpha(COLORS['border'], 0x80)}; border-radius:5px;")
+        bars.addWidget(bar, 0, Qt.AlignLeft)
+    lay.addLayout(bars, stretch=1)
+    return w
+
+
+def _clear_skeleton(layout) -> None:
+    """Remove any skeleton rows still in ``layout`` (error paths)."""
+    for i in reversed(range(layout.count())):
+        w = layout.itemAt(i).widget()
+        if w is not None and w.property("skeleton"):
+            layout.takeAt(i)
+            w.deleteLater()
 
 
 def _letter_fallback(title: str, size: int = 48) -> QPixmap:
@@ -155,6 +192,9 @@ class VersionsPage(QWidget):
         self.scroll.setWidget(self._content)
         root.addWidget(self.scroll, stretch=1)
 
+        # round-124：首帧骨架屏（首次加载 0.6s 内不再是一片空白）
+        for _ in range(6):
+            self._vbox.addWidget(_skeleton_row(56))
         self._load()
 
     def _load(self):
@@ -181,6 +221,7 @@ class VersionsPage(QWidget):
             except ValueError:
                 pass
             if gen == self._load_gen:
+                _clear_skeleton(self._vbox)
                 self.status.setText(t("versions.error", e=e))
 
         worker.finished.connect(_on_fin)
@@ -442,6 +483,10 @@ class StorePage(QWidget):
         self.scroll.setWidget(self._content)
         root.addWidget(self.scroll, stretch=1)
 
+        # round-124：首帧骨架屏（首次检索 1.2s 内不再是一片空白）
+        for _ in range(6):
+            self._vbox.addWidget(_skeleton_row(64))
+
         # 滚动到底自动加载下一页（round-107：移除手动「加载更多」按钮——
         # 之前那个按钮被 setVisible(False) 隐藏却仍留着，属冗余 UI）
         self.scroll.verticalScrollBar().valueChanged.connect(self._on_scroll)
@@ -457,8 +502,22 @@ class StorePage(QWidget):
         ``chip:checked`` QSS via ChipGroup, so no manual styling here."""
         self._category = category
         self.category_chips.set(category)
+        self._update_search_placeholder()
         if not initial:
             self._search_timer.start()
+
+    def _update_search_placeholder(self):
+        """Search hint follows the selected category (round-125).
+
+        It used to be the literal "搜索模组…" on every tab, so the 整合包 /
+        光影 / 资源包 / 数据包 pages all claimed to search mods.
+        """
+        if self._source == "curseforge":
+            from .net_api import curseforge_available
+            if not curseforge_available():
+                self.search.setPlaceholderText(t("store.cf_link_placeholder"))
+                return
+        self.search.setPlaceholderText(t("store.search_ph_" + self._category))
 
     def _on_source_changed(self, _index: int):
         """切换源时同步搜索框提示与状态栏文案。
@@ -470,17 +529,15 @@ class StorePage(QWidget):
         self._source = self.source_combo.currentData()
         if self._source == "curseforge":
             from .net_api import curseforge_available, curseforge_keyless_enabled
+            self._update_search_placeholder()
             if curseforge_available():
-                self.search.setPlaceholderText(t("store.search_placeholder"))
                 self.status.setText(t("store.cf_hint_key"))
             elif curseforge_keyless_enabled():
-                self.search.setPlaceholderText(t("store.cf_link_placeholder"))
                 self.status.setText(t("store.cf_hint"))
             else:
-                self.search.setPlaceholderText(t("store.cf_link_placeholder"))
                 self.status.setText(t("store.cf_no_key"))
         else:
-            self.search.setPlaceholderText(t("store.search_placeholder"))
+            self._update_search_placeholder()
         self._search_timer.start()
 
     # ---- target instance selection ----
@@ -540,6 +597,8 @@ class StorePage(QWidget):
         def _on_err(e):
             self._retire(worker)
             if gen == self._load_gen:
+                if reset:
+                    _clear_skeleton(self._vbox)
                 self.status.setText(t("store.error", e=e))
                 self._loading_more = False
 
@@ -666,36 +725,43 @@ class StorePage(QWidget):
             dl = QPushButton(t("store.download"))
             dl.clicked.connect(
                 lambda _, pid=m["project_id"], pslug=m["slug"],
-                cf=m.get("_cf_file"):
-                self._download(pid, pslug, cf_file=cf)
+                cf=m.get("_cf_file"), mm=m:
+                self._download(pid, pslug, cf_file=cf, card=mm)
             )
         dl.setMinimumHeight(34)
         dl.setIcon(icon("download"))
         dl.setIconSize(QSize(16, 16))
         lay.addWidget(dl)
 
-        # round-66：modrinth 源卡片点击 → 详情页（全部版本 / 翻译 / 按版本下载）。
-        # 下载/安装按钮会消费鼠标事件，不会误触卡片的点击打开。
-        if self._source == "modrinth":
-            card.setCursor(Qt.PointingHandCursor)
-            card.mousePressEvent = lambda _e, m=m: self._open_detail(m)
+        # round-66 / round-120：两种源的卡片点击都进详情页（全部版本 / 翻译 /
+        # 按版本下载）。下载/安装按钮会消费鼠标事件，不会误触卡片的点击打开。
+        card.setCursor(Qt.PointingHandCursor)
+        card.mousePressEvent = lambda _e, m=m: self._open_detail(m)
         return card
 
     def _open_detail(self, m: dict):
         """打开资源详情页：列出全部版本（可按 MC 版本过滤）、获取中文翻译、
-        选择任意版本下载到目标实例对应子目录。"""
+        选择任意版本下载到目标实例对应子目录。
+
+        round-119：没有实例也能打开——详情页里可切到「不指定版本 · 另存为…」
+        只下载文件，与主流启动器一致。
+        """
         inst = self._target()
-        if inst is None:
-            info(self, t("common.hint"), t("store.download_hint"))
-            return
         dlg = StoreDetailDialog(
             self, m, self._category, inst,
-            _TYPE_SUBDIR.get(self._category, "mods"))
+            _TYPE_SUBDIR.get(self._category, "mods"),
+            instances=self.list_instances())
         dlg.exec()
 
-    def _download(self, project_id: str, slug: str, cf_file: dict | None = None):
+    def _download(self, project_id: str, slug: str, cf_file: dict | None = None,
+                  card: dict | None = None):
         inst = self._target()
         if inst is None:
+            # round-119/120：没选实例时不再直接拦下——详情页可按任意版本下载
+            # 或另存为，两种资源源都支持。
+            if card is not None:
+                self._open_detail(card)
+                return
             toast(self, t("common.hint"), t("store.download_hint"))
             return
         reply = confirm(

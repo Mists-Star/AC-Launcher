@@ -20,19 +20,19 @@ from PySide6.QtWidgets import (
     QStackedWidget, QButtonGroup, QSplitter, QGraphicsOpacityEffect, QMenu,
 )
 from PySide6.QtCore import Qt, Signal, QSize, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon, QTransform
+from PySide6.QtGui import QIcon, QTransform
 
 from .theme import COLORS, RoundedCard, with_alpha
 from .effects import LightTrailCard, fade_in_widget  # round-50 卡片混合：实例详情卡流光；round-100 列表淡入
 from . import ui_kit
 from .icons import icon, on_accent
 from .frameless import FramelessHelper, TitleBar
-from .win_rounded import enable_win11_round_corners, confirm, pick_files, info, warn, toast
+from .win_rounded import confirm, pick_files, info, warn, toast
 from .i18n import t, loader_name
 from .instances import manager, Instance, LOADERS, detect_format, launcher_label
 from .net_api import fetch_versions
 from .settings_dialog import load_config
-from .worker import Worker, ProgressWorker
+from .worker import Worker
 from .async_image import make_version_pixmap
 
 
@@ -417,7 +417,10 @@ class _LoaderCard(QFrame):
         self.dlg = dlg
         self.loader_id = loader_id
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(66)
+        # Uniform card height: descriptions wrap to 2 lines in a 3-column grid,
+        # and a min-height-only card made rows uneven enough to look squeezed.
+        self.setFixedHeight(82)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
         lay.setSpacing(12)
@@ -993,12 +996,19 @@ class NewInstanceDialog(QDialog):
         cols = 3
         idx = 0
         for loader_id, card in self._loader_cards.items():
+            # Re-adding a widget that is still in the grid does NOT move it in
+            # Qt — it leaves the old cell item in place, so two cards end up
+            # drawn on top of each other (round-126: Cleanroom covering Forge).
+            # Take it out of the layout first, then place it at its new cell.
+            try:
+                self._loader_grid.removeWidget(card)
+            except (RuntimeError, TypeError):
+                pass
             ok = loader_id in allowed
             card.setVisible(ok)
             if ok:
                 # round-88：隐藏掉不兼容的卡后，把剩余可见卡重新按 3 列
-                # 连续铺排（QGridLayout 的 addWidget 会自动从旧格位移出），
-                # 避免留下空洞、"选项消失后剩余的不对齐"。
+                # 连续铺排，避免留下空洞。
                 self._loader_grid.addWidget(card, idx // cols, idx % cols)
                 idx += 1
                 visible_any = True
@@ -1025,8 +1035,41 @@ class NewInstanceDialog(QDialog):
         self._update_path()
 
     def _open_labymod(self):
-        QDesktopServices.openUrl(QUrl("https://www.labymod.net"))
-        info(self, t("common.hint"), t("new_instance.labymod_visit"))
+        """Download the official LabyMod installer in-app and start it.
+
+        There is no standalone Forge mod jar to drop into ``mods/``: LabyMod 4
+        is distributed only through its installer, which writes the client jar
+        plus a dedicated version JSON. We still avoid the browser detour —
+        fetch the installer here and launch it (round-126 request). Non-premium
+        accounts cannot get into the game, which the confirmation states.
+        """
+        if getattr(self, "_lm_worker", None) is not None and self._lm_worker.isRunning():
+            toast(self, t("common.hint"), t("new_instance.labymod_busy"))
+            return
+        if not confirm(self, t("new_instance.labymod_title"),
+                       t("new_instance.labymod_confirm")):
+            return
+        from .paths import get_data_dir
+        from .net_api import download_labymod_installer
+        dest_dir = os.path.join(get_data_dir(), "downloads")
+        self._lm_worker = Worker(download_labymod_installer, dest_dir)
+        self._lm_worker.finished.connect(self._on_labymod_downloaded)
+        self._lm_worker.error.connect(self._on_labymod_error)
+        self._lm_worker.start()
+
+    def _on_labymod_downloaded(self, path: str):
+        try:
+            os.startfile(path)  # noqa: S606 - official installer, Windows only
+        except OSError as e:
+            warn(self, t("new_instance.labymod_title"),
+                 t("new_instance.labymod_fail", err=str(e)))
+            return
+        info(self, t("new_instance.labymod_title"),
+             t("new_instance.labymod_started", path=path))
+
+    def _on_labymod_error(self, msg: str):
+        warn(self, t("new_instance.labymod_title"),
+             t("new_instance.labymod_fail", err=msg))
 
     # ---------------- loader versions ----------------
     def _load_loader_versions(self):
@@ -1537,6 +1580,20 @@ class InstancesPage(QWidget):
         meta.addStretch(1)
         lay.addLayout(meta)
 
+        # ── 路径（round-124）──
+        # QFormLayout 只按 wordWrap 标签的「单行 sizeHint」分配行高（Qt 已知
+        # 限制），长 mc_dir 因此被裁到只剩盘符。改由纵向布局承载——
+        # QWidget + QVBoxLayout 会正确走 heightForWidth，完整路径才能换行展开。
+        path_box = QWidget()
+        path_lay = QVBoxLayout(path_box)
+        path_lay.setContentsMargins(0, 0, 0, 0)
+        path_lay.setSpacing(6)
+        path_cap = QLabel(t("instances.detail_path"))
+        path_cap.setProperty("cls", "sub")
+        path_lay.addWidget(path_cap)
+        path_lay.addWidget(self._mono(inst.mc_dir))
+        lay.addWidget(path_box)
+
         # info grid
         grid = QFormLayout()
         grid.setHorizontalSpacing(24)
@@ -1544,9 +1601,11 @@ class InstancesPage(QWidget):
         grid.setLabelAlignment(Qt.AlignRight)
         # 字段列伸展填满详情面板宽度，长路径不再被压成一行截断
         grid.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        grid.addRow(QLabel(t("instances.detail_path")), self._mono(inst.mc_dir))
-        grid.addRow(QLabel(t("instances.detail_source")),
-                    QLabel(launcher_label(inst.launcher, show_original=True)))
+        # round-124：AC 自己的实例没有「来源启动器」可显示，空值行会留下
+        # 一个 8×19 的空白 label，直接不插入该行。
+        src_text = launcher_label(inst.launcher, show_original=True)
+        if src_text:
+            grid.addRow(QLabel(t("instances.detail_source")), QLabel(src_text))
         if inst.created_at:
             grid.addRow(QLabel(t("instances.detail_created")),
                         QLabel(inst.created_at))
@@ -1624,8 +1683,8 @@ class InstancesPage(QWidget):
         sec_grid.setSpacing(10)
         sections = [
             ("mods",      "instances.sec_mods",      "mods"),
-            ("respack",   "instances.sec_respacks",  "image"),
-            ("shaders",   "instances.sec_shaders",   "sparkles"),
+            ("respack",   "instances.sec_respacks",  "resourcepack"),
+            ("shaders",   "instances.sec_shaders",   "shader"),
             ("saves",     "instances.sec_saves",     "folder"),
         ]
         for i, (key, label_key, ico) in enumerate(sections):
@@ -1645,8 +1704,10 @@ class InstancesPage(QWidget):
     def _mono(text: str) -> QLabel:
         # round-44 路径完整展示：wordWrap + ToolTip + 可选中复制
         lbl = QLabel(text)
+        # round-120：路径用 text_main（text_sub 在 bg_input 上对比不足，真机
+        # 截图里盘符后的内容几乎看不清）。
         lbl.setStyleSheet(
-            f"color: {COLORS['text_sub']}; font-family: Consolas, monospace; "
+            f"color: {COLORS['text_main']}; font-family: Consolas, monospace; "
             f"font-size: 12px; background: {COLORS['bg_input']}; "
             f"border-radius: 6px; padding: 4px 10px;"
         )
@@ -1719,7 +1780,7 @@ class InstancesPage(QWidget):
 
     def _duplicate(self, inst: Instance):
         """克隆实例（Worker 复制目录，防大实例卡 UI）。"""
-        from .win_rounded import text_input, warn, toast
+        from .win_rounded import text_input, warn
         from .worker import Worker
         name, ok = text_input(
             self, t("instances.duplicate_title"),
@@ -1751,7 +1812,7 @@ class InstancesPage(QWidget):
         """选一份历史快照，回滚覆盖当前 mods / config / 存档。"""
         from .win_rounded import toast, warn, confirm
         from .worker import Worker
-        from .core.backup import list_backups, load_manifest, restore_backup
+        from .core.backup import list_backups, restore_backup
 
         snaps = list_backups(inst)
         if not snaps:
@@ -1823,10 +1884,8 @@ class InstancesPage(QWidget):
 
     def _edit_group(self, inst: Instance):
         """设置/清除实例分组。"""
-        from .win_rounded import text_input, info
+        from .win_rounded import text_input
         from .i18n import t as _t
-        from PySide6.QtWidgets import QInputDialog, QLineEdit
-        from PySide6.QtCore import Qt as _Qt
         cur = inst.group or ""
         name, ok = text_input(
             self, _t("instances.group_title"),
@@ -2214,6 +2273,10 @@ class InstancesPage(QWidget):
         if self._empty_btn is not None:
             self._empty_btn.setEnabled(True)
         self._body_stack.removeWidget(panel)
+        # Hide before the deferred delete: deleteLater only runs on the next
+        # event-loop turn, and until then a still-visible panel kept painting
+        # over the restored page ("退出后双页" report, round-126).
+        panel.hide()
         panel.deleteLater()
         # Defer the refresh so Qt can finish deleting the panel (and its
         # children/workers) before we rebuild the underlying list view.
@@ -2253,6 +2316,7 @@ class InstancesPage(QWidget):
         if self._empty_btn is not None:
             self._empty_btn.setEnabled(True)
         self._body_stack.removeWidget(panel)
+        panel.hide()  # same deferred-delete paint guard as _close_new_panel
         panel.deleteLater()
         QTimer.singleShot(0, self._finish_close_scan)
 
@@ -2268,8 +2332,8 @@ class InstancesPage(QWidget):
         The file picker accepts several formats; we detect the format and pick
         the right importer so the user has a single "Import pack" entry point.
         """
-        from PySide6.QtWidgets import QProgressDialog, QApplication
-        from .win_rounded import pick_files, info, warn
+        from PySide6.QtWidgets import QProgressDialog
+        from .win_rounded import pick_files, warn
         from .modpack_import import (
             detect_pack_format, import_curseforge_zip,
             import_zip_as_instance, import_folder_as_instance,
@@ -2402,13 +2466,12 @@ class InstancesPage(QWidget):
         from .win_rounded import warn
         from .modpack_import import (
             detect_pack_format, import_curseforge_zip,
-            import_zip_as_instance, import_folder_as_instance,
+            import_zip_as_instance,
         )
         fmt = detect_pack_format(path)
         if fmt is None:
             warn(self, t("modpack.title"), t("modpack.unknown_format"))
             return
-        from .win_rounded import QProgressDialog, QApplication
         from .worker import Worker
         # round-74 交互反馈：导入动辄几十秒，给主窗口状态条转圈 + 文案，
         # 避免"点了没反应"的错觉；结束（成功或报错）都恢复。
@@ -2646,7 +2709,10 @@ class ModsPage(QWidget):
         # round-52 操作行独立成一行：目标实例 + 组合 + 两个按钮。
         # combo 用 stretch 弹性伸展，窄窗口下按钮不被挤压、内容不溢出。
         action_widget = QWidget()
-        action_widget.setStyleSheet("background: transparent;")
+        # round-122: an inline "background: transparent" here cascades to every
+        # child and wiped the combo / accent-button backgrounds (offscreen
+        # sampling returned alpha 0, leaving white text on a white page).
+        # QWidget paints no background by default, so no stylesheet is needed.
         al = QHBoxLayout(action_widget)
         al.setContentsMargins(0, 0, 0, 0)
         al.setSpacing(10)
@@ -2748,7 +2814,6 @@ class ModsPage(QWidget):
     def refresh(self):
         if not hasattr(self, "inst_combo"):
             return
-        keep = self.inst_combo.currentData()
         instances = self.list_instances()
         self.inst_combo.blockSignals(True)
         self.inst_combo.clear()

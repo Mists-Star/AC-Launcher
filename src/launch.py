@@ -438,7 +438,7 @@ def _prepare_natives(version: str, mc_dir: str, *, on_repair: callable | None = 
         # extract_natives 幂等：覆盖同名 dll，仅当某些 jar 缺失时才抛错
         _nat.extract_natives(version, mc_dir, natives_dir)
         return natives_dir
-    except Exception as _e:  # noqa: BLE001 - 缺 natives jar/损坏 → 走补全
+    except Exception:  # noqa: BLE001 - 缺 natives jar/损坏 → 走补全
         if on_repair is not None:
             try:
                 on_repair()
@@ -626,12 +626,17 @@ def launch_instance(
     # select_java takes java_auto / user_path as KEYWORD-only args — passing the
     # bool positionally raised TypeError and broke every launch.
     java_auto = settings.get("java_auto", True)
-    java = select_java(inst.game_version, java_auto=java_auto, user_path=user_java)
+    # Cleanroom is a 1.12.2 fork running on Java 21 — the version table alone
+    # would select Java 8 and the client/installer would fail to load classes.
+    from .core.java import required_java_major_for
+    _need = required_java_major_for(inst.game_version, inst.loader)
+    java = select_java(inst.game_version, java_auto=java_auto,
+                       user_path=user_java, need_override=_need)
     # round-46：select_java 返回 None = 没有任何兼容该 MC 版本的 Java。
     # 之前会 fallback find_java()/裸 "java" → 老版本被高版本 Java 启动 → 崩 exit 1。
     if not java:
         from .i18n import t as _t
-        need = required_java_major(inst.game_version)
+        need = _need
         raise RuntimeError(
             _t("err.java_compat_missing",
                default="此版本需要 Java {need}，但未检测到兼容的 Java 运行时。\n"
@@ -657,7 +662,7 @@ def launch_instance(
     if java:
         from .core.java import scan_javas as _scan_javas
         from .core.java import java_major as _java_major
-        _need = required_java_major(inst.game_version)
+        # (_need already includes the Cleanroom → 21 override above)
         _jmajor = 0
         _norm = os.path.normcase(os.path.normpath(java))
         for _j in _scan_javas(deep=False):
@@ -678,7 +683,8 @@ def launch_instance(
             # 手动路径版本不符 → 尝试自动找一个兼容 Java；找到就切换并明示
             _alt = None
             if not java_auto:
-                _alt = select_java(inst.game_version, java_auto=True)
+                _alt = select_java(inst.game_version, java_auto=True,
+                                   need_override=_need)
             if _alt and _alt != java:
                 from .i18n import t as _t
                 _warn = callback.get("setStatus") if callback and hasattr(callback, "get") else None
@@ -946,8 +952,6 @@ def classify_exit(returncode: int, log_path: str | None = None) -> tuple[str, di
     优先读日志末尾的关键特征（比裸退出码更能定位根因）；找不到特征再退到
     退出码本身。返回 (i18n_key, format_kwargs)。
     """
-    from .i18n import t as _t
-
     tail = ""
     if log_path and os.path.isfile(log_path):
         try:
