@@ -86,6 +86,7 @@ class Instance:
     group: str = ""
     # round-82 启动格式（磁盘布局，驱动版本 json / 游戏目录解析）：
     #   "" / "auto" = 自适应：启动/展示时实时检测（见 detect_format）；
+    #   "ac" AC 自有布局（独立 .minecraft + libraries 走共享池联接）；
     #   "vanilla" 原版共享 .minecraft；"iso" 外来版本隔离（导入）；
     #   "multimc" 整合布局；"curseforge" CurseForge；"modrinth" Modrinth；
     #   "custom" 玩家手动强制（仍按标准布局解析，改装目录靠特征兜底自适应）
@@ -289,35 +290,71 @@ def _copied_with_progress(
 # round-82 启动格式（磁盘布局分类）。
 # "auto" = 自适应（启动/展示时实时探测，目录变化自动跟上）；
 # 其余为玩家可手动指定的具体格式。UI 徽章颜色/label 见 pages_instances。
+#
+# round-135 补全：
+# - 新增 "ac"：AC 自己的实例布局（独立 .minecraft + libraries 指向共享池联接），
+#   与「原版共享 .minecraft」是两回事——此前 AC 自建实例被误标成 vanilla。
+# - "iso" = 外来版本隔离：mc_dir 本身就是 versions/<id> 目录，真实版本 json
+#   扁平躺在 <mc_dir>/<version>.json。
 INSTANCE_FORMATS = (
-    "auto", "vanilla", "iso", "multimc", "curseforge", "modrinth", "custom",
+    "auto", "ac", "vanilla", "iso", "multimc", "curseforge", "modrinth", "custom",
 )
+
+# kind（导入时按权威文件判定的布局）→ 启动格式。
+# 特征探测全 miss 时的兜底：目录被改名/移动/元数据文件缺失时仍能认出来源。
+_KIND_TO_FORMAT = {
+    "standard": "vanilla",
+    "mmc": "multimc",
+    "curseforge": "curseforge",
+    "modrinth": "modrinth",
+}
 
 
 def detect_format(inst) -> str:
-    """判定实例的启动格式（round-82）。
+    """判定实例的启动格式（round-82，round-135 补全）。
 
     优先级：
     1. 玩家已手动指定（format 非空且非 auto）→ 直接用；
-    2. 自适应（auto / 空）→ ``_probe_format`` 按磁盘特征实时探测：
+    2. AC 自有布局（``_base`` 为空 ⇒ 实例住在 data/instances/<id>/.minecraft，
+       libraries 走共享池联接）→ ``ac``；
+    3. 自适应（auto / 空）→ ``_probe_format`` 按磁盘特征实时探测：
        MMC 布局（mmc-pack.json）> 外来版本隔离（导入，
        mc_dir 内直接躺 <version>.json）> CurseForge（minecraftinstance.json）
-       > Modrinth（modrinth.json 等）> 兜底原版标准布局。
+       > Modrinth（profile.json 等）> 兜底原版标准布局；
+    4. 特征全 miss → 按导入时判定的 ``kind`` 兜底（目录改名/移动/元数据
+       缺失时不至于把其它启动器的实例误标成原版）。
 
-    返回始终是 INSTANCE_FORMATS 之一；特征全不符时视为原版标准布局——
-    改装/奇怪目录由 versions_root 的 <id>.json 特征兜底自适应（round-78）。
+    返回始终是 INSTANCE_FORMATS 之一；原版标准布局之外的改装/奇怪目录由
+    versions_root 的 <id>.json 特征兜底自适应（round-78）。
     """
     fmt = (getattr(inst, "format", "") or "").strip() or "auto"
     if fmt != "auto":
-        return fmt if fmt in INSTANCE_FORMATS else "auto"
+        if fmt in INSTANCE_FORMATS:
+            return fmt
+        # round-135：非法值（老版本遗留 / 手改配置）不该返回 "auto" 字符串——
+        # 那样徽章会显示「自适应（自动识别）」且永远不再探测。改为按自适应探测。
+    if _is_ac_owned(inst):
+        return "ac"
     return _probe_format(inst)
+
+
+def _is_ac_owned(inst) -> bool:
+    """True ⇒ 实例使用 AC 自有布局（_base 为空，目录在 data/instances/<id>/）。
+
+    AC 自建实例与「复制导入」都是这种形状：独立的 .minecraft + libraries
+    指向共享池联接——与原版共享 .minecraft 是两回事，不能混标。
+    """
+    if getattr(inst, "external", False):
+        return False
+    return not (getattr(inst, "_base", "") or "").strip()
 
 
 def _probe_format(inst) -> str:
     """磁盘特征探测：不修改实例，纯只读判断。"""
     mc = getattr(inst, "mc_dir", "") or ""
+    kind = (getattr(inst, "kind", "") or "").strip()
     if not mc or not os.path.isdir(mc):
-        return "vanilla"
+        return _KIND_TO_FORMAT.get(kind, "vanilla")
     parent = os.path.dirname(os.path.normpath(mc))
     mine = os.path.join(mc, ".minecraft")
     # 1) MMC 布局：mmc-pack.json 实例根 / .minecraft / 上级实例目录
@@ -337,12 +374,16 @@ def _probe_format(inst) -> str:
                  os.path.join(parent, "minecraftinstance.json")):
         if os.path.isfile(cand):
             return "curseforge"
-    # 4) Modrinth App：modrinth.json / modrinth.index.json / instance.cfg
-    for cand in ("modrinth.json", "modrinth.index.json", "instance.cfg"):
+    # 4) Modrinth App：profile.json（当前版）/ modrinth.json（整合包）/
+    #    modrinth.index.json / instance.cfg（旧版）
+    for cand in ("profile.json", "modrinth.json", "modrinth.index.json",
+                 "instance.cfg"):
         if os.path.isfile(os.path.join(mc, cand)):
             return "modrinth"
-    # 5) 原版标准布局兜底（shared .minecraft / versions 在根下）
-    return "vanilla"
+    # 5) 原版标准布局兜底（shared .minecraft / versions 在根下）；
+    #    特征全 miss 时按导入时判定的 kind 兜底，避免把其它启动器的实例
+    #    误标成原版（目录改名/移动/元数据文件缺失时仍能认出来源）。
+    return _KIND_TO_FORMAT.get(kind, "vanilla")
 
 
 class InstancesManager:

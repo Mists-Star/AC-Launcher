@@ -126,3 +126,5 @@ home 的 1.86% = hero 主按钮实底 + 3px 竖条 + 边框/图标点缀（允�
 * 非默认 home 模板（`_build_pcl_card` / `_build_modrinth` 等）的内联色未清扫
   ——默认 `home_style=ac_default`，模板切换功能 round-32 已删，低优先
 * Nuitka 打包版 shiboken6 ImportError（历史遗留，未动）
+  —— **round-133 已关闭**：改用 PyInstaller onedir，同版本组合构建/启动通过，
+  详见 CHANGELOG round-133。

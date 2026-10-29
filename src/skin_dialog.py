@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QScrollArea, QGridLayout, QStackedWidget, QButtonGroup,
 )
 from PySide6.QtCore import Qt, QSize, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QPainter, QGuiApplication
 
 import os
 
@@ -23,14 +23,118 @@ from .frameless import FramelessHelper, TitleBar
 from .worker import Worker
 from .skins import manager as skin_manager
 from .accounts import manager as accounts_manager
-from .skin_render import render_skin, render_cape, skin_model
+from .skin_render import render_cape, skin_model, render_skin_3d
+
+
+class SkinView3D(QWidget):
+    """可拖动旋转的 3D 皮肤预览（round-130）。
+
+    皮肤库此前只有 ``render_skin`` 的 2D 平铺图；主流启动器（PCL2/HMCL）
+    的衣柜都是能转的 3D 模型。这里复用 ``render_skin_3d``，按住左键左右
+    拖动改 yaw，松开恢复默认光标；渲染结果按 (皮肤/披风/角度/尺寸/DPR)
+    缓存，静止时不再重复计算。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._path = ""
+        self._cape_path: str | None = None
+        self._model: str | None = None
+        self._yaw = 22.0
+        self._pitch = 8.0
+        self._drag_x: float | None = None
+        self._pm = None
+        self._pm_key = None
+        self.setCursor(Qt.OpenHandCursor)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+    # ---------- data ----------
+    def set_skin(self, path: str, cape_path: str | None = None,
+                 model: str | None = None) -> None:
+        self._path = path or ""
+        self._cape_path = cape_path
+        self._model = model
+        self._yaw = 22.0
+        self._pitch = 8.0
+        self._pm_key = None
+        self.update()
+
+    def has_content(self) -> bool:
+        """渲染结果是否真有像素（损坏/非 64×64 皮肤返回 False）。"""
+        pm = self._pixmap()
+        if pm is None or pm.isNull() or pm.width() < 2:
+            return False
+        img = pm.toImage()
+        step = max(1, min(img.width(), img.height()) // 24)
+        for y in range(0, img.height(), step):
+            for x in range(0, img.width(), step):
+                if img.pixelColor(x, y).alpha() > 0:
+                    return True
+        return False
+
+    # ---------- paint ----------
+    def _pixmap(self):
+        if not self._path or self.width() <= 1 or self.height() <= 1:
+            return None
+        dpr = max(1.0, float(self.devicePixelRatioF() or 1.0))
+        key = (self._path, self._cape_path, self._model,
+               round(self._yaw, 1), round(self._pitch, 1),
+               self.width(), self.height(), round(dpr, 2))
+        if key == self._pm_key and self._pm is not None:
+            return self._pm
+        pm = render_skin_3d(self._path, int(round(self.width() * dpr)),
+                            int(round(self.height() * dpr)),
+                            self._cape_path, yaw=self._yaw,
+                            pitch=self._pitch, model=self._model)
+        pm.setDevicePixelRatio(dpr)
+        self._pm, self._pm_key = pm, key
+        return pm
+
+    def paintEvent(self, _e):
+        pm = self._pixmap()
+        if pm is None or pm.isNull():
+            return
+        p = QPainter(self)
+        # 皮肤是像素画，缩放保持最近邻，避免双线性把 texel 抹糊。
+        p.setRenderHint(QPainter.SmoothPixmapTransform, False)
+        size = pm.deviceIndependentSize()
+        p.drawPixmap(int((self.width() - size.width()) / 2.0),
+                     int((self.height() - size.height()) / 2.0), pm)
+        p.end()
+
+    # ---------- drag to rotate ----------
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag_x = e.position().x()
+            self.setCursor(Qt.ClosedHandCursor)
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_x is not None:
+            x = e.position().x()
+            dx = x - self._drag_x
+            self._drag_x = x
+            self._yaw = (self._yaw + dx * 0.8) % 360.0
+            self.update()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._drag_x is not None:
+            self._drag_x = None
+            self.setCursor(Qt.OpenHandCursor)
+        super().mouseReleaseEvent(e)
 
 
 class SkinDialog(QDialog):
     def __init__(self, parent=None, account_id: str | None = None):
         super().__init__(parent)
         self.setWindowTitle(t("skin.title"))
-        self.resize(680, 620)
+        # round-146：原固定 680×620 —— 皮肤库一屏放不下两行卡，用户必须
+        # 在弹窗里上下滚动才能看全。改为按屏幕可用高度自适应（上限 880），
+        # 常见 1080p 下整页可见；小屏仍保留内部滚动兜底。
+        _scr = QGuiApplication.primaryScreen()
+        _avail = _scr.availableGeometry().height() if _scr is not None else 900
+        self.resize(760, max(560, min(880, _avail - 80)))
         self._account_id = account_id
         self._skins = skin_manager()
 
@@ -143,6 +247,11 @@ class SkinDialog(QDialog):
         self.status.setProperty("cls", "sub")
         lay.addWidget(self.status)
 
+        # round-130：告诉用户 3D 预览可以拖动（否则没人会去试）。
+        self.drag_hint = QLabel(t("skin.drag_hint"))
+        self.drag_hint.setProperty("cls", "sub")
+        lay.addWidget(self.drag_hint)
+
         # ---- grid ----
         self.grid = QGridLayout()
         self.grid.setSpacing(14)
@@ -231,36 +340,25 @@ class SkinDialog(QDialog):
         cl.setSpacing(8)
 
         path = self._skins.path_of(skin["id"])
-        prev = QLabel()
-        prev.setFixedSize(120, 240)
-        prev.setAlignment(Qt.AlignCenter)
-        if path and os.path.isfile(path):
-            # Render at the widget's device pixel ratio and tag the pixmap, so
-            # Qt does not upscale a 120×240 image on a HiDPI screen (1.25 here)
-            # — that upscale was half of the "低清" skin thumbnails.
-            dpr = max(1.0, float(prev.devicePixelRatioF() or 1.0))
-            pm = render_skin(path, int(round(120 * dpr)),
-                             model=skin.get("model"))
-            pm.setDevicePixelRatio(dpr)
-            # render_skin returns a sized transparent pixmap even when the source
-            # image is invalid/corrupt.  Detect this by checking whether the
-            # pixmap has any real content (sample center pixel alpha).
-            _has_content = (
-                not pm.isNull()
-                and pm.width() > 1
-                and pm.toImage().pixelColor(pm.width() // 2, pm.height() // 2).alpha() > 0
-            )
-            if _has_content:
-                prev.setPixmap(pm)
-            else:
-                prev.setProperty("cls", "sub")
-                prev.setText(t("skin.no_preview"))
-                prev.setWordWrap(True)
+        # round-130：卡片预览从 2D 平铺改为可拖动旋转的 3D 模型；当前使用中
+        # 的皮肤顺带套上已装备披风，和首页角色保持一致。
+        cape_path = (self._skins.active_cape_path(self._account_id)
+                     if (is_active and self._account_id) else None)
+        viewer = SkinView3D()
+        viewer.setFixedSize(120, 240)
+        viewer.set_skin(path or "", cape_path, skin.get("model"))
+        if path and os.path.isfile(path) and viewer.has_content():
+            viewer.setToolTip(t("skin.drag_hint"))
+            cl.addWidget(viewer, alignment=Qt.AlignCenter)
         else:
+            prev = QLabel()
+            prev.setFixedSize(120, 240)
+            prev.setAlignment(Qt.AlignCenter)
             prev.setProperty("cls", "sub")
+            # render_skin 对损坏/非 64×64 图片会返回空图，卡片不能装作有预览。
             prev.setText(t("skin.no_preview"))
             prev.setWordWrap(True)
-        cl.addWidget(prev, alignment=Qt.AlignCenter)
+            cl.addWidget(prev, alignment=Qt.AlignCenter)
 
         name = QLabel(skin["name"])
         name.setProperty("cls", "big")

@@ -1,4 +1,4 @@
-"""Store detail dialog — per-mod info, version picker, translate, download.
+"""Store detail panel — per-mod info, version picker, translate, download.
 
 round-66+85 资源中心详情页（round-85 重构为行卡片流，对齐主流启动器：
 PCL2/HMCL 风格 = 头部信息 + 最新版本条 + 版本卡片列表，每行右侧直接下载：
@@ -7,12 +7,13 @@ PCL2/HMCL 风格 = 头部信息 + 最新版本条 + 版本卡片列表，每行�
 * 其余版本以行卡片流展示（版本号 + MC + 加载器彩章 + 大小 + 日期 + 下载），
   按 MC 版本 + 加载器双重筛选；分页加载（每页 50），大项目不再一次拉全部
   （round-85：Fabric API 上千版本，分页后秒开）
-* "获取翻译"：用免费在线翻译把简介/README 机翻成中文（无需 API key）
+* 中文说明："在 MC百科查看中文说明"外链（主流启动器做法，round-128）+
+  机器翻译兜底；正文本身已是中文时直接显示、不消耗翻译额度
 * 一键打开项目官网详情页
-* AC 无边框窗口：自定义标题栏 + 圆角，与主窗口风格统一
 
-挂在后台 Worker(QThread) 上执行网络请求，绝不阻塞 UI；所有错误体现在
-对话框内状态显示而不是崩溃。
+round-132：改为**页内面板**（QWidget），由资源中心用页内栈切换展示，
+不再是独立 QDialog 弹窗；顶部「返回」回到资源列表，形状与实例页内嵌
+向导一致。所有网络请求仍挂在后台 Worker(QThread)，绝不阻塞 UI。
 """
 from __future__ import annotations
 
@@ -20,19 +21,17 @@ import os
 import re
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QTextEdit, QMessageBox, QFrame, QWidget, QButtonGroup,
     QScrollArea, QFileDialog,
 )
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPixmap
 
 from .theme import COLORS, with_alpha
 from .i18n import t
 from .worker import ProgressWorker, Worker
 from .async_image import ImageLoader
-from .win_rounded import enable_win11_round_corners
-from .frameless import FramelessHelper, TitleBar
 
 PAGE_SIZE = 50
 
@@ -88,10 +87,19 @@ def _human_size(n) -> str:
     return f"{n:.1f} TB"
 
 
-def _fetch_and_translate(card: dict) -> tuple[str, str]:
+def _cjk_ratio(text: str) -> float:
+    """汉字占非空白字符的比例（判断正文是否本身就是中文）。"""
+    body = [c for c in (text or "") if not c.isspace()]
+    if not body:
+        return 0.0
+    return sum(1 for c in body if "\u4e00" <= c <= "\u9fff") / len(body)
+
+
+def _fetch_and_translate(card: dict) -> tuple[str, str | None]:
     """后台线程任务：取项目简介/README（body 优先）并机翻成中文。
 
-    返回 (原文, 译文)。
+    返回 (原文, 译文)。原文本身已经是中文时译文为 None（作者已提供中文
+    说明，round-128：这种情况不再消耗翻译额度）。
     """
     from .net_api import get_project_info, translate_text, NetError
     desc = (card.get("description") or "").strip()
@@ -105,8 +113,18 @@ def _fetch_and_translate(card: dict) -> tuple[str, str]:
     src = body if len(body) > len(desc) else desc
     if not src:
         raise NetError("该资源没有可翻译的简介/说明")
-    src = re.sub(r"[#>*`\[\]()~-]{1,3}", " ", src[:5000])
-    src = re.sub(r"\s{2,}", " ", src).strip()
+    # round-127: README 头部常是徽章图片 / 链接 / 裸 URL，既不展示、又白耗
+    # 翻译额度（MyMemory 匿名额度约 1 万字符/天）。先剔噪声再截断——详情页
+    # 原文区本来也只显示 1200 字符，翻 1600 足够读。
+    src = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", src[:6000])
+    src = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", src)
+    src = re.sub(r"https?://\S+", " ", src)
+    src = re.sub(r"<[^>]+>", " ", src)   # HTML 标签（<center>/<img> 等）不留残迹
+    src = re.sub(r"[#>*`\[\]()~|_]+", " ", src)
+    src = re.sub(r"\s{2,}", " ", src).strip()[:1600]
+    # round-128：正文本来就是中文 -> 不机翻（准确、零额度消耗）。
+    if _cjk_ratio(src) >= 0.2:
+        return src, None
     return src, translate_text(src)
 
 
@@ -209,8 +227,10 @@ class _VersionRow(QFrame):
         super().mouseReleaseEvent(e)
 
 
-class StoreDetailDialog(QDialog):
-    """资源中心详情：信息头 + 最新版本条 + 版本卡片流（分页）+ 翻译 + 下载。"""
+class StoreDetailPanel(QWidget):
+    """资源详情页内嵌面板：信息头 + 最新版本条 + 版本卡片流（分页）+ 翻译 + 下载。"""
+
+    back_requested = Signal()
 
     def __init__(self, parent, card: dict, category: str, inst, subdir: str,
                  instances=None):
@@ -226,25 +246,32 @@ class StoreDetailDialog(QDialog):
         self._offset = 0                     # 服务端分页游标
         self._has_more = False
 
-        self.setWindowTitle(t("store.detail_title"))
-        self.setModal(True)
-        # Height must cover the whole body: forcing 680 clipped the "load more"
-        # and translate rows into the version list (min hint is ~753).
-        self.setMinimumSize(880, 760)
-        self.resize(920, 800)
-
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root.setSpacing(8)
 
-        # ── AC 无边框标题栏 ──
-        self.titlebar = TitleBar(
-            self, title=t("store.detail_title"), height=38, controls="close")
-        root.addWidget(self.titlebar)
+        # ── 顶部返回条（round-132：详情是页内面板，返回列表不再关窗口）──
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        self.back_btn = QPushButton(t("common.back"))
+        self.back_btn.setProperty("cls", "secondary")
+        self.back_btn.setCursor(Qt.PointingHandCursor)
+        self.back_btn.setMinimumHeight(32)
+        self.back_btn.clicked.connect(self._go_back)
+        top.addWidget(self.back_btn)
+        self.page_title = QLabel(t("store.detail_title"))
+        self.page_title.setProperty("cls", "title")
+        top.addWidget(self.page_title)
+        top.addStretch(1)
+        root.addLayout(top)
 
-        body = QWidget()
-        bl = QVBoxLayout(body)
-        bl.setContentsMargins(18, 12, 18, 14)
+        # ── 正文：整页滚动（版本行不自己套滚动区，窄窗口下也能看全）──
+        self.body_scroll = QScrollArea()
+        self.body_scroll.setWidgetResizable(True)
+        self.body_scroll.setFrameShape(QFrame.NoFrame)
+        self._body = QWidget()
+        bl = QVBoxLayout(self._body)
+        bl.setContentsMargins(0, 0, 4, 0)
         bl.setSpacing(8)
 
         # ── ① 信息头：图标 + 标题 + 徽章 + 简介 + 在线页面 ──
@@ -259,18 +286,13 @@ class StoreDetailDialog(QDialog):
         # ── ③ 筛选栏 ──
         bl.addLayout(self._build_filter_bar())
 
-        # ── ④ 版本卡片流 ──
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
+        # ── ④ 版本行容器（行直接铺在页面流里） ──
         self._rows_host = QWidget()
         self._rows = QVBoxLayout(self._rows_host)
-        self._rows.setContentsMargins(0, 0, 4, 0)
+        self._rows.setContentsMargins(0, 0, 0, 0)
         self._rows.setSpacing(6)
         self._rows.addStretch(1)
-        self.scroll.setWidget(self._rows_host)
-        self.scroll.setMinimumHeight(220)
-        bl.addWidget(self.scroll, stretch=1)
+        bl.addWidget(self._rows_host)
 
         # 加载更多
         more_row = QHBoxLayout()
@@ -286,8 +308,15 @@ class StoreDetailDialog(QDialog):
         more_row.addStretch(1)
         bl.addLayout(more_row)
 
-        # ── ⑤ 翻译区 ──
+        # ── ⑤ 中文说明区 ──
+        # round-143（用户拍板）：打开详情即自动机翻（gtx→MyMemory 兜底、带缓存），
+        # 不再要求玩家点按钮或跳官网；MC百科按钮保留为社区中文条目入口。
         tl_row = QHBoxLayout()
+        self.mcmod_btn = QPushButton(t("store.detail_mcmod"))
+        self.mcmod_btn.setProperty("cls", "secondary")
+        self.mcmod_btn.setCursor(Qt.PointingHandCursor)
+        self.mcmod_btn.clicked.connect(self._open_mcmod)
+        tl_row.addWidget(self.mcmod_btn)
         self.translate_btn = QPushButton(t("store.detail_translate"))
         # round-99：改 cls="secondary"（中性描边小按钮）——旧 surface 类在
         # 按钮上是左对齐/零内边距，显示成裸文字"链接"，与页面按钮体系不一致
@@ -306,26 +335,22 @@ class StoreDetailDialog(QDialog):
         self.text.setMaximumHeight(96)
         bl.addWidget(self.text)
 
-        # ── ⑥ 底部状态 + 关闭 ──
+        # ── ⑥ 底部状态（下载进度/结果） ──
         foot = QHBoxLayout()
         self.status = QLabel("")
         self.status.setProperty("cls", "sub")
         foot.addWidget(self.status, stretch=1)
-        self.close_btn = QPushButton(t("common.cancel"))
-        self.close_btn.setProperty("cls", "secondary")
-        self.close_btn.setMinimumHeight(32)
-        self.close_btn.clicked.connect(self.close)
-        foot.addWidget(self.close_btn)
         bl.addLayout(foot)
 
-        root.addWidget(body, stretch=1)
-
-        # ── AC 窗口：无边框 + 拖拽 + 圆角 ──
-        self._frameless = FramelessHelper(self)
-        self._frameless.set_titlebar(self.titlebar)
-        enable_win11_round_corners(self)
+        bl.addStretch(1)
+        self.body_scroll.setWidget(self._body)
+        root.addWidget(self.body_scroll, stretch=1)
 
         self._load_first_page()
+        # round-143（用户拍板）：描述默认直接机翻成中文——打开详情就自动翻，
+        # 不再要求玩家先点按钮或跳官网；原文本身是中文时上层零成本直返。
+        if (card.get("description") or "").strip():
+            self._translate(auto=True)
 
     # ---------------- UI 构建 ----------------
     def _build_target_bar(self) -> QHBoxLayout:
@@ -383,7 +408,6 @@ class StoreDetailDialog(QDialog):
         self.thumb.setFixedSize(72, 72)
         hl.addWidget(self.thumb, 0, Qt.AlignTop)
         if self._img and card.get("icon_url"):
-            from PySide6.QtGui import QPixmap
             fb = QPixmap(72, 72)
             fb.fill(Qt.transparent)
             self._img.load(card.get("icon_url", ""), 72, self.thumb, fb)
@@ -413,8 +437,16 @@ class StoreDetailDialog(QDialog):
         self.open_btn.setProperty("cls", "secondary")
         self.open_btn.setCursor(Qt.PointingHandCursor)
         self.open_btn.setMinimumHeight(28)
-        link = (f"https://modrinth.com/{_type_slug(self._category)}/"
-                f"{card.get('slug') or card.get('project_id')}")
+        # round-143 修：CF 卡片此前也拼 Modrinth 链接（点开必 404）。
+        if card.get("source") == "curseforge":
+            _cf_path = {"mod": "mc-mods", "modpack": "modpacks",
+                        "shader": "shaders", "resourcepack": "resource-packs",
+                        "datapack": "data-packs"}.get(self._category, "mc-mods")
+            link = (f"https://www.curseforge.com/minecraft/{_cf_path}/"
+                    f"{card.get('slug') or ''}")
+        else:
+            link = (f"https://modrinth.com/{_type_slug(self._category)}/"
+                    f"{card.get('slug') or card.get('project_id')}")
         self.open_btn.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl(link)))
         meta.addWidget(self.open_btn)
@@ -572,8 +604,11 @@ class StoreDetailDialog(QDialog):
                 w = Worker(_curseforge_versions,
                            self._card.get("project_id", ""), PAGE_SIZE, offset)
             else:
+                # round-142：传 project_id（数字 id 走镜像文件列表；cfwidget
+                # 对整合包 slug 404，slug 只作最后兜底）
                 w = Worker(_curseforge_versions_keyless,
-                           self._card.get("slug", ""), PAGE_SIZE, offset)
+                           self._card.get("project_id", "")
+                           or self._card.get("slug", ""), PAGE_SIZE, offset)
         else:
             w = Worker(_modrinth_versions, self._card.get("project_id", ""),
                        "", "", PAGE_SIZE, offset)
@@ -687,7 +722,7 @@ class StoreDetailDialog(QDialog):
         self.versions_lbl.setText(
             t("store.detail_shown", shown=len(self._filtered()),
               total=len(self._versions)))
-        self.scroll.verticalScrollBar().setValue(0)
+        self.body_scroll.verticalScrollBar().setValue(0)
 
     # ---------- 下载 ----------
     def _download_latest(self):
@@ -766,8 +801,35 @@ class StoreDetailDialog(QDialog):
         self._track(w)
         w.start()
 
-    # ---------- 翻译 ----------
-    def _translate(self):
+    # ---------- 中文说明 ----------
+    def _open_mcmod(self):
+        """打开 MC百科条目（中文说明的正解；找不到就退搜索页）。"""
+        from .mod_names import cn_short
+        from .net_api import mcmod_entry_url, mcmod_search_url
+        slug = self._card.get("slug") or ""
+        key = (cn_short(slug) or self._card.get("title") or slug or "").strip()
+        self.mcmod_btn.setEnabled(False)
+        self.tr_status.setText(t("store.detail_mcmod_searching"))
+        w = Worker(mcmod_entry_url, key)
+
+        def _ok(url):
+            self.mcmod_btn.setEnabled(True)
+            self.tr_status.setText("")
+            QDesktopServices.openUrl(QUrl(url))
+
+        def _err(_e):
+            # 网络异常不拦用户：直接开搜索页让他自己在浏览器里找。
+            self.mcmod_btn.setEnabled(True)
+            self.tr_status.setText("")
+            QDesktopServices.openUrl(QUrl(mcmod_search_url(key)))
+
+        w.finished.connect(_ok)
+        w.error.connect(_err)
+        self._track(w)
+        w.start()
+
+    # ---------- 翻译（打开即自动，按钮可重试） ----------
+    def _translate(self, auto: bool = False):
         self.tr_status.setText(t("store.detail_translating"))
         self.translate_btn.setEnabled(False)
         w = Worker(_fetch_and_translate, self._card)
@@ -775,16 +837,27 @@ class StoreDetailDialog(QDialog):
         def _ok(pair):
             self.translate_btn.setEnabled(True)
             src, tr = pair
+            if tr is None:
+                # round-128：原文已是中文，没走机翻。
+                self.text.setPlainText(src)
+                self.tr_status.setText(t("store.detail_native_cn"))
+                return
             disp = tr if len(tr) <= 6000 else tr[:6000] + "…"
             self.text.setPlainText(
                 f"── {t('store.detail_original')} ──\n{src[:1200] if len(src) > 1200 else src}"
                 f"\n\n── {t('store.detail_translated')} ──\n{disp}"
             )
+            # 头部短简介也换成中文（默认视图不再让玩家先看到英文）。
+            self.desc.setText(self._short(tr, 240))
             self.tr_status.setText(t("store.detail_translated_ok"))
 
         def _err(e):
             self.translate_btn.setEnabled(True)
-            self.tr_status.setText(t("store.detail_translate_fail", e=e))
+            if auto:
+                # 自动翻译失败不打扰：保留头部英文简介即可，按钮仍可手动重试。
+                self.tr_status.setText("")
+            else:
+                self.tr_status.setText(t("store.detail_translate_fail", e=e))
 
         w.finished.connect(_ok)
         w.error.connect(_err)
@@ -803,11 +876,20 @@ class StoreDetailDialog(QDialog):
         except ValueError:
             pass
 
-    def closeEvent(self, e):
-        for w in self._workers:
-            if w.isRunning():
-                w.requestInterruption()
-        super().closeEvent(e)
+    def _go_back(self):
+        """返回资源列表：先停掉在跑的 Worker，再通知宿主切回列表。"""
+        self.shutdown()
+        self.back_requested.emit()
+
+    def shutdown(self):
+        """停止所有在跑的 Worker（面板被移出页内栈时由宿主调用）。"""
+        for w in list(self._workers):
+            try:
+                if w.isRunning():
+                    w.requestInterruption()
+            except RuntimeError:
+                pass
+        self._workers.clear()
 
 
 def _cat_key(category: str) -> str:

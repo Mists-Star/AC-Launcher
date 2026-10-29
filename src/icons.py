@@ -218,6 +218,30 @@ def on_accent(name: str) -> QIcon:
     return icon(name, COLORS.get("text_on_accent") or "#FFFFFF")
 
 
-def pixmap(name: str, size: int = _SIZE, color: str | None = None) -> QPixmap:
-    """Return a QPixmap of the named icon at the given pixel size."""
-    return icon(name, color).pixmap(size, size)
+def screen_dpr() -> float:
+    """Device pixel ratio of the primary screen (>= 1.0)."""
+    try:
+        from PySide6.QtGui import QGuiApplication
+        scr = QGuiApplication.primaryScreen()
+        return max(1.0, float(scr.devicePixelRatio()) if scr else 1.0)
+    except Exception:  # noqa: BLE001 - no screen yet
+        return 1.0
+
+
+def pixmap(name: str, size: int = _SIZE, color: str | None = None,
+           dpr: float | None = None) -> QPixmap:
+    """Return a QPixmap of the named icon at the given *logical* pixel size.
+
+    round-148：HiDPI（125%/150%）屏上，按逻辑尺寸渲染的位图会被 Qt 的设备
+    变换再放大一次 → 边缘发虚。这里按 ``size × dpr`` 的**物理**像素渲染，
+    并打上 devicePixelRatio 标记，QLabel / QIcon 都会 1:1 显示。
+
+    注意：``size`` 的语义仍是「逻辑边长」——返回的位图物理尺寸是
+    ``size × dpr``，但显示出来还是 ``size`` 逻辑像素，布局不受影响。
+    """
+    dpr = screen_dpr() if dpr is None else max(1.0, float(dpr or 1.0))
+    # ``QIcon.pixmap(size, dpr)`` 会让引擎按 ``size × dpr`` 的**物理**像素
+    # 渲染，并打上 dpr 标记（``pixmap(size)`` 也会自动套用屏幕 DPR）。
+    pm = icon(name, color).pixmap(QSize(size, size), dpr)
+    pm.setDevicePixelRatio(dpr)
+    return pm

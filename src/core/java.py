@@ -8,6 +8,7 @@ the closest installed JRE >= that major.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -168,6 +169,22 @@ def required_java_major(game_version: str) -> int:
 
     Sources: Mojang's stated requirements per release.
     """
+    gv = (game_version or "").strip().lower()
+    # round-146：快照 ID（25w14craftmine / 24w14potato / 23w13a_or_b …）里的
+    # 数字是「年份+周」，不是版本号 —— 旧逻辑会把 25w14 当成主版本 25，于是
+    # 4 月愚人节版本被判成「需要 Java 25」，玩家装了 Java 26 也被拒。快照按
+    # 所属正式版定 Java：24w 起 = 1.20.5+ → 21；22w/23w = 1.17–1.20.4 → 17；
+    # 21w = 1.17 → 16；20w 及更早 = 1.16- → 8。
+    m = re.match(r"^(\d{2})w(\d{2})", gv)
+    if m:
+        year = int(m.group(1))
+        if year >= 24:
+            return 21
+        if year >= 22:
+            return 17
+        if year >= 21:
+            return 16
+        return 8
     parts = re.findall(r"\d+", game_version)
     if not parts:
         return 17
@@ -195,6 +212,60 @@ def required_java_major(game_version: str) -> int:
     return 8
 
 
+# round-146：兼容上限表从 select_java/launch/health 三处重复定义收拢到这里。
+# 25 只到 25：Cleanroom 0.7.x 的安装器明确拒绝 Java 24 和 26。
+# 21 → 30：1.20.5+ 在 22–26 上均可运行，旧上限 24 会误杀玩家的 Java 26。
+# （4 月快照 25w14craftmine 不在此列：版本 json 的 javaVersion=21 → 走 21 档，
+#  Java 26 已可启动；「要 25」来自旧逻辑把快照 ID 当主版本号。）
+JAVA_MAX_OK = {8: 8, 16: 17, 17: 21, 21: 30, 25: 25}
+
+
+def java_max_ok(need: int) -> int:
+    return JAVA_MAX_OK.get(need, need + 3)
+
+
+def is_java_compatible(need: int, major: int) -> bool:
+    """Does a Java of ``major`` satisfy a version that needs ``need``?
+
+    Old clients (Java 8/16) crash on newer JVMs, so they must match closely;
+    17+ tolerate a newer runtime (and 1.20.5+ runs fine on 22–26). Cleanroom
+    (25) is strict by its installer's own rule.
+    """
+    if need <= 0 or major <= 0:
+        return True  # unknown → don't block
+    return need <= major <= java_max_ok(need)
+
+
+def find_version_json(mc_dir: str, version_id: str) -> str:
+    """Locate the installed version json for ``version_id`` (best effort).
+
+    round-146：用版本 json 里的 ``javaVersion.majorVersion`` 取代纯 ID 推断，
+    这样快照 / 新编号正式版的 Java 要求都以 Mojang 的真实元数据为准。
+    """
+    if not mc_dir or not version_id:
+        return ""
+    parent = os.path.dirname(os.path.normpath(mc_dir))
+    for cand in (
+        os.path.join(mc_dir, "versions", version_id, f"{version_id}.json"),
+        os.path.join(mc_dir, f"{version_id}.json"),
+        os.path.join(parent, "versions", version_id, f"{version_id}.json"),
+    ):
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _java_major_from_json(path: str) -> int:
+    if not path or not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return int((data.get("javaVersion") or {}).get("majorVersion") or 0)
+    except Exception:  # noqa: BLE001 - a broken json just falls back to the table
+        return 0
+
+
 def reset_scan_cache() -> None:
     """Drop the cached scan results (call after provisioning a new JRE)."""
     global _SCAN_CACHE_DEEP, _SCAN_CACHE_DEEP_AT, _SCAN_CACHE_FAST, _SCAN_CACHE_FAST_AT
@@ -216,7 +287,8 @@ def java25_path() -> str | None:
     return None
 
 
-def required_java_major_for(game_version: str, loader: str = "") -> int:
+def required_java_major_for(game_version: str, loader: str = "",
+                            version_json: str = "") -> int:
     """Java major an *instance* needs, not just its game version.
 
     Cleanroom is the exception to the version table: it is a 1.12.2 fork that
@@ -226,6 +298,9 @@ def required_java_major_for(game_version: str, loader: str = "") -> int:
     """
     if (loader or "").strip().lower() == "cleanroom":
         return 25
+    from_json = _java_major_from_json(version_json)
+    if from_json > 0:
+        return from_json
     return required_java_major(game_version)
 
 
@@ -252,8 +327,8 @@ def select_java(game_version: str, *, java_auto: bool = True, user_path: str = "
     if exact:
         return exact[0]["path"]
     # 兼容上限（借鉴主流做法：老版本拒绝高版本，新版本接受小范围更高）
-    # 25 只到 25：Cleanroom 0.7.x 的安装器明确拒绝 Java 24 和 26。
-    max_ok = {8: 8, 16: 17, 17: 21, 21: 24, 25: 25}.get(need, need + 3)
+    # round-146：统一走模块级 JAVA_MAX_OK（Cleanroom 25 仍只认 25）。
+    max_ok = java_max_ok(need)
     compat = sorted(
         (j for j in javas if need <= j["major"] <= max_ok),
         key=lambda x: x["major"])

@@ -7,6 +7,7 @@ memory for the session.
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 import time
@@ -23,6 +24,17 @@ def _t_err(key, default, **kw):
 
 VERSION_MANIFEST_URL = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
 MODRINTH_SEARCH_URL = "https://api.modrinth.com/v2/search"
+MODRINTH_PROJECTS_URL = "https://api.modrinth.com/v2/projects"
+# MC百科（mcmod.cn）：中文资源说明的事实标准站点，主流启动器（PCL2/HMCL）
+# 都只把它当外链/中文名来源，不做正文机翻（round-128）。
+MCMOD_SEARCH_URL = "https://search.mcmod.cn/s"
+MCMOD_CLASS_URL = "https://www.mcmod.cn/class/{id}.html"
+# mcmod 搜索页对非浏览器 UA 会返回空壳，必须带浏览器 UA。
+_MCMOD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0 Safari/537.36",
+}
 
 # BMCLAPI manifest mirror (used when download_mirror == "bmclapi").
 try:
@@ -901,21 +913,38 @@ def download_mod_version_to(
 # 资源中心详情页"获取翻译"：免费接口，无需 API key。
 # round-125：Google gtx 在国内网络直接超时（用户「资源中心获取翻译失败」），
 # 所以改为「Google 优先 + MyMemory 兜底」——MyMemory 无需 key、国内可达。
-# 结果本地缓存 24h（md5 摘要键）。
+# round-127: MyMemory 匿名额度只有约 1 万字符/天，超了统一返回 HTTP 429
+#   "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY"
+#   —— 旧代码把这段英文原文直接甩给用户。现在按 chunk 缓存 7 天（重试只补
+#   未翻译的段落），429 时给中文提示；Google 连不上就 30 分钟内不再重试，
+#   免得每次点翻译都白等 5 秒。
 
 _TRANSLATE_API = "https://translate.googleapis.com/translate_a/single"
 _TRANSLATE_FALLBACK = "https://api.mymemory.translated.net/get"
-_TRANSLATE_TTL = 24 * 3600
+_TRANSLATE_TTL = 7 * 86400
+
+# Google endpoint is unreachable on mainland networks. Retrying it on every
+# click only costs a 4s connect timeout, so remember the failure for a while.
+_GOOGLE_SKIP_UNTIL = 0.0
+_GOOGLE_SKIP_SECONDS = 1800
+_GOOGLE_TIMEOUT = 4
 
 
 def _google_translate(text: str, target: str) -> str:
-    r = requests.get(
-        _TRANSLATE_API,
-        params={"client": "gtx", "sl": "auto", "tl": target,
-                "dt": "t", "q": text},
-        headers=_HEADERS, timeout=5, proxies=_proxies(),
-    )
-    r.raise_for_status()
+    global _GOOGLE_SKIP_UNTIL
+    if time.time() < _GOOGLE_SKIP_UNTIL:
+        raise NetError("google translate unreachable (skipped)")
+    try:
+        r = requests.get(
+            _TRANSLATE_API,
+            params={"client": "gtx", "sl": "auto", "tl": target,
+                    "dt": "t", "q": text},
+            headers=_HEADERS, timeout=_GOOGLE_TIMEOUT, proxies=_proxies(),
+        )
+        r.raise_for_status()
+    except requests.RequestException:
+        _GOOGLE_SKIP_UNTIL = time.time() + _GOOGLE_SKIP_SECONDS
+        raise
     data = r.json()
     return "".join(seg[0] for seg in data[0] if seg and seg[0])
 
@@ -940,23 +969,46 @@ def _chunk_text(text: str, limit: int = 450) -> list[str]:
     return chunks
 
 
+def _quota_exhausted(detail: str) -> bool:
+    """MyMemory answers 429 with a ``MYMEMORY WARNING: ...`` body when the
+    anonymous daily quota (~10k chars / IP) is used up."""
+    return "ALL AVAILABLE FREE TRANSLATIONS" in (detail or "").upper()
+
+
 def _mymemory_translate(text: str, target: str) -> str:
     lang = "zh-CN" if target.lower().startswith("zh") else target
     out_parts = []
     for chunk in _chunk_text(text):
+        # Per-chunk cache: a failed run still keeps the chunks that made it
+        # through, so a retry tomorrow only spends quota on what's missing.
+        ck = "trc:" + hashlib.md5((lang + chunk).encode("utf-8")).hexdigest()
+        hit = _cached(ck, _TRANSLATE_TTL)
+        if hit is not None:
+            out_parts.append(hit)
+            continue
         r = requests.get(
             _TRANSLATE_FALLBACK,
             params={"q": chunk, "langpair": f"en|{lang}"},
             headers=_HEADERS, timeout=12, proxies=_proxies(),
         )
-        r.raise_for_status()
-        data = r.json()
+        try:
+            data = r.json()
+        except ValueError:
+            raise NetError(f"mymemory HTTP {r.status_code}") from None
         if str(data.get("responseStatus")) != "200":
-            raise NetError(str(data.get("responseDetails") or "mymemory error"))
+            detail = str(data.get("responseDetails") or "")
+            if r.status_code == 429 or _quota_exhausted(detail):
+                raise NetError(_t_err(
+                    "err.translate_quota",
+                    default="免费翻译额度已用完（MyMemory 匿名额度约 1 万字符/天），"
+                            "请明天再试，或在设置里配置代理后走 Google 翻译。"))
+            raise NetError(detail or f"mymemory error (HTTP {r.status_code})")
         piece = (data.get("responseData") or {}).get("translatedText") or ""
         if not piece:
             raise NetError("mymemory: empty result")
-        out_parts.append(html.unescape(piece))
+        piece = html.unescape(piece)
+        out_parts.append(piece)
+        _store(ck, piece)
     return "\n".join(out_parts)
 
 
@@ -979,17 +1031,17 @@ def translate_text(text: str, target: str = "zh-CN") -> str:
     for fn in (_google_translate, _mymemory_translate):
         try:
             out = fn(text, target)
-        except requests.RequestException as e:
-            last_err = e
-            continue
-        except NetError as e:
+        except (requests.RequestException, NetError, ValueError) as e:
             last_err = e
             continue
         if out:
             _store(key, out)
             return out
-    raise NetError(
-        _t_err("err.translate", default="翻译失败：{err}", err=last_err or ""))
+    if last_err is not None:
+        # 详情页自己会加「翻译失败：」前缀，这里只回传后端原因，
+        # 否则会出现「翻译失败：翻译失败：…」。
+        raise NetError(str(last_err))
+    raise NetError(_t_err("err.translate", default="翻译失败"))
 
 
 # 资源中心支持的 Modrinth project_type（对齐主流下载分类：模组/整合包/光影/资源包/数据包）
@@ -1012,8 +1064,23 @@ LITELOADER_SNAPSHOTS_INDEX = (
     "https://repo.mumfrey.com/content/repositories/snapshots/com/mumfrey/liteloader/"
 )
 CURSEFORGE_API = "https://api.curseforge.com/v1"
+# round-140：MCIM 公益镜像（HMCL / PCL2-CE 在用）——与官方 API 同契约、
+# 免 x-api-key，无 key 时的关键词搜索走这里。仅搜索走镜像；下载仍走
+# cfwidget + forgecdn 公开直链。
+_CF_MIRROR = "https://mod.mcimirror.top/curseforge/v1"
 CURSEFORGE_GAME_ID = 432  # Minecraft
 CURSEFORGE_MOD_CLASS = 6  # Mods class
+# round-140 修：CF 搜索此前写死 classId=6（模组），资源中心的分类胶囊在
+# CF 源下被完全忽略——「整合包」页签搜出来的全是模组（与 PCL 表现不一致）。
+# classId 经镜像 + 官网路径实锤：data-packs=6945（4546 是 customization，
+# 不是数据包）、resource-packs=12、shaders=6552、modpacks=4471。
+CURSEFORGE_CLASS_OF = {
+    "mod":          6,
+    "modpack":      4471,
+    "shader":       6552,
+    "resourcepack": 12,
+    "datapack":     6945,
+}
 
 
 def _curseforge_key() -> str:
@@ -1030,78 +1097,285 @@ def curseforge_available() -> bool:
 
 
 def curseforge_keyless_enabled() -> bool:
-    """Whether the keyless fallback channel (cfwidget + forgecdn direct links) is on.
+    """Whether the keyless channel (MCIM mirror search + cfwidget/forgecdn links) is on.
 
-    Default **off**: the public release must route CurseForge traffic through the
-    official API only. The keyless channel resolves a slug straight to
-    ``edge.forgecdn.net`` and therefore bypasses the mod author's third-party
-    distribution consent the API enforces — shipping it as a default would
-    contradict what we declare to CurseForge.
+    Default **on**（round-140 用户拍板「搜索+下载全默认开」）: without an
+    official key, keyword search goes through the MCIM community mirror
+    (same contract as the CF API, no ``x-api-key`` — HMCL / PCL2-CE use it)
+    and downloads resolve slug → cfwidget → ``edge.forgecdn.net``. Turning
+    it off restricts CurseForge to the official keyed API only.
     """
     try:
         from .settings_dialog import load_config
-        return bool(load_config().get("curseforge_keyless", False))
+        return bool(load_config().get("curseforge_keyless", True))
     except Exception:  # noqa: BLE001
-        return False
+        return True
 
 
-def search_curseforge(query: str = "", offset: int = 0, limit: int = 20) -> list[dict]:
-    """Search CurseForge mods via the official API (needs an API key).
+_CF_POOL_STEP = 50     # CF 单页上限 50（镜像同）
+_CF_POOL_PAGES = 3     # round-141：首屏拉 0/50/100 → 150 条相关性池
 
+
+def _cf_map_row(m: dict) -> dict:
+    """CF API 行 → 统一 hit 形状（与 search_mods 对齐）。"""
+    logo = (m.get("logo") or {}).get("url", "")
+    return {
+        "project_id": str(m.get("id", "")),      # CF mod id
+        "slug": m.get("slug", ""),
+        "title": m.get("name", ""),
+        "description": (m.get("summary") or "")[:160],
+        "downloads": m.get("downloadCount", 0),
+        "icon_url": logo,
+        "author": (m.get("authors") or [{}])[0].get("name", ""),
+        "source": "curseforge",
+    }
+
+
+def _cf_relevance(hit: dict, q_norm: str, q_low: str) -> int:
+    """本地相关性分级（round-141 搜索质量）。
+
+    实测 CF v1 / MCIM 镜像引擎把「名字精确匹配」的项目埋到 100+ 位
+    （搜 sodium，本体排在第 100 页位；sortField 不起作用），我们只取前
+    20 永远看不到本体 —— 用户报「搜 sodium 搜不到」的根因。
+    分级：0 = 名字/slug 精确 → 1 = 名字包含全部词 → 2 = slug 含关键词
+    → 3 = 名字含关键词 → 4 = 其它（保留引擎原始顺序，稳定排序）。
+    """
+    slug = (hit.get("slug") or "").lower()
+    name = (hit.get("title") or "").lower()
+    if q_norm and (slug == q_norm or name == q_low):
+        return 0
+    toks = q_low.split()
+    if toks and all(t in name for t in toks):
+        return 1
+    if q_norm and q_norm in slug:
+        return 2
+    if q_low and q_low in name:
+        return 3
+    return 4
+
+
+def _cf_pool(base: str, headers: dict, query: str, category: str) -> list[dict]:
+    """首屏相关性池：3×50 页并行拉取 + slug 精确钉顶 → 去重 → 本地分级重排。
+
+    后续分页从池里切片（0 成本），池整体带缓存。全部失败才 raise，
+    部分页失败用已取回的部分兜底。
+    """
+    key = f"cfpool:{category}:{query}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    class_id = CURSEFORGE_CLASS_OF.get(category, CURSEFORGE_MOD_CLASS)
+
+    def _page(idx: int) -> list[dict]:
+        params = {"gameId": CURSEFORGE_GAME_ID, "classId": class_id,
+                  "searchFilter": query, "pageSize": _CF_POOL_STEP, "index": idx}
+        r = requests.get(f"{base}/mods/search", params=params, headers=headers,
+                         timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+        r.raise_for_status()
+        return r.json().get("data", [])
+
+    def _slug_probe() -> list[dict]:
+        # slug 精确钉顶：用户输入 ≈ 完整名时，无论引擎把本体埋多深都救回来
+        norm = query.strip().lower().replace(" ", "-")
+        if not norm or "/" in norm or has_cjk(norm):
+            return []
+        params = {"gameId": CURSEFORGE_GAME_ID, "slug": norm, "pageSize": 1}
+        try:
+            r = requests.get(f"{base}/mods/search", params=params, headers=headers,
+                             timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+            r.raise_for_status()
+            return r.json().get("data", [])
+        except requests.RequestException:
+            return []
+
+    rows: list[dict] = []
+    errs: list[Exception] = []
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = [ex.submit(_slug_probe)] + [
+            ex.submit(_page, i * _CF_POOL_STEP) for i in range(_CF_POOL_PAGES)]
+        for f in futs:
+            try:
+                rows.extend(f.result())
+            except Exception as e:  # noqa: BLE001 - 单页失败用其余页兜底
+                errs.append(e)
+    if not rows and errs:
+        raise NetError(f"无法搜索 CurseForge：{errs[0]}")
+    # 按 slug 去重（钉顶行在最前，先到先得）
+    seen: set = set()
+    merged: list[dict] = []
+    for m in rows:
+        s = m.get("slug") or m.get("id")
+        if s in seen:
+            continue
+        seen.add(s)
+        merged.append(m)
+    hits = [_cf_map_row(m) for m in merged]
+    q_low = query.strip().lower()
+    q_norm = q_low.replace(" ", "-")
+    hits.sort(key=lambda h: _cf_relevance(h, q_norm, q_low))  # 稳定排序
+    _store(key, hits)
+    return hits
+
+
+def search_curseforge(query: str = "", offset: int = 0, limit: int = 20,
+                      category: str = "mod") -> list[dict]:
+    """Search CurseForge mods — official API with a key, MCIM mirror without.
+
+    round-140：无 key 且免 key 通道开启时改走 MCIM 公益镜像（同 API 契约、
+    免 x-api-key），关键词 / 中文名库反查 / 分页语义与官方路径一致。
+    round-140 修：``category`` → CF classId，分类胶囊在 CF 源下生效
+    （此前写死模组类，搜整合包返回的是模组）。
+    round-141：offset < 150 走 ``_cf_pool`` 相关性池（3×50 页 + slug 钉顶 +
+    本地分级重排），修「搜 sodium 搜不到本体」；更深页走引擎原生顺序。
     Returns the same hit-shaped dicts as :func:`search_mods` so the store page
     renders both sources with identical cards.
     """
     key = _curseforge_key()
-    if not key:
+    if key:
+        base = CURSEFORGE_API
+        headers = {**_HEADERS, "x-api-key": key, "Accept": "application/json"}
+    elif curseforge_keyless_enabled():
+        base = _CF_MIRROR
+        headers = {**_HEADERS, "Accept": "application/json"}
+    else:
         raise NetError("未配置 CurseForge API Key（设置 → 第三方服务）")
-    cache_key = f"cf:{query}:{offset}:{limit}"
+    cache_key = f"cf:{category}:{query}:{offset}:{limit}"
+    # round-128：CF 的 searchFilter 同样不认中文，先用本地名库反查 slug，
+    # 再走 CF 的 slug 精确查询（单次请求，保持原有分页语义）。
+    if has_cjk(query):
+        cached = _cached(cache_key)
+        if cached is not None:
+            return cached
+        slugs = _lookup_cn_slugs(query)
+        if not slugs:
+            return []
+        params = {
+            "gameId": CURSEFORGE_GAME_ID,
+            "classId": CURSEFORGE_CLASS_OF.get(category, CURSEFORGE_MOD_CLASS),
+            "slug": slugs[0],
+            "pageSize": limit,
+            "index": offset,
+        }
+        try:
+            r = requests.get(
+                f"{base}/mods/search",
+                params=params,
+                headers=headers,
+                timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
+            )
+            r.raise_for_status()
+            data = r.json().get("data", [])
+        except requests.RequestException as e:
+            raise NetError(f"无法搜索 CurseForge：{e}") from e
+        hits = [_cf_map_row(m) for m in data]
+        _store(cache_key, hits)
+        return hits
+    # 首屏 → 相关性池切片。注意：池是唯一权威 —— 不能先查切片缓存，
+    # 否则修复前存下的旧排名数据（sodium 埋 100+ 位那版）会一直短路新池。
+    if offset < _CF_POOL_STEP * _CF_POOL_PAGES:
+        return _cf_pool(base, headers, query, category)[offset:offset + limit]
+    # 深页兜底（>150）：引擎原生顺序
     cached = _cached(cache_key)
     if cached is not None:
         return cached
+    params = {
+        "gameId": CURSEFORGE_GAME_ID,
+        "classId": CURSEFORGE_CLASS_OF.get(category, CURSEFORGE_MOD_CLASS),
+        "searchFilter": query,
+        "pageSize": limit,
+        "index": offset,
+    }
     try:
         r = requests.get(
-            f"{CURSEFORGE_API}/mods/search",
-            params={
-                "gameId": CURSEFORGE_GAME_ID,
-                "classId": CURSEFORGE_MOD_CLASS,
-                "searchFilter": query,
-                "pageSize": limit,
-                "index": offset,
-            },
-            headers={**_HEADERS, "x-api-key": key, "Accept": "application/json"},
+            f"{base}/mods/search",
+            params=params,
+            headers=headers,
             timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
         )
         r.raise_for_status()
         data = r.json().get("data", [])
     except requests.RequestException as e:
         raise NetError(f"无法搜索 CurseForge：{e}") from e
-
-    hits = []
-    for m in data:
-        logo = (m.get("logo") or {}).get("url", "")
-        hits.append({
-            "project_id": str(m.get("id", "")),      # CF mod id
-            "slug": m.get("slug", ""),
-            "title": m.get("name", ""),
-            "description": (m.get("summary") or "")[:160],
-            "downloads": m.get("downloadCount", 0),
-            "icon_url": logo,
-            "author": (m.get("authors") or [{}])[0].get("name", ""),
-            "source": "curseforge",
-        })
+    hits = [_cf_map_row(m) for m in data]
     _store(cache_key, hits)
     return hits
 
 
+def search_all(query: str = "", offset: int = 0, limit: int = 20,
+               category: str = "mod") -> list[dict]:
+    """「全部」源（round-140 用户要求）：Modrinth + CurseForge 并行搜索合并返回。
+
+    两源各自走自己的缓存/分页；一边失败不拖死另一边（只有两边都失败且
+    结果为空才 raise）。命中 dict 自带 ``source`` 字段，卡片/详情/下载
+    据此分流。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    box: dict[str, list[dict] | None] = {"mr": None, "cf": None}
+    errs: list[Exception] = []
+
+    def _mr():
+        try:
+            box["mr"] = search_mods(query, offset, limit, project_type=category)
+        except Exception as e:  # noqa: BLE001 - 单源失败不拖死合并视图
+            errs.append(e)
+
+    def _cf():
+        if not (curseforge_available() or curseforge_keyless_enabled()):
+            return
+        try:
+            box["cf"] = search_curseforge(query, offset, limit, category)
+        except Exception as e:  # noqa: BLE001
+            errs.append(e)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futs = [ex.submit(_mr), ex.submit(_cf)]
+        for f in futs:
+            f.result()
+    hits = (box["mr"] or []) + (box["cf"] or [])
+    if not hits and errs:
+        raise NetError(str(errs[0]))
+    return hits
+
+
 def download_curseforge_mod(project_id: str, dest_dir: str,
+                            file_id: int | str | None = None,
                             callback=None) -> str:
-    """Download a CurseForge mod's latest file into dest_dir.
+    """Download a CurseForge mod file into dest_dir.
 
     round-111：新增 ``callback``（mll 风格，ProgressWorker 注入）→ 进度/速度。
+    round-142（CF 整合包一键安装）：``file_id`` 支持按 manifest 指定的文件
+    版本精确下载；无 key 时不再直接报错，改走 cfwidget→forgecdn 免 key 通道。
     """
     key = _curseforge_key()
     if not key:
-        raise NetError("未配置 CurseForge API Key")
+        if not curseforge_keyless_enabled():
+            raise NetError(_t_err(
+                "store.cf_no_key",
+                default="CurseForge 暂不可用。请到「设置 → 网络 → 第三方服务」"
+                        "开启免密钥选项，或填入自己的 CurseForge API Key。"))
+        return _download_cf_keyless(project_id, file_id, dest_dir, callback)
+    if file_id:
+        # 整合包 manifest 指定版本 → 官方精确文件端点（不再退回最新版，
+        # 否则整合包装出来的模组版本和作者声明的不一致）。
+        try:
+            r = requests.get(
+                f"{CURSEFORGE_API}/mods/{project_id}/files/{file_id}",
+                headers={**_HEADERS, "x-api-key": key,
+                         "Accept": "application/json"},
+                timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
+            )
+            r.raise_for_status()
+            f = r.json().get("data") or {}
+        except requests.RequestException as e:
+            raise NetError(f"无法获取 CurseForge 文件：{e}") from e
+        filename = f.get("fileName") or f"{project_id}.zip"
+        # 部分文件 downloadUrl 为 null → forgecdn 是同款公开直链，直接拼。
+        url = f.get("downloadUrl") or FORGECDN_URL.format(
+            a=int(file_id) // 1000, b=int(file_id) % 1000, name=filename)
+        os.makedirs(dest_dir, exist_ok=True)
+        return download_file(url, os.path.join(dest_dir, filename),
+                             timeout=120, progress=_cb_progress(callback))
     try:
         r = requests.get(
             f"{CURSEFORGE_API}/mods/{project_id}/files",
@@ -1124,6 +1398,149 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
     dest = os.path.join(dest_dir, filename)
     return download_file(url, dest, timeout=120,
                          progress=_cb_progress(callback))
+
+
+def _cfwidget_info(proj: str) -> dict:
+    """cfwidget 详情（免 key）：``proj`` 可以是 slug 或数字 project_id。带缓存。"""
+    key = f"cfwidget:info:{proj}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    try:
+        r = requests.get(CFWIDGET_URL.format(slug=str(proj)), headers=_HEADERS,
+                         timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+        if r.status_code != 200:
+            raise NetError(_t_err(
+                "err.curseforge_missing",
+                default="CurseForge 未找到「{slug}」（或链接无效）",
+                slug=str(proj)))
+        d = r.json()
+    except requests.RequestException as e:
+        raise NetError(f"无法获取 CurseForge 信息：{e}") from e
+    if isinstance(d, dict):
+        _store(key, d)
+    return d
+
+
+def _cf_files_mirror(project_id: str) -> list[dict]:
+    """镜像文件列表 ``/mods/{id}/files``（同官方 API 契约、免 key）→ 官方形状行。"""
+    key = f"cffi:{project_id}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    try:
+        r = requests.get(f"{_CF_MIRROR}/mods/{project_id}/files",
+                         params={"pageSize": 50},
+                         headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
+                         proxies=_proxies())
+        r.raise_for_status()
+        rows = r.json().get("data") or []
+    except requests.RequestException as e:
+        raise NetError(f"无法获取 CurseForge 文件：{e}") from e
+    _store(key, rows)
+    return rows
+
+
+def _cf_direct_url(u: str) -> bool:
+    """是否为可直接 GET 的文件直链。
+
+    cfwidget 的 ``file.url`` 是**网页链接**（www.curseforge.com/.../files/N），
+    直接 GET 会被 Cloudflare 403（round-142 实测踩坑）；镜像个别条目也可能
+    回 null/网页链接。网页链接一律当「没有直链」处理，落到 forgecdn 拼链。
+    """
+    if not u or not u.startswith(("http://", "https://")):
+        return False
+    return "curseforge.com/" not in u
+
+
+def _download_cf_keyless(project_id: str, file_id: int | str | None,
+                         dest_dir: str, callback=None) -> str:
+    """免 key 下载：镜像拿元数据（1 次）→ forgecdn 直链下载（1 次）。
+
+    round-142 初版每个文件最多要问 4 个地方（精确端点/文件列表/cfwidget/下载），
+    用户实测「导入整合包这么久」——现改为：
+    * 元数据结果缓存（``cfx:{pid}:{fid}``），重复导入同一包秒回；
+    * 精确端点拿到 fileName 即可拼 forgecdn（downloadUrl 为 null 不再往下问）；
+    * 文件列表同理：有 id+fileName 直接拼；cfwidget 只在镜像整体故障时才用。
+    整合包 manifest 只有 projectID+fileID，必须按文件版本精确下载；
+    找不到指定 fileID 时退回最新文件，让安装至少能继续。
+    """
+    meta_key = f"cfx:{project_id}:{file_id or 'latest'}"
+    cached = _cached(meta_key)
+    url, filename = ("", "")
+    if isinstance(cached, (list, tuple)) and len(cached) == 2:
+        url, filename = cached[0] or "", cached[1] or ""
+
+    def _forge(fid, name) -> str:
+        return FORGECDN_URL.format(a=int(fid) // 1000, b=int(fid) % 1000,
+                                   name=name)
+
+    # 1) 精确文件端点（manifest 指定版本的正路）
+    if not url and file_id:
+        try:
+            r = requests.get(f"{_CF_MIRROR}/mods/{project_id}/files/{file_id}",
+                             headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
+                             proxies=_proxies())
+            if r.status_code == 200:
+                f = r.json().get("data") or {}
+                fname = f.get("fileName") or ""
+                if _cf_direct_url(f.get("downloadUrl") or ""):
+                    url, filename = f["downloadUrl"], fname
+                elif fname:
+                    # downloadUrl 为 null：id+fileName 已足够拼 forgecdn，
+                    # 不再往下问文件列表 / cfwidget（省 2 次往返）。
+                    url, filename = _forge(file_id, fname), fname
+        except requests.RequestException:
+            pass
+    # 2) 文件列表（精确端点没给 fileName 时按 id 匹配；找不到取最新）
+    if not url:
+        hit = None
+        try:
+            rows = _cf_files_mirror(project_id)
+            if file_id:
+                for cand in rows:
+                    if str(cand.get("id")) == str(file_id):
+                        hit = cand
+                        break
+            if hit is None and rows:
+                hit = rows[0]
+        except NetError:
+            hit = None
+        if hit:
+            fname = hit.get("fileName") or ""
+            if _cf_direct_url(hit.get("downloadUrl") or ""):
+                url, filename = hit["downloadUrl"], fname
+            elif hit.get("id") and fname:
+                url, filename = _forge(hit["id"], fname), fname
+    # 3) cfwidget 兜底（镜像整体故障才走；注意其 file.url 是网页链接，403，
+    #    只能用 id+name 拼 forgecdn）。
+    if not url:
+        rows: list[dict] = []
+        try:
+            d = _cfwidget_info(project_id)
+            rows = [f for f in (d.get("files") or []) if isinstance(f, dict)]
+        except NetError:
+            pass
+        hit = None
+        if file_id:
+            for cand in rows:
+                if str(cand.get("id")) == str(file_id):
+                    hit = cand
+                    break
+        if hit is None and rows:
+            hit = rows[0]
+        if hit and hit.get("id"):
+            filename = hit.get("name") or f"{project_id}.zip"
+            url = _forge(hit["id"], filename)
+    if not url:
+        raise NetError(_t_err("err.curseforge_no_file",
+                              default="该 mod 没有可下载的文件"))
+    if not filename:
+        filename = os.path.basename(url.split("?")[0]) or f"{project_id}.zip"
+    _store(meta_key, [url, filename])
+    os.makedirs(dest_dir, exist_ok=True)
+    return download_file(url, os.path.join(dest_dir, filename),
+                         timeout=300, progress=_cb_progress(callback))
 
 
 # ---- CurseForge 版本列表 / 指定文件下载（round-120）----
@@ -1193,34 +1610,48 @@ def _curseforge_versions(project_id: str, limit: int | None = None,
     return out
 
 
-def _curseforge_versions_keyless(slug: str, limit: int | None = None,
+def _curseforge_versions_keyless(proj: str, limit: int | None = None,
                                  offset: int = 0) -> list[dict]:
-    """List files via cfwidget (no API key) — same shape as the API path."""
-    if not slug:
+    """免 key 版本列表：数字 project_id 走镜像文件列表，否则 cfwidget（slug）。
+
+    round-142：cfwidget 对整合包 slug 一律 404，且它的 files 对部分项目为空；
+    镜像 ``/mods/{id}/files`` 是官方同契约端点且免 key，数字 id 一律优先走它
+    （详情页也改为传 project_id）。
+    """
+    if not proj:
         raise NetError("缺少 CurseForge 项目标识")
-    cache_key = f"cfvw:{slug}:{limit}:{offset}"
+    cache_key = f"cfvw:{proj}:{limit}:{offset}"
     cached = _cached(cache_key)
     if cached is not None:
         return cached
-    try:
-        r = requests.get(CFWIDGET_URL.format(slug=slug), headers=_HEADERS,
-                         timeout=_REQUEST_TIMEOUT, proxies=_proxies())
-        if r.status_code != 200:
-            raise NetError(_t_err("err.curseforge_missing",
-                                  default="CurseForge 未找到「{slug}」（或链接无效）",
-                                  slug=slug))
-        d = r.json()
-    except requests.RequestException as e:
-        raise NetError(f"无法获取 CurseForge 信息：{e}") from e
-    files = [f for f in (d.get("files") or []) if isinstance(f, dict)]
-    if limit:
-        files = files[offset:offset + limit]
-    out = [
-        _cf_version_entry(f.get("id"), f.get("display"), f.get("name"),
-                          f.get("filesize"), f.get("uploaded_at"),
-                          f.get("versions"))
-        for f in files
-    ]
+    out: list[dict] | None = None
+    if str(proj).isdigit():
+        try:
+            rows = _cf_files_mirror(str(proj))
+            if limit:
+                rows = rows[offset:offset + limit]
+            elif offset:
+                rows = rows[offset:]
+            out = [
+                _cf_version_entry(f.get("id"), f.get("displayName"),
+                                  f.get("fileName"), f.get("fileLength"),
+                                  f.get("fileDate"), f.get("gameVersions"),
+                                  f.get("downloadUrl", ""))
+                for f in rows if isinstance(f, dict)
+            ]
+        except NetError:
+            out = None  # 镜像挂了 → 落到下方 cfwidget 兜底
+    if out is None:
+        d = _cfwidget_info(proj)
+        files = [f for f in (d.get("files") or []) if isinstance(f, dict)]
+        if limit:
+            files = files[offset:offset + limit]
+        out = [
+            _cf_version_entry(f.get("id"), f.get("display"), f.get("name"),
+                              f.get("filesize"), f.get("uploaded_at"),
+                              f.get("versions"), f.get("url") or "")
+            for f in files
+        ]
     _store(cache_key, out)
     return out
 
@@ -1273,6 +1704,18 @@ def curseforge_link_search(query: str, limit: int = 8) -> list[dict]:
     """
     import re
     slug = query.strip()
+    # round-128：免 key 通道只认 slug，中文输入先经名库反查（逐个试，
+    # 命中即返回），避免直接把「小地图」当 slug 去查必然 404。
+    if has_cjk(slug):
+        for cand in _lookup_cn_slugs(slug)[:3]:
+            try:
+                return curseforge_link_search(cand, limit)
+            except NetError:
+                continue
+        raise NetError(_t_err(
+            "err.cf_zh_missing",
+            default="CurseForge 免 key 通道只支持英文 slug，未能在本地中文名库中找到「{q}」",
+            q=query))
     m = re.search(r"mc-mods/([a-zA-Z0-9\-]+)", slug)
     if m:
         slug = m.group(1)
@@ -1328,6 +1771,20 @@ def download_cfwidget_file(cf_file: dict, dest_dir: str, callback=None) -> str:
     os.makedirs(dest_dir, exist_ok=True)
     return download_file(url, os.path.join(dest_dir, name), timeout=120,
                          progress=_cb_progress(callback))
+
+
+def download_cfwidget_slug(slug: str, dest_dir: str, callback=None) -> str:
+    """免 key 下载：slug → cfwidget 最新文件 → forgecdn 直链（round-140）。
+
+    供免 key 镜像搜索命中的卡片使用——命中只有 slug / project_id，没有
+    官方 download-url 端点可用，走公开直链通道。
+    """
+    hits = curseforge_link_search(slug)
+    cf_file = (hits[0] or {}).get("_cf_file") if hits else None
+    if not cf_file:
+        raise NetError(_t_err("err.curseforge_no_file",
+                              default="该 mod 没有可下载的文件"))
+    return download_cfwidget_file(cf_file, dest_dir, callback=callback)
 
 
 def fetch_liteloader_builds(mc_version: str) -> list[dict]:
@@ -1471,6 +1928,140 @@ def download_optifine_to(filename: str, dest_dir: str) -> str:
     )
 
 
+# ── 中文关键词搜索（round-128）──────────────────────────────────────────
+# Modrinth 的 /search 不认中文（搜「小地图」只会命中几个翻译补丁），facet
+# 里的 project_id OR 也不支持零 query。所以中文输入只能先在本地名库里反查
+# slug，再用 /projects?ids= 批量取项目。这一层就是「PCL2 搜小地图能出
+# Xaero's Minimap」的实现方式。
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def has_cjk(text: str) -> bool:
+    """文本里是否含汉字（用于判断该不该走本地反查）。"""
+    return bool(_CJK_RE.search(text or ""))
+
+
+def _lookup_cn_slugs(query: str) -> list[str]:
+    """中文关键词 → 名库里命中的 slug（精确 > 前缀 > 包含）。"""
+    from .mod_names import cn_slug_map
+    q = (query or "").strip()
+    if not q:
+        return []
+    ranked: list[tuple[int, str]] = []
+    for short, slugs in cn_slug_map().items():
+        if q == short:
+            rank = 0
+        elif short.startswith(q) or q.startswith(short):
+            rank = 1
+        elif q in short:
+            rank = 2
+        else:
+            continue
+        for s in slugs:
+            ranked.append((rank, s))
+    ranked.sort()
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, slug in ranked:
+        if slug not in seen:
+            seen.add(slug)
+            out.append(slug)
+    return out
+
+
+def _projects_by_slugs(slugs: list[str]) -> list[dict]:
+    """批量取项目（/v2/projects?ids=，上游单次上限 25 个）。"""
+    out: list[dict] = []
+    for i in range(0, len(slugs), 25):
+        chunk = slugs[i:i + 25]
+        try:
+            r = requests.get(
+                MODRINTH_PROJECTS_URL, params={"ids": json.dumps(chunk)},
+                headers=_HEADERS, timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
+            )
+            r.raise_for_status()
+            data = r.json()
+        except requests.RequestException as e:
+            raise NetError(
+                _t_err("err.search_mods", default="无法搜索资源：{err}", err=e)
+            ) from e
+        if isinstance(data, list):
+            out.extend(data)
+    return out
+
+
+def search_mods_zh(query: str, offset: int = 0, limit: int = 20,
+                   project_type: str = "mod") -> list[dict]:
+    """中文关键词搜索：本地名库反查 → 批量取项目 → 过滤类型 → 分页。"""
+    try:
+        from .i18n import get_language
+        _lang = get_language()
+    except Exception:
+        _lang = "zh-CN"
+    key = f"mods_zh:{query}:{project_type}:{_lang}"
+    cached = _cached(key)
+    if cached is None:
+        slugs = _lookup_cn_slugs(query)
+        projects = _projects_by_slugs(slugs[:60]) if slugs else []
+        cached = [
+            {
+                "project_id": p.get("id", ""),
+                "slug": p.get("slug", ""),
+                "title": (cn_name(p.get("slug", ""), p.get("title", ""))
+                          if _lang != "en-US" else p.get("title", "")),
+                "description": p.get("description", ""),
+                "downloads": p.get("downloads", 0),
+                "icon_url": p.get("icon_url") or "",
+                # /v2/projects 不带作者名（team/organization 只是 id），
+                # 名库反查数量少、列表页对作者不敏感，留空即可。
+                "author": "",
+                "source": "modrinth",
+            }
+            for p in projects
+            if p.get("project_type", "mod") == project_type
+        ]
+        _store(key, cached)
+    return cached[offset:offset + limit]
+
+
+def mcmod_search_url(name: str) -> str:
+    """MC百科搜索页地址（无匹配条目时的兜底入口）。"""
+    name = (name or "").strip()
+    return (MCMOD_SEARCH_URL + "?key=" + requests.utils.quote(name)) if name \
+        else MCMOD_SEARCH_URL
+
+
+def mcmod_entry_url(name: str) -> str:
+    """MC百科条目地址：命中就返回精确 /class/<id>.html，否则返回搜索页。
+
+    走 7 天缓存；网络失败/结构变化都退回搜索页，绝不阻塞用户看说明。
+    """
+    name = (name or "").strip()
+    if not name:
+        return MCMOD_SEARCH_URL
+    search = mcmod_search_url(name)
+    key = "mcmod:" + name
+    cached = _cached(key, _DISK_CACHE_TTL)
+    if cached is not None:
+        return cached
+    url = search
+    try:
+        r = requests.get(search, headers=_MCMOD_HEADERS,
+                         timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+        if r.ok:
+            # 结果页里条目链接是相对路径（/class/2785.html），绝对 URL 只在
+            # 少数位置出现——两种都接，取第一条（搜索相关性最高）。
+            m = re.search(r"/class/(\d+)\.html", r.text)
+            if m:
+                url = MCMOD_CLASS_URL.format(id=m.group(1))
+                # 只缓存命中：mcmod 对连续请求偶发返回空壳页（实测），
+                # 把失败也写进 7 天缓存会让用户这周都拿不到精确条目。
+                _store(key, url)
+    except requests.RequestException:
+        pass
+    return url
+
+
 def search_mods(query: str = "", offset: int = 0, limit: int = 20,
                 project_type: str = "mod") -> list[dict]:
     """Search Modrinth for content of a given project_type.
@@ -1484,6 +2075,9 @@ def search_mods(query: str = "", offset: int = 0, limit: int = 20,
         _lang = get_language()
     except Exception:
         _lang = "zh-CN"
+    # round-128：中文关键词走本地名库反查（Modrinth 搜索不认中文）。
+    if query and has_cjk(query):
+        return search_mods_zh(query, offset, limit, project_type)
     key = f"mods:{query}:{offset}:{limit}:{project_type}:{_lang}"
     cached = _cached(key)
     if cached is not None:

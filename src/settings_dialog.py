@@ -10,7 +10,7 @@ config and emits `saved` (MainWindow refreshes UI + navigates home).
 import json, os, sys
 
 from PySide6.QtCore import QSize, Qt, Signal, QEvent
-from PySide6.QtGui import QFontDatabase, QFont
+from PySide6.QtGui import QFontDatabase, QFont, QIcon
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -24,9 +24,11 @@ from PySide6.QtWidgets import (
 
 from .theme import COLORS, RoundedCard, set_accent_color, set_theme_mode, apply_qss, with_alpha
 from . import ui_kit
-from .icons import icon
+from .icons import icon, pixmap as icon_pixmap
 from .paths import get_config_path, get_data_dir
 from .i18n import t, set_language
+from .brand import APP_DISPLAY
+from . import brand_custom
 from .worker import Worker
 from .core import authlib as authlib_dl
 from .core.java import scan_javas
@@ -74,10 +76,11 @@ _DEFAULTS = {
     "ms_client_id": "",
     "authlib_path": "",
     # round-108 第三方服务：CurseForge 官方 API 需要用户自己的 3rd-party key。
-    # 公开发布版不捆绑 key —— 谁用谁填。keyless 通道（cfwidget 直链）默认关，
-    # 避免公开分发时绕过作者的分发授权（与 CF ToS 声明保持一致）。
+    # 公开发布版不捆绑 key —— 谁用谁填。免 key 通道（MCIM 镜像搜索 +
+    # cfwidget/forgecdn 直链，HMCL/PCL2-CE 同款）round-140 起默认开——
+    # 用户拍板「搜索+下载全默认开」，无 key 也能搜能下。
     "curseforge_api_key": "",
-    "curseforge_keyless": False,
+    "curseforge_keyless": True,
     "launch_sound": True,
     "launch_sound_trigger": "game",
     "launch_sound_file": "",
@@ -96,6 +99,13 @@ _DEFAULTS = {
     "sfx_error": "",
     "sfx_vol": 0.6,
     "splash_enabled": True,
+    # ---- round-136 品牌自定义 ----
+    # 用户自定义标志图：标题栏左上角 + 窗口/任务栏图标 + 启动页标志共用同一张。
+    "custom_logo_path": "",
+    # 标题栏左上角文本（logo 右侧）；留空 = 用 APP_DISPLAY。
+    "custom_title_text": "",
+    # 启动页背景图；留空 = 启动页保持现有透明背景。
+    "splash_bg_image": "",
     # ---- launcher window geometry (persisted across sessions) ----
     "win_geometry": None,            # [x, y, w, h] or None → use default size
     "win_maximized": False,
@@ -628,7 +638,7 @@ class SettingsPage(QWidget):
             ("dark", t("settings.theme_dark"), "moon"),
         ]:
             rb = QRadioButton(label)
-            rb.setIcon(icon(icon_name).pixmap(18, 18))
+            rb.setIcon(QIcon(icon_pixmap(icon_name, 18)))
             rb.setChecked(self.cfg.get("theme_mode", "light") == mode)
             rb.theme_mode_val = mode
             self.theme_btns.addButton(rb)
@@ -767,6 +777,50 @@ class SettingsPage(QWidget):
         # 700+px，窄窗口下横向溢出（无法滚动）。
         wpl.addWidget(self._wrap_hint(t("settings.wp_hint")))
         lay.addWidget(wp_grp)
+
+        # ── 品牌自定义（round-136：左上角标志 / 左上角文本）──
+        brand_grp = QGroupBox(t("settings.brand"))
+        bl = QVBoxLayout(brand_grp)
+        bl.setSpacing(10)
+
+        # 标志图：一张图三处共用（标题栏 / 窗口图标 / 启动页标志）
+        logo_row = QHBoxLayout()
+        logo_row.addWidget(QLabel(t("settings.brand_logo")))
+        self.brand_logo_path = QLineEdit(self.cfg.get("custom_logo_path", ""))
+        self.brand_logo_path.setReadOnly(True)
+        self.brand_logo_path.setMinimumWidth(0)
+        self.brand_logo_path.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        logo_row.addWidget(self.brand_logo_path, stretch=1)
+        self.brand_logo_pick = QPushButton(t("settings.brand_logo_pick"))
+        self.brand_logo_pick.setProperty("cls", "accent")
+        self.brand_logo_pick.setMinimumHeight(30)
+        self.brand_logo_pick.clicked.connect(self._browse_brand_logo)
+        logo_row.addWidget(self.brand_logo_pick)
+        self.brand_logo_clear = QPushButton(t("settings.brand_logo_clear"))
+        self.brand_logo_clear.setMinimumHeight(30)
+        self.brand_logo_clear.clicked.connect(self._clear_brand_logo)
+        logo_row.addWidget(self.brand_logo_clear)
+        bl.addLayout(logo_row)
+
+        self.brand_logo_preview = QLabel()
+        self.brand_logo_preview.setFixedSize(40, 40)
+        self.brand_logo_preview.setProperty("cls", "sub")
+        self.brand_logo_preview.setAlignment(Qt.AlignCenter)
+        bl.addWidget(self.brand_logo_preview)
+        self._refresh_brand_logo_preview()
+        bl.addWidget(self._wrap_hint(t("settings.brand_logo_hint")))
+
+        # 左上角文本（logo 右侧）
+        text_row = QHBoxLayout()
+        text_row.addWidget(QLabel(t("settings.brand_title_text")))
+        self.brand_title_text = QLineEdit(self.cfg.get("custom_title_text", ""))
+        self.brand_title_text.setPlaceholderText(APP_DISPLAY)
+        self.brand_title_text.setMinimumWidth(0)
+        self.brand_title_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        text_row.addWidget(self.brand_title_text, stretch=1)
+        bl.addLayout(text_row)
+        bl.addWidget(self._wrap_hint(t("settings.brand_title_text_hint")))
+        lay.addWidget(brand_grp)
 
         lay.addStretch(1)
         return w
@@ -908,6 +962,25 @@ class SettingsPage(QWidget):
         self.splash_on.setChecked(bool(self.cfg.get("splash_enabled", True)))
         bl.addWidget(self.splash_on)
         bl.addWidget(QLabel(t("settings.splash_hint")))
+        # round-136：启动页背景图（留空 = 保持透明背景）
+        bg_row = QHBoxLayout()
+        bg_row.addWidget(QLabel(t("settings.splash_bg")))
+        self.splash_bg_edit = QLineEdit(self.cfg.get("splash_bg_image", ""))
+        self.splash_bg_edit.setReadOnly(True)
+        self.splash_bg_edit.setMinimumWidth(0)
+        self.splash_bg_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        bg_row.addWidget(self.splash_bg_edit, stretch=1)
+        self.splash_bg_pick = QPushButton(t("settings.brand_logo_pick"))
+        self.splash_bg_pick.setProperty("cls", "accent")
+        self.splash_bg_pick.setMinimumHeight(30)
+        self.splash_bg_pick.clicked.connect(self._browse_splash_bg)
+        bg_row.addWidget(self.splash_bg_pick)
+        self.splash_bg_clear = QPushButton(t("settings.brand_logo_clear"))
+        self.splash_bg_clear.setMinimumHeight(30)
+        self.splash_bg_clear.clicked.connect(self._clear_splash_bg)
+        bg_row.addWidget(self.splash_bg_clear)
+        bl.addLayout(bg_row)
+        bl.addWidget(self._wrap_hint(t("settings.splash_bg_hint")))
         lay.addWidget(boot_grp)
 
         lay.addStretch(1)
@@ -1021,9 +1094,9 @@ class SettingsPage(QWidget):
         self.cf_key_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         cl.addWidget(self.cf_key_edit)
         cl.addWidget(self._wrap_hint(t("settings.cf_key_hint")))
-        # 免 key 通道（cfwidget + forgecdn 直链）：默认关，仅供自用/兜底。
+        # 免 key 通道（MCIM 镜像搜索 + cfwidget/forgecdn 直链）：round-140 起默认开。
         self.cf_keyless_chk = QCheckBox(t("settings.cf_keyless"))
-        self.cf_keyless_chk.setChecked(bool(self.cfg.get("curseforge_keyless", False)))
+        self.cf_keyless_chk.setChecked(bool(self.cfg.get("curseforge_keyless", True)))
         cl.addWidget(self.cf_keyless_chk)
         cl.addWidget(self._wrap_hint(t("settings.cf_keyless_hint")))
         lay.addWidget(cf_grp)
@@ -1474,6 +1547,49 @@ class SettingsPage(QWidget):
                     parent.home._apply_wallpaper(version_id=parent._current_version_id())
             except Exception:
                 pass
+
+    # ── round-136 品牌自定义：标志图 / 启动页背景图 ─────────────────────
+    _BRAND_IMAGE_FILTER = (
+        "Images (*.png *.jpg *.jpeg *.bmp *.webp *.svg *.ico);;All Files (*)"
+    )
+
+    def _browse_brand_logo(self):
+        """Pick a custom logo image (titlebar + window icon + splash logo)."""
+        path = pick_files(self, t("settings.brand_logo_pick"), "",
+                          self._BRAND_IMAGE_FILTER)
+        if path:
+            self.brand_logo_path.setText(path)
+            self._refresh_brand_logo_preview()
+
+    def _clear_brand_logo(self):
+        self.brand_logo_path.clear()
+        self._refresh_brand_logo_preview()
+
+    def _refresh_brand_logo_preview(self):
+        """Show a thumbnail of the picked logo (or the built-in one)."""
+        lbl = getattr(self, "brand_logo_preview", None)
+        if lbl is None:
+            return
+        pm = brand_custom.load_pixmap(
+            brand_custom.custom_logo_path({"custom_logo_path":
+                                          self.brand_logo_path.text().strip()}),
+            40)
+        if pm is None:
+            lbl.clear()
+            lbl.setText("—")
+            return
+        lbl.setText("")
+        lbl.setPixmap(pm)
+
+    def _browse_splash_bg(self):
+        """Pick the splash screen background image."""
+        path = pick_files(self, t("settings.splash_bg"), "",
+                          self._BRAND_IMAGE_FILTER)
+        if path:
+            self.splash_bg_edit.setText(path)
+
+    def _clear_splash_bg(self):
+        self.splash_bg_edit.clear()
 
     def _browse_bgm(self):
         from .core.sound import AUDIO_FILTER
@@ -2142,7 +2258,7 @@ class SettingsPage(QWidget):
             target.get("curseforge_api_key", ""))
         target["curseforge_keyless"] = self._safe(
             lambda: self.cf_keyless_chk.isChecked(),
-            bool(target.get("curseforge_keyless", False)))
+            bool(target.get("curseforge_keyless", True)))
         checked_mode = self._safe(lambda: self.mode_btns.checkedButton(), None)
         if checked_mode:
             target["window_mode"] = getattr(checked_mode, "mode_key", target["window_mode"])
@@ -2173,6 +2289,16 @@ class SettingsPage(QWidget):
             target["theme_mode"] = getattr(checked_theme, "theme_mode_val", target["theme_mode"])
         target["theme_pack"] = self._safe(
             lambda: self.pack_combo.currentData() or "", target["theme_pack"])
+        # round-136 品牌自定义（外观页 + 启动页两个分区，各自懒加载 → 逐项回落）
+        target["custom_logo_path"] = self._safe(
+            lambda: self.brand_logo_path.text().strip(),
+            target.get("custom_logo_path", ""))
+        target["custom_title_text"] = self._safe(
+            lambda: self.brand_title_text.text().strip(),
+            target.get("custom_title_text", ""))
+        target["splash_bg_image"] = self._safe(
+            lambda: self.splash_bg_edit.text().strip(),
+            target.get("splash_bg_image", ""))
         target["java_auto"] = self._safe(
             lambda: self.java_auto.isChecked(), bool(target["java_auto"]))
         target["java_path"] = self._safe(

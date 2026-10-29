@@ -29,7 +29,8 @@ from .icons import icon, on_accent
 from .frameless import FramelessHelper, TitleBar
 from .win_rounded import confirm, pick_files, info, warn, toast
 from .i18n import t, loader_name
-from .instances import manager, Instance, LOADERS, detect_format, launcher_label
+from .instances import (manager, Instance, LOADERS, INSTANCE_FORMATS,
+                       detect_format, launcher_label)
 from .net_api import fetch_versions
 from .settings_dialog import load_config
 from .worker import Worker
@@ -109,6 +110,7 @@ def _loader_badge(text: str, loader_id: str) -> "QLabel":
 # round-82 启动格式徽章配色（与来源 launcher 徽章区分，见 detect_format）。
 FORMAT_BADGE = {
     "auto":      "#8B5CF6",   # 自适应紫
+    "ac":        "#7C3AED",   # AC 自有布局（品牌紫）
     "vanilla":   "#22C55E",   # 原版绿
     "iso":       "#F59E0B",   # 隔离橙
     "multimc":   "#3B82F6",   # 整合蓝
@@ -119,6 +121,7 @@ FORMAT_BADGE = {
 
 _fmt_keys = {  # format 值 → i18n key（label/tooltip 共用前缀）
     "auto": "instances.fmt_auto",
+    "ac": "instances.fmt_ac",
     "vanilla": "instances.fmt_vanilla",
     "iso": "instances.fmt_iso",
     "multimc": "instances.fmt_multimc",
@@ -532,6 +535,11 @@ class NewInstanceDialog(QDialog):
             # 设为 Qt.Widget 使其成为被 stack 正常管理的普通子控件。
             self.setWindowFlags(Qt.Widget)
             self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+            # round-145 ④：嵌入式向导是一块贴在壁纸上的白底面板（背景来自
+            # 全局 QDialog 规则），没有 DWM 窗口圆角可用 → 直角白框很突兀。
+            # 控件级 QSS 只加 radius（底色仍走全局 token，随主题刷新）；子页
+            # 在壁纸模式下透明，四角圆角可见。
+            self.setStyleSheet("QDialog { border-radius: 14px; }")
 
         self.stack = QStackedWidget()
         self._page_version = self._build_version_page()
@@ -761,7 +769,9 @@ class NewInstanceDialog(QDialog):
         lay.setSpacing(12)
 
         tile = QLabel()
-        tile.setPixmap(make_version_pixmap(ver_id, vtype, 48))
+        # round-129：同上，按当前窗口 DPR 渲染，避免多屏缩放拿错尺寸。
+        tile.setPixmap(make_version_pixmap(ver_id, vtype, 48,
+                                           self.devicePixelRatioF()))
         tile.setFixedSize(48, 48)
         lay.addWidget(tile)
 
@@ -795,7 +805,16 @@ class NewInstanceDialog(QDialog):
     # ------------------------------------------------------------------ page 2
     def _build_loader_page(self) -> QWidget:
         page = QWidget()
-        lay = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        # round-143 修复「选非默认加载器后卡片互相重叠」：内容高度超出容器时
+        # QGridLayout 会把行高压缩到卡片固定高度(82)以下 → 上下行卡片重叠
+        # 28~73px（实测 760x560 选 cleanroom 即触发：加载器版本行一出现，
+        # 总高超限）。改为内容整体进 QScrollArea —— 高度不足时滚动，绝不压缩
+        # 卡片；footer 固定在页底不随滚动。
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(16)
 
@@ -912,7 +931,16 @@ class NewInstanceDialog(QDialog):
         foot.addWidget(back)
         foot.addWidget(cancel)
         foot.addWidget(ok)
-        lay.addLayout(foot)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, stretch=1)
+        foot_m = QHBoxLayout()
+        foot_m.setContentsMargins(24, 4, 24, 16)
+        foot_m.addLayout(foot)
+        outer.addLayout(foot_m)
         return page
 
     def _go_to_loader_page(self):
@@ -1738,7 +1766,9 @@ class InstancesPage(QWidget):
     def _sync_panel_btn(self):
         """同步页头收起按钮的图标方向（展开=◀ / 收起=▶）。tooltip 复用同一键。"""
         from .ui_kit import state_pix
-        pix = state_pix("chev", COLORS["text_sub"], 14)
+        # round-148：尺寸与 iconSize 对齐（15），否则 QIcon 会把位图缩放一次
+        # 再显示；state_pix 已按物理像素绘制并带 DPR 标记。
+        pix = state_pix("chev", COLORS["text_sub"], 15)
         if self._list_panel_visible:
             pix = pix.transformed(QTransform().rotate(180))
         self.panel_btn.setIcon(QIcon(pix))
@@ -2019,16 +2049,14 @@ class InstancesPage(QWidget):
         ga_row.addWidget(game_args, stretch=1)
         lay.addLayout(ga_row)
         # round-82 启动格式（磁盘布局）：自适应默认，可手动覆盖/强制
+        # round-135：改为遍历 INSTANCE_FORMATS，新增格式不再漏改 UI。
         fmt_row = QHBoxLayout()
         fmt_row.addWidget(QLabel(_t("instances.fmt_title")))
         fmt_combo = QComboBox()
-        for _k, _v in (("auto", "auto"), ("vanilla", "vanilla"), ("iso", "iso"),
-                       ("multimc", "multimc"), ("curseforge", "curseforge"),
-                       ("modrinth", "modrinth"), ("custom", "custom")):
-            fmt_combo.addItem(_t(f"instances.fmt_{_k}"), _v)
+        for _k in INSTANCE_FORMATS:
+            fmt_combo.addItem(_t(f"instances.fmt_{_k}"), _k)
         _cur_fmt = (inst.format or "auto").strip()
-        _fmt_vals = {"auto", "vanilla", "iso", "multimc", "curseforge", "modrinth", "custom"}
-        _idx = fmt_combo.findData(_cur_fmt if _cur_fmt in _fmt_vals else "auto")
+        _idx = fmt_combo.findData(_cur_fmt if _cur_fmt in INSTANCE_FORMATS else "auto")
         fmt_combo.setCurrentIndex(_idx if _idx >= 0 else 0)
         fmt_hint = QLabel()
         fmt_hint.setStyleSheet(
@@ -2366,13 +2394,8 @@ class InstancesPage(QWidget):
             self._show_mrpack_dialog(path)
             return
 
-        # CurseForge requires an API key; ask once before starting the worker.
-        if fmt == "curseforge":
-            if not confirm(
-                self, t("modpack.curseforge_key_title"),
-                t("modpack.curseforge_key_body"),
-            ):
-                return
+        # CurseForge zip（round-142 起免 key 逐文件安装）不再需要前置确认，
+        # 直接进导入 worker；失败时走 _err 弹具体原因。
 
         # Run heavy import in a worker so the UI doesn't freeze.
         fn_map = {
@@ -2386,13 +2409,52 @@ class InstancesPage(QWidget):
         progress.setLabelText(t("modpack.importing"))
         progress.setCancelButton(None)
         progress.setMinimumDuration(0)
-        progress.setRange(0, 0)  # indeterminate
+        # 防闪加固：关闭 QProgressDialog 满值自动关→reset(清空 label)→再 show
+        # 的自循环（「导入包」空提示闪烁的所有变体都源于此），结束统一手动 close。
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setRange(0, 0)  # indeterminate（先解析 manifest/overrides）
         progress.setMinimumWidth(420)
 
-        worker = Worker(fn, path, self.mgr)
+        # round-142b：CF 导入给实时 n/N 计数 —— 此前只有无限转圈，
+        # 用户体感「导入怎么这么久」（轮询 state，跨线程零信号管道）。
+        state = {"label": "", "done": 0, "total": 0}
+
+        def _pr(label, done, total):
+            state.update(label=str(label), done=done, total=total)
+            return True  # 返回 False 可取消；不提供取消按钮
+
+        kw = {"progress": _pr} if fmt == "curseforge" else {}
+        worker = Worker(fn, path, self.mgr, **kw)
+        tick = QTimer(self)
+        tick.setInterval(200)
+
+        def _on_tick():
+            d, tot = state["done"], state["total"]
+            if not tot:
+                return
+            if d < tot:
+                if progress.maximum() != tot:
+                    progress.setRange(0, tot)
+                if progress.value() != d:
+                    progress.setValue(d)
+                txt = f"{t('modpack.importing')}（{d}/{tot}）"
+                if state.get("txt") != txt:
+                    state["txt"] = txt
+                    progress.setLabelText(txt)
+            elif not state.get("finishing"):
+                # 文件下完后的收尾阶段（补全游戏版本 / 装加载器，可能较久）。
+                # 此前这里每 200ms 反复 setValue(总值) → QProgressDialog
+                # 自动关→reset(清空 label)→再 show 循环 —— 用户看到
+                # 「导入包」空提示一直闪。改为一次性切不定长转圈+收尾文案。
+                state["finishing"] = True
+                progress.setRange(0, 0)
+                progress.setLabelText(t("modpack.finishing"))
+                progress.show()
 
         def _done(inst):
-            progress.close()
+            tick.stop()
+            progress.hide()
             toast(self, t("modpack.title"), t("modpack.done"))
             self._refresh()
             if inst and getattr(inst, "id", None):
@@ -2400,12 +2462,15 @@ class InstancesPage(QWidget):
                 self.current_changed.emit(inst.id)
 
         def _err(e):
-            progress.close()
+            tick.stop()
+            progress.hide()
             if isinstance(e, NetError):
                 warn(self, t("modpack.title"), str(e))
             else:
                 warn(self, t("modpack.title"), t("modpack.error", e=e))
 
+        tick.timeout.connect(_on_tick)
+        tick.start()
         worker.finished.connect(_done)
         worker.error.connect(_err)
         worker.start()

@@ -102,7 +102,8 @@ class _InstanceRow(QWidget):
         self.btn.setEnabled(False)
         self.btn.setStyleSheet(
             f"QPushButton {{ background:{COLORS['bg_panel']}; "
-            f"color:{COLORS['text_sub']}; border:1px solid {COLORS['border']}; }}"
+            f"color:{COLORS['text_sub']}; border:1px solid {COLORS['border']}; "
+            f"border-radius: 8px; }}"  # round-145 ④：白底按钮补圆角
         )
 
 

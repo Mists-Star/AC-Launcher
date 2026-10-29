@@ -13,7 +13,7 @@ fonts are not shipped, so that path always fell back anyway, round-103).
 Played before MainWindow shows; MainWindow calls mark_ready() when built.
 """
 from PySide6.QtWidgets import QWidget
-from PySide6.QtCore import Qt, QTimer, Signal, QElapsedTimer
+from PySide6.QtCore import Qt, QTimer, Signal, QElapsedTimer, QRect
 from PySide6.QtGui import QPainter, QColor, QRadialGradient
 
 from . import brand
@@ -54,6 +54,17 @@ class SplashWindow(QWidget):
 
         # round-103：手绘矢量 monogram 的布局（本地单位，随窗口缩放）。
         self._mark_height, self._mark_total, self._cells = brand.monogram_layout(12.0)
+
+        # round-136：品牌自定义 —— 自定义标志图替代矢量 AC 字母，可选背景图。
+        # 读不到 / 路径失效时静默回落默认（矢量字母 + 透明背景）。
+        from . import brand_custom
+        # 标志按 512 上限解码（绘制时缩到 112 高，避免小图被放大取自放大糊），
+        # 背景按 960 上限解码（启动页 480×320，cover 铺满足够）。
+        self._logo_pm = brand_custom.load_pixmap(brand_custom.custom_logo_path(), 512)
+        self._bg_pm = brand_custom.load_pixmap(brand_custom.splash_bg_path(), 960)
+        # round-137（round-136 遗留）：蒙版强度按背景平均亮度自适应 ——
+        # 亮背景压深（前景可读），暗背景少压（保留图片细节）。
+        self._bg_veil = self._estimate_veil(self._bg_pm)
 
         # Wall-clock starts at mark_ready() — NOT at splash.show(). The main
         # window is constructed while the splash plays and would otherwise eat
@@ -155,6 +166,12 @@ class SplashWindow(QWidget):
         # round-65 精简：透明背景上不再绘制深色面板/旋转光晕/标语/状态文字，
         # 只保留干净的 AC 手绘字母交错动画 + 底部进度条。
 
+        # round-136：自定义背景图（cover 铺满）+ 暗色蒙版（保证前景可读）。
+        if self._bg_pm is not None and not self._bg_pm.isNull():
+            p.drawPixmap(self._cover_rect(self._bg_pm, w, h), self._bg_pm)
+            veil = QColor(0, 0, 0, self._bg_veil)
+            p.fillRect(0, 0, w, h, veil)
+
         cx, cy = w // 2, int(h * 0.40)
         accent = QColor(COLORS["accent"])
 
@@ -165,36 +182,52 @@ class SplashWindow(QWidget):
         c_l = _smooth((self._phase - 0.28) / 0.42)
 
         target_h = 112.0
-        s = target_h / self._mark_height
 
-        # soft glow behind each letter (px space)
-        for letter, l in (("A", a_l), ("C", c_l)):
-            if l <= 0.01:
-                continue
-            ax, ay, _bcx, _bcy = self._cells[letter]
-            gx = cx + s * ax
-            gy = cy + s * ay + (1 - l) * 14.0
-            self._glow(p, gx, gy, 66 * (0.6 + 0.4 * l), l, accent)
+        if self._logo_pm is not None and not self._logo_pm.isNull():
+            # round-136：用户自定义标志图替代矢量笔画（淡入 + 轻微放大）。
+            l = a_l
+            if l > 0.01:
+                pm = self._logo_pm
+                k = pm.height() or 1
+                dh = int(target_h * (0.86 + 0.14 * l))
+                dw = max(1, int(pm.width() * dh / k))
+                x = cx - dw // 2
+                y = cy - dh // 2
+                p.save()
+                p.setOpacity(l)
+                p.drawPixmap(QRect(x, y, dw, dh), pm)
+                p.restore()
+        else:
+            s = target_h / self._mark_height
 
-        # letters: reveal + per-letter scale + rise, all in the scaled frame
-        p.save()
-        p.translate(cx, cy)
-        p.scale(s, s)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(accent)
-        for letter, l in (("A", a_l), ("C", c_l)):
-            if l <= 0.01:
-                continue
-            ax, ay, bcx, bcy = self._cells[letter]
+            # soft glow behind each letter (px space)
+            for letter, l in (("A", a_l), ("C", c_l)):
+                if l <= 0.01:
+                    continue
+                ax, ay, _bcx, _bcy = self._cells[letter]
+                gx = cx + s * ax
+                gy = cy + s * ay + (1 - l) * 14.0
+                self._glow(p, gx, gy, 66 * (0.6 + 0.4 * l), l, accent)
+
+            # letters: reveal + per-letter scale + rise, all in the scaled frame
             p.save()
-            p.setOpacity(l)
-            p.translate(ax, ay + (1 - l) * 14.0 / s)
-            k = 0.6 + 0.4 * l
-            p.scale(k, k)
-            p.translate(-bcx, -bcy)
-            brand.draw_letter(p, letter, l)
+            p.translate(cx, cy)
+            p.scale(s, s)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(accent)
+            for letter, l in (("A", a_l), ("C", c_l)):
+                if l <= 0.01:
+                    continue
+                ax, ay, bcx, bcy = self._cells[letter]
+                p.save()
+                p.setOpacity(l)
+                p.translate(ax, ay + (1 - l) * 14.0 / s)
+                k = 0.6 + 0.4 * l
+                p.scale(k, k)
+                p.translate(-bcx, -bcy)
+                brand.draw_letter(p, letter, l)
+                p.restore()
             p.restore()
-        p.restore()
 
         # progress bar — must reach exactly 100% at phase == 1.0
         prog = _smooth((self._phase - 0.12) / 0.88)
@@ -210,6 +243,40 @@ class SplashWindow(QWidget):
         p.end()
 
     # ---------- glow ----------
+    @staticmethod
+    def _estimate_veil(pm) -> int:
+        """按背景图平均亮度估算暗色蒙版 alpha（无背景时用默认 120）。
+
+        缩到 32px 取亮度均值（0.299R+0.587G+0.114B），线性映射：
+        全黑 → 40（少压，保留细节），全白 → 170（压深，保证前景可读）。
+        """
+        if pm is None or pm.isNull():
+            return 120
+        small = pm.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio,
+                          Qt.TransformationMode.SmoothTransformation)
+        img = small.toImage()
+        total = 0.0
+        n = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                c = img.pixelColor(x, y)
+                total += 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+                n += 1
+        if n == 0:
+            return 120
+        lum = total / n  # 0..255
+        return int(max(40, min(170, 40 + lum * 130.0 / 255.0)))
+
+    @staticmethod
+    def _cover_rect(pm, w, h):
+        """Target rect that fills w×h with pm, keeping aspect (center crop)."""
+        pw, ph = pm.width(), pm.height()
+        if pw <= 0 or ph <= 0:
+            return QRect(0, 0, w, h)
+        scale = max(w / pw, h / ph)
+        dw, dh = int(pw * scale + 0.5), int(ph * scale + 0.5)
+        return QRect((w - dw) // 2, (h - dh) // 2, dw, dh)
+
     def _glow(self, p, cx, cy, r, op, accent):
         """Soft radial glow behind a letter, scaled by the letter's opacity."""
         if op <= 0.01:

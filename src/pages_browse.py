@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QScrollArea, QLineEdit, QComboBox, QDialog, QProgressBar,
+    QScrollArea, QLineEdit, QComboBox, QDialog, QProgressBar, QStackedWidget,
 )
 from PySide6.QtCore import Signal, QSize, QTimer, Qt
 from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
@@ -30,7 +30,7 @@ from .net_api import (
 )
 from .worker import ProgressWorker, Worker
 from .async_image import ImageLoader, make_version_pixmap
-from .store_detail import StoreDetailDialog  # round-66 资源详情页（版本/翻译）
+from .store_detail import StoreDetailPanel  # round-66 资源详情；round-132 页内面板
 
 
 # ── 首帧骨架屏（round-124）─────────────────────────────────────────────
@@ -232,6 +232,9 @@ class VersionsPage(QWidget):
         _, versions = data
         self._versions = versions
         self.status.setText(t("versions.count", n=len(versions)))
+        # round-141 性能：数据到达才重建卡片（含淡入）；此后 pill/搜索
+        # 过滤只走 _apply_filter 的显隐切换。
+        self._rebuild()
         self._apply_filter()
 
     def _fmt_date(self, rt: str) -> str:
@@ -242,35 +245,48 @@ class VersionsPage(QWidget):
         self._filter_key = key
         self._apply_filter()
 
-    def _apply_filter(self):
-        q = self.search.text().strip().lower()
-        only_group = self._filter_key
-        installed = {i.game_version for i in self.mgr.list()}
-        # 彻底清空 layout：takeAt 会把包括 stretch 在内的所有项从 layout
-        # 移除（避免 stretch 无限堆积），widget 再单独 deleteLater 异步销毁。
-        # 之前只 deleteLater widget 而从不移除 stretch 项，反复切换过滤
-        # （正式版/快照/愚人节）几十次后 layout 项数爆炸 → Qt 布局崩溃闪退。
+    def _rebuild(self):
+        """一次性建好全部分组卡片 + 淡入（仅数据到达时调用）。
+
+        round-141 性能：旧实现把「建卡」和「过滤」耦在 _apply_filter 里，
+        每次点分类 pill 都整列 tear-down 重建 —— 上百张 LightTrailCard 同时
+        销毁/创建 + 上百个 170ms 淡入动画同跑 + QSS 重新 polish，切换明显
+        卡顿。现在 pill/搜索只翻显隐，重建只发生在数据刷新。
+        """
         while self._vbox.count():
             item = self._vbox.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-
-        shown = self._versions
-        if q:
-            shown = [v for v in shown if q in v["id"].lower()]
-        groups = _GROUP_ORDER if only_group == "all" else [only_group]
-
-        for g in groups:
-            members = [v for v in shown if _group_of(v) == g]
+        self._cards: list[tuple] = []    # (widget, group, id_lower)
+        self._headers: list[tuple] = []  # (widget, group)
+        installed = {i.game_version for i in self.mgr.list()}
+        for g in _GROUP_ORDER:
+            members = [v for v in self._versions if _group_of(v) == g]
             if not members:
                 continue
-            # group header
             hdr = ui_kit.group_label(t(f"versions.group.{g}"))
-            self._vbox.addWidget(hdr)
+            self._vbox.addWidget(self._fade(hdr))
+            self._headers.append((hdr, g))
             for v in members:
-                self._vbox.addWidget(self._fade(self._make_card(v, v["id"] in installed)))
+                card = self._fade(self._make_card(v, v["id"] in installed))
+                self._vbox.addWidget(card)
+                self._cards.append((card, g, v["id"].lower()))
         self._vbox.addStretch(1)
+
+    def _apply_filter(self):
+        """分类 pill / 搜索框过滤 = 纯显隐切换（不再重建，见 _rebuild）。"""
+        q = self.search.text().strip().lower()
+        only_group = self._filter_key
+        counts: dict[str, int] = {}
+        for w, g, vid in getattr(self, "_cards", []):
+            show = (only_group == "all" or g == only_group) and (
+                not q or q in vid)
+            if show:
+                counts[g] = counts.get(g, 0) + 1
+            w.setVisible(show)
+        for w, g in getattr(self, "_headers", []):
+            w.setVisible(counts.get(g, 0) > 0)
 
     @staticmethod
     def _fade(w):
@@ -287,7 +303,11 @@ class VersionsPage(QWidget):
         lay.setSpacing(14)
 
         tile = QLabel()
-        tile.setPixmap(make_version_pixmap(v["id"], "april" if v.get("april") else v["type"], 56))
+        # round-129：把当前页面的 DPR 传进去，图标按实际显示屏幕的超采样
+        # 渲染（默认读主屏 DPR，多屏不同缩放时会拿错尺寸）。
+        tile.setPixmap(make_version_pixmap(
+            v["id"], "april" if v.get("april") else v["type"], 56,
+            self.devicePixelRatioF()))
         tile.setFixedSize(56, 56)
         lay.addWidget(tile)
 
@@ -379,11 +399,18 @@ class StorePage(QWidget):
         super().__init__(parent)
         self.list_instances = list_instances
         self.get_current = get_current_instance
+        # round-142b 修（crash.log 18:43）：CF 整合包装完要在本页 set_current，
+        # 但 StorePage 此前没有 mgr —— 回调里 AttributeError，Worker 根本没启动，
+        # 用户看到的就是「导入一直没动静」。
+        self.mgr = manager()
         self._mods: list[dict] = []
         self._offset = 0
         self._query = ""
         self._category = "mod"
-        self._source = "modrinth"
+        # round-140：默认源 = 「全部」（Modrinth + CurseForge 合并）；
+        # _has_more = 无限滚动的到底闸门（不足一页 → 停止，杜绝重复加载）。
+        self._source = "all"
+        self._has_more = True
         self._img = ImageLoader(self)
         # Keep in-flight workers referenced until they finish. Overwriting
         # self._worker used to drop the only strong ref to a still-running
@@ -401,11 +428,19 @@ class StorePage(QWidget):
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
 
+        # round-132：列表与详情在同一页内用栈切换（详情不再是独立弹窗）
+        self._list_view = QWidget()
+        lv = QVBoxLayout(self._list_view)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(16)
+        self._detail_panel = None
+
         # 第一行：标题 + 目标实例 + 源切换（round-104：目标实例上移到页头，
         # 搜索行只留搜索框——「搜索」按钮被搜索框吃掉）
         self.source_combo = QComboBox()
         self.source_combo.setMinimumHeight(36)
         self.source_combo.setMinimumWidth(120)
+        self.source_combo.addItem(t("store.source_all"), "all")
         self.source_combo.addItem(t("store.source_modrinth"), "modrinth")
         self.source_combo.addItem(t("store.source_curseforge"), "curseforge")
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
@@ -431,7 +466,7 @@ class StorePage(QWidget):
         self._header = ui_kit.page_header(
             t("store.title"), action=[target_w, self.source_combo, ver_btn], icon_key="store")
         self.title_lbl = self._header.title_lbl
-        root.addWidget(self._header)
+        lv.addWidget(self._header)
 
         # 第二行：分类标签栏（像主流下载页一样横向排开，一眼看到所有类型）
         # 复用 ui_kit.ChipGroup，激活态纯 QSS 驱动。
@@ -444,7 +479,7 @@ class StorePage(QWidget):
         self._cat_row.addStretch(1)
         self._cat_row.addWidget(self.category_chips)
         self._cat_row.addStretch(1)
-        root.addLayout(self._cat_row)
+        lv.addLayout(self._cat_row)
 
         # 第三行：搜索框（无独立按钮——输入即防抖搜索，Enter 立即搜索）
         self.search = QLineEdit()
@@ -452,11 +487,11 @@ class StorePage(QWidget):
         self.search.setMinimumHeight(34)
         self.search.textChanged.connect(lambda _=None: self._search_timer.start())
         self.search.returnPressed.connect(self._search_timer.start)
-        root.addWidget(self.search)
+        lv.addWidget(self.search)
 
         self.status = QLabel(t("store.loading"))
         self.status.setProperty("cls", "sub")
-        root.addWidget(self.status)
+        lv.addWidget(self.status)
 
         # round-111：整合包下载的字节级进度 + 实时速度（与启动/下载对话框同一
         # slim 进度条范式）。平时隐藏，只在下载整合包时出现。
@@ -465,11 +500,11 @@ class StorePage(QWidget):
         self._dl_bar.setTextVisible(False)
         self._dl_bar.setFixedHeight(8)
         self._dl_bar.setVisible(False)
-        root.addWidget(self._dl_bar)
+        lv.addWidget(self._dl_bar)
         self._dl_speed = QLabel("")
         self._dl_speed.setProperty("cls", "sub")
         self._dl_speed.setVisible(False)
-        root.addWidget(self._dl_speed)
+        lv.addWidget(self._dl_speed)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -481,7 +516,11 @@ class StorePage(QWidget):
         self._vbox.setContentsMargins(0, 0, 0, 0)
         self._vbox.setSpacing(10)
         self.scroll.setWidget(self._content)
-        root.addWidget(self.scroll, stretch=1)
+        lv.addWidget(self.scroll, stretch=1)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._list_view)
+        root.addWidget(self._stack, stretch=1)
 
         # round-124：首帧骨架屏（首次检索 1.2s 内不再是一片空白）
         for _ in range(6):
@@ -513,8 +552,10 @@ class StorePage(QWidget):
         光影 / 资源包 / 数据包 pages all claimed to search mods.
         """
         if self._source == "curseforge":
-            from .net_api import curseforge_available
-            if not curseforge_available():
+            from .net_api import curseforge_available, curseforge_keyless_enabled
+            # 免 key 镜像支持关键词搜索 → 关键词 placeholder；只有「无 key 且
+            # 关掉免 key 通道」时才退回到 slug/链接精确匹配的提示。
+            if not curseforge_available() and not curseforge_keyless_enabled():
                 self.search.setPlaceholderText(t("store.cf_link_placeholder"))
                 return
         self.search.setPlaceholderText(t("store.search_ph_" + self._category))
@@ -523,8 +564,8 @@ class StorePage(QWidget):
         """切换源时同步搜索框提示与状态栏文案。
 
         CurseForge 有三态：配置了 key → 官方 API 关键词搜索；没 key 但开了
-        免 key 通道 → 只能输入精确 slug / 完整链接解析；两者都没有 → 提示
-        去设置里填 key（公开发布版默认走这条，不捆绑 key）。
+        免 key 通道 → MCIM 镜像关键词搜索（round-140）；两者都没有 → 提示
+        去设置里填 key。
         """
         self._source = self.source_combo.currentData()
         if self._source == "curseforge":
@@ -533,9 +574,17 @@ class StorePage(QWidget):
             if curseforge_available():
                 self.status.setText(t("store.cf_hint_key"))
             elif curseforge_keyless_enabled():
-                self.status.setText(t("store.cf_hint"))
+                self.status.setText(t("store.cf_hint_mirror"))
             else:
                 self.status.setText(t("store.cf_no_key"))
+        elif self._source == "all":
+            # round-140：合并源提示（CF 通道全关时退回「只搜 Modrinth」语义）
+            from .net_api import curseforge_available, curseforge_keyless_enabled
+            self._update_search_placeholder()
+            self.status.setText(
+                t("store.source_all_hint")
+                if (curseforge_available() or curseforge_keyless_enabled())
+                else t("store.source_all_hint_mr"))
         else:
             self._update_search_placeholder()
         self._search_timer.start()
@@ -575,6 +624,7 @@ class StorePage(QWidget):
         self._query = self.search.text().strip()
         self._offset = 0
         self._loading_more = False
+        self._has_more = True  # round-140：新搜索重新武装到底闸门
         # Invalidate any in-flight icon loads — the list is about to be wiped,
         # so stale replies must not touch widgets that are being deleted.
         self._img.bump()
@@ -624,7 +674,7 @@ class StorePage(QWidget):
             self._more()
 
     def _more(self):
-        if self._loading_more:
+        if self._loading_more or not self._has_more:
             return
         self._loading_more = True
         self._offset += 20
@@ -637,34 +687,49 @@ class StorePage(QWidget):
         self.status.setText(t("store.fetching"))
         self._load_gen += 1
         gen = self._load_gen
-        worker = Worker(search_mods, self._query, self._offset,
-                        project_type=self._category)
+        if self._source == "all":
+            # round-140：「全部」源 = 两源并行合并（net_api.search_all）
+            from .net_api import search_all
+            worker = Worker(search_all, self._query, self._offset, 20,
+                            self._category)
+        else:
+            worker = Worker(search_mods, self._query, self._offset,
+                            project_type=self._category)
         self._track(worker, gen, reset)
 
     def _load_curseforge(self, reset: bool):
-        """CurseForge 源：有 key → 官方 API；无 key 且开启免 key 通道 → slug/链接解析。
+        """CurseForge 源：有 key → 官方 API；无 key 且开免 key 通道 → MCIM 镜像
+        关键词搜索（round-140，输入里带链接时仍走 slug/链接解析）。
 
-        两者都没有时明确提示去设置里填 key —— 公开发布版默认走官方 API，
-        不默认绕过作者的分发授权（cfwidget + forgecdn 直链只能自用兜底）。
+        两者都没有时明确提示去设置里填 key —— 关掉免 key 通道即回到
+        仅官方 API 的保守模式。
         """
-        from .net_api import curseforge_available, curseforge_keyless_enabled
-        if curseforge_available():
-            from .net_api import search_curseforge
-            worker_fn = search_curseforge
-        elif curseforge_keyless_enabled():
-            from .net_api import curseforge_link_search
-            worker_fn = curseforge_link_search
-        else:
+        from .net_api import (curseforge_available, curseforge_keyless_enabled,
+                              search_curseforge, curseforge_link_search)
+        has_key = curseforge_available()
+        if not has_key and not curseforge_keyless_enabled():
             self._on_loaded([], reset)
             self.status.setText(t("store.cf_no_key"))
             return
+        # 粘贴完整链接 → 免 key 的 slug 解析；关键词 → 镜像/官方搜索
+        # （带 category=CF classId + 翻页 offset —— 此前写死模组类且
+        # offset 恒 0，导致分类不生效 + 无限滚动重复拉同一页）。
+        if not has_key and "/" in self._query:
+            worker_fn, args = curseforge_link_search, (self._query,)
+        else:
+            worker_fn = search_curseforge
+            args = (self._query, self._offset, 20, self._category)
         self._load_gen += 1
         gen = self._load_gen
-        worker = Worker(worker_fn, self._query)
+        worker = Worker(worker_fn, *args)
         self._track(worker, gen, reset)
 
     def _on_loaded(self, mods: list[dict], reset: bool):
         self._loading_more = False
+        # round-140：不足一页 = 已到底 → 关闸（此前 CF 源 offset 恒 0，
+        # 无限滚动会把第一页无限重复塞进列表）。
+        if len(mods) < 20:
+            self._has_more = False
         self._mods = mods if reset else self._mods + mods
         if reset:
             while self._vbox.count():
@@ -672,7 +737,17 @@ class StorePage(QWidget):
                 w = item.widget()
                 if w is not None:
                     w.deleteLater()
-        self.status.setText(t("store.results", n=len(self._mods)))
+        # round-128：中文查询走本地名库反查，名库没收录时是「搜不到」而不是
+        # 「没有这个资源」——状态栏要说清楚，别让用户以为功能坏了。
+        try:
+            from .net_api import has_cjk
+            _zh = has_cjk(self._query)
+        except Exception:  # noqa: BLE001
+            _zh = False
+        if not self._mods and _zh:
+            self.status.setText(t("store.zh_no_hit"))
+        else:
+            self.status.setText(t("store.results", n=len(self._mods)))
         for m in mods:
             card = self._make_card(m)
             self._vbox.addWidget(card)
@@ -683,8 +758,8 @@ class StorePage(QWidget):
         if reset and mods:
             fade_in_widget(self.scroll.viewport())
         # 策略变更：结果一到就把每个资源的「详情页 72px 封面」预取进缓存，
-        # 不必等用户点进详情才开始下载（详情页 StoreDetailDialog 用的正是 72
-        # 尺寸）。失败静默——详情页仍会按需加载，不会因此空白。
+        # 不必等用户点进详情才开始下载（页内详情面板用的正是 72 尺寸）。
+        # 失败静默——详情页仍会按需加载，不会因此空白。
         for m in mods:
             self._img.prefetch(m.get("icon_url", ""), 72)
 
@@ -719,8 +794,8 @@ class StorePage(QWidget):
 
         if self._category == "modpack":
             dl = QPushButton(t("store.install"))
-            dl.clicked.connect(lambda _, pid=m["project_id"], pslug=m["slug"]:
-                               self._install_modpack(pid, pslug))
+            dl.clicked.connect(lambda _, pid=m["project_id"], pslug=m["slug"], mm=m:
+                               self._install_modpack(pid, pslug, mm))
         else:
             dl = QPushButton(t("store.download"))
             dl.clicked.connect(
@@ -740,18 +815,35 @@ class StorePage(QWidget):
         return card
 
     def _open_detail(self, m: dict):
-        """打开资源详情页：列出全部版本（可按 MC 版本过滤）、获取中文翻译、
-        选择任意版本下载到目标实例对应子目录。
+        """在页内打开资源详情（round-132：不再弹独立 QDialog）。
 
-        round-119：没有实例也能打开——详情页里可切到「不指定版本 · 另存为…」
+        列出全部版本（可按 MC 版本过滤）、获取中文翻译、选择任意版本下载到
+        目标实例对应子目录。没有实例也能打开——可切到「不指定版本 · 另存为…」
         只下载文件，与主流启动器一致。
         """
+        if self._detail_panel is not None:
+            return
         inst = self._target()
-        dlg = StoreDetailDialog(
+        panel = StoreDetailPanel(
             self, m, self._category, inst,
             _TYPE_SUBDIR.get(self._category, "mods"),
             instances=self.list_instances())
-        dlg.exec()
+        panel.back_requested.connect(self._close_detail)
+        self._detail_panel = panel
+        self._stack.addWidget(panel)
+        self._stack.setCurrentWidget(panel)
+
+    def _close_detail(self):
+        """关闭页内详情，恢复资源列表（先隐藏再延迟删除，避免残留绘制）。"""
+        panel = self._detail_panel
+        if panel is None:
+            return
+        self._detail_panel = None
+        panel.shutdown()
+        self._stack.setCurrentWidget(self._list_view)
+        self._stack.removeWidget(panel)
+        panel.hide()
+        panel.deleteLater()
 
     def _download(self, project_id: str, slug: str, cf_file: dict | None = None,
                   card: dict | None = None):
@@ -777,12 +869,20 @@ class StorePage(QWidget):
         dest = os.path.join(inst.game_dir, sub)
         # round-111：改用 ProgressWorker（裸 Worker 没有 callback/速度），
         # 复用整合包那条 slim 进度条 + 速度标签。
-        if self._source == "curseforge":
-            from .net_api import download_cfwidget_file, download_curseforge_mod
+        # round-140：合并源下按卡片归属分流（card.source 优先于页面源）
+        src = (card or {}).get("source") or self._source
+        if src == "curseforge":
+            from .net_api import (download_cfwidget_file, download_curseforge_mod,
+                                  download_cfwidget_slug, curseforge_available,
+                                  curseforge_keyless_enabled)
             if cf_file:
                 # 免 key 通道解析出的文件（含 id/name）→ forgecdn 直链
                 self._dworker = ProgressWorker(download_cfwidget_file,
                                                cf_file, dest)
+            elif not curseforge_available() and curseforge_keyless_enabled():
+                # 免 key 镜像搜索的命中只有 slug → slug → cfwidget → forgecdn
+                self._dworker = ProgressWorker(download_cfwidget_slug,
+                                               slug, dest)
             else:
                 # 官方 API 搜索命中只有 project_id → 走官方下载接口
                 self._dworker = ProgressWorker(download_curseforge_mod,
@@ -810,8 +910,8 @@ class StorePage(QWidget):
         self._dl_speed.setVisible(False)
         self.status.setText(t("store.downloaded", file=os.path.basename(p)))
 
-    # ---- modpack: download .mrpack → install as a new instance ----
-    def _install_modpack(self, project_id: str, slug: str):
+    # ---- modpack: download .mrpack / CF zip → install as a new instance ----
+    def _install_modpack(self, project_id: str, slug: str, card: dict | None = None):
         if not confirm(
             self, t("store.install_pack_title"),
             t("store.install_pack_confirm", slug=slug),
@@ -820,13 +920,22 @@ class StorePage(QWidget):
         self.status.setText(t("store.downloading_pack", slug=slug))
         from .paths import get_data_dir
         cache_dir = os.path.join(get_data_dir(), "cache")
-        # round-111：改用 ProgressWorker（而非裸 Worker）——它会注入 mll 风格
-        # callback，经 net_api.download_modpack_to 桥接成字节级进度 + 实时速度。
-        self._pworker = ProgressWorker(download_modpack_to, project_id,
-                                       cache_dir)
+        # round-142：CF 整合包一键安装 —— 主 zip 走免 key 文件列表最新条目
+        # （cfwidget 对整合包 slug 404，必须用数字 project_id 走镜像），
+        # 下载完由 _on_cf_pack_downloaded 走 manifest 逐文件安装链。
+        if (card or {}).get("source") == "curseforge":
+            from .net_api import download_curseforge_mod
+            self._pworker = ProgressWorker(download_curseforge_mod,
+                                           project_id, cache_dir)
+            self._pworker.finished.connect(self._on_cf_pack_downloaded)
+        else:
+            # round-111：改用 ProgressWorker（而非裸 Worker）——它会注入 mll 风格
+            # callback，经 net_api.download_modpack_to 桥接成字节级进度 + 实时速度。
+            self._pworker = ProgressWorker(download_modpack_to, project_id,
+                                           cache_dir)
+            self._pworker.finished.connect(self._on_pack_downloaded)
         self._pworker.progress.connect(self._on_pack_progress)
         self._pworker.speed.connect(self._on_pack_speed)
-        self._pworker.finished.connect(self._on_pack_downloaded)
         self._pworker.error.connect(self._on_pack_error)
         self._dl_bar.setVisible(True)
         self._dl_bar.setRange(0, 0)          # 未知总量 → 忙指示
@@ -862,12 +971,92 @@ class StorePage(QWidget):
         dlg = _MrpackDialog(path, info_dict, self)
         dlg.exec()
 
+    def _on_cf_pack_downloaded(self, path: str):
+        """CF 整合包主 zip 下载完成 → 免 key 逐文件解析安装为新实例（round-142）。"""
+        self._dl_bar.setVisible(False)
+        self._dl_speed.setVisible(False)
+        from PySide6.QtWidgets import QProgressDialog
+        from .win_rounded import warn
+        from .modpack_import import detect_pack_format, import_curseforge_zip
+        from .net_api import NetError
+        if detect_pack_format(path) != "curseforge":
+            info(self, t("mrpack.title"), t("mrpack.bad_file"))
+            return
+        progress = QProgressDialog(self)
+        progress.setWindowTitle(t("modpack.title"))
+        progress.setLabelText(t("modpack.importing"))
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        # 防闪加固：关自动关/自动重置（见 pages_instances 同段注释）。
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setRange(0, 0)  # 先 indeterminate 解析 manifest，随后 n/N
+        progress.setMinimumWidth(420)
+
+        # round-142b：实时 n/N 计数（轮询 state，跨线程零信号管道）
+        state = {"done": 0, "total": 0}
+
+        def _pr(label, done, total):
+            state.update(done=done, total=total)
+            return True
+
+        worker = Worker(import_curseforge_zip, path, self.mgr, progress=_pr)
+        from PySide6.QtCore import QTimer
+        tick = QTimer(self)
+        tick.setInterval(200)
+
+        def _on_tick():
+            d, tot = state["done"], state["total"]
+            if not tot:
+                return
+            if d < tot:
+                if progress.maximum() != tot:
+                    progress.setRange(0, tot)
+                if progress.value() != d:
+                    progress.setValue(d)
+                txt = f"{t('modpack.importing')}（{d}/{tot}）"
+                if state.get("txt") != txt:
+                    state["txt"] = txt
+                    progress.setLabelText(txt)
+            elif not state.get("finishing"):
+                # 收尾阶段（补全版本/装加载器）：不再 setValue(max) 触发
+                # 自动关→reset→show 循环（「导入包」空提示闪烁的根因）。
+                #一次性切不定长转圈 + 收尾文案，稳定显示到完成。
+                state["finishing"] = True
+                progress.setRange(0, 0)
+                progress.setLabelText(t("modpack.finishing"))
+                progress.show()
+
+        def _done(inst):
+            tick.stop()
+            progress.hide()
+            toast(self, t("modpack.title"), t("modpack.done"))
+            if inst and getattr(inst, "id", None):
+                self.mgr.set_current(inst.id)
+
+        def _err(e):
+            tick.stop()
+            progress.hide()
+            if isinstance(e, NetError):
+                warn(self, t("modpack.title"), str(e))
+            else:
+                warn(self, t("modpack.title"), t("modpack.error", e=e))
+
+        tick.timeout.connect(_on_tick)
+        tick.start()
+        worker.finished.connect(_done)
+        worker.error.connect(_err)
+        worker.start()
+
     def _on_pack_error(self, e):
         self._dl_bar.setVisible(False)
         self._dl_speed.setVisible(False)
         self.status.setText(t("store.download_fail", e=e))
 
     def retranslate_ui(self):
+        # round-132：详情面板是页内组件，切换语言时先退回列表（避免英文界面
+        # 里残留中文详情文案），下次再点开即按新语言重建。
+        self._close_detail()
         self.title_lbl.setText(t("store.title"))
         self.target_lbl.setText(t("store.target_label"))
         self.search.setPlaceholderText(t("store.search_placeholder"))
@@ -875,6 +1064,7 @@ class StorePage(QWidget):
         keep = self.source_combo.currentData()
         self.source_combo.blockSignals(True)
         self.source_combo.clear()
+        self.source_combo.addItem(t("store.source_all"), "all")
         self.source_combo.addItem(t("store.source_modrinth"), "modrinth")
         self.source_combo.addItem(t("store.source_curseforge"), "curseforge")
         idx = self.source_combo.findData(keep)

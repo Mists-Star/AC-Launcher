@@ -36,7 +36,9 @@ THEME_LIGHT = {
 
     # text hierarchy (dark-on-light)
     "text_main":    "#1A1A2E",
-    "text_sub":     "#6B7280",
+    # round-146b：次文本 #6B7280 → #4B5563。壁纸模式下文字直接落在全景画面上，
+    # #6B7280 在亮部对比不足（用户反馈「大部分文字可阅读性低」）。
+    "text_sub":     "#4B5563",
     "text_disabled":"#9CA3AF",
     "text_accent":  "#7C3AED",
 
@@ -143,6 +145,8 @@ _app_bg_translucent = False
 # ── ``bg_app_frost``（QWidget/QMainWindow 的底色）调成半透明；卡片仍走
 # ── 实色 ``$glassy``，文字依旧落在不透明底上，可读性不受影响。
 # ── 对话框必须保持实色（独立顶层窗口，没有壁纸垫底），走 ``$bg_app_solid``。
+# ── round-144「仅留文字与背景」：``bg_app_frost`` / ``$glassy`` 在壁纸模式
+# ── 下进一步全部透明 —— 文字直接落壁纸 + veil；交互控件仍实色。
 _wallpaper_surface = False
 
 
@@ -155,6 +159,33 @@ def set_wallpaper_surface(on: bool) -> None:
     _wallpaper_surface = on
     _QSS_CACHE.clear()
     _notify_theme_change()
+
+
+def _on_wallpaper_window(widget) -> bool:
+    """``widget`` 所属顶层窗是否是铺壁纸的主窗。
+
+    round-144：主窗在 ``MainWindow.__init__`` 里打 ``wallpaper_backdrop``
+    标记；对话框/toast/启动画面等独立顶层窗没有该属性 → 返回 False。
+    """
+    if not _wallpaper_surface or widget is None:
+        return False
+    try:
+        win = widget.window()
+        return win is not None and win.property("wallpaper_backdrop") == "1"
+    except Exception:  # noqa: BLE001 - C++ 对象已销毁等边缘情况
+        return False
+
+
+def default_card_fill(widget=None) -> QColor:
+    """卡片默认填充色（``RoundedCard``/``LightTrailCard`` fill=None 时）。
+
+    round-144「仅留文字与背景，白色文字底不要」：壁纸主窗上的卡片全透明，
+    文字直接落在壁纸 + veil 上；对话框/独立顶层窗保持现行实色（它们没有
+    壁纸垫底，透明会直接透出桌面）。
+    """
+    if _on_wallpaper_window(widget):
+        return QColor(0, 0, 0, 0)
+    return QColor(COLORS["bg_frost"] if _frosted else COLORS["bg_card"])
 
 
 def set_app_background_translucent(on: bool) -> None:
@@ -391,7 +422,7 @@ BUILTIN_THEME_PACKS = {
             "accent_press": "#0284C7",
             "accent_soft":  "#E0F2FE",
             "text_main":    "#0F172A",
-            "text_sub":     "#64748B",
+            "text_sub":     "#475569",
             "border":       "#E2E8F0",
             "border_focus": "#0EA5E9",
             "text_accent":  "#0284C7",
@@ -496,7 +527,7 @@ QWidget {
     font-size: ${f_md}px;
 }
 QMainWindow {
-    background: $bg_app_frost;
+    background: $win_bg;
     /* no border — frameless windows must be edge-to-edge */
 }
 
@@ -612,13 +643,16 @@ QPushButton[cls="accent"]:pressed { background: $accent_press; }
 QPushButton[cls="play"] {
     background: $accent;
     color: $text_on_accent;
-    border: 2px solid $accent_press;
+    /* round-145 ②：原先 border: 2px solid $accent_press——浅色主题下
+       accent_press 是深紫近黑，按钮四周一圈「黑边/紫边」（用户反馈
+       「按钮留黑边/紫边不好看」）。去掉描边，hover/pressed 只靠底色变化。 */
+    border: none;
     border-radius: 12px;
     padding: 8px 24px;
     font-weight: 600;
 }
-QPushButton[cls="play"]:hover { background: $accent_hover; border-color: $accent_press; }
-QPushButton[cls="play"]:pressed { background: $accent_press; border-color: $accent; }
+QPushButton[cls="play"]:hover { background: $accent_hover; }
+QPushButton[cls="play"]:pressed { background: $accent_press; }
 /* round-119: with no instance selected the play button is disabled — without
    this rule the accent/disabled cascade left it near-white on white (an
    invisible button). Keep it visible but clearly muted. */
@@ -698,6 +732,7 @@ QComboBox QAbstractItemView {
     selection-background-color: $accent_soft;
     selection-color: $accent;
     border: 1px solid $border;
+    border-radius: 8px;  /* round-145 ④：下拉弹层白框补圆角 */
     outline: none;
     padding: 4px 0;
 }
@@ -763,7 +798,8 @@ QListWidget::item:selected {
     background: $accent;
     color: $text_on_accent;
     font-weight: 600;
-    border-left: 3px solid $accent_press;
+    /* round-146：去掉 3px $accent_press 左条——它在浅色主题下是近黑的深紫，
+       用户看到的是「选中项左侧留了一道黑边」。accent 实底本身已足够强调。 */
 }
 
 /* 左侧导航分组标题（不可选灰字，功能区分化） */
@@ -780,8 +816,10 @@ QListWidget::item:selected {
 }
 
 /* ---- AC left sidebar (scoped by object name) ---- */
+/* round-144b：$band 壁纸垫底时透明 —— 用户反馈「左侧栏目会遮挡壁纸，
+   需要透明（非纯色背景时）」；非壁纸模式 $band == $bg_panel，外观不变。 */
 #ac-nav {
-    background: $bg_panel;
+    background: $band;
     border: none;
     border-right: 1px solid $border;
     outline: 0;
@@ -805,8 +843,6 @@ QListWidget::item:selected {
     background: $accent;
     color: $text_on_accent;
     font-weight: 700;
-    border-left: 3px solid $accent_press;
-    padding-left: 11px;
 }
 #ac-nav::item:selected:!active {
     background: $accent;
@@ -960,18 +996,59 @@ QTextEdit {
 QTextEdit:focus { border: 2px solid $border_focus; }
 
 /* ---- tooltip ---- */
+/* round-146：原先是「反色」提示框（background:$text_main）——浅色主题下
+   即一块纯黑小窗（用户截图里的「展开侧栏」黑框）。改为常规浮层：实色
+   $bg_panel + 细边框，随主题自动明暗。 */
 QToolTip {
-    background: $text_main;
-    color: $bg_card;   /* opaque — bg_panel may be translucent in frosted mode */
-    border: none;
-    border-radius: ${r_small}px;
+    background: $bg_panel;
+    color: $text_main;
+    border: 1px solid $border;
+    border-radius: 6px;
     padding: 4px 10px;
     font-size: ${f_sm}px;
 }
 
+/* ---- menu (round-145 修「浅色下所有下拉栏全黑看不到文字」) ----
+   QMenu 此前没有任何专属规则 → 吃到全局 QWidget{background:$bg_app_frost}，
+   壁纸模式下是 transparent → 顶层弹窗透出后方暗区，配上 $text_main 深色字
+   就成了黑底黑字。弹层必须实色（与弹层安全面 $bg_panel 一致）。 */
+/* round-146 ①：cls="card" 的弹窗（下载进度 / 模组检查）此前只有
+   `[cls="card"]{background:$glassy}` 一条规则，而壁纸模式下 $glassy 是
+   transparent —— 顶层弹窗没有底 → 整块渲染成黑色（浅色主题下尤其突兀）。
+   QDialog[cls="card"] 的选择器特异性高于 [cls="card"]，在这里补实色底。 */
+QDialog[cls="card"] {
+    background: $bg_app_solid;
+    border: 1px solid $border;
+    border-radius: 14px;
+}
+QMenu {
+    background: $bg_panel;
+    color: $text_main;
+    border: 1px solid $border;
+    border-radius: 8px;  /* round-145 ④：菜单弹层白框补圆角 */
+    padding: 4px 2px;
+}
+QMenu::item {
+    background: transparent;
+    color: $text_main;
+    padding: 6px 30px 6px 14px;
+}
+QMenu::item:selected {
+    background: $accent_soft;
+    color: $accent;
+}
+QMenu::item:disabled {
+    color: $text_disabled;
+}
+QMenu::separator {
+    height: 1px;
+    background: $border;
+    margin: 5px 10px;
+}
+
 /* ---- status bar ---- */
 QStatusBar {
-    background: $bg_panel;
+    background: $band;
     color: $text_sub;
     border-top: 1px solid $border;
     font-size: ${f_sm}px;
@@ -989,11 +1066,11 @@ QStatusBar {
    that re-applying the global QSS (app.setStyleSheet(build_qss())) re-skins
    every persistent widget when the light/dark mode changes. */
 [cls="titlebar"] {
-    background: $bg_panel;
+    background: $band;
     border-bottom: 1px solid $border;
 }
 [cls="page-header"] {
-    background: $bg_panel;
+    background: $band;
     border-bottom: 1px solid $border;
     color: $text_main;
     font-size: ${f_xl}px;
@@ -1002,8 +1079,9 @@ QStatusBar {
 }
 [cls="page-footer"] {
     /* round-124：原先用 $bg_panel，浅色主题下与页面内容的白底差半档，
-     * 底栏看起来像一条独立的灰白条。改为与内容同色，只留分隔线。 */
-    background: $bg_card;
+     * 底栏看起来像一条独立的灰白条。改为与内容同色，只留分隔线。
+     * round-144：内容透明（壁纸模式）时页脚同为透明。 */
+    background: $band_card;
     border-top: 1px solid $border;
 }
 [cls="surface"] {
@@ -1175,16 +1253,29 @@ def build_qss() -> str:
     # （原 QSS 硬编码 rgba(239,68,68,0.08)，换成 danger token 派生，
     #  自定义主题包改 danger 时 hover 底随之联动）。
     subst["danger_hover"] = _to_translucent(COLORS.get("danger", "#EF4444"), 20)
-    # 透底模式（round-51）：应用层底色转半透明，让系统 Acrylic 的桌面模糊
-    # 透出来；关闭时保持实色（round-32 默认）。
-    if _app_bg_translucent:
+    # round-144「仅留文字与背景，白色文字底不要」：壁纸垫底时页面底与
+    # 页头/页脚/状态栏条全部透明 —— 文字直接落在壁纸 + 可读性 veil 上
+    # （light veil 把画面洗向 bg_app 白，正文对比度已有保障）。按钮/输入框/
+    # 下拉/弹层等交互控件仍走各自的实色 token，不在替换之列。
+    if _wallpaper_surface:
+        subst["bg_app_frost"] = "transparent"
+        subst["band"] = "transparent"
+        subst["band_card"] = "transparent"
+        # 主窗本体保持实色垫底：壁纸子控件没盖到（加载间隙）时窗口不会
+        # 透出桌面；ExtensionWindow 等独立 QMainWindow 同样受益。
+        subst["win_bg"] = COLORS["bg_app"]
+    elif _app_bg_translucent:
+        # 透底模式（round-51）：应用层底色转半透明，让系统 Acrylic 的桌面
+        # 模糊透出来；关闭时保持实色（round-32 默认）。
         subst["bg_app_frost"] = _to_translucent(COLORS["bg_app"], 205)
-    elif _wallpaper_surface:
-        # Wallpaper behind every page: keep the surface translucent enough for
-        # the artwork to read through while cards stay solid ($glassy).
-        subst["bg_app_frost"] = _to_translucent(COLORS["bg_app"], 185)
+        subst["band"] = COLORS["bg_panel"]
+        subst["band_card"] = COLORS["bg_card"]
+        subst["win_bg"] = subst["bg_app_frost"]
     else:
         subst["bg_app_frost"] = COLORS["bg_app"]
+        subst["band"] = COLORS["bg_panel"]
+        subst["band_card"] = COLORS["bg_card"]
+        subst["win_bg"] = subst["bg_app_frost"]
     # Dialogs are separate top-level windows with no wallpaper behind them —
     # they must stay fully opaque or they would show the desktop through.
     subst["bg_app_solid"] = COLORS["bg_app"]
@@ -1195,7 +1286,11 @@ def build_qss() -> str:
     # bg_frost（透出 Acrylic 桌面模糊），关闭时实色 bg_card。注意此处必须
     # 直接读 COLORS["bg_frost"]（上方 subst["bg_frost"] 已被映射成 bg_btn，
     # 那是给按钮的对比度颜色，不是卡片玻璃色）。
-    subst["glassy"] = COLORS["bg_frost"] if _frosted else COLORS["bg_card"]
+    # round-144：壁纸垫底时 $glassy 直接透明（「白色文字底不要」）。
+    if _wallpaper_surface:
+        subst["glassy"] = "transparent"
+    else:
+        subst["glassy"] = COLORS["bg_frost"] if _frosted else COLORS["bg_card"]
     qss = QSS_TEMPLATE.safe_substitute(**subst)
     _QSS_CACHE[key] = qss
     return qss
@@ -1287,8 +1382,10 @@ class RoundedCard(QFrame):
         fill = self._fill
         if fill is None:
             # frosted → translucent card; otherwise solid (same token logic
-            # as the QSS $bg_frost substitution in build_qss()).
-            brush = QColor(COLORS["bg_frost"] if _frosted else COLORS["bg_card"])
+            # as the QSS $bg_frost substitution in build_qss()). round-144：
+            # 壁纸主窗上默认透明（文字直接落壁纸）。self._fill 仍保持 None，
+            # 下方边框/圆角判定逻辑不变。
+            brush = default_card_fill(self)
         elif isinstance(fill, str):
             brush = QColor(fill)
         else:

@@ -122,11 +122,14 @@ def _accent() -> QColor:
         return QColor("#7C3AED")
 
 
-def _card_fill() -> QColor:
+def _card_fill(widget=None) -> QColor:
+    """卡片默认填充：round-144 与 theme 统一 —— 壁纸主窗上透明，
+    对话框/独立顶层窗保持实色（详见 theme.default_card_fill）。"""
     try:
+        from .theme import default_card_fill
+        return default_card_fill(widget)
+    except Exception:  # noqa: BLE001 - 主题异常时退回不透明白
         return QColor(COLORS.get("bg_card", "#FFFFFF"))
-    except Exception:  # noqa: BLE001
-        return QColor("#FFFFFF")
 
 
 def _border() -> QColor:
@@ -207,7 +210,7 @@ class LightTrailCard(RoundedCard):
         # 1) 表面填充（与 RoundedCard 一致）
         fill = self._fill
         if fill is None:
-            brush = _card_fill()
+            brush = _card_fill(self)
         elif isinstance(fill, str):
             brush = QColor(fill)
         else:

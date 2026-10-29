@@ -138,17 +138,32 @@ def render_cape(path: str, width: int, height: int) -> QPixmap:
     back = _copy(img, 1, 1, 10, 16)
     qp = QPainter(out)
     qp.setRenderHint(QPainter.SmoothPixmapTransform, True)
-    qp.drawPixmap(0, 0, width, height, QPixmap.fromImage(back))
+    # round-131：背面是 10:16，按 width×height 直接拉伸会在尺寸比例不对时
+    # 把披风压扁/拉长。改为等比适配 + 居中；调用方传 120×192 时结果不变。
+    scale = min(width / 10.0, height / 16.0)
+    dw, dh = 10.0 * scale, 16.0 * scale
+    qp.drawPixmap(int(round((width - dw) / 2.0)),
+                  int(round((height - dh) / 2.0)),
+                  int(round(dw)), int(round(dh)),
+                  QPixmap.fromImage(back))
     qp.end()
     return out
 
 
 def render_head(path: str, size: int) -> QPixmap:
-    """Return a transparent pixmap of just the head (avatar)."""
+    """Return a transparent pixmap of just the head (avatar).
+
+    round-148：按**物理**像素渲染并打上 DPR 标记——HiDPI 屏上不再把
+    逻辑尺寸的位图再放大一次（否则头像块面发糊）。
+    """
+    from .icons import screen_dpr
+    dpr = screen_dpr()
+    px = max(1, int(round(size * dpr)))
     img = QImage(path)
-    out = QPixmap(size, size)
+    out = QPixmap(px, px)
     out.fill(Qt.transparent)
     if img.isNull():
+        out.setDevicePixelRatio(dpr)
         return out
 
     head = QPixmap(8, 8)
@@ -162,8 +177,9 @@ def render_head(path: str, size: int) -> QPixmap:
 
     qp = QPainter(out)
     qp.setRenderHint(QPainter.SmoothPixmapTransform, size < 8)
-    qp.drawPixmap(0, 0, size, size, head)
+    qp.drawPixmap(0, 0, px, px, head)
     qp.end()
+    out.setDevicePixelRatio(dpr)
     return out
 
 

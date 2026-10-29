@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
 )
 
 from .theme import COLORS, RoundedCard, R_CARD, F_SM, F_LG, with_alpha
-from .icons import icon
+# ``screen_dpr`` 从 icons 转出：所有「按物理像素渲染」的自绘图标共用同一处
+# DPR 判定，避免各处各写一份（round-148）。
+from .icons import icon, pixmap as icon_pixmap, screen_dpr
 
 
 # ── 全局滚轮防误触（round-86）───────────────────────────────────────────
@@ -50,18 +52,26 @@ def accent_text() -> str:
     return "#1F2937" if lum > 0.62 else COLORS["accent"]
 
 
-def state_pix(mode: str, color: str, size: int = 16) -> QPixmap:
+def state_pix(mode: str, color: str, size: int = 16,
+              dpr: float | None = None) -> QPixmap:
     """自绘状态图标（round-89 消灭文本 emoji/符号）。
 
     Windows 下 ⚠✔▶★ 这些字符会被 Segoe UI Emoji 渲染成彩色 emoji，
     风格突兀；统一改为 QPainter 程序绘制、颜色跟随传入主题色。
     mode: pending=空心圆  dot=实心圆  running=实心三角(播放)
           chev=细线三角箭头  done=对勾  star=五角星  warn=警示三角。
+
+    round-148：画布按**物理**像素（size × dpr）建，画笔整体 scale(dpr)，
+    坐标与线宽仍用逻辑单位；返回前打上 devicePixelRatio 标记，
+    QLabel / QIcon 都会按标记 1:1 显示，不再被二次放大。
     """
-    pm = QPixmap(size, size)
+    dpr = screen_dpr() if dpr is None else max(1.0, float(dpr or 1.0))
+    px = max(1, int(round(size * dpr)))
+    pm = QPixmap(px, px)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
+    p.scale(dpr, dpr)
     c = QColor(color)
     s = float(size)
 
@@ -128,6 +138,7 @@ def state_pix(mode: str, color: str, size: int = 16) -> QPixmap:
         for y in (0.28, 0.5, 0.72):
             p.drawLine(QPointF(s * 0.18, s * y), QPointF(s * 0.82, s * y))
     p.end()
+    pm.setDevicePixelRatio(dpr)
     return pm
 
 
@@ -166,7 +177,7 @@ def tile(icon_key: str, size: int = 44, icon_size: int = 24,
     box.setFixedSize(size, size)
     box.setAlignment(Qt.AlignCenter)
     box.setProperty("cls", "tile")
-    box.setPixmap(icon(icon_key).pixmap(icon_size, icon_size))
+    box.setPixmap(icon_pixmap(icon_key, icon_size))
     if bg:
         box.setStyleSheet(f"background: {bg}; border-radius: 10px;")
     return box
@@ -212,7 +223,7 @@ def section_header(title: str, subtitle: str = "", action=None,
     h.setSpacing(spacing)
     if icon_key:
         ic = QLabel()
-        ic.setPixmap(icon(icon_key).pixmap(18, 18))
+        ic.setPixmap(icon_pixmap(icon_key, 18))
         ic.setStyleSheet(f"color: {COLORS['text_sub']};")
         h.addWidget(ic)
     t = QLabel(title)
@@ -249,7 +260,7 @@ def page_header(title: str, desc: str = "", action=None,
     h.setSpacing(12)
     if icon_key:
         ic = QLabel()
-        ic.setPixmap(icon(icon_key).pixmap(26, 26))
+        ic.setPixmap(icon_pixmap(icon_key, 26))
         ic.setStyleSheet(f"color: {COLORS['accent']};")
         h.addWidget(ic)
     col = QVBoxLayout()
@@ -299,7 +310,7 @@ def empty_state(icon_key: str, title: str, hint: str = "",
     v.setAlignment(Qt.AlignCenter)
     v.setSpacing(12)
     ic = QLabel()
-    ic.setPixmap(icon(icon_key).pixmap(icon_size, icon_size))
+    ic.setPixmap(icon_pixmap(icon_key, icon_size))
     ic.setStyleSheet(f"color: {COLORS['text_sub']}; opacity: 0.7;")
     v.addWidget(ic, alignment=Qt.AlignCenter)
     tt = QLabel(title)

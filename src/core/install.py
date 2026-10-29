@@ -452,9 +452,16 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
                 build or CLEANROOM_LATEST_FALLBACK,
                 maven=("repo.cleanroommc.com" not in installer_url))
             parallel_download_file(alt, jar_path, timeout=180)
-        if callback:
+        # round-143 修复「启动失败：'dict' object is not callable」：
+        # ProgressWorker 传入的 callback 是 mll 风格 dict（setStatus/...），
+        # 此前直接 callback({...}) 把 dict 当函数调 → Cleanroom 实例首启必炸。
+        if callable(callback):
             callback({"stage": "cleanroom", "progress": 0.6,
                       "status": "运行 Cleanroom 安装器…"})
+        elif isinstance(callback, dict):
+            st = callback.get("setStatus")
+            if callable(st):
+                st("运行 Cleanroom 安装器…")
         # 0.7.x installer CLI: `client -d <dir> --version <id> -y --json`.
         # It insists on Java 25; `--provision-java` fetches one into
         # ~/.cleanroom/java when the machine has none (round-126: the old
@@ -537,8 +544,13 @@ def _install_optifine(mc_version, mc_dir, *, build="", java="java", callback=Non
     tmp_dir = tempfile.mkdtemp(prefix="ac_optifine_")
     try:
         jar_path = download_optifine_to(filename, tmp_dir)
-        if callback:
+        # round-143：同 Cleanroom 分支 —— dict 回调不能当函数调用。
+        if callable(callback):
             callback({"stage": "optifine", "progress": 0.6, "status": "运行 OptiFine 安装器…"})
+        elif isinstance(callback, dict):
+            st = callback.get("setStatus")
+            if callable(st):
+                st("运行 OptiFine 安装器…")
         subprocess.run(
             [java, "-jar", jar_path, "--installDir", mc_dir],
             check=True, capture_output=True, timeout=300,

@@ -27,7 +27,7 @@ from .theme import (COLORS, RoundedCard, set_theme_mode, get_theme_mode,
 from .effects import (
     LightTrailCard, set_effects_enabled, set_window_opacity, fade_page_transition,
 )
-from .icons import icon, on_accent
+from .icons import icon, on_accent, screen_dpr
 from .i18n import t
 from src.instances import manager, Instance
 from src.pages_instances import InstancesPage, ModsPage
@@ -41,6 +41,7 @@ from .paths import get_data_dir, get_resource_path
 from .skins import manager as skin_manager
 from .skin_render import render_head, render_skin_frames, skin_model
 from .brand import APP_DISPLAY, APP_VERSION
+from . import brand_custom
 from .win_rounded import enable_win11_round_corners
 
 
@@ -279,13 +280,15 @@ class _InstanceCard(LightTrailCard):
         play_btn.setCursor(Qt.PointingHandCursor)
         play_btn.setFixedSize(40, 40)
         play_btn.setToolTip(t("home.play"))
-        # round-91 跟随自定义 accent：强调色底 + 自适应文字色 + 强调色暗边框，
-        # 不再写死品牌紫（用户改主题色后按钮颜色分裂）。
+        # round-91 跟随自定义 accent：强调色底 + 自适应文字色。
+        # round-146：去掉 2px accent_press 描边——浅色主题下它是近黑深紫，
+        # 按钮四周一圈「黑边/紫边」（用户截图里的圆角黑框）。与 QSS
+        # QPushButton[cls="play"] 统一为无边框。
         from .theme import COLORS as _C
         play_btn.setStyleSheet(
             f"QPushButton {{ background: {_C['accent']}; color: {_C['text_on_accent']}; "
-            f"border: 2px solid {_C['accent_press']}; border-radius: 10px; padding: 0; font-weight: 600; }}"
-            f"QPushButton:hover {{ background: {_C['accent_hover']}; border: 2px solid {_C['accent_press']}; }}"
+            f"border: none; border-radius: 10px; padding: 0; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: {_C['accent_hover']}; }}"
         )
         play_btn.clicked.connect(lambda *a: self._emit_play())
         bot.addWidget(play_btn)
@@ -320,6 +323,10 @@ class _CharStage(QWidget):
         self._anim = QTimer(self)
         self._anim.setInterval(55)          # ≈18 fps for a 30-frame turn
         self._anim.timeout.connect(self._advance_frame)
+        # round-130：拖动旋转（此前只能看自动转，用户问「可转动做好了吗」）。
+        self._drag_x: float | None = None
+        self._drag_accum = 0.0
+        self._drag_total = 0.0
         self.setFixedSize(216, 248)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setCursor(Qt.PointingHandCursor)
@@ -356,9 +363,40 @@ class _CharStage(QWidget):
         self._anim.stop()
         super().hideEvent(e)
 
-    def mouseReleaseEvent(self, e):
+    def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            self.clicked.emit()
+            self._drag_x = e.position().x()
+            self._drag_accum = 0.0
+            self._drag_total = 0.0
+            if self._frames:
+                self._anim.stop()      # 拖的时候由手指控制角度
+            self.setCursor(Qt.ClosedHandCursor)
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_x is not None and self._frames:
+            x = e.position().x()
+            dx = x - self._drag_x
+            self._drag_x = x
+            self._drag_total += abs(dx)
+            # 10px 走一帧（30 帧 ≈ 300px 转一圈），方向跟随拖动。
+            self._drag_accum += dx
+            steps = int(self._drag_accum / 10.0)
+            if steps:
+                self._drag_accum -= steps * 10.0
+                self._frame_idx = (self._frame_idx + steps) % len(self._frames)
+                self.update()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self._drag_x is not None:
+            dragged = self._drag_total >= 4.0
+            self._drag_x = None
+            self.setCursor(Qt.PointingHandCursor)
+            if self._frames and self.isVisible():
+                self._anim.start()     # 松手后继续缓慢自转
+            if not dragged:            # 没拖动才算点击（打开皮肤库）
+                self.clicked.emit()
         super().mouseReleaseEvent(e)
 
     def paintEvent(self, e):
@@ -483,9 +521,15 @@ class HomePage(QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        _bd = self._backdrop_ref()
+        # round-147：壁纸垫底自 round-144b 起挂在**主窗**上（要盖住标题栏、
+        # 侧栏和状态栏），几何必须跟主窗走。此前这里用的是首页自己的
+        # rect()（内容区大小，比窗口小一圈），于是切页/滚动条出现等任何
+        # 触发首页重排的动作，都把壁纸裁成内容区大小 —— 用户看到的
+        # 「点侧栏操作壁纸被拉伸缩小」正是这条路径。
+        win = self.window()
+        _bd = getattr(win, "backdrop", None)
         if _bd is not None:
-            _bd.setGeometry(self.rect())
+            _bd.setGeometry(win.rect())
             _bd.lower()
 
     # ── (re)build the ac_default home layout ──
@@ -630,6 +674,11 @@ class HomePage(QWidget):
         if inst_id:
             self.set_current_instance(inst_id)
             self._refresh()
+            # round-145 修「版本背景不会根据选择的版本切换」：此前只有
+            # 实例页 current_changed（懒构建，未打开过就没有连接）会触发
+            # 重绘，首页下拉切实例时背景纹丝不动。这里直接重 apply ——
+            # panorama 同 key 早退，重复调用无副作用。
+            self._apply_wallpaper(version_id=self._current_version_id())
 
     def _make_play_btn(self) -> QPushButton:
         """Hero / lobby 的"启动游戏"大按钮——必须一眼可见。
@@ -666,7 +715,10 @@ class HomePage(QWidget):
         # 启动器（PCL2 / HMCL / BakaXL）都把大尺寸角色放进启动面板本身，作为
         # 账号区的视觉锚点——合并为一张卡后不再有「卡中卡」和小空台，右侧
         # 200×240 三分之四视角角色直接站在柔光台上，披风穿在身上。
-        hero = RoundedCard(radius=18, accent_border=3)
+        # round-147：去掉 accent_border=3 的左侧紫色竖条 —— 用户反馈
+        # 「图片中按钮留黑边/紫边等不好看，就是说这些按钮留边都不太好看」，
+        # round-146 已删掉侧栏选中条的同类竖条，首页 hero 这条是遗漏。
+        hero = RoundedCard(radius=18)
         hero.setMinimumHeight(400)
         hl = QHBoxLayout(hero)
         hl.setContentsMargins(32, 24, 26, 22)
@@ -1383,12 +1435,17 @@ def _win_svg_pixmap(kind: str, color: str, size: int = 18) -> QPixmap:
         f'stroke-linecap="round" stroke-linejoin="round"/></svg>'
     )
     r = QSvgRenderer(QByteArray(svg.encode("utf-8")))
-    pm = QPixmap(size, size)
+    # round-148：按**物理**像素渲染并打上 DPR 标记。原先只画逻辑尺寸，
+    # 125% 屏上会被设备变换放大 1.25 倍 → 字形发虚。
+    dpr = screen_dpr()
+    px = max(1, int(round(size * dpr)))
+    pm = QPixmap(px, px)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    r.render(p)
+    r.render(p, QRectF(0, 0, px, px))
     p.end()
+    pm.setDevicePixelRatio(dpr)
     return pm
 
 
@@ -1462,17 +1519,19 @@ def _nav_item_icon(name: str, px: int) -> QIcon:
 
     ``QIcon`` keeps one pixmap per (mode, state); without a ``Selected`` entry
     Qt reuses the grey ``text_sub`` glyph on top of the accent-filled pill
-    (~2:1 contrast). Two scales keep it crisp on HiDPI screens.
+    (~2:1 contrast).
+
+    round-148：位图按**屏幕 DPR** 的物理像素渲染并打上 dpr 标记——侧栏
+    delegate 取的是 ``pixmap(size, dpr)``，尺寸正好对上 → 不再二次重采样。
     """
+    dpr = screen_dpr()
     ic = QIcon()
     for mode, src in ((QIcon.Normal, icon(name)),
                       (QIcon.Selected, on_accent(name))):
-        for scale in (1, 2):
-            pm = src.pixmap(QSize(px * scale, px * scale))
-            if pm.isNull():
-                continue
-            pm.setDevicePixelRatio(scale)
-            ic.addPixmap(pm, mode, QIcon.Off)
+        pm = src.pixmap(QSize(px, px), dpr)
+        if pm.isNull():
+            continue
+        ic.addPixmap(pm, mode, QIcon.Off)
     return ic
 
 
@@ -1528,21 +1587,13 @@ class _IconNavDelegate(QStyledItemDelegate):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # round-144「仅留文字与背景」：主窗标记为「有壁纸垫底」—— theme 里
+        # 的卡片默认填充据此把窗内卡片/容器变透明（对话框等独立顶层窗没有
+        # 该属性，保持实色）。纯 Python 读取，无需 repolish。
+        self.setProperty("wallpaper_backdrop", "1")
         # ── 临时启动定位打点（round-83 排查"构造卡死"，定位后移除）──
         self.setWindowTitle(APP_DISPLAY)
         _boot_trace("1 title")
-        _icon_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "icons")
-        _icon_path = None
-        for _ext in ("png", "ico"):
-            _p = os.path.normpath(os.path.join(_icon_base, f"logo.{_ext}"))
-            if os.path.isfile(_p):
-                _icon_path = _p
-                break
-        if _icon_path:
-            ico = QIcon(_icon_path)
-            for _sz in (16, 24, 32, 48, 64, 128, 256):
-                ico.addPixmap(ico.pixmap(_sz, _sz))
-            self.setWindowIcon(ico)
         self.resize(1100, 720)
         self.setMinimumSize(900, 600)
         _boot_trace("2 icon ok")
@@ -1558,7 +1609,6 @@ class MainWindow(QMainWindow):
         self._dl_workers: dict[str, object] = {}
         self._dl_dlgs: dict[str, object] = {}
         self._dl_pct: dict[str, int] = {}      # round-109：实例 → 最新下载百分比
-        self._dl_aborted: set[str] = set()     # round-109：用户主动取消的实例
         self._game_proc = None      # round-34：运行中游戏进程
         self._game_procs = {}       # round-92 多开：按实例 id 登记运行中游戏
         self._game_name = ""
@@ -1566,6 +1616,8 @@ class MainWindow(QMainWindow):
         self._active_toasts = []
         self.cfg = load_config()
         _boot_trace("5 cfg ok")
+        # round-136：窗口/任务栏图标（用户自定义图优先，回落内置 logo）
+        self._apply_window_icon()
 
         # Apply persisted theme before any UI is built. Default is now light.
         set_theme_mode(self.cfg.get("theme_mode", "light"))
@@ -1601,14 +1653,17 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── wallpaper backdrop (round-119) ────────────────────────────────
+        # ── wallpaper backdrop (round-119, 改挂主窗 round-144b) ──────────
         # One layer behind the title bar, the nav rail and *every* page — a
         # wallpaper has to cover the whole launcher, not just the home page.
+        # round-144b：改挂 MainWindow（而非 central）—— QStatusBar 在 central
+        # 之外，挂在 central 下状态栏区永远露出 $win_bg 白条；挂主窗 + lower()
+        # 后位于 central/statusbar 之下、窗体自身背景之上，整窗无白边。
         # It is transparent for mouse events and sits at the bottom of the
         # stacking order, so it can never cover buttons or text.
         from .wallpaper import WallpaperWidget
-        self.backdrop = WallpaperWidget(central)
-        self.backdrop.setGeometry(central.rect())
+        self.backdrop = WallpaperWidget(self)
+        self.backdrop.setGeometry(self.rect())
         self.backdrop.lower()
 
         # ── full-width custom title bar (drag area + window controls) ──
@@ -2158,9 +2213,7 @@ class MainWindow(QMainWindow):
             set_wallpaper_surface(mode != "none")
             apply_qss()
             backdrop.apply(self.cfg, version_id, *self._panorama_source())
-            central = self.centralWidget()
-            backdrop.setGeometry(central.rect() if central is not None
-                                 else self.rect())
+            backdrop.setGeometry(self.rect())   # round-144b: 挂主窗，盖到状态栏
             backdrop.lower()
             home = getattr(self, "home", None)
             if home is not None:
@@ -2171,9 +2224,19 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         backdrop = getattr(self, "backdrop", None)
-        central = self.centralWidget()
-        if backdrop is not None and central is not None:
-            backdrop.setGeometry(central.rect())
+        if backdrop is not None:
+            # round-144b：跟主窗走（含状态栏高度），不再用 central.rect() ——
+            # 首显时 central 布局可能未完成，几何过期会导致四边白条。
+            backdrop.setGeometry(self.rect())
+            backdrop.lower()
+
+    def showEvent(self, e):
+        # round-144b：首次 show（及托盘恢复）时窗口几何才最终确定，补一次
+        # 同步，杜绝「首显壁纸没铺满、resize 一次后又正常」的过期几何。
+        super().showEvent(e)
+        backdrop = getattr(self, "backdrop", None)
+        if backdrop is not None:
+            backdrop.setGeometry(self.rect())
             backdrop.lower()
 
     def _on_current_changed(self, _id: str):
@@ -2289,7 +2352,6 @@ class MainWindow(QMainWindow):
     def _on_download_done(self, inst_id: str) -> None:
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
-        self._dl_aborted.discard(inst_id)
         inst = self.inst_mgr.get(inst_id)
         name = getattr(inst, "name", "") or inst_id
         self._progress.setVisible(False)
@@ -2307,25 +2369,13 @@ class MainWindow(QMainWindow):
     def _on_download_error(self, inst_id: str, err: str) -> None:
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
-        cancelled = inst_id in self._dl_aborted
-        self._dl_aborted.discard(inst_id)
         inst = self.inst_mgr.get(inst_id)
         name = getattr(inst, "name", "") or inst_id
         self._progress.setVisible(False)
         self._set_speed("")
         dlg = self._dl_dlgs.pop(inst_id, None)
-        if cancelled:
-            # round-109：用户主动「取消下载并启动」→ 这不是失败，走中性文案。
-            self.statusBar().showMessage(
-                t("status.download_cancelled", name=name), 6000)
-            if dlg is not None:
-                dlg.mark_done(t("launch.dl_cancelled"))
-                QTimer.singleShot(1200, dlg.close)
-            try:
-                self.instances_page.set_instance_task(inst_id, "")
-            except Exception:  # noqa: BLE001
-                pass
-            return
+        # round-146：取消下载的唯一入口（「取消下载并启动」）已随硬护栏移除，
+        # 走到这里的一律是真失败。
         # 失败不阻断：实例仍可创建，首次启动会重新触发下载/修复（install 幂等）。
         self.statusBar().showMessage(
             t("status.download_error", name=name, err=err), 9000)
@@ -2336,35 +2386,6 @@ class MainWindow(QMainWindow):
         if dlg is not None:
             dlg.set_status_text(err)
             QTimer.singleShot(2500, dlg.close)
-
-    def _confirm_launch_while_downloading(self, inst, worker) -> bool:
-        """下载护栏的逃生口（round-109）。
-
-        默认建议继续等待；用户也可选择「取消下载并启动」——worker.abort() 会让
-        在途下载立即抛错退出（不再写盘），随后正常走启动流程。返回 True 表示
-        放行启动。
-        """
-        from PySide6.QtWidgets import QMessageBox
-        iid = getattr(inst, "id", "")
-        pct = self._dl_pct.get(iid, 0)
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle(t("launch.dl_busy_title"))
-        box.setText(t("launch.dl_busy_msg", name=inst.name, pct=pct))
-        wait = box.addButton(t("launch.dl_busy_wait"), QMessageBox.ButtonRole.AcceptRole)
-        force = box.addButton(t("launch.dl_busy_force"), QMessageBox.ButtonRole.DestructiveRole)
-        box.setDefaultButton(wait)
-        box.exec()
-        if box.clickedButton() is not force:
-            self.statusBar().showMessage(
-                t("status.download_blocked_launch", name=inst.name))
-            return False
-        self._dl_aborted.add(iid)
-        try:
-            worker.abort()
-        except Exception:  # noqa: BLE001
-            pass
-        return True
 
     def _set_speed(self, text: str) -> None:
         """round-110 A：状态栏实时速度标签（空串则收起）。"""
@@ -2424,14 +2445,16 @@ class MainWindow(QMainWindow):
         lay.setSpacing(10)
 
         logo = QLabel()
-        logo.setPixmap(icon("logo").pixmap(30, 30))
+        logo.setPixmap(self._titlebar_logo_pixmap())
         logo.setFixedSize(32, 32)
         logo.setStyleSheet("padding-left: 2px;")
         lay.addWidget(logo)
-        name = QLabel(APP_DISPLAY)
+        self._tb_logo = logo
+        name = QLabel(brand_custom.custom_title_text(self.cfg))
         name.setProperty("cls", "big")
         name.setStyleSheet(f"color: {COLORS['accent']}; font-weight: 600; font-size: 15px;")
         lay.addWidget(name)
+        self._tb_name = name
         # round-107 侧栏图标模式（像 Blockhelm）：汉堡按钮常驻标题栏，收起后
         # 左侧导航只剩图标、宽度收窄；仅 AC 左侧导航布局可见（顶栏布局不适用）。
         from .ui_kit import state_pix as _state_pix
@@ -2509,6 +2532,45 @@ class MainWindow(QMainWindow):
         on_theme_change(self._refresh_win_icons)
 
         return bar
+
+    # ---- round-136 品牌自定义（标题栏标志 / 左上角文本 / 窗口图标）----
+    def _titlebar_logo_pixmap(self):
+        """标题栏左上角标志：优先用户自定义图，回落内置 logo.svg。"""
+        pm = brand_custom.load_pixmap(brand_custom.custom_logo_path(self.cfg), 30)
+        if pm is not None and not pm.isNull():
+            return pm
+        return icon("logo").pixmap(30, 30)
+
+    def _refresh_titlebar_brand(self):
+        """设置保存后刷新标题栏标志与左上角文本（标题栏不随 retranslate 重建）。"""
+        lb = getattr(self, "_tb_logo", None)
+        if lb is not None:
+            lb.setPixmap(self._titlebar_logo_pixmap())
+        nm = getattr(self, "_tb_name", None)
+        if nm is not None:
+            nm.setText(brand_custom.custom_title_text(self.cfg))
+
+    def _apply_window_icon(self):
+        """窗口/任务栏图标：优先用户自定义图，回落内置 logo。"""
+        path = brand_custom.custom_logo_path(self.cfg)
+        if path:
+            ico = QIcon(path)
+            for _sz in (16, 24, 32, 48, 64, 128, 256):
+                ico.addPixmap(ico.pixmap(_sz, _sz))
+            self.setWindowIcon(ico)
+            return
+        _icon_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "icons")
+        _icon_path = None
+        for _ext in ("png", "ico"):
+            _p = os.path.normpath(os.path.join(_icon_base, f"logo.{_ext}"))
+            if os.path.isfile(_p):
+                _icon_path = _p
+                break
+        if _icon_path:
+            ico = QIcon(_icon_path)
+            for _sz in (16, 24, 32, 48, 64, 128, 256):
+                ico.addPixmap(ico.pixmap(_sz, _sz))
+            self.setWindowIcon(ico)
 
     def _refresh_win_icons(self):
         """Re-render the window-control glyphs for the current theme colors."""
@@ -3191,16 +3253,29 @@ class MainWindow(QMainWindow):
         _s.setWordWrap(True)
         _s.setAlignment(Qt.AlignCenter)
         _cl.addWidget(_s)
-        for ikey, kind, name_key in [
-            ("folder", "inst", "pcl2.toolbox_open_inst"),
-            ("console", "logs", "pcl2.toolbox_open_data"),
-            ("delete", "cache", "pcl2.toolbox_clear_cache"),
+        for ikey, kind, name_key, desc_key in [
+            ("folder", "inst", "pcl2.toolbox_open_inst",
+             "pcl2.toolbox_open_inst_desc"),
+            ("console", "logs", "pcl2.toolbox_open_data",
+             "pcl2.toolbox_open_data_desc"),
+            ("delete", "cache", "pcl2.toolbox_clear_cache",
+             "pcl2.toolbox_clear_cache_desc"),
         ]:
+            # round-146：用户「不知道百宝箱有什么用」——每个工具配一行说明，
+            # 让入口自解释（按钮左、说明右，窄窗自动换行）。
+            _row = QHBoxLayout()
+            _row.setSpacing(12)
             _b = QPushButton(icon(ikey), t(name_key))
             _b.setMinimumHeight(42)
+            _b.setMinimumWidth(230)
             _b.setCursor(Qt.CursorShape.PointingHandCursor)
             _b.clicked.connect(lambda _=False, k=kind: self._toolbox_action(k))
-            _cl.addWidget(_b)
+            _row.addWidget(_b)
+            _d = QLabel(t(desc_key))
+            _d.setProperty("cls", "sub")
+            _d.setWordWrap(True)
+            _row.addWidget(_d, 1)
+            _cl.addLayout(_row)
         _tb.addWidget(_card)
         _tb.addStretch(1)
         return self.toolbox_widget
@@ -3522,6 +3597,9 @@ class MainWindow(QMainWindow):
         self.cfg = load_config()
         self.retranslate_ui()  # resets nav + stack to home
         self.home._refresh()
+        # round-136：标题栏不随 retranslate_ui 重建 → 品牌自定义要手动刷新
+        self._refresh_titlebar_brand()
+        self._apply_window_icon()
 
     def retranslate_ui(self):
         """Reload all user-facing strings after a language change."""
@@ -3664,13 +3742,19 @@ class MainWindow(QMainWindow):
         if getattr(inst, "id", "") in getattr(self, "_game_procs", {}):
             self.statusBar().showMessage(t("status.instance_running", name=inst.name))
             return
-        # round-107 T8 / round-109：该实例后台下载仍在进行 → 默认不并发启动
-        # （双写同一目录）；但给逃生口 —— 用户可取消下载后立刻启动，护栏不再
-        # 变成「永久拦住启动」。
+        # round-146：该实例后台下载没结束 → 直接拒绝启动（不再给「取消下载
+        # 并启动」的逃生口）。用户明确要求：下载中不要同时拉起游戏，避免
+        # 同一目录双写；启动入口在首页 / 实例页都会经过这里。
         _dl = getattr(self, "_dl_workers", {}).get(getattr(inst, "id", ""))
         if _dl is not None and _dl.isRunning():
-            if not self._confirm_launch_while_downloading(inst, _dl):
-                return
+            pct = self._dl_pct.get(getattr(inst, "id", ""), 0)
+            self.statusBar().showMessage(
+                t("status.download_blocked_launch", name=inst.name), 6000)
+            from .win_rounded import toast
+            toast(self, t("launch.dl_busy_toast",
+                          default="「{name}」仍在下载（{pct}%），完成后再启动。",
+                          name=inst.name, pct=pct))
+            return
         account = self.current_account or OFFLINE_ACCOUNT
         settings = load_config()
         # round-116 P0-1 低内存警告：实例覆盖内存优先，超「可提交内存余量」时警告。

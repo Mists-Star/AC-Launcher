@@ -27,7 +27,16 @@ from src.settings_dialog import load_config
 
 
 def _app_icon() -> QIcon:
-    """Load the AC Launcher icon from assets."""
+    """Load the AC Launcher icon: user custom logo wins over the built-in asset."""
+    # round-136：用户自定义标志优先（标题栏 / 窗口图标 / 启动页共用同一张图）。
+    # 这里必须自己读配置 —— 调用点在 load_config() 之前。
+    try:
+        from src.brand_custom import custom_logo_path
+        p = custom_logo_path()
+        if p:
+            return QIcon(p)
+    except Exception:
+        pass
     base = os.path.dirname(os.path.abspath(__file__))
     for ext in ("png", "ico", "svg"):
         p = os.path.join(base, "assets", "icons", f"logo.{ext}")

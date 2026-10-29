@@ -7,7 +7,7 @@
 
 ## 0. 我们的现状基线（对照锚点）
 
-- **栈**：Python 3.13 + PySide6（QSS 主题）+ PyInstaller / Nuitka 打包。
+- **栈**：Python 3.13 + PySide6（QSS 主题）+ PyInstaller 打包。
 - **已实现**：Microsoft 登录（device-code）、实例管理、多加载器（Fabric/Forge/NeoForge/OptiFine/LiteLoader/Quilt）、mod 本地管理、资源中心 `StorePage`（Modrinth + CF widget）、BMCLAPI + 官方下载、单实例（跨进程 mutex，**已实现**）、崩溃分析 UI。
 - **第 13 轮待打包**：双页根因修复（QDialog 窗口标志）、图标缓存 `.img`→`.png` 修复。
 - **11 个短板（用户原话）**：动画 / 主页排版功能样式 / 玩家各类管理 / 启动器图标资源 / 流畅度 / 美观度 / 可自定义度 / 资源图标零等待 / 下载路线窄慢 / 欢迎页 / 单实例优化。

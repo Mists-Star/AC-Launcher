@@ -11,15 +11,17 @@
 from __future__ import annotations
 
 import os
+import threading
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QGroupBox, QCheckBox, QFrame, QMenu,
+    QGroupBox, QCheckBox, QFrame, QMenu, QProgressBar,
 )
 
 from . import modules as M
 from . import plugin_host as PH
+from . import feature_pack as FP
 from .i18n import t, get_language
 from .theme import COLORS, with_alpha
 from .icons import icon
@@ -65,6 +67,14 @@ class ModulesPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._ext_windows: dict = {}
+        # round-139 组件下载（工作线程 + 轮询进度，避免 UI 卡死）
+        self._pack_thread: threading.Thread | None = None
+        self._pack_cancel: threading.Event | None = None
+        self._pack_result: dict | None = None
+        self._pack_btn: QPushButton | None = None
+        self._pack_pb: QProgressBar | None = None
+        self._pack_pct: QLabel | None = None
+        self._pack_timer: QTimer | None = None
         self._build()
 
     # ── scaffold ─────────────────────────────────────────────────────────
@@ -371,19 +381,47 @@ class ModulesPage(QWidget):
     # ── 4. JS 扩展 ───────────────────────────────────────────────────────
     def _fill_extensions(self):
         self._clear(self._ext_lay)
-        if not PH.webengine_available():
-            # round-104：把「不可用」的具体原因一并显示，便于排查（如缺 DLL、
-            # 导入报错等），不再只有一句笼统提示。
-            msg = t("ext.unavailable")
-            reason = PH.webengine_unavailable_reason()
-            if reason:
-                msg += "\n\n" + t("ext.unavailable_reason", reason=reason)
-            hint = QLabel(msg)
-            hint.setProperty("cls", "sub")
-            hint.setWordWrap(True)
-            hint.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            self._ext_lay.addWidget(hint)
+        # 卸载后本会话保持「安装入口」（宿主 import 已缓存，available 仍为 True）
+        if getattr(self, "_pack_uninstalled", False):
+            self._pack_card({"status": "absent", "reason": "no-state"})
             return
+        st = FP.state()
+        if not PH.webengine_available():
+            if st["status"] == "installed":
+                # round-139：组件文件在位但宿主还没 import 成功 —— 最常见是
+                # 「刚装完待重启」；也可能是真实故障（缺运行库），附上具体原因，
+                # 不误报为「组件没装」。
+                msg = t("ext.pack.wait_restart")
+                reason = PH.webengine_unavailable_reason()
+                if reason:
+                    msg += "\n\n" + t("ext.unavailable_reason", reason=reason)
+                hint = QLabel(msg)
+                hint.setProperty("cls", "sub")
+                hint.setWordWrap(True)
+                hint.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                self._ext_lay.addWidget(hint)
+                return
+            # 未安装 / 版本过期 / 文件缺失 → 组件安装卡（round-139 B3）
+            self._pack_card(st)
+            return
+        # 宿主可用 → 组件状态行（有安装记录才给卸载；手动合并/开发环境不给）
+        if st["status"] == "installed":
+            st_row = QHBoxLayout()
+            if st.get("manual"):
+                lbl = QLabel(t("ext.pack.installed_manual"))
+            else:
+                lbl = QLabel(t("ext.pack.installed",
+                               version=st.get("version") or "-"))
+            lbl.setProperty("cls", "sub")
+            st_row.addWidget(lbl)
+            st_row.addStretch(1)
+            if not st.get("manual"):
+                un = QPushButton(t("ext.pack.uninstall"))
+                un.setProperty("cls", "secondary")
+                un.setMinimumHeight(26)
+                un.clicked.connect(self._uninstall_pack)
+                st_row.addWidget(un)
+            self._ext_lay.addLayout(st_row)
 
         inst = {e.id: e for e in PH.scan_extensions()}
         if inst:
@@ -434,6 +472,136 @@ class ModulesPage(QWidget):
         hint.setWordWrap(True)
         row.addWidget(hint, stretch=1)
         self._ext_lay.addLayout(row)
+
+    # ── 4.1 组件安装卡（round-139 B3）────────────────────────────────────
+    def _pack_card(self, st: dict):
+        """未安装/版本过期/文件缺失时展示的安装入口：按钮 + 下载进度。"""
+        card = QFrame()
+        card.setProperty("cls", "card")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(6)
+        title = QLabel(t("ext.pack.section"))
+        title.setStyleSheet("font-size: 13px; font-weight: 700;")
+        v.addWidget(title)
+        desc = QLabel(t("ext.pack.desc"))
+        desc.setProperty("cls", "sub")
+        desc.setWordWrap(True)
+        v.addWidget(desc)
+
+        prow = QHBoxLayout()
+        prow.setSpacing(8)
+        self._pack_pb = QProgressBar()
+        self._pack_pb.setTextVisible(False)
+        self._pack_pb.setFixedHeight(8)
+        self._pack_pct = QLabel("")
+        self._pack_pct.setProperty("cls", "sub")
+        prow.addWidget(self._pack_pb, stretch=1)
+        prow.addWidget(self._pack_pct)
+        v.addLayout(prow)
+
+        brow = QHBoxLayout()
+        label = (t("ext.pack.update") if st.get("reason") == "version-mismatch"
+                 else t("ext.pack.install"))
+        self._pack_btn = QPushButton(label)
+        self._pack_btn.setMinimumHeight(32)
+        self._pack_btn.clicked.connect(self._start_pack_install)
+        cancel_b = QPushButton(t("ext.pack.cancel"))
+        cancel_b.setProperty("cls", "secondary")
+        cancel_b.setMinimumHeight(32)
+        cancel_b.clicked.connect(self._cancel_pack_install)
+        cancel_b.setVisible(False)
+        brow.addWidget(self._pack_btn)
+        brow.addWidget(cancel_b)
+        brow.addStretch(1)
+        v.addLayout(brow)
+
+        downloading = st["status"] == "downloading"
+        self._pack_pb.setVisible(downloading)
+        self._pack_pct.setVisible(downloading)
+        if downloading and self._pack_btn:
+            self._pack_btn.setEnabled(False)
+            cancel_b.setVisible(True)
+
+        self._ext_lay.addWidget(card)
+        self._pack_cancel_btn = cancel_b
+
+    def _start_pack_install(self):
+        """后台线程 下载→校验→落位；QTimer 200ms 轮询进度（不阻塞 UI）。"""
+        if self._pack_thread and self._pack_thread.is_alive():
+            return
+        self._pack_uninstalled = False
+        self._pack_cancel = threading.Event()
+        self._pack_result = None
+        if self._pack_btn:
+            self._pack_btn.setEnabled(False)
+        if self._pack_pb:
+            self._pack_pb.setVisible(True)
+        if getattr(self, "_pack_cancel_btn", None):
+            self._pack_cancel_btn.setVisible(True)
+
+        def run():
+            res: dict = {}
+            try:
+                if not self._pack_cancel.is_set():
+                    z = FP.ensure_downloaded(cancel=self._pack_cancel.is_set)
+                    if self._pack_cancel.is_set():
+                        res["cancel"] = True
+                    else:
+                        FP.install(z)
+                        res["ok"] = True
+                else:
+                    res["cancel"] = True
+            except Exception as e:  # noqa: BLE001 —— 面向用户弹错
+                # 用户主动取消不报错（下载中断已 break 换源前的退出）
+                res["cancel" if (self._pack_cancel and self._pack_cancel.is_set())
+                    else "err"] = e
+            self._pack_result = res
+
+        self._pack_thread = threading.Thread(target=run, daemon=True)
+        self._pack_thread.start()
+        self._pack_timer = QTimer(self)
+        self._pack_timer.setInterval(200)
+        self._pack_timer.timeout.connect(self._poll_pack)
+        self._pack_timer.start()
+
+    def _poll_pack(self):
+        sofar, total = FP.progress()
+        if total > 0 and self._pack_pb:
+            pct = int(sofar * 100 / total)
+            self._pack_pb.setValue(pct)
+            if self._pack_pct:
+                self._pack_pct.setText(t("ext.pack.downloading", pct=pct))
+        res = self._pack_result
+        if res is None:
+            return
+        if self._pack_timer:
+            self._pack_timer.stop()
+        self._pack_thread = None
+        if res.get("ok"):
+            info(self, t("ext.pack.done_title"), t("ext.pack.restart_tip"))
+        elif res.get("err"):
+            warn(self, t("ext.pack.fail"), str(res["err"]))
+        self._fill_extensions()  # 恢复卡态 / 显示「待重启」提示
+
+    def _cancel_pack_install(self):
+        if self._pack_cancel:
+            self._pack_cancel.set()
+        if self._pack_btn:
+            self._pack_btn.setEnabled(False)  # 等线程在断点处退出
+
+    def _uninstall_pack(self):
+        if not confirm(self, t("ext.pack.uninstall"),
+                       t("ext.pack.uninstall_confirm")):
+            return
+        try:
+            FP.uninstall()
+        except FP.ComponentError as e:
+            warn(self, t("ext.pack.fail"), str(e))
+            return
+        # 本会话宿主 import 已缓存（available 仍 True），显式切回安装卡（B4）
+        self._pack_uninstalled = True
+        self._fill_extensions()
 
     def _ext_row(self, e: PH.ExtensionInfo) -> QFrame:
         row = QFrame()

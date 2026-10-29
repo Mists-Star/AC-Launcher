@@ -54,9 +54,6 @@ _PERF_EXPECT_FORGE = [
     ("entityculling",),
 ]
 
-# Java 兼容区间（对齐 core.java.select_java 的 max_ok 表）
-_JAVA_MAX_OK = {8: 8, 16: 17, 17: 21, 21: 24, 25: 25}
-
 
 # --------------------------------------------------------------------------- #
 # helpers
@@ -268,15 +265,19 @@ def _java_major_for(javas: list[dict], path: str) -> int:
 
 
 def _check_java(inst, settings) -> list[Finding]:
-    from .java import required_java_major_for, select_java, scan_javas
+    from .java import (required_java_major_for, select_java, scan_javas,
+                       find_version_json, is_java_compatible)
 
     findings: list[Finding] = []
     gv = (getattr(inst, "game_version", "") or "").strip()
     if not gv:
         return findings
     # Loader-aware: Cleanroom is 1.12.2 on Java 21.
-    need = required_java_major_for(gv, getattr(inst, "loader", "") or "")
-    max_ok = _JAVA_MAX_OK.get(need, need + 3)
+    # round-146：有版本 json 时以其 javaVersion 为准（快照/新编号版本）。
+    _vjson = find_version_json(getattr(inst, "mc_dir", "") or "",
+                               getattr(inst, "version_id", "") or gv)
+    need = required_java_major_for(gv, getattr(inst, "loader", "") or "",
+                                   version_json=_vjson)
 
     settings = settings or {}
     inst_path = (getattr(inst, "java_path", "") or "").strip()
@@ -290,7 +291,7 @@ def _check_java(inst, settings) -> list[Finding]:
         major = _java_major_for(javas, eff_path)
         # 只有能从扫描结果确认版本、且确实不兼容时才报（路径不在扫描表里
         # 说明是玩家手填的 JDK，不运行无法得知版本 → 不误报）。
-        if major and not (need <= major <= max_ok):
+        if major and not is_java_compatible(need, major):
             fixed = select_java(gv, java_auto=True, need_override=need)
             fix = (_fix("set_java_path", "health.fixlabel.set_java_path",
                         {"path": fixed}) if fixed

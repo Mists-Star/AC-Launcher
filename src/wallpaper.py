@@ -18,9 +18,10 @@ from __future__ import annotations
 import os
 
 from PySide6.QtWidgets import QWidget, QLabel, QGraphicsOpacityEffect
-from PySide6.QtCore import Qt, QUrl, QSize, QPointF, QRectF, QTimer, Signal
+from PySide6.QtCore import (Qt, QUrl, QSize, QPointF, QRectF, QTimer, Signal,
+                            QElapsedTimer)
 from PySide6.QtGui import (
-    QPixmap, QMovie, QPainter, QColor,
+    QPixmap, QMovie, QPainter, QColor, QImage,
     QRadialGradient, QLinearGradient, QBrush,
 )
 
@@ -48,19 +49,33 @@ ANY_FILTER = (
 # How strong the scrim has to be depends on the artwork -- a bright sunrise
 # panorama needs a heavy scrim, the dark cave panorama needs almost none --
 # so it is derived from the cubemap's mean luminance instead of being fixed.
-PANO_TARGET_LUMA = {"light": 0.55, "dark": 0.44}
+# round-146b：light 目标亮度 0.68 → 0.76、底部遮罩下限 0.46 → 0.56 —— 用户
+# 反馈「文字可阅读性低」：#4B5563 次文本压在亮全景上仍不够，把整体压得更亮、
+# 底部也不完全放开，保证牌面/说明文字在各角度都能读。
+PANO_TARGET_LUMA = {"light": 0.76, "dark": 0.40}
 # Scrim strength at the bottom of the page, where no text sits: the artwork
 # is most visible there.
-PANO_SCRIM_FLOOR = {"light": 0.30, "dark": 0.15}
+PANO_SCRIM_FLOOR = {"light": 0.56, "dark": 0.18}
 # Fraction of the page height over which the scrim fades to its lower value.
 PANO_SCRIM_SPAN = 0.70
-# Animation: Minecraft's title panorama turns very slowly; 0.2 deg per tick
-# at 20 fps is ~4 deg/s, fast enough to be noticed, slow enough to stay calm.
-PANO_FRAME_MS = 50
-PANO_YAW_STEP = 0.2
-# The cubemap is rendered into a half-resolution buffer and scaled up: the
-# art is soft anyway and it halves the per-frame cost.
-PANO_BUFFER_DIV = 2
+# Animation: the vanilla title panorama advances with the game's tick clock —
+# 20 ticks per second, 0.15 deg of yaw per tick — NOT with the render frame
+# rate.  So a 144 Hz screen must not spin the cube faster than a 60 Hz one.
+#
+# Two things follow:
+#   * the repaint interval is one tick (50 ms), matching the original rhythm;
+#   * the yaw is advanced by the *measured* elapsed time, not by a fixed step,
+#     so a timer that fires late (or a machine that stalls) cannot make the
+#     rotation drift away from the original speed.
+PANO_TICK_HZ = 20
+PANO_FRAME_MS = int(1000 / PANO_TICK_HZ)
+PANO_YAW_PER_TICK = 0.15
+# Degrees per second implied by the original tick rhythm (0.15 * 20 = 3 deg/s).
+PANO_YAW_PER_SEC = PANO_YAW_PER_TICK * PANO_TICK_HZ
+# round-146：原先 2 = 半分辨率缓冲再放大——用户看到「版本动态背景模糊」。
+# 全景贴图本身是 1024×1024，半分辨率重投影等于先丢掉一半细节再插值放大。
+# 改为 1（按窗口原生分辨率重投影），配合 SmoothPixmapTransform 直接清晰。
+PANO_BUFFER_DIV = 1
 
 # ── loop-seam fade ──────────────────────────────────────────────────────
 # GIFs and videos restart abruptly at the loop point; the jump from the last
@@ -89,6 +104,36 @@ def _mean_luma(images) -> float:
                 total += (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
                 count += 1
     return (total / count / 255.0) if count else 0.0
+
+
+def _device_dpr(widget) -> float:
+    """Device pixel ratio of the surface a widget paints on (>= 1.0).
+
+    round-148：壁纸此前完全没有处理 DPR。显示器 125% 缩放（DPR=1.25）时，
+    按**逻辑**尺寸渲染的图会被 Qt 放大 1.25 倍铺到物理像素上 → 一次多余的
+    重采样 → 整屏发糊。这与 async_image 在 round-126 修过的「卡片封面低清」
+    是同一个坑，只是壁纸漏了。
+    """
+    try:
+        return max(1.0, float(widget.devicePixelRatioF() or 1.0))
+    except Exception:  # noqa: BLE001 - no screen yet
+        return 1.0
+
+
+def _flat_raster(pm: QPixmap) -> QPixmap:
+    """The pixmap's pixels as a plain DPR-1.0 raster (no resampling).
+
+    ``QPixmap.scaled()`` interprets its target size in the *source* raster's
+    own coordinate system, so a source that already carries a device pixel
+    ratio has to be normalised first -- otherwise the picture ends up scaled
+    by the ratio twice.
+    """
+    if pm.devicePixelRatio() == 1.0:
+        return pm
+    img = pm.toImage().copy()
+    img.setDevicePixelRatio(1.0)
+    return QPixmap.fromImage(img)
+
 
 
 def guess_mode(path: str) -> str:
@@ -148,7 +193,8 @@ def _theme_for_version(version_id: str | None) -> str:
     return "overworld"
 
 
-def draw_version_wallpaper(version_id: str | None, size: QSize) -> QPixmap | None:
+def draw_version_wallpaper(version_id: str | None, size: QSize,
+                           dpr: float = 1.0) -> QPixmap | None:
     """Render a deterministic, resolution-independent themed wallpaper.
 
     The same ``version_id`` always produces the same scene, so the background
@@ -158,11 +204,20 @@ def draw_version_wallpaper(version_id: str | None, size: QSize) -> QPixmap | Non
       - quiet near-black (dark) or lavender-grey (light) base
       - a single soft accent glow whose HUE follows the version
       - a faint grid overlay (control-console feel) instead of noisy blocks
+
+    round-148：``size`` 是**逻辑**尺寸，``dpr`` 是目标表面的设备像素比。
+    图形按物理像素绘制后再打上 DPR 标记，这样贴到屏幕上时是 1:1 的物理
+    像素映射，不会被二次插值放大。
     """
     if not size.isValid() or size.width() < 2 or size.height() < 2:
         return None
-    pm = QPixmap(size)
-    w, h = size.width(), size.height()
+    dpr = max(1.0, float(dpr or 1.0))
+    # 物理像素尺寸的画布
+    pw = max(2, int(round(size.width() * dpr)))
+    ph = max(2, int(round(size.height() * dpr)))
+    pm = QPixmap(pw, ph)
+    # 绘制坐标统一用逻辑单位（= 物理像素 / dpr）
+    w, h = float(pw) / dpr, float(ph) / dpr
     theme = VERSION_THEMES.get(_theme_for_version(version_id), VERSION_THEMES["overworld"])
     # round-91 光晕主色跟随自定义 accent（内置紫主题下与原先 #7C3AED 一致）
     try:
@@ -183,12 +238,14 @@ def draw_version_wallpaper(version_id: str | None, size: QSize) -> QPixmap | Non
     p = QPainter(pm)
     try:
         p.setRenderHint(QPainter.Antialiasing)
+        # 画布是物理像素，绘制坐标用逻辑单位 → 缩放 dpr 倍即可 1:1 落位
+        p.scale(dpr, dpr)
 
         # 1. base vertical gradient (neutral, quiet)
         bg = QLinearGradient(0, 0, 0, h)
         bg.setColorAt(0.0, base_top)
         bg.setColorAt(1.0, base_bot)
-        p.fillRect(pm.rect(), QBrush(bg))
+        p.fillRect(QRectF(0, 0, w, h), QBrush(bg))
 
         # 2. single accent glow, top-left → centre; hue from the version
         # With no instance there is no version to follow, so use the brand
@@ -207,7 +264,7 @@ def draw_version_wallpaper(version_id: str | None, size: QSize) -> QPixmap | Non
         glow.setColorAt(1.0, QColor(0, 0, 0, 0))
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(glow))
-        p.drawRect(pm.rect())
+        p.drawRect(QRectF(0, 0, w, h))
 
         # 2b. faint AC accent echo from the bottom-right corner (brand tie-in)
         if dark:
@@ -217,14 +274,14 @@ def draw_version_wallpaper(version_id: str | None, size: QSize) -> QPixmap | Non
             echo.setColorAt(0.0, acc)
             echo.setColorAt(1.0, QColor(0, 0, 0, 0))
             p.setBrush(QBrush(echo))
-            p.drawRect(pm.rect())
+            p.drawRect(QRectF(0, 0, w, h))
 
         # 3. faint control-console grid (keep alpha very low)
         p.setPen(QColor(255, 255, 255, 14) if dark else QColor(90, 70, 160, 16))
         step = 72
-        for gx in range(0, w + step, step):
+        for gx in range(0, int(w) + step, step):
             p.drawLine(gx, 0, gx, h)
-        for gy in range(0, h + step, step):
+        for gy in range(0, int(h) + step, step):
             p.drawLine(0, gy, w, gy)
 
         # 4. vignette to keep edges dark-ish for UI text readability
@@ -233,9 +290,11 @@ def draw_version_wallpaper(version_id: str | None, size: QSize) -> QPixmap | Non
         vig.setColorAt(1.0, QColor(0, 0, 0, 150 if dark else 90))
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(vig))
-        p.fillRect(pm.rect(), QBrush(vig))
+        p.fillRect(QRectF(0, 0, w, h), QBrush(vig))
     finally:
         p.end()
+    # 标记 DPR：贴到屏幕上时按逻辑尺寸 1:1 落位，不再被二次放大
+    pm.setDevicePixelRatio(dpr)
     return pm
 
 
@@ -351,6 +410,8 @@ class WallpaperWidget(QWidget):
         self._media_luma: float | None = None  # mean luminance of still art
         self._pano_timer: QTimer | None = None
         self._pano_key: tuple | None = None
+        # round-147：真实时钟，用于按原版 tick 节奏推进 yaw（消除定时器漂移）
+        self._pano_clock = QElapsedTimer()
         # ── loop-seam fade state ──
         self._veil: _Veil | None = None
         self._fade: _LoopFade | None = None
@@ -617,12 +678,17 @@ class WallpaperWidget(QWidget):
         if key != self._pano_key:
             return  # a newer request superseded this one
         if not images or len(images) != 6:
-            return  # nothing found -> keep the procedural gradient
+            # round-145 修「部分版本获取不到背景」：贴图缺失（资源未下载 /
+            # 旧版本无 panorama）时此前直接 return，backdrop 永远隐身 →
+            # 整个背景消失。回退到程序化的版本主题背景，至少有底色。
+            self._fallback_procedural()
+            return  # nothing found -> procedural fallback is on screen
         try:
             from .panorama import PanoramaRenderer
             self._panorama = PanoramaRenderer(images)
         except Exception:  # noqa: BLE001 - a broken cubemap must not kill the page
             self._panorama = None
+            self._fallback_procedural()
             return
         self._pano_luma = _mean_luma(images)
         self._pano_buffer = None
@@ -636,6 +702,33 @@ class WallpaperWidget(QWidget):
         self.panorama_ready.emit()
         self.update()
 
+    def _fallback_procedural(self) -> None:
+        """Paint the deterministic version-themed wallpaper (round-145).
+
+        Used when the real panorama cannot be loaded — a version without
+        usable panorama assets must still get a background. Uses the current
+        widget size; a later resize re-scales via the shared ``_scaled`` path.
+        """
+        if self._mode != "version":
+            return
+        try:
+            pm = draw_version_wallpaper(self._version_id, self.size(),
+                                        _device_dpr(self))
+        except Exception:  # noqa: BLE001 - a fallback bug must never hurt
+            pm = None
+        if pm is None or pm.isNull():
+            return
+        self._pixmap = pm
+        self._scaled = None
+        try:
+            self._media_luma = _mean_luma([pm.toImage()])
+        except Exception:  # noqa: BLE001
+            self._media_luma = None
+        if not self.isVisible():
+            self.setVisible(True)
+        self._sync_veil()
+        self.update()
+
     def _start_pano_timer(self) -> None:
         if self._pano_timer is None:
             self._pano_timer = QTimer(self)
@@ -643,9 +736,27 @@ class WallpaperWidget(QWidget):
             self._pano_timer.timeout.connect(self._pano_tick)
         if self.isVisible():
             self._pano_timer.start()
+            # round-147：重新计时基准，避免暂停期间积压的时间在恢复瞬间
+            # 让全景「跳」一大段。
+            self._pano_clock.restart()
 
     def _pano_tick(self) -> None:
-        self._pano_yaw = (self._pano_yaw + PANO_YAW_STEP) % 360.0
+        """Advance the panorama by one tick of the original game's clock.
+
+        round-147：原版主菜单的全景是跟着**游戏 tick** 走的（20 tick/s、
+        每 tick 0.15° ≈ 3°/s），跟显示器刷新率无关——144 Hz 屏上不会比
+        60 Hz 屏转得更快（这是 Bedrock 版的已知 bug，Java 版没有）。
+
+        所以这里不再用「每次定时器固定 +0.2°」，而是量出**真实经过时间**
+        再换算成角度：定时器抖动、系统卡顿都不会让转速偏离原版。
+        """
+        if not self._pano_clock.isValid():
+            self._pano_clock.start()
+            elapsed = PANO_FRAME_MS
+        else:
+            elapsed = self._pano_clock.restart()
+        self._pano_yaw = (self._pano_yaw
+                          + elapsed * PANO_YAW_PER_SEC / 1000.0) % 360.0
         self.update()
 
     def _teardown_dynamic(self) -> None:
@@ -751,13 +862,26 @@ class WallpaperWidget(QWidget):
         elif self._mode in ("image", "version") and self._pixmap is not None:
             # Cache the size-fit pixmap — re-scaling a full-res image on every
             # repaint (especially during a resize drag) is very expensive.
-            if self._scaled is None or self._scaled.size() != self.size():
-                self._scaled = self._pixmap.scaled(
-                    self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            #
+            # round-148：缩放到**物理**像素并打上 DPR 标记。缩到逻辑尺寸再让
+            # 设备变换放大 1.25 倍 = 多一次插值重采样 → 整屏发糊。
+            dpr = _device_dpr(self)
+            phys = QSize(max(1, int(round(self.width() * dpr))),
+                         max(1, int(round(self.height() * dpr))))
+            if (self._scaled is None
+                    or self._scaled_size != phys
+                    or self._scaled.devicePixelRatio() != dpr):
+                # ``_flat_raster`` 先把源图归一化成 DPR-1.0 的像素栅格，
+                # 否则 ``scaled()`` 会按比例缩放两次。
+                self._scaled = _flat_raster(self._pixmap).scaled(
+                    phys, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
                 )
-                self._scaled_size = self.size()
-            x = (self.width() - self._scaled.width()) // 2
-            y = (self.height() - self._scaled.height()) // 2
+                self._scaled.setDevicePixelRatio(dpr)
+                self._scaled_size = phys
+            lw = self._scaled.width() / dpr
+            lh = self._scaled.height() / dpr
+            x = (self.width() - lw) / 2.0
+            y = (self.height() - lh) / 2.0
             p.drawPixmap(x, y, self._scaled)
         p.end()
 
@@ -766,17 +890,25 @@ class WallpaperWidget(QWidget):
         w, h = self.width(), self.height()
         if w < 2 or h < 2 or self._panorama is None:
             return
-        bw = max(2, w // PANO_BUFFER_DIV)
-        bh = max(2, h // PANO_BUFFER_DIV)
+        # round-148：缓冲按**物理**像素建。之前缓冲只有逻辑分辨率，再被设备
+        # 变换放大 1.25 倍 —— 多一次重采样（糊），面缝也被拉宽成可见黑线。
+        dpr = _device_dpr(self)
+        bw = max(2, int(round(w * dpr)) // PANO_BUFFER_DIV)
+        bh = max(2, int(round(h * dpr)) // PANO_BUFFER_DIV)
         if self._pano_buffer is None or self._pano_buffer.size() != QSize(bw, bh):
             self._pano_buffer = QPixmap(bw, bh)
         bp = QPainter(self._pano_buffer)
         try:
-            bp.fillRect(self._pano_buffer.rect(), QColor(0, 0, 0))
+            # round-146：底色从纯黑改为全景平均色 —— 缓冲填黑时，相邻面之间
+            # 的亚像素缝会透出黑点/黑线并随 yaw 抖动闪烁（「黑色噪点」）。
+            avg = getattr(self._panorama, "avg_color", None)
+            bp.fillRect(self._pano_buffer.rect(), avg or QColor(32, 34, 38))
             self._panorama.render(bp, QRectF(0, 0, bw, bh), yaw=self._pano_yaw)
         finally:
             bp.end()
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        # 缓冲是 DPR-1.0 的物理像素栅格，源矩形用像素坐标；目标矩形用逻辑
+        # 坐标（设备变换负责 1:1 落到物理像素）。
         p.drawPixmap(QRectF(0, 0, w, h), self._pano_buffer,
                      QRectF(self._pano_buffer.rect()))
         self._paint_scrim(p)
@@ -862,6 +994,9 @@ class WallpaperWidget(QWidget):
                 if on:
                     if self._panorama is not None:
                         self._pano_timer.start()
+                        # round-147：恢复播放时重置时钟基准，暂停期间
+                        # 的时间不计入 yaw（否则会瞬间跳一大段）。
+                        self._pano_clock.restart()
                 else:
                     self._pano_timer.stop()
             except Exception:  # noqa: BLE001

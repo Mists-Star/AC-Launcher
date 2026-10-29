@@ -16,11 +16,10 @@ import os
 def get_resource_path(relative_path: str) -> str:
     """Absolute path to a bundled read-only resource (assets/, default configs…).
 
-    Supports three packaging layouts:
+    Supports two packaging layouts:
       - dev:              cwd-relative (project root)
-      - PyInstaller:      sys._MEIPASS temp dir
-      - Nuitka standalone: exe dir, or exe_dir/_internal for newer Nuitka
-        versions that group dependencies there.
+      - PyInstaller:      sys._MEIPASS temp dir (onedir 也走这一支，
+                          PyInstaller 6.x 把 _MEIPASS 指向 exe 同级的 _internal)
     """
     if getattr(sys, "_MEIPASS", None):
         return os.path.join(sys._MEIPASS, relative_path)

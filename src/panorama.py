@@ -44,7 +44,7 @@ import zipfile
 
 from PySide6.QtCore import QPointF, QRectF, QThread, Signal
 from PySide6.QtGui import (
-    QImage, QPainter, QPainterPath, QPolygonF, QTransform,
+    QImage, QPainter, QPainterPath, QPolygonF, QTransform, QColor,
 )
 
 # Resource names of the six faces, most recent layout first.
@@ -411,6 +411,29 @@ class PanoramaRenderer:
         self.fov = fov
         self.yaw = 0.0
         self.pitch = -6.0
+        # round-146：面与面之间按浮点裁剪后偶有 1px 缝，缓冲填黑时这些缝就是
+        # 用户看到的「黑色噪点/黑线」（且随每帧 yaw 抖动闪烁）。缓冲底色改为
+        # 六面平均色——缝隙即使露出来也和画面同色，肉眼不可见。
+        self.avg_color = self._mean_color(faces)
+
+    @staticmethod
+    def _mean_color(faces: list[QImage]) -> QColor:
+        """Sparse mean color of the six faces (16×16 samples each — cheap)."""
+        r = g = b = n = 0
+        for img in faces:
+            w, h = img.width(), img.height()
+            if w < 2 or h < 2:
+                continue
+            for i in range(16):
+                for j in range(16):
+                    c = img.pixelColor(int(w * (i + 0.5) / 16), int(h * (j + 0.5) / 16))
+                    r += c.red()
+                    g += c.green()
+                    b += c.blue()
+                    n += 1
+        if not n:
+            return QColor(32, 34, 38)
+        return QColor(r // n, g // n, b // n)
 
     # ---------------------------------------------------------------- draw
     def render(self, painter: QPainter, rect: QRectF, yaw: float | None = None,
@@ -491,6 +514,19 @@ class PanoramaRenderer:
             sy = (my[0] * u + my[1] * v + my[2]) / den
             dev.append(QPointF(sx, sy))
         path = QPainterPath()
+        # round-146：相邻面共用一条边，浮点裁剪后常留 1px 缝；缓冲填黑时这些
+        # 缝就是闪烁的「黑色噪点」。把可见多边形沿质心方向外扩 0.75px，让相邻
+        # 面互相压住（重叠部分画的是同一处墙面，肉眼不可见）。
+        if len(dev) >= 3:
+            gx = sum(pt.x() for pt in dev) / len(dev)
+            gy = sum(pt.y() for pt in dev) / len(dev)
+            grown = []
+            for pt in dev:
+                dx, dy = pt.x() - gx, pt.y() - gy
+                d = math.hypot(dx, dy) or 1.0
+                grown.append(QPointF(pt.x() + dx / d * 0.75,
+                                     pt.y() + dy / d * 0.75))
+            dev = grown
         path.addPolygon(QPolygonF(dev))
         path.closeSubpath()
 
@@ -498,6 +534,9 @@ class PanoramaRenderer:
         painter.resetTransform()
         painter.setClipPath(path)
         painter.setTransform(t)
+        # round-146：1024px 贴图被重投影放大到屏幕，最近邻采样会给出块状/点状
+        # 杂色（用户感知为「噪点」）；显式打开平滑采样。
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
         painter.drawImage(QPointF(0, 0), img)
         painter.restore()
 

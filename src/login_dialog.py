@@ -20,7 +20,7 @@ import webbrowser
 from PySide6.QtGui import QPixmap  # round-100：QColor/QLinearGradient 已随 hero 中性化移除
 
 from .theme import COLORS, RoundedCard
-from .icons import icon
+from .icons import icon, pixmap as icon_pixmap
 from .i18n import t
 from .worker import Worker
 from .core import auth
@@ -166,7 +166,7 @@ class LoginDialog(QDialog):
         el.setSpacing(8)
         ext_head = QHBoxLayout()
         ext_icon = QLabel()
-        ext_icon.setPixmap(icon("external").pixmap(18, 18))
+        ext_icon.setPixmap(icon_pixmap("external", 18))
         ext_head.addWidget(ext_icon)
         ext_head.addWidget(QLabel(t("login.third_title")))
         ext_head.addStretch(1)
@@ -206,12 +206,14 @@ class LoginDialog(QDialog):
         self._login_box.setVisible(True)
 
     def _build_hero(self) -> QWidget:
-        """顶部横幅（round-100 极简）：中性卡 + 左侧 3px accent 竖条。
+        """顶部横幅（round-100 极简）：中性卡。
 
         旧版是紫→洋红渐变 + 白字（大面积强调色，主题色一换整块变色），
-        改为中性底 + 全局 token 文字 + accent 竖条/小图标点缀。
+        round-100 改为中性底 + 全局 token 文字。
+        round-147：再去掉左侧 3px accent 竖条 —— 用户反馈「按钮留黑边/紫边
+        等不好看，就是说这些按钮留边都不太好看」。
         """
-        hero = RoundedCard(radius=16, accent_border=3)
+        hero = RoundedCard(radius=16)
         hero.setMinimumHeight(110)
         hl = QVBoxLayout(hero)
         hl.setContentsMargins(22, 18, 22, 18)
@@ -220,7 +222,7 @@ class LoginDialog(QDialog):
         ic.setFixedSize(40, 40)
         ic.setAlignment(Qt.AlignCenter)
         ic.setProperty("cls", "tile")
-        ic.setPixmap(icon("account").pixmap(22, 22))
+        ic.setPixmap(icon_pixmap("account", 22))
         hl.addWidget(ic)
         ttl = QLabel(t("login.heading"))
         ttl.setProperty("cls", "big")
@@ -348,7 +350,7 @@ class LoginDialog(QDialog):
         path = skin_manager().active_path(acc.get("id"))
         if path and os.path.exists(path):
             return render_head(path, 56)
-        return icon("account").pixmap(56, 56)
+        return icon_pixmap("account", 56)
 
     def _open_skins(self):
         acc = accounts_manager().current()

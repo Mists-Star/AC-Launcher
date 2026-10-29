@@ -25,7 +25,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor
 
 from .theme import COLORS, RoundedCard, set_accent_color
-from .icons import icon
+from .icons import pixmap as icon_pixmap
 from .i18n import t, set_language
 from .frameless import FramelessHelper, TitleBar
 from .settings_dialog import load_config, save_config, ACCENT_PRESETS
@@ -339,7 +339,7 @@ class OnboardingDialog(QDialog):
                 card_lay.setSpacing(12)
 
                 icon_lbl = QLabel()
-                icon_lbl.setPixmap(icon(icon_name).pixmap(28, 28))
+                icon_lbl.setPixmap(icon_pixmap(icon_name, 28))
                 icon_lbl.setStyleSheet("background: transparent; border: none;")
                 card_lay.addWidget(icon_lbl)
 

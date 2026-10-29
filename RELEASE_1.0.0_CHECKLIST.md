@@ -35,6 +35,11 @@
 
 - [ ] **打包成品**：`build.bat`/PyInstaller 出可分发单包，安装后首次运行
   冒烟（Acrylic 关闭时的降级路径）。
+  现状 2026-10-26（round-133）：打包已切换为 PyInstaller onedir，
+  `build.bat` → `build.py` → `dist_beta\AC_Launcher\AC_Launcher.exe`；
+  spec 补齐 32 个模块与 mll 动态导入，完整构建 exit=0，成品离屏启动到
+  MainWindow 且无 crash/boot/fault 日志。**剩余：真机（非离屏）首启目检
+  与 Program Files 只读路径验证。**
 
 ## B. 高感知（建议在 1.0.0 前，按性价比）
 

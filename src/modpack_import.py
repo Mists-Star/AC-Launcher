@@ -207,8 +207,11 @@ def import_curseforge_zip(
         fid = f.get("fileID", "")
         label = f"CurseForge #{pid}/{fid}"
 
-        def _task(pid=pid):
-            download_curseforge_mod(pid, inst.mods_dir)
+        # round-142：传 file_id —— manifest 指定的文件版本必须精确下载
+        # （此前丢弃 fileID 只取最新版，装出来的包和作者声明的不一致）；
+        # 无 key 时 download_curseforge_mod 内部自动走免 key 通道。
+        def _task(pid=pid, fid=fid):
+            download_curseforge_mod(pid, inst.mods_dir, file_id=fid)
 
         batch.append(BatchItem(name=label, task=_task))
 

@@ -301,13 +301,16 @@ def versions_root(inst, version: str = "") -> str:
     """mll 解析版本 json 用的 .minecraft 根目录（round-78 对齐主流解析器）。
 
     round-82 起按启动格式（inst.format / detect_format）分流：
-    - iso（版本隔离）→ mc_dir 本身就是隔离目录，真实 json 扁平躺在
+    - iso（外来版本隔离）→ mc_dir 本身就是隔离目录，真实 json 扁平躺在
       mc_dir/<version>.json，mll 固定按 ``<root>/versions/<id>/<id>.json`` 解析，
       把解析根指到 mc_dir 的上级两层（原 .minecraft），让 mll 直接食用玩家真实
       json——重建、伪造一律不发生（即「按他的格式启动」）。
-    - 其余布局（原版共享 / AC 自建 / 其它整合布局的 .minecraft）
+    - 其余布局（AC 自有 / 原版共享 / 其它整合布局的 .minecraft）
       根即 mc_dir；`<mc>/<version>.json` 特征兜底自适应，改装/奇怪目录也尽量
       按外来隔离式扁平布局解析（round-78）。
+      注：AC 自有布局与原版共享 .minecraft 的**解析根相同**（都是 mc_dir），
+      区别在数据是否共享，不在版本 json 定位——故 round-135 的 "ac" 档
+      不改变这里的分流结果。
     """
     mc = getattr(inst, "mc_dir", "")
     if not mc:
@@ -532,6 +535,41 @@ def launch_process(cmd: list[str], mc_dir: str, log_path: str | None = None,
     return proc, None
 
 
+def _find_installed_loader(mc_dir: str, loader: str, game_version: str) -> str | None:
+    """在 versions/ 下找该加载器对应当前 MC 版本的已安装版本 id。
+
+    多数加载器的版本 id 自带 MC 版本（``fabric-loader-0.15.11-1.20.1`` /
+    ``1.20.1-forge-47.2.0``），子串匹配即可；但 NeoForge 1.21+ 的 id 是
+    ``neoforge-21.1.0``、Cleanroom 是 ``Cleanroom-0.7.12-alpha`` —— 都不含
+    MC 版本，只能读版本 json 的 ``inheritsFrom`` 判定。否则这两类实例每次
+    启动都被判成「未安装」，重跑安装器（Cleanroom 一次可达数分钟）。
+    """
+    import glob as _glob
+    import json as _json
+    for d in sorted(_glob.glob(os.path.join(mc_dir, "versions", f"*{loader}*"))):
+        base = os.path.basename(d)
+        # 子串撞名防护：glob 的 *forge* 会命中 neoforge、*fabric* 会命中
+        # legacyfabric —— 逐个排除，避免把另一种加载器当成目标加载器启动。
+        _low = base.lower()
+        if loader == "forge" and "neoforge" in _low:
+            continue
+        if loader == "fabric" and "legacyfabric" in _low:
+            continue
+        jp = os.path.join(d, f"{base}.json")
+        if not os.path.isfile(jp):
+            continue
+        if game_version and game_version in base:
+            return base
+        try:
+            with open(jp, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+        except (OSError, ValueError):
+            continue
+        if str(data.get("inheritsFrom") or "") == game_version:
+            return base
+    return None
+
+
 def launch_instance(
     inst,
     account: dict,
@@ -575,7 +613,6 @@ def launch_instance(
     # 二次启动跳过安装并用 game_version（原版）启动，加载器静默失效。
     # 正确判据：加载器实例必须匹配 <loader> 相关的 version json
     # （fabric-loader-0.15.11-1.20.1 / 1.20.1-forge-47.2.0 等）。
-    import glob as _glob
     import os as _os
     _loader = (getattr(inst, "loader", "") or "").strip().lower()
     _skip = False
@@ -589,14 +626,9 @@ def launch_instance(
             or _os.path.isfile(_os.path.join(
             inst.mc_dir, f"{inst.version_id}.json"))
     elif _loader and _loader != "vanilla":
-        # AC 创建加载器实例：找 <loader>-<...>-<mcver> 的 version json
-        installed = None
-        _pat = _os.path.join(inst.mc_dir, "versions", f"*{_loader}*{inst.game_version}*")
-        for _d in sorted(_glob.glob(_pat)):
-            _base = _os.path.basename(_d)
-            if _os.path.isfile(_os.path.join(_d, f"{_base}.json")):
-                installed = _base
-                break
+        # AC 创建加载器实例：按加载器版本 json 判定已安装（NeoForge 1.21+ /
+        # Cleanroom 的 id 不含 MC 版本，需按 inheritsFrom 匹配，见 helper）。
+        installed = _find_installed_loader(inst.mc_dir, _loader, inst.game_version)
         _skip = installed is not None
         installed = installed or inst.game_version
     else:
@@ -626,10 +658,14 @@ def launch_instance(
     # select_java takes java_auto / user_path as KEYWORD-only args — passing the
     # bool positionally raised TypeError and broke every launch.
     java_auto = settings.get("java_auto", True)
-    # Cleanroom is a 1.12.2 fork running on Java 21 — the version table alone
-    # would select Java 8 and the client/installer would fail to load classes.
-    from .core.java import required_java_major_for
-    _need = required_java_major_for(inst.game_version, inst.loader)
+    # Cleanroom is a 1.12.2 fork whose 0.7.x builds run on Java 25 — the version
+    # table alone would select Java 8 and the client would fail to load classes.
+    from .core.java import find_version_json, required_java_major_for
+    # round-146：优先用版本 json 的真实 javaVersion；快照（25w14craftmine）
+    # 只有 json 里才写对要求，纯 ID 推断会误判成「需要 Java 25」。
+    _vjson = find_version_json(getattr(inst, "mc_dir", ""),
+                               version or getattr(inst, "game_version", ""))
+    _need = required_java_major_for(inst.game_version, inst.loader, version_json=_vjson)
     java = select_java(inst.game_version, java_auto=java_auto,
                        user_path=user_java, need_override=_need)
     # round-46：select_java 返回 None = 没有任何兼容该 MC 版本的 Java。
@@ -662,7 +698,7 @@ def launch_instance(
     if java:
         from .core.java import scan_javas as _scan_javas
         from .core.java import java_major as _java_major
-        # (_need already includes the Cleanroom → 21 override above)
+        # (_need already includes the Cleanroom → 25 override above)
         _jmajor = 0
         _norm = os.path.normcase(os.path.normpath(java))
         for _j in _scan_javas(deep=False):
@@ -679,7 +715,8 @@ def launch_instance(
             if _m:
                 _n = int(_m.group(1))
                 _jmajor = 8 if _n == 1 else _n
-        if _jmajor and _jmajor != _need:
+        from .core.java import is_java_compatible as _java_ok
+        if _jmajor and not _java_ok(_need, _jmajor):
             # 手动路径版本不符 → 尝试自动找一个兼容 Java；找到就切换并明示
             _alt = None
             if not java_auto:
@@ -759,7 +796,11 @@ def launch_instance(
             except Exception:  # noqa: BLE001 - 更新失败绝不影响启动
                 pass
         else:
-            if callback:
+            # round-143 修复「启动失败：'dict' object is not callable」：
+            # ProgressWorker 传入的 callback 是 mll 风格的进度 dict，不可
+            # 调用 —— 直接调用会让整次启动以 TypeError 失败。dict 侧交给
+            # _emit_step 无 key 静默跳过。
+            if callable(callback):
                 callback(f"警告：未找到 authlib-injector.jar（{inj}），外置登录可能无法生效")
 
     # round-53：一次构建所有选项（含 authlib agent）——之前 yggdrasil 分支

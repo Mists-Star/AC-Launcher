@@ -42,6 +42,7 @@ SUITES = [
     ("整合包进度桥接", "test_pack_progress.py", "script"),
     ("mod 下载进度聚合", "test_mod_progress.py", "script"),
     ("设置页脏检测回归", "test_settings_dirty.py", "script"),
+    ("品牌自定义回归", "test_brand_custom.py", "script"),
     ("核心功能冒烟", "test_functional.py", "script"),
     ("全页面构造冒烟", "smoke_all.py", "script"),
 ]

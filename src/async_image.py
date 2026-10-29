@@ -11,7 +11,6 @@ Both are Qt-aware; keep them out of the Qt-free ``core`` layer.
 from __future__ import annotations
 
 import os
-import math
 import hashlib
 from collections import OrderedDict
 
@@ -410,15 +409,18 @@ def _draw_iso_block(p: QPainter, s: float, top_pm, side_pm, right_pm,
                     top_col: QColor, side_col: QColor, right_col: QColor) -> None:
     """Draw an isometric cube of width ``s`` (top vertex at the origin).
 
-    ``hh`` is the half-height of the top diamond (2:1, the MC pixel-art
-    standard). The vertical side edges must be as long as the slanted top
-    edges — ``hypot(cx, hh)`` ≈ 0.559·s — otherwise the same 16×16 texture is
-    stretched horizontally on the sides and the whole cube reads as squashed.
-    Total silhouette height = 2·hh + vh ≈ 1.059·s.
+    round-145：照 MC 官方 GUI 投影（block model gui display: rot [30,225,0]）
+    取比例——顶面菱形 2:1（hh = 0.25·s，官方同为 2:1），竖直棱 vh ≈ 0.6124·s，
+    即官方「竖边/总宽」比 0.866/1.414。
+    此前 vh 取 hypot(cx, hh) ≈ 0.559·s（与斜边等长、贴图零形变），但官方
+    渲染里竖边本就比斜边长 9.6%（16×16 贴图被竖向拉伸 1.096×，正是 MC 自
+    己的效果），0.559 让侧壁矮了一截、整体 h/w 仅 1.059，视觉上就是用户
+    说的「压扁」。现按官方比例：总高 = 2·hh + vh ≈ 1.112·s（官方 1.112）。
+    HMCL 等启动器直接渲染 MC 原版模型，即此比例（PCL2 则用 2D 平面图标）。
     """
     cx = s / 2.0
     hh = s * 0.25
-    vh = math.hypot(cx, hh)
+    vh = s * 0.6124
     A = QPointF(cx, 0.0)
     C = QPointF(cx, hh * 2.0)
     D = QPointF(0.0, hh)
@@ -436,43 +438,64 @@ def _draw_iso_block(p: QPainter, s: float, top_pm, side_pm, right_pm,
                 right_pm or side_pm, right_col, 82)
 
 
-def make_version_pixmap(version_id: str, vtype: str, size: int = 56) -> QPixmap:
+# round-129：原版方块贴图只有 16×16，直接按目标尺寸做最近邻映射时，每个
+# texel 在 56px 图标上只占 ~3.5px，再叠加斜切变换，斜面全是阶梯状硬边、
+# 噪点贴图糊成颗粒——观感就是「低清 / 被压缩」。改为 4× 超采样 + 双线性
+# 贴图 + 平滑缩回：texel 边界被抗锯齿，斜边平滑，读起来像一张干净的小渲染
+# 图，而不是被压坏的小图。图标只与 vtype 有关，按 (vtype, size, dpr) 缓存。
+_ICON_SS = 4
+_version_icon_cache: dict[tuple[str, int, float], QPixmap] = {}
+
+
+def make_version_pixmap(version_id: str, vtype: str, size: int = 56,
+                        dpr: float | None = None) -> QPixmap:
     """Draw a 3D isometric MC block icon for a version (HMCL / PCL2 style).
 
     round-107：正式版草方块、快照命令方块、愚人节工作台、旧版砖块 / 圆石。用
     随包真实 MC 贴图渲染；任何贴图缺失都会回退到纯色向量块，绝不画出坏图标。
     ``version_id`` 保留在签名里以兼容旧调用点（图标由 ``vtype`` 决定）。
     """
+    if dpr is None:
+        try:
+            from PySide6.QtGui import QGuiApplication
+            _scr = QGuiApplication.primaryScreen()
+            dpr = float(_scr.devicePixelRatio()) if _scr is not None else 1.0
+        except Exception:
+            dpr = 1.0
+    dpr = max(1.0, float(dpr))
+    px = max(8, int(round(size * dpr)))
+    key = (vtype, int(size), round(dpr, 2))
+    hit = _version_icon_cache.get(key)
+    if hit is not None:
+        return hit
+
     names = _BLOCK_FACES.get(vtype) or _BLOCK_FALLBACK
     top_pm = _tinted_block_tex(names[0], _FACE_TINTS.get(names[0], ""))
     side_pm = _load_block_tex(names[1])
     right_pm = _load_block_tex(names[2]) if names[2] else None
     cols = _ISO_BLOCK.get(vtype) or _ISO_BLOCK["old_alpha"]
 
-    # Render at the physical pixel size and carry the DPR on the pixmap, so a
-    # 1.25×/1.5× display gets a crisp icon instead of a Qt-upscaled blur.
-    try:
-        from PySide6.QtGui import QGuiApplication
-        _scr = QGuiApplication.primaryScreen()
-        dpr = float(_scr.devicePixelRatio()) if _scr is not None else 1.0
-    except Exception:
-        dpr = 1.0
-    dpr = max(1.0, dpr)
-    px = max(8, int(round(size * dpr)))
-    pm = QPixmap(px, px)
+    ss = _ICON_SS
+    big = px * ss
+    pm = QPixmap(big, big)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    # 2px padding so the AA edges of the top vertex aren't clipped. The cube is
-    # taller than wide (height = s·(2+√5)/4 ≈ 1.059·s), so derive the width from
-    # the available height instead of stuffing it into a square — that was the
-    # "grass block looks squashed" bug.
-    box = float(px - 4 * dpr)
-    s = box * 4.0 / (2.0 + math.sqrt(5.0))
-    p.translate((px - s) / 2.0, 2.0 * dpr)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    # 2 logical px padding so the AA edges of the top vertex aren't clipped. The
+    # cube is taller than wide (round-145: height = s·(0.5+0.6124) ≈ 1.1124·s，
+    # 照 MC 官方 GUI 投影比例，见 _draw_iso_block docstring)，so derive the
+    # width from the available height instead of stuffing it into a square —
+    # that was the "grass block looks squashed" bug.
+    box = float(big - 4 * ss)
+    s = box / 1.1124
+    p.translate((big - s) / 2.0, 2.0 * ss)
     _draw_iso_block(p, s, top_pm, side_pm, right_pm,
                     QColor(cols[0]), QColor(cols[1]), QColor(cols[2]))
     p.end()
+
+    pm = pm.scaled(px, px, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
     pm.setDevicePixelRatio(dpr)
+    _version_icon_cache[key] = pm
     return pm
 
