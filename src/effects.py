@@ -21,10 +21,64 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication
 
-from .theme import COLORS, RoundedCard
+from .theme import (COLORS, RoundedCard, MOTION_QUICK_MS,
+                    MOTION_LIFT_PX)
 
 # ── global switch (config-driven, refreshed at startup) ─────────────────────
 EFFECTS_ENABLED = True
+
+# ── 减少动效 / reduced motion（round-152，无障碍）────────────────────────
+# 与 EFFECTS_ENABLED 是两件事：后者管「花哨装饰」（流光/扫光），本开关管
+# 「过渡本身」。开启后页面切换瞬时到位、列表不淡入、流光卡停止跑动画，
+# 但界面与功能完整保留 —— 对齐 LumilioCL 的 reduced-motion 语义。
+MOTION_REDUCED = False
+
+# ── 游戏运行中（round-156，启动即降载）──────────────────────────────────
+# 游戏跑起来后，启动器只是后台面板：流光/扫光这类装饰动画没有观看价值，
+# 却每帧都在光栅化。置 True 后主表停摆、卡面退回静态；游戏退出自动恢复。
+GAME_RUNNING = False
+
+
+def set_game_running(on: bool) -> None:
+    """游戏进程运行期间暂停装饰动画（对齐 LumilioCL「游戏运行时停止装饰性工作」）。"""
+    global GAME_RUNNING
+    on = bool(on)
+    if on == GAME_RUNNING:
+        return
+    GAME_RUNNING = on
+    if on:
+        for c in list(_ACTIVE_CARDS):
+            try:
+                c.update()      # 让 paintEvent 以静态样式重绘一次
+            except Exception:  # noqa: BLE001 - 单卡析构中，忽略
+                pass
+        _stop_master()
+    elif EFFECTS_ENABLED and not MOTION_REDUCED and _ACTIVE_CARDS:
+        _ensure_master()
+
+
+def set_reduce_motion(on: bool) -> None:
+    global MOTION_REDUCED
+    MOTION_REDUCED = bool(on)
+    if MOTION_REDUCED:
+        # 已在跑的流光卡：先请求重绘一次（paintEvent 会退回静态卡片），
+        # 再清出活动集合，主表停摆。
+        for c in list(_ACTIVE_CARDS):
+            try:
+                c.update()
+            except Exception:  # noqa: BLE001 - 单卡析构中，忽略
+                pass
+        _ACTIVE_CARDS.clear()
+        _stop_master()
+
+
+def motion_ms(ms: int) -> int:
+    """动效时长统一出口：减少动效时归零。
+
+    注意：duration=0 的 QPropertyAnimation 仍会走首尾帧，需要「完全瞬时」
+    的调用方（页面切换等）应先查 ``MOTION_REDUCED`` 直接跳转。
+    """
+    return 0 if MOTION_REDUCED else int(ms)
 
 
 def set_effects_enabled(on: bool) -> None:
@@ -166,7 +220,9 @@ class LightTrailCard(RoundedCard):
     # -- lifecycle -----------------------------------------------------
     def showEvent(self, e):
         super().showEvent(e)
-        if EFFECTS_ENABLED and (self._trail or self._reflect):
+        # 减少动效：不注册到主表，paintEvent 同步退回静态卡片。
+        if EFFECTS_ENABLED and not MOTION_REDUCED and not GAME_RUNNING and (
+                self._trail or self._reflect):
             _ACTIVE_CARDS.add(self)
             _ensure_master()
 
@@ -189,8 +245,9 @@ class LightTrailCard(RoundedCard):
 
     # -- painting ------------------------------------------------------
     def paintEvent(self, e):
-        # 效果关闭 → 走普通 RoundedCard 绘制。
-        if not EFFECTS_ENABLED or not (self._trail or self._reflect):
+        # 效果关闭 / 减少动效 / 游戏运行中 → 走普通 RoundedCard 绘制（静态）。
+        if (not EFFECTS_ENABLED or MOTION_REDUCED or GAME_RUNNING
+                or not (self._trail or self._reflect)):
             return super().paintEvent(e)
         try:
             self._paint_liquid(e)
@@ -304,9 +361,20 @@ def fade_page_transition(stack, index: int) -> None:
     调用本函数；动画失败 → 直接瞬时切换（不崩、不卡）。
 
     round-103：不再受 ``EFFECTS_ENABLED``（流光装饰总开关）牵连——页面切换
-    动画有自己的配置 ``page_transition``（默认开）。此前本函数在流光关闭时
-    直接跳转，导致「页面切换动画」开关形同虚设。"""
+    动画有自己的配置 ``page_transition``。此前本函数在流光关闭时直接跳转，
+    导致「页面切换动画」开关形同虚设。
+
+    round-152：减少动效（``MOTION_REDUCED``）时直接瞬时切换；时长/上浮距离
+    改用 ``theme`` 的动效 token。"""
     if stack is None:
+        return
+    if MOTION_REDUCED:
+        # 无障碍：不走任何 palette/pos 过渡，直接落位。
+        try:
+            stack.setGraphicsEffect(None)
+            stack.setCurrentIndex(index)
+        except Exception:  # noqa: BLE001
+            pass
         return
     from PySide6.QtCore import QPropertyAnimation, QEasingCurve
     from PySide6.QtWidgets import QGraphicsOpacityEffect
@@ -318,7 +386,7 @@ def fade_page_transition(stack, index: int) -> None:
         stack.setGraphicsEffect(eff)
         stack.setCurrentIndex(index)
         anim = QPropertyAnimation(eff, b"opacity", stack)
-        anim.setDuration(160)
+        anim.setDuration(motion_ms(MOTION_QUICK_MS))
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
         anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -345,9 +413,9 @@ def fade_page_transition(stack, index: int) -> None:
             except Exception:  # noqa: BLE001
                 pass
             end_pos = page.pos()
-            page.move(end_pos.x(), end_pos.y() + 8)
+            page.move(end_pos.x(), end_pos.y() + MOTION_LIFT_PX)
             rise = QPropertyAnimation(page, b"pos", stack)
-            rise.setDuration(180)
+            rise.setDuration(motion_ms(MOTION_QUICK_MS))
             rise.setStartValue(page.pos())
             rise.setEndValue(end_pos)
             rise.setEasingCurve(QEasingCurve.OutCubic)
@@ -369,13 +437,13 @@ def fade_page_transition(stack, index: int) -> None:
             pass
 
 
-def fade_in_widget(w, duration: int = 170) -> None:
+def fade_in_widget(w, duration: int = MOTION_QUICK_MS) -> None:
     """列表/容器重建后的轻量淡入（round-100 动画打磨，克制）。
 
     一次性 QGraphicsOpacityEffect——动画结束必清 effect（同
     fade_page_transition 的防重影策略）；重复触发先清旧 effect。
-    失败或效果总开关关闭 → 静默跳过（纯装饰，不参与功能）。"""
-    if w is None or not EFFECTS_ENABLED:
+    失败、效果总开关关闭或减少动效 → 静默跳过（纯装饰，不参与功能）。"""
+    if w is None or not EFFECTS_ENABLED or MOTION_REDUCED:
         return
     from PySide6.QtCore import QPropertyAnimation, QEasingCurve
     from PySide6.QtWidgets import QGraphicsOpacityEffect

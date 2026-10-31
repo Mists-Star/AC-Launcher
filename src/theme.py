@@ -106,6 +106,16 @@ THEME_DARK = {
 # Active token table (default: LIGHT — matches user's Ardot white-bg design)
 COLORS = dict(THEME_LIGHT)
 _theme_mode = "light"
+
+# ── 动效 token（round-152）──────────────────────────────────────────────
+# 对齐 LumilioCL 的 motion token：时长/位移统一从这里取，调用处不再散写
+# 160/180/280。无障碍「减少动效」由 effects.set_reduce_motion 负责把
+# 过渡压成瞬时（本组 token 不随之改写，便于还原）。
+MOTION_INSTANT_MS = 90     # 按下 / 悬停等即时反馈
+MOTION_QUICK_MS = 160      # 页面、列表淡入（最高频）
+MOTION_SETTLE_MS = 280     # 面板落位 / toast 进出
+MOTION_SCENE_MS = 700      # 启动页 / 场景级过渡
+MOTION_LIFT_PX = 8         # 页面 / 卡片上浮距离
 # round-49 修复「改选项把强调色拉回紫色」：记录用户自定义的 accent。set_theme_mode /
 # apply_theme_pack 重置基础色表后必须重新套用自定义 accent，否则 accent 恒被
 # THEME_LIGHT/THEME_DARK 里的 #7C3AED 覆盖。None = 未自定义（用内置紫）。
@@ -1262,7 +1272,7 @@ def build_qss() -> str:
         subst["band"] = "transparent"
         subst["band_card"] = "transparent"
         # 主窗本体保持实色垫底：壁纸子控件没盖到（加载间隙）时窗口不会
-        # 透出桌面；ExtensionWindow 等独立 QMainWindow 同样受益。
+        # 透出桌面；独立 QMainWindow 同样受益。
         subst["win_bg"] = COLORS["bg_app"]
     elif _app_bg_translucent:
         # 透底模式（round-51）：应用层底色转半透明，让系统 Acrylic 的桌面

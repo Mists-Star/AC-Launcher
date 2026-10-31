@@ -8,6 +8,552 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-162（2026-10-31）— 条款版本化门禁 + 更新后内容弹窗
+
+> 来源：LumilioCL 调研第 9 节「条款要版本化，不要一次性同意」。
+> 首次使用或条款改版时启动必须重新同意；更新器装完后的首次启动展示
+> 本次更新内容（只弹一次）。
+
+### 新增
+
+* **`src/terms.py`**：隐私协议 / 用户守则 / 免责声明的**唯一正文来源**，
+  `TERMS_VERSION = 1`（`TERMS_UPDATED = 2026-10-31`）。改正文只需改这一处
+  并 bump 版本；`needs_acceptance(cfg)` 对脏值（None / 字符串）回落为 0。
+* **`src/terms_dialog.py`**：可滚动条款 + 「我已阅读并同意」勾选门禁；
+  未勾选时「同意并继续」不可用，关闭 / 退出即拒绝。
+* **`main.py` 启动门禁**：QSS 应用后、splash 之前征询；拒绝则直接退出、
+  不创建主窗口；同意后把 `terms_accepted_version` 写回配置。
+* **更新后内容弹窗**：读取更新器写入的 `data/updates/pending_notes.json`，
+  等主窗口真正显示后弹一次，随即清除——不会每次启动都骚扰。
+* **设置页「隐私协议 / 用户守则 / 免责声明」**改为读取 `src/terms.py`，
+  与启动门禁共用同一份正文（原先硬编码在 `settings_dialog.py`）。
+* i18n 新增 8 键 × 2 语言（1421/1421）。
+
+### 🔍 验证
+
+* `python -m compileall -q src main.py` → 0 错误。
+* `python regress.py` → **22 / 22 全绿**（新增「条款版本化门禁」14 项）。
+* 条款套件覆盖：首次 / 已同意 / 改版 / 更高版本记录 / 脏值回落、
+  三段正文齐全且带最后更新日期。
+* 离屏 UI 冒烟：`TermsDialog` 构造正常，未勾选时继续按钮禁用、勾选后启用。
+
+## round-161（2026-10-31）— 更新器 UI + 下载校验 + PowerShell 自替换
+
+> 来源：LumilioCL 调研第 9 节「更新要能自己完成，失败要能自己回来」。
+> 签名清单通过后才下载；下载完再复核 size/sha256；替换只动 exe 与
+> `_internal`，配置 / 账户 / `data/` 原地不动；失败自动回滚并重启旧版。
+
+### 新增
+
+* **`src/core/update_install.py`**：
+  * `download_update` —— `data/updates/<version>/<asset>.zip.part` 流式写入，
+    硬上限 = 清单 size，超限/中断/哈希不符一律删 `.part`；成功后 `os.replace`
+    原子落盘并再次复核；已存在且校验通过的缓存直接复用；支持进度回调与取消。
+  * `write_upgrade_script` —— 生成带 BOM 的 PowerShell 助手（中文路径不乱码）：
+    等待主进程 PID 退出（≤120s）→ 把 `AC_Launcher.exe` / `_internal` 改名为
+    `.upd_bak` → `Expand-Archive` 覆盖 → 校验新 exe → 删备份并重启；
+    任一步失败则删除新文件、改回原名、重启旧版。单引号路径做 `''` 转义。
+  * `launch_upgrade_helper` —— 隐藏窗口、脱离父进程启动助手；仅 Windows。
+  * `pending_notes.json` —— 更新说明交接给下次启动的内容弹窗。
+* **设置页「启动器更新」**（高级分区）：
+  * 更新源可留空（官方 GitHub Releases `latest.json`）或填自建 https 地址；
+  * 检查更新 → 验签失败 / 网络失败按错误码给出人话原因；
+  * 发现新版本显示版本号与更新说明，确认后「下载并重启更新」；
+  * 下载进度条 + 取消；下载/校验/写助手全在 Worker 线程，UI 不卡；
+  * 游戏运行中拒绝更新；源码运行（非 frozen）拒绝自动替换；
+  * 成功后自动保存配置、拉起助手并退出主程序。
+* `AC_PiTest_noupx.spec` 收录 `src.core.update_install`、`src.terms`、
+  `src.terms_dialog`；`regress.py` 新增「更新下载/自替换助手」套件；
+  i18n 新增 27 键 × 2 语言（1413/1413）。
+
+### 🔍 验证
+
+* `python -m compileall -q src main.py` → 0 错误。
+* `python regress.py` → **22 / 22 全绿**（新增「更新下载/自替换助手」35 项）。
+* 新套件覆盖：file:// 下载成功 / 进度单调 / 缓存复用（源被改也不受影响）/
+  损坏缓存重下 / size 与 hash 不符清理 / 非 https 拒绝 / 取消无残留 /
+  脚本 PID、`.upd_bak`、`Expand-Archive`、`-WorkingDirectory`、回滚分支 /
+  `'` 转义 / pending notes 读写清理 / 开发版与缺资产拒绝 /
+  **PowerShell 语法解析通过**（只解析不执行）。
+* 离屏 UI 冒烟：高级分区构造出更新控件，默认隐藏下载/进度/取消，
+  且未改动时 `is_dirty() == False`（懒加载不误判）。
+
+## round-160（2026-10-31）— 更新签名信任链核心（Ed25519 + 清单校验 + 发布密钥）
+
+> 来源：LumilioCL 调研第 9 节「签名是信任成本，不是最佳实践」。
+> AC 不学「无签名分发 + 教用户放行」：更新清单必须先通过离线密钥签名
+> 验证，再谈下载；签名覆盖**清单原始字节**，避免 JSON 规范化歧义。
+
+### 新增
+
+* **`src/core/ed25519.py`**：纯 Python 的 RFC 8032 Ed25519 签名/验签。
+  不引入 `cryptography`，冻结包在干净 Windows 上也能验证；RFC 8032
+  两组官方向量已写成回归断言。
+* **`src/core/update_trust.py`**：
+  * `parse_version` / `compare_versions` / `is_newer` —— 语义化版本比较
+    （含 `-beta` / `-rc.2` 预发布排序）；
+  * `verify_signed_manifest` —— 严格 JSON（拒绝重复键）→ 信任表查
+    key_id → Ed25519 验签 → schema/kind/版本/资产字段校验；
+  * 资产必须 `.zip`、sha256 为 64 位小写十六进制、大小 1B~2GB、
+    文件名禁止路径分隔符；URL 默认只允许 https（http/file 仅在测试
+    `allow_insecure=True` 时放行）；
+  * `check_for_update` —— 拉取 `latest.json` + `latest.json.sig`
+    （默认 GitHub Releases，设置可覆盖），返回 update/current；
+  * `file_sha256` / `verify_asset_file` —— 下载后按清单复核大小与哈希。
+* **`src/core/update_keys.py`**：只提交公钥（key id
+  `ac-e5a35f41ce3faf1f`，2026-10-31 生成）；私钥在
+  `~/.ac_launcher_update_key`，不入库、不进构建、不打印。
+* **`tools/ac_update_keygen.py`**：一次性生成密钥对（拒绝覆盖，需
+  `--force` 轮换）；只打印公钥与 key id。
+* **`tools/ac_update_sign.py`**：对清单**原始字节**签名，输出
+  `latest.json.sig`（含 schema/algorithm/key_id/sig）。
+
+### 🔍 验证
+
+* `python -m compileall -q src tools` → 0 错误。
+* `python regress.py` → **20 / 20 全绿**（新增「更新签名信任链」44 项）。
+* 新增套件覆盖：RFC 8032 向量、篡改清单/签名/算法/密钥、重复 JSON 键、
+  版本排序（含 rc.2 < rc.10）、http 拒绝与测试放行、file:// 拉取、
+  读取上限、资产 size/hash/缺失、未知密钥。
+* 生产密钥端到端：`ac_update_sign.py` 签临时清单 → `verify_signed_manifest`
+  用仓库公钥验签成功（key id 一致）；私钥内容未出现在任何输出。
+
+## round-159（2026-10-31）— IA 用户路径表（源码标记生成 + 过期即失败）
+
+> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 8 节、第 11 节 #8）。
+> 「文档不会说谎」：路径表由源码里的标记生成，代码改了而文档没更新，
+> `regress.py` 直接失败——不靠人记、不靠手写维护。
+
+### 新增
+
+* **`tools/gen_paths.py`**：
+  * 扫描 `src/**.py` 里的 `# ia[page]: 操作 | 层/组件 | 结果与反馈 [| 备注]`
+    标记，生成 `docs/ia/paths.md`；
+  * `--check` 与磁盘内容逐字比对，过期/标记格式错误 → 退出码 1；
+  * 只记源文件不记行号，避免无关编辑导致文档天天「过期」。
+* **`docs/ia/paths.md`**：首页 / 实例 / 设置三页共 15 条真实操作路径
+  （启动、结束游戏、首页留意行动作、实例切换/删除/体检/打开目录、
+  设置分区切换/保存、模块从文件安装）。
+* **`tests/check_paths.py`**：以 `--check` 模式跑生成器并透传退出码。
+
+### 变更
+
+* 在 `main_window.py` / `pages_instances.py` / `settings_dialog.py` /
+  `modules_page.py` 的关键动作函数上方补 IA 标记（仅注释，无运行时代码变化）。
+
+### 🔍 验证
+
+* `python tools/gen_paths.py` → 3 页 / 15 条 / 0 错误。
+* `python regress.py` → **19 / 19 全绿**（新增「IA 路径表（过期检查）」）。
+* 手动改坏 `docs/ia/paths.md` 一行 → `--check` 退出码 1；重新生成后恢复。
+* i18n 无新增键（1386 / 1386）。
+
+## round-158（2026-10-31）— 诊断包导出（脱敏 zip：版本/配置/日志/自检结果）
+
+> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 9 节、第 11 节 #9）。
+> 「一键把问题打包给作者」不该靠用户手动截图、翻目录、贴日志；导出的包
+> 在写盘前就完成脱敏，可以直接贴到公开 issue 而不泄漏令牌与用户名。
+
+### 新增
+
+* **`src/core/support_bundle.py`**（Qt-free）：
+  * `redact_config()` —— 敏感键（`dev_mode_key` / `curseforge_api_key`，
+    含嵌套）替换为 `<redacted>`，其余字符串统一走 `log_mask` 打码；
+  * `build_support_bundle()` —— 原子写出 zip：`summary.txt`（版本/平台/
+    Python/数据目录/自检计数）、`config.json`（脱敏副本）、
+    `diagnostics.txt`（逐条状态）、`logs/`（数据根与 `logs/` 下的 `.log`）；
+  * 日志按修改时间取最新 12 个，每个只保留尾部 256KB，读取即打码
+    （`accessToken` 首尾 5 位 + Windows 用户名）；
+  * `default_bundle_name()` —— `AC_support_YYYYMMDD_HHMMSS.zip`。
+* **诊断对话框**：新增「导出诊断包」按钮（export 图标），保存对话框选择
+  路径后在 worker 线程打包，完成弹窗给出路径；运行/修复期间按钮禁用。
+
+### 🔍 验证
+
+* `python -m compileall -q src` → 0 错误。
+* `python regress.py` → **18 / 18 全绿**（新增「诊断包导出（脱敏打包）」
+  套件 29 项）。
+* 新增套件覆盖：敏感键与嵌套键打码、配置/日志中的原始 token 与用户名
+  不出现在归档、两类日志入包且非 `.log` 不入包、600KB 日志截断到 256KB
+  尾部、缺失数据目录与空结果仍可导出、无 `.tmp` 残留、文件名格式。
+* i18n 中英对称 **1386 / 1386** 键（+4 键 × 2 语言）。
+* 全页面构造冒烟通过（DiagnosticsDialog 可构建，新按钮接线无异常）。
+
+## round-157（2026-10-31）— 移除 Chromium（QtWebEngine 扩展宿主整体砍掉）
+
+> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 3 节「没有浏览器内核」）
+> + 用户拍板「没有 chrome 核心之类的，能不能砍掉」。
+> 结论：启动器不该为「用不上的 JS 扩展」背一整套 Chromium；主程序与发行物
+> 从代码到依赖全部去 WebEngine，把内存和体积让给游戏。
+
+### 删除
+
+* **`src/plugin_host.py`**：JS 扩展宿主（QWebEngine 注入桥、权限授予、
+  `ExtensionWindow`）整体移除。
+* **`src/feature_pack.py`**：WebEngine 组件包（下载/校验/安装/卸载）整体移除。
+* **模块页扩展区**：`_fill_extensions()`、`_ext_grp`、扩展窗口映射与
+  `threading/QTimer/QProgressBar` 相关导入、组件包下载线程与进度条字段一并删除。
+* **i18n**：`ext.*`（41 键）+ `pack.err.*`（10 键）中英共 102 行全部删除。
+* **启动参数注入**：`launch.py` 不再消费 `ext_launch_arg_jobs`；
+  `settings_dialog._DEFAULTS` 删除 `ext_grants` / `ext_launch_arg_jobs`。
+* **组件打包链**：`build.py` 删除 `_make_component()` / `run_components()`
+  与 `AC_LITE` 分支，只保留单一主包形态；`requirements.txt` 由 `PySide6`
+  改为 `PySide6-Essentials`。
+
+### 变更
+
+* **spec 恒排除 Chromium 整栈**：`_QT_EXCLUDE` 无条件包含
+  `QtWebEngineCore` / `QtWebEngineWidgets`（连同 Quick/WebChannel 等），
+  不再依赖 `AC_LITE` 环境变量；`_src_modules` 移除两个已删文件。
+* **模块页文案**：分区名改为「模块 / Modules」，文档字符串同步为
+  「内容模块市场 + 从文件安装」三分组。
+
+### 🔍 验证
+
+* `python -m compileall -q src` → 0 错误。
+* `python regress.py` → **17 / 17 全绿**（含 i18n 对称、全页面构造冒烟——
+  证明删掉扩展区后设置页/模块页仍可完整构建）。
+* i18n 中英对称 **1382 / 1382** 键，差异 0。
+* 全仓 `plugin_host` / `feature_pack` / `QWebEngine` 引用仅存于历史文档与旧
+  CHANGELOG，`src/` 内为零。
+
+## round-156（2026-10-31）— 启动即降载（装饰动画暂停 + 壁纸缓存释放 + 插件窗即毁）
+
+> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 3 节、第 11 节 #7）。
+> 游戏跑起来后启动器只是后台面板：把「不在屏幕上的像素」和「没人看的动画」
+> 交还给玩家，而不是让启动器和游戏抢内存/CPU。
+
+### 新增
+
+* **装饰动画随游戏暂停**：`effects.py` 增 `GAME_RUNNING` / `set_game_running()`；
+  游戏运行中主表停摆、流光卡 paintEvent 退回静态卡片，游戏退出自动恢复。
+  游戏运行中新建的流光卡也不注册主表。
+* **壁纸降载**：`WallpaperWidget.suspend()` 停播并销毁动图/视频、丢弃全景六面
+  贴图与缩放缓存、隐藏壁纸层；`resume()` 只清标记，重新上屏由窗口随后的
+  `apply()` 完成。降载期间 `apply()` 不重新加载新图（配置仍由窗口保存）。
+* **接线**：`_set_game_running_ui` 在游戏进程登记/退出时统一切换上述两项，
+  并把页面表面退回不透明（避免透明页面露出一块无内容的底色）。
+
+### 变更
+
+* **插件窗口用完即销毁**：`ExtensionWindow` 设 `WA_DeleteOnClose`；模块页在
+  `destroyed` 后清掉映射，并对已销毁的旧窗口做 `RuntimeError` 兜底重建。
+  关闭后不再让 QWebEngine 渲染进程静默常驻。
+
+### 🔍 验证
+
+* `python -m compileall -q src` → 0 错误。
+* `python regress.py` → **17 / 17 全绿**（新增「启动即降载（动画/壁纸）」套件
+  13 项：游戏运行中不注册流光卡、退出后恢复；suspend 丢弃大图/缩放缓存并隐藏、
+  暂停期间 panorama 停表、降载期间 apply 不加载、resume 后重新上屏）。
+* i18n 中英对称 1433 / 1433 键（本轮无新增 UI 文案）。
+
+## round-155（2026-10-31）— 来源链（Provider/Chain + 逐源失败可见）
+
+> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 4 节、第 11 节 #4）。
+> 来源从「全局布尔开关 + 主机重写」升级为可展开的提供者链：每个请求按偏好
+> 得到「镜像 / 官方」候选，逐源尝试，失败原因按源记录并显示在下载/启动详情。
+
+### 新增
+
+* **`src/core/transfer.py`**（Qt-free）：
+  * `MirrorRule` —— 重写表变成纯数据（前缀必须落在路径边界，避免误伤同前缀主机）；
+  * `OfficialProvider` / `PrefixMirrorProvider` —— 官方与镜像提供者；
+  * `SourceChain` —— 三档偏好（`official_only` / `official_first` / `mirror_first`），
+    候选按 URL 去重；本次安装的失效主机只跳过**镜像**候选，官方回退永远保留；
+    `preferred_concurrency()` 取首个非零并发上限；
+  * `SourceTrace` —— 线程安全的逐源记录：只记失败（环形上限 20），成功只记最后
+    一条；`summary()`（任务历史用，≤4 失败 + 1 成功）、`describe()`（详情一行）。
+* **`InstallContext.trace`**：每次安装自带一份来源记录；`ProgressWorker.trace`
+  在上下文销毁前留下快照，完成回调仍可读。
+* **UI**：下载 / 启动进度对话框新增「来源：…」行（失败源 + HTTP 状态 +
+  最后成功源）；`TaskRecord.sources` 同步写入，任务历史里可追每个源为什么失败。
+
+### 变更
+
+* `core/mirror.py` 的 `MirrorSession.send` 改为走来源链：镜像优先时逐候选尝试，
+  非末位失败记录原因后换源，末位 strict（两源皆失败 = 安装已损坏，显式抛错）；
+  连接错误/超时同样触发换源（此前只对 HTTP ≥400 回退）。
+* `_rewrite`（分片并行等自有路径）保持旧语义：返回链中的镜像候选，未命中则原样。
+
+### 🔍 验证
+
+* `python -m compileall -q src` → 0 错误。
+* `python regress.py` → **16 / 16 全绿**（新增「来源链（逐源失败）」套件 41 项：
+  规则边界、三档顺序、去重、失效过滤、trace 环形上限/摘要、`_rewrite` 与旧
+  重写表等价、假 transport 下镜像 404 → 官方兜底、两源皆失败显式抛错且逐源记账、
+  镜像关闭时不写成功噪声）。
+* i18n 中英对称 1433 / 1433 键（新增 `launch.sources_line`）。
+
+## round-154（2026-10-31）— 任务中心第一步（TaskRecord + 状态机 + 持久历史）
+
+> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 5 节、第 11 节 #3）。
+> 下载 / 启动 / 导入不再各管各的回调，统一上报到一台任务记录表；本轮只做
+> 地基（记录 + 历史），任务页 UI 与重试/暂停留到第二步。
+
+### 新增
+
+* **`src/core/task_center.py`**（Qt-free）：`TaskRecord{id, kind, label,
+  state, stage, completed, total, detail, sources, target_page, created_at,
+  updated_at}`；状态机 `queued → running → done | failed | cancelled`。
+  `TaskCenter` 线程安全，提供 `start/update/finish/fail/cancel/running/recent`。
+* **持久历史**：完成后原子写 `<data_dir>/task_history.json`（只保留最近
+  **50** 条已结束任务）；进行中的任务不落盘，避免半截任务变成历史。
+  进程重启后 `get_task_center()` 自动加载，坏文件/坏记录静默丢弃。
+* **统一上报**：
+  * 实例后台下载：阶段文案 + 下载百分比 + 完成/失败原因；
+  * 游戏启动：启动进度 + 成功（已启动）/ 失败原因；
+  * 整合包应用到实例：阶段文案 + 完成/失败原因。
+
+### 修复
+
+* `core/last_session.py` 导入路径 `from .paths` → `from ..paths`。此前模块
+  导入即失败、异常被静默吞掉，导致 round-153 的「上次启动未成功」实际
+  从未生效；修正后首页聚合能真正读到会话结果（新增冒烟用例覆盖）。
+
+### 🔍 验证
+
+* `python -m compileall -q src` → 0 错误。
+* `python regress.py` → **15 / 15 全绿**（新增「任务中心（记录/历史）」
+  套件 19 项：状态机、结束后忽略迟到 update、进行中不落盘、50 条裁剪、
+  坏文件/坏记录清洗、同目录重建实例后历史仍可读）。
+* i18n 中英对称 1432 / 1432 键（本轮无新增 UI 文案）。
+
+## round-153（2026-10-31）— 首页两问（继续哪个 / 哪些挡住你）+ Java 三档 + 启动前确认
+
+> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 11 节 #1、#2）。首页不再
+> 只是「一堆实例卡」，而是先回答两个问题：最近能玩哪个、哪些会挡住你。
+
+### 新增
+
+* **首页聚合**（`src/core/home_summary.py`，Qt-free）：
+  `HomeSummary{continue_with, needs_attention}`。继续 = 最近玩过且**无 Error**
+  的实例；需要留意 = Warning 及以上（Info 不计），每实例只显示最严重一条
+  + 「另有 N 条」；排序口径 **严重级 → 最近玩过 → id**。未登录时追加一条
+  全局 Warning（action=login）。
+* **会话记录**（`src/core/last_session.py`）：`last_session.json` 原子写，
+  记录 `starting/ok/failed/crashed` + 简短原因；首页据此提示「上次启动未成功」。
+* **`Instance.last_played`**：启动时写入并持久化（同时进摘要索引，懒加载也能排序）。
+* **首页两问 UI**（`main_window.py`）：hero 下方一行一条 `_AttentionRow`
+  （Critical 红 / Warning 琥珀 / 继续 强调色），整行与右侧按钮都可触发；
+  动作路由：继续→切实例并直接启动，fix→切实例页后一键修复，java→设置页
+  Java 分区，login→账户页，其余→实例页。最多显示 4 条 + 1 条继续。
+* **健康扫描降本**：只对当前实例 + 最近玩过的 2 个实例跑 `scan_health`
+  （90s TTL 缓存，按模组目录 mtime / 设置签名失效），其余实例只跑
+  `quick_check`（Java / 内存 / 启动参数，不读 jar）。
+
+### 变更
+
+* **Java 三档语义**（`core/instance_health._check_java`）：
+  * Error（Critical）：缺可用 Java，或指定 Java 不兼容且**没有替代**；
+  * Warning：指定 Java 不兼容，但扫描到可自动切换的版本（体检给
+    「切到 Java N」修复按钮，启动前会先确认）；
+  * Info：能跑但非推荐版本、且本机已装精确匹配版本（只建议，不拦启动）。
+* **启动前 Java 确认**（`main_window._confirm_java_before_launch`）：
+  将更换玩家指定的 Java 时弹一次确认（「本次改用 Java N」）；同意后经
+  `launch_instance(java_override=...)` **只影响这一次**，不写实例/全局设置。
+  `launch_instance` 新增 `java_override` 关键字参数。
+
+### 🔍 验证
+
+* `python -m compileall -q src` → 0 错误。
+* `python regress.py` → **14 / 14 全绿**（新增「首页两问聚合（继续/留意）」
+  套件 23 项：继续避开 Critical、severity→last_played→id 排序、Info 不计与
+  不挡继续、more 计数、未登录全局项、Java 三档、90s 缓存命中/失效）。
+* i18n 中英对称 **1432 / 1432 键**（新增 `home.attn.*` 10 条、
+  `health.*java_advice` 5 条、`launch.java_confirm_*` 3 条）。
+
+## round-152（2026-10-31）— 设计基建：动效 token / 减少动效 / 文案门禁
+
+> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 11 节 #5、#6）。先落地
+> 两条「低成本、全库受益」的设计基建，为后续首页聚合 / 任务中心 / 来源链
+> 提供统一的节奏与文案约束。
+
+### 新增
+
+* **动效 token**（`theme.py`）：`MOTION_INSTANT_MS 90` / `MOTION_QUICK_MS 160`
+  / `MOTION_SETTLE_MS 280` / `MOTION_SCENE_MS 700` / `MOTION_LIFT_PX 8`。
+  页面淡入、上浮、侧栏展开、toast 滑入的散写时长统一改引 token（行为不变）。
+* **减少动效（reduced motion）**（`effects.py` + `settings_dialog.py` +
+  `main_window.py`）：设置 → 外观新增「减少动效」复选框（默认关）。
+  开启后页面切换瞬时到位、列表不再淡入、流光卡退回静态卡片并停表、
+  toast 直接落位、侧栏展开不做宽度过渡；保存后即时生效，重启后保持。
+  与 `EFFECTS_ENABLED`（花哨装饰总开关）解耦——关的是过渡，不是功能。
+* **文案门禁**（`tests/check_copy.py` + `tests/copy_allowlist.txt`，
+  并入 `regress.py`）：中英 AI 禁用词零容忍；`_hint/_help/_note`
+  加权长度预算（中文 40 / 英文 80，汉字 1、其余 0.5）；存量 38 条超预算
+  进 allowlist，**只缩不增**——新增超标或改好未删行都会 FAIL。
+
+### 🔍 验证
+
+* `python -m compileall src` → 0 错误。
+* `python regress.py` → **13 / 13 全绿**（新增「文案门禁」套件：
+  zh/en 各 1414 键、提示 91 条、禁用词 0 命中、allowlist 38 条无新增无过期）。
+* 减少动效手工路径：设置勾选 → 切页瞬时、流光卡停止跑动；取消勾选 → 动画恢复。
+
+## round-151（2026-10-31）— 下载弹窗文本挤压 / 点状态栏召回任务 / 30s 无进展自动切源
+
+> 用户反馈：①「随便下载一个实例即可发现文本被挤压」（截图：下载游戏文件
+> 弹窗的副标题、状态行、步骤行上下被裁）；②「这个窗口被关闭放后台后无法
+> 再次被打开」——要求点底部状态栏回到对应页面与窗口，无任务时不响应；
+> ③（可选）下载源过慢时 30s 无进度直接切源。
+
+### 修复
+
+* **① 下载 / 启动弹窗文本被裁**（`launch_dialog.py`）：
+  根因是像素字体（`Minecraft AE`）的 `fontMetrics().height()`（13~15px）
+  与 QSS 行高不一致 —— 单行 QLabel 只拿到一行高度，上下半截被裁；
+  `wordWrap` 的状态行换行成 2~3 行时布局仍只给 1.8 行，文字被压扁。
+  新增 `_fit_text_heights()`：逐标签按 `max(lineSpacing, height)` 设最小
+  高度，状态行按 `heightForWidth(实际宽度)` 算换行需求；在 `showEvent` /
+  `resizeEvent` / 每次 `set_status_text` 后重算（带 `_fitting` 防重入）。
+* **② 后台任务对话框无法召回**（`main_window.py`）：
+  原来只有 8px 进度条本身能点（`status.click_to_return` 提示几乎不可能点中）。
+  改为**整条状态栏**都能点：状态栏本体 + 所有子控件装 `eventFilter`，
+  `MouseButtonPress` → `_reopen_launch_task()`：
+  - `_active_task_dialog()` 先查 `_dl_workers`（实例下载）再查
+    `_play_worker` + `_launch_dlg`（启动），**只在 worker 真在跑时**返回；
+    无任务时点击完全不响应（不切页、不弹窗）。
+  - `_task_page_key` 记录任务发起页：实例下载固定 `instances`，
+    启动任务用新增的 `_current_page_key()`（`STACK_INDEX` 反查）在
+    `_handle_play` 里记下当前页。
+  - 命中后 `_goto_page_key()` 切回该页（AC 侧栏走 `nav.setCurrentRow`，
+    顶栏布局走 `_pcl2_goto`），再 `show()/raise_()/activateWindow()`
+    把被关闭或隐藏的对话框拉回前台。
+* **③ 30s 无字节进展自动切源**（`core/install.py` + `core/mirror.py` +
+  `i18n.py`）：新增 `_start_source_watchdog(meter, callback, timeout=30)`，
+  daemon 线程每 5s 读一次传输层计量 `SpeedMeter.snapshot()`，`total_bytes`
+  连续 30s 不变 → `set_mirror(True)` 一次并发状态「下载源 30 秒无进展，
+  已自动切换到 BMCLAPI 镜像…」。只对官方源启用（`mirror != "bmclapi"`）；
+  请求超时 / 4xx 仍由 `MirrorSession` 逐文件回退负责，互不重叠。
+  - `SpeedMeter.__slots__` 补 `__weakref__`（看门狗用弱引用感知安装结束，
+    `__slots__` 类默认不可弱引用，否则 `install_instance` 直接 `TypeError`）。
+  - 看门狗循环里 `snapshot()` 后立刻 `del m`：局部强引用会让弱引用永不为空，
+    线程永不退出（实测残留 2 条 `ac-source-watchdog`）。
+* **④ LittleSkin 一键预设**（`login_dialog.py` + `i18n.py`，用户选定「只做
+  登录预设」）：外置登录本就是标准 Yggdrasil，但要求玩家自己记 API 路径。
+  第三方卡片里新增「快速填入：LittleSkin」chip，一点即把验证服务器地址填成
+  `https://littleskin.cn/api/yggdrasil`（悬停 tooltip 显示完整地址），
+  登录后启动照旧自动挂 authlib-injector。未改动任何认证 / 皮肤代码。
+
+### 🔍 验证
+
+* `python -m compileall -q src` 通过；`python regress.py` **12/12**
+  （i18n 中英 **1412/1412** 对称，含新增 `dl.switch_source` / `login.third_preset`）。
+* **文本挤压**（`_probe_launch_dialog.py`，真实 `LaunchProgressDialog`
+  + 真实 `Minecraft AE` 字体）：修复前 `status_lbl h=24 / sizeHint=36`
+  （只给 1.8 行）、`sub_lbl h=12 / fm=13`；修复后 `status_lbl h=52 /
+  sizeHint=48`、`sub_lbl h=19 / 22`，抓图 `_shots/_r151_download_dialog.png`
+  中标题 / 副标题 / 速度 / 状态（2 行）/ 步骤 / 底部提示全部完整。
+* **状态栏召回**（`_probe_statusbar_recall.py`，真实 `MainWindow` +
+  `QTest.mouseClick`，12/12）：空闲时点状态栏无任何反应（栈页不变、
+  无对话框）；模拟下载任务时关闭对话框→点状态栏文案区→对话框重新可见
+  且栈页切回 `instances`；隐藏（非关闭）同样可召回；启动任务从 `settings`
+  页发起→召回后栈页回到 `settings`。
+* **30s 切源**（`_probe_source_watchdog.py`，真实 `SpeedMeter`，
+  把 30s 压成 3s）：无进展 → `_MIRROR_ON=True` 且回调文案 ==
+  `dl.switch_source`；持续每 2s 有字节 → 全程不切换；计量器回收后
+  看门狗线程自行退出（线程数 3 → 1）。
+* **LittleSkin 预设**（`_probe_login_preset.py`，真实 `LoginDialog` + `QTest`，
+  3/3）：chip 唯一存在；点击后 `ext_server == https://littleskin.cn/api/yggdrasil`；
+  「快速填入」提示文案在中文界面下可见。
+
+### 附：LittleSkin 等第三方皮肤站可行性评估（登录预设已实现，其余未做）
+
+* **登录 / 启动**：现有外置登录已是标准 Yggdrasil（`core/auth.py`
+  `yggdrasil_login`），启动时 `launch.build_options` 写 authlib-injector
+  配置并挂 `-javaagent`。玩家把服务器填 `https://littleskin.cn/api/yggdrasil`
+  即可登录与进服 —— 这一步代码已具备，只缺「一键填入 LittleSkin」预设。
+* **账号皮肤**：`skins.manager.fetch_account_skin()` 目前把 Mojang
+  `sessionserver` 写死；LittleSkin 同样提供
+  `GET {base}/sessionserver/session/minecraft/profile/<uuid>`，
+  `properties[].textures` 解出 SKIN/CAPE，只需把 host 参数化即可复用现有
+  皮肤库 / 渲染链路（改动小）。
+* **皮肤站搜索（皮肤库）**：属站点私有 Web 接口，官方手册（2025-08 版）
+  已无 API 章节，无公开文档与稳定性承诺；要做只能抓页面或逆向，
+  违背「不做脆弱爬取」的既有取向 —— 建议不做，或先做只读最小实验。
+
+## round-150（2026-10-31）— 动态壁纸遮挡全部 UI / 版本背景回退白底 / 整合包导入补全
+
+> 用户反馈三条：①「使用动态壁纸会导致所有功能不可见」（截图中整窗只剩壁纸，
+> 标题栏 / 侧栏 / 卡片 / 文字全部消失）；②版本背景取不到资源时显示一片淡紫底；
+> ③整合包导入「收尾时间过长，重启启动器后打开会补全版本，识别不到正确格式」。
+
+### 修复
+
+* **① 动态壁纸覆盖全部界面（P0）**（`wallpaper.py`）：
+  根因不是层级/透明度，而是 `QVideoWidget` —— 它把帧交给多媒体后端的
+  独立合成表面，**不参与 Qt 控件栈序**，`backdrop.lower()` 对它无效，
+  于是视频盖住了标题栏、导航、卡片与所有文字。改为 `QVideoSink` +
+  自绘 `_VideoSurface`：`videoFrameChanged → frame.toImage() → 按物理像素
+  缩放 → QPainter` 绘制，受正常栈序约束（DPR 规则沿用 round-148）。
+  `_start_video` 不再创建 `QVideoWidget`；`_teardown_dynamic` 一并释放 sink。
+* **② 版本背景无资源时的淡紫底**（`wallpaper.py` + `main_window.py`）：
+  原先回退到 `draw_version_wallpaper()` 的程序化主题（浅色下是
+  `#F7F6FB→#ECEAF7` + 紫色光晕），用户看到的就是「紫色底色」。改为隐藏
+  壁纸层并发 `panorama_unavailable` 信号 → 窗口 `set_wallpaper_surface(False)`
+  + `apply_qss()`，页面回到默认白底、卡片恢复实色；真实全景到达时
+  `panorama_ready` → 恢复透明页面（避免卡片一直透明压在白底上）。
+* **③ 整合包导入后的「收尾 / 补全版本」**（`modpack_import.py` /
+  `core/install.py` / `pages_instances.py` / `pages_browse.py` / `i18n.py`）：
+  - **导入完成即安装**：旧流程只写元数据（`loader=forge`、`loader_version`
+    但 `version_id=""`），首次启动时 `launch_instance` 才发现版本未装，
+    弹「安装 / 修复游戏版本」——即用户说的「重启后打开又补全版本」。
+    现在导入末尾直接 `install_instance()`（先 `_persist` 再安装，安装失败
+    也不丢已下载的整合包），装好后启动是零下载直启。
+  - **官方源失败自动换 BMCLAPI**（`_retry_with_mirror`）：实测
+    `maven.minecraftforge.net` 的 `maven-metadata.xml` 8s 读超时，官方源下
+    `ml.install` 在写版本 json 之前就抛错 → 每次启动重跑安装，这是
+    「补全版本」反复出现的直接原因；失败后换镜像再试一次。
+  - **收尾阶段给出真实文案**：下载完成后不再只显示「正在收尾」，改为
+    「正在安装游戏版本与加载器…」+ mll 的实时状态（`progress(label,-1,0)`
+    约定，两处导入对话框同步支持不定长自定义文案）。
+  - **进度口径修正**：`progress(label, done, total)` 的 total 改用批任务数
+    （原为 manifest 条目数，缺 `projectID` 的条目不入批 → 百分比永远到不了
+    100%，收尾状态提前/滞后）。
+  - **失败可解释**：安装失败时弹「整合包内容已导入，但游戏版本/加载器安装
+    未完成：{e}\n首次启动时会再试一次」，不再让用户以为导入失败。
+
+### 🔍 验证
+
+* `python -m compileall -q src` 通过；`python regress.py` **12/12**
+  （i18n 中英 1410/1410 对称，含「整合包进度桥接」「全页面构造冒烟」）。
+* **动态壁纸实证**（`_probe_wallpaper_ui.py`，真实 mp4 + 真实窗口）：
+  修复前桌面区域抓屏只有视频、UI 全灭；修复后窗口抓屏里同时出现视频帧
+  与标题栏 / 侧栏 / 卡片 / 文字，`backdrop` 栈索引 0，
+  `childAt(topbar/sidebar/content)` 命中 `_WinBtn` / `QWidget` / `RoundedCard`。
+* **版本背景回退**：无 6 张 cubemap 的版本切到「版本背景」→ backdrop 隐藏、
+  `panorama_unavailable` 触发、页面 `bg_app` 白底；有全景的版本恢复透明页面。
+* **Forge 源实测**（`_probe_forge_fetch.py`）：官方
+  `maven-metadata.xml` **8s 读超时**，BMCLAPI 200；installer 两源均 200 ——
+  印证「官方源下安装器在写 json 前失败」的因果链。
+* **Java 检测旁证**（`_probe_javas.py`）：本机仅有 Java 26 时
+  `select_java(1.20.1)=None`（兼容上限 21），安装器改用 PATH 上的 `java`
+  （26 可运行 Forge 处理器），不影响安装；游戏启动仍按 round-146 的兼容
+  规则提示装 Java 17–21。
+
+## round-149（2026-10-31）— 导入进度条内嵌百分比被 8px 条裁切
+
+> 用户反馈「自动导入进度条被遮挡了一部分」（截图里条内「38%」只剩上半截）。
+> 根因不是布局，是全局 QSS：`QProgressBar { height: 8px }` 把控件钉成 8px 高，
+> 而内嵌百分比文字按 12px 字高绘制 → 字形被控件边界裁掉。
+
+### 修复
+
+* `pages_instances.py` / `pages_browse.py` 两处 CurseForge 导入流程：把
+  `QProgressDialog` 内置的 `QProgressBar` 关掉 `setTextVisible`，百分比并入
+  label 文案（`正在导入，请稍候…（27/71 · 38%）`），与 round-107 的 slim 条
+  「百分比用旁侧标签」约定一致。
+* `scan_dialog.py`（扫描后复制实例的进度框）同款问题一并关掉内嵌文字。
+
+### 🔍 验证
+
+* `_probe_import_dialog.py`（offscreen 复现真实构造，PNG 快照）：
+  修复前 `bar=398x8 text_visible=True`，快照里「38%」只剩上半截；
+  修复后 `text_visible=False`，条体完整、无残留字形。
+  label 宽 398 / 文字需求 308 → 长文案不换行、不裁切。
+* `python -m compileall -q src` 通过；`python regress.py` **12/12**。
+
 ## round-148（2026-10-29）— HiDPI(125%) 渲染修复：壁纸/图标/头像全链路按物理像素渲染
 
 > 用户反馈「估计又是渲染 bug」。实测定位为 **devicePixelRatio（DPR）处理缺失**：

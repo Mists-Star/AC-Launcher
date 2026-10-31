@@ -1,6 +1,7 @@
-PySide6
+# 运行时
+PySide6-Essentials
 minecraft-launcher-lib
-pyinstaller
-pyjwt
 requests
-qdarkstyle
+
+# 打包（build.py）
+pyinstaller

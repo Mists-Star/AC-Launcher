@@ -992,12 +992,17 @@ class StorePage(QWidget):
         progress.setAutoReset(False)
         progress.setRange(0, 0)  # 先 indeterminate 解析 manifest，随后 n/N
         progress.setMinimumWidth(420)
+        # round-149：全局 QSS 把 QProgressBar 定死 8px 高，内嵌百分比文字会被
+        # 裁掉一半。与 pages_instances 同款导入流程一起关掉内嵌文字。
+        _bar = progress.findChild(QProgressBar)
+        if _bar is not None:
+            _bar.setTextVisible(False)
 
         # round-142b：实时 n/N 计数（轮询 state，跨线程零信号管道）
         state = {"done": 0, "total": 0}
 
         def _pr(label, done, total):
-            state.update(done=done, total=total)
+            state.update(label=str(label), done=done, total=total)
             return True
 
         worker = Worker(import_curseforge_zip, path, self.mgr, progress=_pr)
@@ -1007,6 +1012,17 @@ class StorePage(QWidget):
 
         def _on_tick():
             d, tot = state["done"], state["total"]
+            if d < 0:
+                # round-150：不定长阶段（装游戏版本/加载器）用回调的自定义文案。
+                txt = state.get("label") or t("modpack.finishing")
+                if progress.maximum() != 0:
+                    progress.setRange(0, 0)
+                if state.get("txt") != txt:
+                    state["txt"] = txt
+                    progress.setLabelText(txt)
+                if not progress.isVisible():
+                    progress.show()
+                return
             if not tot:
                 return
             if d < tot:
@@ -1014,7 +1030,7 @@ class StorePage(QWidget):
                     progress.setRange(0, tot)
                 if progress.value() != d:
                     progress.setValue(d)
-                txt = f"{t('modpack.importing')}（{d}/{tot}）"
+                txt = f"{t('modpack.importing')}（{d}/{tot} · {d * 100 // tot}%）"
                 if state.get("txt") != txt:
                     state["txt"] = txt
                     progress.setLabelText(txt)
@@ -1030,7 +1046,12 @@ class StorePage(QWidget):
         def _done(inst):
             tick.stop()
             progress.hide()
-            toast(self, t("modpack.title"), t("modpack.done"))
+            # round-150：导入时已尝试安装版本/加载器；失败时提示首次启动会重试。
+            err = getattr(inst, "loader_install_error", "")
+            if err:
+                warn(self, t("modpack.title"), t("modpack.loader_failed_hint", e=err))
+            else:
+                toast(self, t("modpack.title"), t("modpack.done"))
             if inst and getattr(inst, "id", None):
                 self.mgr.set_current(inst.id)
 

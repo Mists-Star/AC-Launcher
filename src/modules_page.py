@@ -1,27 +1,23 @@
-"""「模块与扩展」设置分区 — 内容模块市场 + JS 扩展宿主管理。
+"""「模块」设置分区 — 内容模块市场 + 从文件安装。
 
-四个分组（自上而下）：
+三个分组（自上而下）：
   1. 内容模块     已安装模块的开关 / 应用 / 导出 / 卸载
   2. 模块市场     内置精选（主题 / JVM 预设 / 音效包 / 崩溃策略）
   3. 从文件安装   .zip 模块包 / 旧版主题包 .json 自动转模块
-  4. JS 扩展      QtWebEngine 选装；已装列表 + 示例扩展 + 从 zip 安装
 
-模块数据操作在 src/modules.py，宿主在 src/plugin_host.py；本页只管编排 UI。
+模块数据操作在 src/modules.py；本页只管编排 UI。
 """
 from __future__ import annotations
 
 import os
-import threading
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QGroupBox, QCheckBox, QFrame, QMenu, QProgressBar,
+    QGroupBox, QCheckBox, QFrame, QMenu,
 )
 
 from . import modules as M
-from . import plugin_host as PH
-from . import feature_pack as FP
 from .i18n import t, get_language
 from .theme import COLORS, with_alpha
 from .icons import icon
@@ -66,15 +62,6 @@ class ModulesPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._ext_windows: dict = {}
-        # round-139 组件下载（工作线程 + 轮询进度，避免 UI 卡死）
-        self._pack_thread: threading.Thread | None = None
-        self._pack_cancel: threading.Event | None = None
-        self._pack_result: dict | None = None
-        self._pack_btn: QPushButton | None = None
-        self._pack_pb: QProgressBar | None = None
-        self._pack_pct: QLabel | None = None
-        self._pack_timer: QTimer | None = None
         self._build()
 
     # ── scaffold ─────────────────────────────────────────────────────────
@@ -125,17 +112,11 @@ class ModulesPage(QWidget):
         fl.addLayout(brow)
         lay.addWidget(ff_grp)
 
-        self._ext_grp = QGroupBox(t("ext.section"))
-        self._ext_lay = QVBoxLayout(self._ext_grp)
-        self._ext_lay.setSpacing(6)
-        lay.addWidget(self._ext_grp)
-
         self._refresh()
 
     def _refresh(self):
         self._fill_installed()
         self._fill_market()
-        self._fill_extensions()
 
     @staticmethod
     def _clear(lay: QVBoxLayout):
@@ -350,6 +331,7 @@ class ModulesPage(QWidget):
         self._fill_installed()
 
     # ── 3. 从文件安装 ────────────────────────────────────────────────────
+    # ia[settings]: 点「从文件安装」 | 模块分区 | 选择 .zip 安装模块，成功/失败弹窗后刷新列表
     def _install_module_zip(self):
         path = pick_files(self, t("modules.install_zip_title"), "",
                           t("modules.zip_filter"))
@@ -377,320 +359,3 @@ class ModulesPage(QWidget):
         info(self, t("modules.import_theme_ok_title"),
              t("modules.import_theme_ok", name=_mod_name(mod)))
         self._fill_installed()
-
-    # ── 4. JS 扩展 ───────────────────────────────────────────────────────
-    def _fill_extensions(self):
-        self._clear(self._ext_lay)
-        # 卸载后本会话保持「安装入口」（宿主 import 已缓存，available 仍为 True）
-        if getattr(self, "_pack_uninstalled", False):
-            self._pack_card({"status": "absent", "reason": "no-state"})
-            return
-        st = FP.state()
-        if not PH.webengine_available():
-            if st["status"] == "installed":
-                # round-139：组件文件在位但宿主还没 import 成功 —— 最常见是
-                # 「刚装完待重启」；也可能是真实故障（缺运行库），附上具体原因，
-                # 不误报为「组件没装」。
-                msg = t("ext.pack.wait_restart")
-                reason = PH.webengine_unavailable_reason()
-                if reason:
-                    msg += "\n\n" + t("ext.unavailable_reason", reason=reason)
-                hint = QLabel(msg)
-                hint.setProperty("cls", "sub")
-                hint.setWordWrap(True)
-                hint.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                self._ext_lay.addWidget(hint)
-                return
-            # 未安装 / 版本过期 / 文件缺失 → 组件安装卡（round-139 B3）
-            self._pack_card(st)
-            return
-        # 宿主可用 → 组件状态行（有安装记录才给卸载；手动合并/开发环境不给）
-        if st["status"] == "installed":
-            st_row = QHBoxLayout()
-            if st.get("manual"):
-                lbl = QLabel(t("ext.pack.installed_manual"))
-            else:
-                lbl = QLabel(t("ext.pack.installed",
-                               version=st.get("version") or "-"))
-            lbl.setProperty("cls", "sub")
-            st_row.addWidget(lbl)
-            st_row.addStretch(1)
-            if not st.get("manual"):
-                un = QPushButton(t("ext.pack.uninstall"))
-                un.setProperty("cls", "secondary")
-                un.setMinimumHeight(26)
-                un.clicked.connect(self._uninstall_pack)
-                st_row.addWidget(un)
-            self._ext_lay.addLayout(st_row)
-
-        inst = {e.id: e for e in PH.scan_extensions()}
-        if inst:
-            for eid in sorted(inst):
-                self._ext_lay.addWidget(self._ext_row(inst[eid]))
-        else:
-            empty = QLabel(t("ext.empty"))
-            empty.setProperty("cls", "sub")
-            self._ext_lay.addWidget(empty)
-
-        # 示例扩展（随包分发）
-        for b in PH.bundled_extensions():
-            if b.id in inst:
-                continue
-            row = QFrame()
-            row.setProperty("cls", "card")
-            h = QHBoxLayout(row)
-            h.setContentsMargins(12, 8, 12, 8)
-            h.setSpacing(10)
-            col = QVBoxLayout()
-            col.setSpacing(2)
-            nm = QLabel(f"{PH.display_name(b)}  v{b.version}")
-            nm.setStyleSheet("font-size: 13px; font-weight: 700;")
-            col.addWidget(nm)
-            ds = QLabel(_lname(str(b.manifest.get("description", "")),
-                               str(b.manifest.get("description_en", "") or b.manifest.get("description", ""))))
-            ds.setProperty("cls", "sub")
-            ds.setWordWrap(True)
-            col.addWidget(ds)
-            h.addLayout(col, stretch=1)
-            lbl = QLabel(t("ext.bundled_badge"))
-            lbl.setProperty("cls", "badge")
-            h.addWidget(lbl)
-            ins = QPushButton(t("modules.install"))
-            ins.setProperty("cls", "secondary")
-            ins.setMinimumHeight(30)
-            ins.clicked.connect(lambda _=False, bb=b: self._install_extension(bb))
-            h.addWidget(ins)
-            self._ext_lay.addWidget(row)
-
-        row = QHBoxLayout()
-        zip_b = QPushButton(icon("import"), t("ext.install_zip_btn"))
-        zip_b.setMinimumHeight(30)
-        zip_b.clicked.connect(self._install_extension_zip)
-        row.addWidget(zip_b)
-        hint = QLabel(t("ext.hint"))
-        hint.setProperty("cls", "sub")
-        hint.setWordWrap(True)
-        row.addWidget(hint, stretch=1)
-        self._ext_lay.addLayout(row)
-
-    # ── 4.1 组件安装卡（round-139 B3）────────────────────────────────────
-    def _pack_card(self, st: dict):
-        """未安装/版本过期/文件缺失时展示的安装入口：按钮 + 下载进度。"""
-        card = QFrame()
-        card.setProperty("cls", "card")
-        v = QVBoxLayout(card)
-        v.setContentsMargins(14, 12, 14, 12)
-        v.setSpacing(6)
-        title = QLabel(t("ext.pack.section"))
-        title.setStyleSheet("font-size: 13px; font-weight: 700;")
-        v.addWidget(title)
-        desc = QLabel(t("ext.pack.desc"))
-        desc.setProperty("cls", "sub")
-        desc.setWordWrap(True)
-        v.addWidget(desc)
-
-        prow = QHBoxLayout()
-        prow.setSpacing(8)
-        self._pack_pb = QProgressBar()
-        self._pack_pb.setTextVisible(False)
-        self._pack_pb.setFixedHeight(8)
-        self._pack_pct = QLabel("")
-        self._pack_pct.setProperty("cls", "sub")
-        prow.addWidget(self._pack_pb, stretch=1)
-        prow.addWidget(self._pack_pct)
-        v.addLayout(prow)
-
-        brow = QHBoxLayout()
-        label = (t("ext.pack.update") if st.get("reason") == "version-mismatch"
-                 else t("ext.pack.install"))
-        self._pack_btn = QPushButton(label)
-        self._pack_btn.setMinimumHeight(32)
-        self._pack_btn.clicked.connect(self._start_pack_install)
-        cancel_b = QPushButton(t("ext.pack.cancel"))
-        cancel_b.setProperty("cls", "secondary")
-        cancel_b.setMinimumHeight(32)
-        cancel_b.clicked.connect(self._cancel_pack_install)
-        cancel_b.setVisible(False)
-        brow.addWidget(self._pack_btn)
-        brow.addWidget(cancel_b)
-        brow.addStretch(1)
-        v.addLayout(brow)
-
-        downloading = st["status"] == "downloading"
-        self._pack_pb.setVisible(downloading)
-        self._pack_pct.setVisible(downloading)
-        if downloading and self._pack_btn:
-            self._pack_btn.setEnabled(False)
-            cancel_b.setVisible(True)
-
-        self._ext_lay.addWidget(card)
-        self._pack_cancel_btn = cancel_b
-
-    def _start_pack_install(self):
-        """后台线程 下载→校验→落位；QTimer 200ms 轮询进度（不阻塞 UI）。"""
-        if self._pack_thread and self._pack_thread.is_alive():
-            return
-        self._pack_uninstalled = False
-        self._pack_cancel = threading.Event()
-        self._pack_result = None
-        if self._pack_btn:
-            self._pack_btn.setEnabled(False)
-        if self._pack_pb:
-            self._pack_pb.setVisible(True)
-        if getattr(self, "_pack_cancel_btn", None):
-            self._pack_cancel_btn.setVisible(True)
-
-        def run():
-            res: dict = {}
-            try:
-                if not self._pack_cancel.is_set():
-                    z = FP.ensure_downloaded(cancel=self._pack_cancel.is_set)
-                    if self._pack_cancel.is_set():
-                        res["cancel"] = True
-                    else:
-                        FP.install(z)
-                        res["ok"] = True
-                else:
-                    res["cancel"] = True
-            except Exception as e:  # noqa: BLE001 —— 面向用户弹错
-                # 用户主动取消不报错（下载中断已 break 换源前的退出）
-                res["cancel" if (self._pack_cancel and self._pack_cancel.is_set())
-                    else "err"] = e
-            self._pack_result = res
-
-        self._pack_thread = threading.Thread(target=run, daemon=True)
-        self._pack_thread.start()
-        self._pack_timer = QTimer(self)
-        self._pack_timer.setInterval(200)
-        self._pack_timer.timeout.connect(self._poll_pack)
-        self._pack_timer.start()
-
-    def _poll_pack(self):
-        sofar, total = FP.progress()
-        if total > 0 and self._pack_pb:
-            pct = int(sofar * 100 / total)
-            self._pack_pb.setValue(pct)
-            if self._pack_pct:
-                self._pack_pct.setText(t("ext.pack.downloading", pct=pct))
-        res = self._pack_result
-        if res is None:
-            return
-        if self._pack_timer:
-            self._pack_timer.stop()
-        self._pack_thread = None
-        if res.get("ok"):
-            info(self, t("ext.pack.done_title"), t("ext.pack.restart_tip"))
-        elif res.get("err"):
-            warn(self, t("ext.pack.fail"), str(res["err"]))
-        self._fill_extensions()  # 恢复卡态 / 显示「待重启」提示
-
-    def _cancel_pack_install(self):
-        if self._pack_cancel:
-            self._pack_cancel.set()
-        if self._pack_btn:
-            self._pack_btn.setEnabled(False)  # 等线程在断点处退出
-
-    def _uninstall_pack(self):
-        if not confirm(self, t("ext.pack.uninstall"),
-                       t("ext.pack.uninstall_confirm")):
-            return
-        try:
-            FP.uninstall()
-        except FP.ComponentError as e:
-            warn(self, t("ext.pack.fail"), str(e))
-            return
-        # 本会话宿主 import 已缓存（available 仍 True），显式切回安装卡（B4）
-        self._pack_uninstalled = True
-        self._fill_extensions()
-
-    def _ext_row(self, e: PH.ExtensionInfo) -> QFrame:
-        row = QFrame()
-        row.setProperty("cls", "card")
-        h = QHBoxLayout(row)
-        h.setContentsMargins(12, 8, 12, 8)
-        h.setSpacing(10)
-        col = QVBoxLayout()
-        col.setSpacing(2)
-        nm = QLabel(f"{PH.display_name(e)}  v{e.version}")
-        nm.setStyleSheet("font-size: 13px; font-weight: 700;")
-        col.addWidget(nm)
-        perms_parts = []
-        for p in e.permissions:
-            label = t(PH.PERMISSIONS.get(p, p))
-            perms_parts.append(
-                label if PH.is_granted(e.id, p)
-                else f"{label}（{t('ext.ungranted')}）")
-        perms = " · ".join(perms_parts) if perms_parts else t("ext.grant_none")
-        ps = QLabel(
-            (t("ext.perms") + "：" + perms) if e.permissions else perms)
-        ps.setProperty("cls", "sub")
-        ps.setWordWrap(True)
-        col.addWidget(ps)
-        h.addLayout(col, stretch=1)
-        open_b = QPushButton(icon("play"), t("ext.open"))
-        open_b.setMinimumHeight(30)
-        open_b.clicked.connect(lambda _=False, ee=e: self._open_extension(ee))
-        h.addWidget(open_b)
-        h.addWidget(_more_btn([
-            (t("ext.regrant_tip"), "refresh", lambda ee=e: self._regrant(ee)),
-            (t("ext.uninstall_tip"), "delete",
-             lambda ee=e: self._uninstall_extension(ee)),
-        ]))
-        return row
-
-    def _install_extension_zip(self):
-        path = pick_files(self, t("ext.install_zip_title"), "",
-                          t("ext.zip_filter"))
-        if not path:
-            return
-        try:
-            ext = PH.install_extension_zip(path)
-        except Exception as e:  # noqa: BLE001
-            warn(self, t("ext.install_fail"), str(e))
-            return
-        self._after_extension_install(ext)
-
-    def _install_extension(self, bundle: PH.ExtensionInfo):
-        try:
-            ext = PH.install_extension_bundle(bundle)
-        except Exception as e:  # noqa: BLE001
-            warn(self, t("ext.install_fail"), str(e))
-            return
-        self._after_extension_install(ext)
-
-    def _after_extension_install(self, ext: PH.ExtensionInfo):
-        grants = PH.grant_dialog(ext, parent=self)
-        if grants is not None:
-            for perm, on in grants.items():
-                PH.set_grant(ext.id, perm, on)
-        info(self, t("ext.install_ok_title"), PH.display_name(ext))
-        self._fill_extensions()
-
-    def _open_extension(self, ext: PH.ExtensionInfo):
-        win = self._ext_windows.get(ext.id)
-        if win is not None and win.isVisible():
-            win.raise_()
-            win.activateWindow()
-            return
-        win = PH.ExtensionWindow(ext)
-        self._ext_windows[ext.id] = win
-        win.show()
-
-    def _regrant(self, ext: PH.ExtensionInfo):
-        grants = PH.grant_dialog(ext, parent=self)
-        if grants is None:
-            return
-        for perm, on in grants.items():
-            PH.set_grant(ext.id, perm, on)
-        self._fill_extensions()
-
-    def _uninstall_extension(self, ext: PH.ExtensionInfo):
-        if not confirm(self, t("ext.uninstall"),
-                       t("ext.uninstall_confirm", name=PH.display_name(ext))):
-            return
-        win = self._ext_windows.get(ext.id)
-        if win is not None:
-            win.close()
-            self._ext_windows.pop(ext.id, None)
-        PH.uninstall_extension(ext.id)
-        self._fill_extensions()

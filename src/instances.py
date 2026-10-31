@@ -60,6 +60,9 @@ class Instance:
     # launch via install_instance.
     needs_convert: bool = False
     created_at: str = ""
+    # last_played: 最近一次启动的 epoch 秒（0 = 从未启动）。首页「继续哪个」
+    # 与实例卡「最近 …」都读它；启动流程开始时写入并持久化。
+    last_played: float = 0.0
     # java_path: per-instance Java executable. Empty ⇒ fall back to the global
     # launcher setting. Lets one instance force a specific JDK (e.g. older Forge
     # on Java 8, newer vanilla on Java 21) without changing the global default.
@@ -546,6 +549,10 @@ class InstancesManager:
         摘要文件缺的字段落在默认值上（=「跟随全局」语义），由
         _ensure_full 补齐为真值。
         """
+        try:
+            last_played = float(raw.get("last_played", 0) or 0)
+        except (TypeError, ValueError):
+            last_played = 0.0
         return Instance(
             id=raw.get("id") or iid,
             name=raw.get("name", ""),
@@ -556,6 +563,7 @@ class InstancesManager:
             kind=raw.get("kind", ""),
             needs_convert=raw.get("needs_convert", False),
             created_at=raw.get("created_at", ""),
+            last_played=last_played,
             java_path=raw.get("java_path", ""),
             ram_mb=raw.get("ram_mb", 0) or 0,
             jvm_args=raw.get("jvm_args", "") or "",
@@ -587,7 +595,7 @@ class InstancesManager:
         "id", "name", "game_version", "loader", "loader_version",
         "version_id", "kind", "launcher", "needs_convert", "group",
         "format",  # round-82 启动格式：摘要即存，懒加载实例也能渲染徽章
-        "external", "created_at", "_base",
+        "external", "created_at", "last_played", "_base",
     )
 
     def _summary(self, inst: Instance) -> dict:

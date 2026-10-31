@@ -271,29 +271,6 @@ def build_options(
         opts["server"] = server
         if port:
             opts["port"] = str(port)
-    # JS 扩展宿主 changeArgs 写入的任务（ext_launch_arg_jobs）：追加到 JVM
-    # 参数末尾，与已有参数（预设/玩家 jvm_args/渲染器）按 token 去重——
-    # 同名 -XX 开关 JVM 是后者覆盖前者，重复注入只会让命令冗余、难调参。
-    try:
-        from .settings_dialog import load_config as _load_ext_cfg
-        _ext_jobs = _load_ext_cfg().get("ext_launch_arg_jobs") or []
-    except Exception:  # noqa: BLE001 - 配置读取失败仅跳过扩展参数，不影响启动
-        _ext_jobs = []
-    if _ext_jobs:
-        import shlex as _shlex
-        _seen = set(opts["jvmArguments"])
-        for _job in _ext_jobs:
-            _txt = str((_job or {}).get("args") or "").strip()
-            if not _txt:
-                continue
-            try:
-                _toks = _shlex.split(_txt)
-            except ValueError:
-                _toks = _txt.split()
-            for _tok in _toks:
-                if _tok not in _seen:
-                    opts["jvmArguments"].append(_tok)
-                    _seen.add(_tok)
     return opts
 
 
@@ -581,6 +558,9 @@ def launch_instance(
     # 用于「收藏服务器 → 用当前实例直连启动」而不用手改实例的附加参数。
     server_override: str | None = None,
     port_override: str | None = None,
+    # round-153 启动前 Java 确认：非空 = 玩家已同意「本次改用 Java N」，
+    # 直接使用该路径，不再走 select_java 的静默切换。
+    java_override: str = "",
 ):
     """Install (if needed) + assemble command + spawn. Returns (proc, log_path)."""
     # round-41 玩家视角加固：实例目录被玩家删了 / 移动后点启动——
@@ -666,8 +646,11 @@ def launch_instance(
     _vjson = find_version_json(getattr(inst, "mc_dir", ""),
                                version or getattr(inst, "game_version", ""))
     _need = required_java_major_for(inst.game_version, inst.loader, version_json=_vjson)
-    java = select_java(inst.game_version, java_auto=java_auto,
-                       user_path=user_java, need_override=_need)
+    if java_override:
+        java = java_override
+    else:
+        java = select_java(inst.game_version, java_auto=java_auto,
+                           user_path=user_java, need_override=_need)
     # round-46：select_java 返回 None = 没有任何兼容该 MC 版本的 Java。
     # 之前会 fallback find_java()/裸 "java" → 老版本被高版本 Java 启动 → 崩 exit 1。
     if not java:
@@ -679,7 +662,7 @@ def launch_instance(
                        "请到 设置 → Java → 管理，安装 Java {need} 后再启动。",
                need=need)
         )
-    if not java_auto and user_java and not os.path.isfile(user_java):
+    if not java_override and not java_auto and user_java and not os.path.isfile(user_java):
         from .i18n import t as _t
         raise RuntimeError(
             _t("err.java_path_invalid", default="指定的 Java 路径不存在：{path}\n请在 设置 → Java 里重新选择，或开启「自动检测」。", path=user_java)

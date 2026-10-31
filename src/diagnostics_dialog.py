@@ -8,9 +8,11 @@ never freezes.
 """
 from __future__ import annotations
 
+import os
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QWidget, QStatusBar,
+    QScrollArea, QWidget, QStatusBar, QFileDialog,
 )
 from PySide6.QtCore import QSize
 
@@ -18,9 +20,11 @@ from .theme import COLORS, RoundedCard
 from .icons import icon
 from .i18n import t
 from .frameless import FramelessHelper, TitleBar
+from .paths import get_data_dir
 from .win_rounded import info
 from .worker import Worker
 from . import diagnostics as diag
+from .core import support_bundle as sb
 
 _STATUS_COLOR = {
     diag.STATUS_OK: COLORS["success"],
@@ -80,6 +84,7 @@ class DiagnosticsDialog(QDialog):
         self.resize(660, 580)
         self._running = False
         self._worker = None
+        self._last_results: list = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -104,7 +109,13 @@ class DiagnosticsDialog(QDialog):
         self.repair_all_btn.setIconSize(QSize(16, 16))
         self.repair_all_btn.setMinimumHeight(34)
         self.repair_all_btn.clicked.connect(self.repair_all)
+        self.bundle_btn = QPushButton(t("diag.bundle"))
+        self.bundle_btn.setIcon(icon("export"))
+        self.bundle_btn.setIconSize(QSize(16, 16))
+        self.bundle_btn.setMinimumHeight(34)
+        self.bundle_btn.clicked.connect(self.export_bundle)
         hl.addStretch(1)
+        hl.addWidget(self.bundle_btn)
         hl.addWidget(self.recheck)
         hl.addWidget(self.repair_all_btn)
         root.addWidget(head)
@@ -138,6 +149,7 @@ class DiagnosticsDialog(QDialog):
         self._running = running
         self.recheck.setEnabled(not running)
         self.repair_all_btn.setEnabled(not running)
+        self.bundle_btn.setEnabled(not running)
 
     def run(self) -> None:
         if self._running:
@@ -166,6 +178,7 @@ class DiagnosticsDialog(QDialog):
         self._set_running(False)
 
     def _render(self, results: list[diag.CheckResult]) -> None:
+        self._last_results = list(results)
         self._clear_list()
         ok = warn = err = skip = 0
         for r in results:
@@ -190,6 +203,35 @@ class DiagnosticsDialog(QDialog):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+
+    # ---- support bundle ----
+    def export_bundle(self) -> None:
+        if self._running:
+            return
+        default = os.path.join(get_data_dir(), sb.default_bundle_name())
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("diag.bundle"), default, "Zip (*.zip)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        self._set_running(True)
+        self._status.showMessage(t("diag.bundle.working"))
+        self._worker = Worker(sb.build_support_bundle, path, self._last_results)
+
+        def _done(saved: str) -> None:
+            self._set_running(False)
+            self._status.showMessage("")
+            info(self, t("diag.bundle"), t("diag.bundle.ok", path=saved))
+
+        def _fail(e) -> None:
+            self._set_running(False)
+            self._status.showMessage(t("diag.bundle.fail", e=str(e)))
+
+        self._worker.finished.connect(_done)
+        self._worker.error.connect(_fail)
+        self._worker.start()
 
     # ---- repair actions ----
     def _repair_one(self, cid: str, btn: QPushButton) -> None:

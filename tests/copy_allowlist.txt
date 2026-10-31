@@ -1,0 +1,47 @@
+# round-152 文案门禁基线：提示类文案超预算的存量项。
+# 规则见 tests/check_copy.py —— 只缩不增：
+#   * 新增超标项不得往这里加，先改文案；
+#   * 某条改好后必须删掉对应行，否则门禁报「过期」。
+# 格式：lang|key（lang = zh / en）
+
+# ── 中文（预算 40 加权汉字）──
+zh|server_fav.hint
+zh|login.microsoft_note
+zh|settings.show_quilt_hint
+zh|settings.warn_non_ascii_path_hint
+zh|javamgr.hint
+zh|settings.splash_hint
+zh|settings.brand_logo_hint
+zh|settings.proxy_hint
+zh|settings.dl_diag_hint
+zh|settings.cf_key_hint
+zh|settings.cf_keyless_hint
+zh|settings.lobby_tool_hint
+zh|store.detail_text_hint
+zh|scan.help
+zh|scan.import_all_hint
+zh|scan.import_link_hint
+zh|settings.hook_hint
+zh|settings.font_family_hint
+zh|settings.tray_minimize_hint
+zh|settings.theme_pack_hint
+zh|settings.wp_hint
+zh|onboard.mode_hint
+zh|onboard.style_note
+zh|onboard.java_mgr_hint
+
+# ── 英文（预算 80 加权字符）──
+en|login.microsoft_note
+en|settings.show_quilt_hint
+en|settings.warn_non_ascii_path_hint
+en|javamgr.hint
+en|settings.proxy_hint
+en|settings.dl_diag_hint
+en|settings.cf_key_hint
+en|settings.cf_keyless_hint
+en|settings.lobby_tool_hint
+en|scan.help
+en|settings.hook_hint
+en|settings.tray_minimize_hint
+en|settings.theme_pack_hint
+en|settings.wp_hint

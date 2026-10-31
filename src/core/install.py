@@ -29,6 +29,54 @@ def _diag_enabled() -> bool:
         return False
 
 
+def _start_source_watchdog(meter, callback=None, timeout: float = 30.0) -> None:
+    """round-151：下载源 30s 没有任何字节进展 → 自动切到 BMCLAPI。
+
+    只对「慢但没报错」的源生效（请求超时 / 4xx 由 MirrorSession 的逐文件回退和
+    ``_retry_with_mirror`` 处理）。字节数来自 round-110 的传输层计量
+    （``InstallContext.meter``），比 mll 的文件计数更细。
+    """
+    if meter is None:
+        return
+    import threading
+    import time
+    import weakref
+
+    ref = weakref.ref(meter)
+    state = {"total": -1, "ts": time.monotonic(), "switched": False}
+
+    def _loop() -> None:
+        while True:
+            time.sleep(5.0)
+            m = ref()
+            if m is None:  # 安装结束，计量器已释放 → 退出
+                return
+            total, _ = m.snapshot()
+            # 关键：立刻丢掉强引用。局部变量会在下一轮 sleep 期间继续持有着
+            # 计量器，弱引用永远不为空 → 看门狗线程永不退出（round-151 实测）。
+            del m
+            now = time.monotonic()
+            if total != state["total"]:
+                state["total"] = total
+                state["ts"] = now
+                continue
+            if state["switched"] or now - state["ts"] < timeout:
+                continue
+            from .mirror import set_mirror
+            set_mirror(True)
+            state["switched"] = True
+            print(f"[install] 下载源 {int(timeout)}s 无进展 → 自动切换 BMCLAPI")
+            try:
+                from ..i18n import t
+                msg = t("dl.switch_source")
+                if callback:
+                    callback.get("setStatus", lambda _s: None)(msg)
+            except Exception:  # noqa: BLE001 - 提示失败不影响安装
+                pass
+
+    threading.Thread(target=_loop, daemon=True, name="ac-source-watchdog").start()
+
+
 def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirror: str = "official", proxy: str = "", callback=None) -> str:
     """Install (or repair) an instance's game version + loader into its mc_dir.
 
@@ -49,11 +97,14 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
             mirror = "official"
     # round-109：打补丁与走镜像解耦 —— 镜像与否由 set_mirror 在请求时决定，
     # 补丁本身永远打上，好让官方源也拿到「超时 + 重试 + 可取消」。
-    from .mirror import patch_install_session, set_diag, set_mirror, set_proxy
+    from .mirror import active_meter, patch_install_session, set_diag, set_mirror, set_proxy
     set_proxy(proxy or None)
     set_mirror(mirror == "bmclapi")
     set_diag(_diag_enabled())
     patch_install_session()
+    if mirror != "bmclapi":
+        # round-151：官方源「能连但极慢」时 30s 无字节进展自动切 BMCLAPI。
+        _start_source_watchdog(active_meter(), callback)
 
     mc_dir = inst.mc_dir
     loader = inst.loader if inst.loader in SUPPORTED_LOADERS else "vanilla"
@@ -68,13 +119,32 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
                            user_path=java_path, need_override=21)
     java = java or "java"
 
+    def _retry_with_mirror(fn):
+        """round-150：官方源失败 → 换 BMCLAPI 再试一次。
+
+        实测（国内网络）maven.minecraftforge.net 的 maven-metadata.xml 读超时 +
+        Forge 库下载也不稳定；官方源下 ``ml.install`` 会在写版本 json 之前就抛错，
+        用户看到的就是「每次重启后打开都在补全版本」。
+        """
+        try:
+            return fn()
+        except Exception:
+            if mirror == "bmclapi":
+                raise
+            set_mirror(True)
+            try:
+                return fn()
+            finally:
+                set_mirror(False)
+
     # Persist the resolved loader version so later runs are deterministic.
     # Only lib-managed loaders (fabric/forge/quilt/neoforge) expose
     # get_latest_loader_version; the custom ones resolve inside their own
     # install functions when loader_version is empty.
     if loader in ("fabric", "forge", "quilt", "neoforge") and not inst.loader_version:
         ml = minecraft_launcher_lib.mod_loader.get_mod_loader(loader)
-        inst.loader_version = ml.get_latest_loader_version(inst.game_version)
+        inst.loader_version = _retry_with_mirror(
+            lambda: ml.get_latest_loader_version(inst.game_version))
 
     if loader == "vanilla":
         minecraft_launcher_lib.install.install_minecraft_version(
@@ -128,14 +198,13 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
         )
 
     ml = minecraft_launcher_lib.mod_loader.get_mod_loader(loader)
-    installed = ml.install(
+    return _retry_with_mirror(lambda: ml.install(
         inst.game_version,
         mc_dir,
         loader_version=inst.loader_version or None,
         callback=callback,
         java=java,
-    )
-    return installed
+    ))
 
 
 def list_installed_versions(mc_dir: str) -> list[str]:

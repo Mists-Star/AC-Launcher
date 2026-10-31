@@ -416,6 +416,10 @@ class ScanPanel(QWidget):
         progress.setAutoClose(False)     # we close it ourselves
         progress.setAutoReset(False)     # don't reset value on setValue
         progress.setMinimumWidth(420)
+        # round-149：8px 高的全局 QSS 条画不下内嵌百分比文字，关掉以免半截字。
+        _bar = progress.findChild(QProgressBar)
+        if _bar is not None:
+            _bar.setTextVisible(False)
         progress.setValue(0)
 
         last_refresh = [0.0]

@@ -290,6 +290,37 @@ def main():
         pass
     _log.write("5 qss ok\n"); _log.flush()
 
+    # ── round-162 条款门禁：首次使用 / 条款改版必须重新同意 ──────────────
+    try:
+        from src.terms import TERMS_VERSION, needs_acceptance
+        # AC_NO_TERMS / AC_LIVE：自动化与 live 截图通道跳过门禁（同 onboarding）。
+        _skip_terms = (os.environ.get("AC_NO_TERMS") == "1"
+                       or os.environ.get("AC_LIVE") == "1")
+        if needs_acceptance(cfg) and not _skip_terms:
+            from src.terms_dialog import TermsDialog
+            _log.write("5.5 terms gate\n"); _log.flush()
+            _dlg = TermsDialog()
+            if not _dlg.exec():
+                _log.write("5.5 terms rejected — exiting\n"); _log.flush()
+                return
+            cfg["terms_accepted_version"] = TERMS_VERSION
+            try:
+                from src.settings_dialog import save_config
+                save_config(cfg)
+            except Exception:
+                pass
+            _log.write("5.5 terms accepted\n"); _log.flush()
+    except Exception:
+        _log.write("5.5 terms gate failed (ignored)\n"); _log.flush()
+
+    # 更新器落下的更新说明：等主窗口真正显示后再弹，避免压在 splash 上。
+    _pending_notes = None
+    try:
+        from src.core.update_install import read_pending_notes
+        _pending_notes = read_pending_notes()
+    except Exception:
+        _pending_notes = None
+
     splash = None
     # round-114 live view：live 实例跳过启动动画——画面第一帧就该是主窗口，
     # 否则 Agent 截图时看到的是 splash。
@@ -436,6 +467,27 @@ def main():
                 _v.start()
             except Exception:
                 pass
+            # round-162 更新后首次启动：展示上次更新内容（弹一次后清除）。
+            if _pending_notes:
+                try:
+                    from src.i18n import t as _t
+                    from src.win_rounded import info as _info
+                    _nl = _pending_notes.get("notes")
+                    if not isinstance(_nl, list):
+                        _nl = []
+                    _notes = "\n".join("· " + str(n) for n in _nl)
+                    _info(win, _t("update.notes_title"),
+                          _t("update.notes_body",
+                             version=_pending_notes.get("version", ""),
+                             notes=_notes or _t("settings.update_no_notes")))
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        from src.core.update_install import clear_pending_notes
+                        clear_pending_notes()
+                    except Exception:
+                        pass
             # round-95：强制首页首帧/前台逻辑已移入 _show_main()（win.show() 之后）。
             # 这里不再对「未显示」的主窗口做 repaint/raise/_force_foreground——
             # ShowWindow(SW_RESTORE) 会把还没到展示时机的主窗口拉出来，

@@ -31,6 +31,9 @@ from .settings_dialog import load_config
 from .skins import manager as skin_manager
 from .skin_render import render_head
 
+# round-151：LittleSkin 的 Yggdrasil 入口（该站外置登录的标准地址）。
+LITTLESKIN_SERVER = "https://littleskin.cn/api/yggdrasil"
+
 
 class LoginDialog(QDialog):
     # Microsoft device-code ready: emitted from the worker thread; queued
@@ -175,6 +178,22 @@ class LoginDialog(QDialog):
         hint.setProperty("cls", "sub")
         hint.setWordWrap(True)
         el.addWidget(hint)
+        # round-151：LittleSkin 一键预设。外置登录走的就是标准 Yggdrasil，
+        # 玩家不必记住 API 路径；填进去后登录即成功，启动自动挂
+        # authlib-injector（见 launch.build_options）。
+        pre = QHBoxLayout()
+        pre.setSpacing(8)
+        pre_lbl = QLabel(t("login.third_preset"))
+        pre_lbl.setProperty("cls", "sub")
+        pre.addWidget(pre_lbl)
+        ls_btn = QPushButton("LittleSkin")
+        ls_btn.setProperty("cls", "chip")
+        ls_btn.setCursor(Qt.PointingHandCursor)
+        ls_btn.setToolTip(LITTLESKIN_SERVER)
+        ls_btn.clicked.connect(lambda: self.ext_server.setText(LITTLESKIN_SERVER))
+        pre.addWidget(ls_btn)
+        pre.addStretch(1)
+        el.addLayout(pre)
         self.ext_server = QLineEdit()
         self.ext_server.setPlaceholderText(t("login.third_server_ph"))
         self.ext_user = QLineEdit()

@@ -378,12 +378,67 @@ class _LoopFade(QWidget):
         p.end()
 
 
+class _VideoSurface(QWidget):
+    """Draws decoded video frames with QPainter (round-150).
+
+    ``QVideoWidget`` hands the frames to the multimedia backend's own surface,
+    which is composited *outside* Qt's widget stacking order: even with the
+    backdrop lowered to the bottom of the window, the video covered the title
+    bar, the nav rail, every card and all text (user report: "使用动态壁纸会
+    导致所有功能不可见"). A plain QWidget fed by ``QVideoSink`` paints like
+    any other child widget, so it stays behind the pages.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._img: QImage | None = None
+        self._scaled: QPixmap | None = None
+        self._scaled_size = QSize(0, 0)
+
+    def set_frame(self, img: QImage) -> None:
+        if img is None or img.isNull():
+            return
+        self._img = img
+        self._scaled = None
+        self.update()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._scaled = None
+
+    def paintEvent(self, e):
+        if self._img is None:
+            return
+        # round-148 的 DPR 规则同样适用：按物理像素缩放再贴回逻辑坐标。
+        dpr = _device_dpr(self)
+        phys = QSize(max(1, int(round(self.width() * dpr))),
+                     max(1, int(round(self.height() * dpr))))
+        if (self._scaled is None
+                or self._scaled_size != phys
+                or self._scaled.devicePixelRatio() != dpr):
+            self._scaled = QPixmap.fromImage(self._img).scaled(
+                phys, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            )
+            self._scaled.setDevicePixelRatio(dpr)
+            self._scaled_size = phys
+        lw = self._scaled.width() / dpr
+        lh = self._scaled.height() / dpr
+        p = QPainter(self)
+        p.drawPixmap(QPointF((self.width() - lw) / 2.0,
+                             (self.height() - lh) / 2.0), self._scaled)
+        p.end()
+
+
 class WallpaperWidget(QWidget):
     """Backdrop that renders a colour / image / GIF / video / panorama."""
 
     # Emitted once the real cubemap is on screen, so the page can adapt the
     # labels that sit directly on the backdrop.
     panorama_ready = Signal()
+    # Emitted when "version" mode has no usable artwork (round-150): the
+    # window restores the plain page background instead of a tinted wash.
+    panorama_unavailable = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -400,6 +455,7 @@ class WallpaperWidget(QWidget):
         self._video: object | None = None   # QVideoWidget
         self._player: object | None = None  # QMediaPlayer
         self._audio: object | None = None
+        self._sink: object | None = None    # QVideoSink (round-150)
         self._opacity = 1.0
         self._blur = 0
         # ── panorama state ──
@@ -420,6 +476,8 @@ class WallpaperWidget(QWidget):
         self._fade_timer: QTimer | None = None
         self._last_gif_frame = -1
         self._last_video_pos = -1
+        # round-156：游戏运行中降载（suspend 后 apply 只记录不加载，恢复时重放）。
+        self._suspended = False
 
     # ------------------------------------------------------------- config
     def apply(self, cfg: dict, version_id: str | None = None,
@@ -432,6 +490,10 @@ class WallpaperWidget(QWidget):
         can be loaded.  A player-supplied custom image always wins.
         """
         mode = cfg.get("wallpaper_mode", "none")
+        if self._suspended:
+            # round-156：游戏运行中不接受新壁纸加载（配置已由调用方保存，
+            # resume 后由窗口重新 apply）。
+            return
         self._opacity = float(cfg.get("wallpaper_opacity", 1.0))
         self._color = QColor(cfg.get("wallpaper_color", "#1E1E1E"))
         path = cfg.get("wallpaper_image", "")
@@ -491,6 +553,9 @@ class WallpaperWidget(QWidget):
                 path and os.path.exists(path)):
             visible = False
         self.setVisible(visible)
+        if mode == "version" and not visible:
+            # 没有实例/没有可用资源 → 告诉窗口回到默认（白底）页面背景。
+            self.panorama_unavailable.emit()
         self._sync_veil()
         # A fresh wallpaper starts clear; the loop seam handles its own fades.
         self._reset_fade()
@@ -678,17 +743,16 @@ class WallpaperWidget(QWidget):
         if key != self._pano_key:
             return  # a newer request superseded this one
         if not images or len(images) != 6:
-            # round-145 修「部分版本获取不到背景」：贴图缺失（资源未下载 /
-            # 旧版本无 panorama）时此前直接 return，backdrop 永远隐身 →
-            # 整个背景消失。回退到程序化的版本主题背景，至少有底色。
-            self._fallback_procedural()
-            return  # nothing found -> procedural fallback is on screen
+            # round-150：贴图缺失（资源未下载 / 旧版本无 panorama）时不再画
+            # 程序化的淡紫色底 —— 用户明确要求「没有版本背景就回退默认白底」。
+            self._no_version_artwork()
+            return
         try:
             from .panorama import PanoramaRenderer
             self._panorama = PanoramaRenderer(images)
         except Exception:  # noqa: BLE001 - a broken cubemap must not kill the page
             self._panorama = None
-            self._fallback_procedural()
+            self._no_version_artwork()
             return
         self._pano_luma = _mean_luma(images)
         self._pano_buffer = None
@@ -702,31 +766,22 @@ class WallpaperWidget(QWidget):
         self.panorama_ready.emit()
         self.update()
 
-    def _fallback_procedural(self) -> None:
-        """Paint the deterministic version-themed wallpaper (round-145).
+    def _no_version_artwork(self) -> None:
+        """版本背景没有可用资源 → 隐藏 backdrop，交给窗口回退默认白底（round-150）.
 
-        Used when the real panorama cannot be loaded — a version without
-        usable panorama assets must still get a background. Uses the current
-        widget size; a later resize re-scales via the shared ``_scaled`` path.
+        不再画 ``draw_version_wallpaper`` 的淡紫/暗色渐变：那不是玩家选的版本
+        背景，只会在浅色主题下露出一整片紫色底（用户反馈）。
         """
         if self._mode != "version":
             return
-        try:
-            pm = draw_version_wallpaper(self._version_id, self.size(),
-                                        _device_dpr(self))
-        except Exception:  # noqa: BLE001 - a fallback bug must never hurt
-            pm = None
-        if pm is None or pm.isNull():
-            return
-        self._pixmap = pm
+        self._panorama = None
+        self._pixmap = None
         self._scaled = None
-        try:
-            self._media_luma = _mean_luma([pm.toImage()])
-        except Exception:  # noqa: BLE001
-            self._media_luma = None
-        if not self.isVisible():
-            self.setVisible(True)
-        self._sync_veil()
+        self._media_luma = None
+        if self._veil is not None:
+            self._veil.hide()
+        self.setVisible(False)
+        self.panorama_unavailable.emit()
         self.update()
 
     def _start_pano_timer(self) -> None:
@@ -773,6 +828,7 @@ class WallpaperWidget(QWidget):
                 pass
             self._player = None
             self._audio = None
+        self._sink = None
         if self._video is not None:
             self._video.deleteLater()
             self._video = None
@@ -802,30 +858,44 @@ class WallpaperWidget(QWidget):
     # ------------------------------------------------------------- video
     def _start_video(self, path: str, volume: float = 0.0) -> None:
         try:
-            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-            from PySide6.QtMultimediaWidgets import QVideoWidget
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
         except ImportError:
             return  # multimedia backend unavailable → silently skip
-        vw = QVideoWidget(self)
-        vw.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        vw.setGeometry(self.rect())
-        vw.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
+        # round-150：不再用 QVideoWidget（后端自绘表面会盖住整个 UI）。
+        surface = _VideoSurface(self)
+        surface.setGeometry(self.rect())
+        sink = QVideoSink(self)
+        sink.videoFrameChanged.connect(self._on_video_frame)
         player = QMediaPlayer(self)
         audio = QAudioOutput(self)
         audio.setVolume(max(0.0, min(1.0, volume)))
         player.setAudioOutput(audio)
-        player.setVideoOutput(vw)
+        player.setVideoOutput(sink)
         player.setLoops(QMediaPlayer.Loops.Infinite)
         player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
         self._last_video_pos = -1
         player.positionChanged.connect(self._on_video_pos)
         if self._opacity < 1.0:
-            eff = QGraphicsOpacityEffect(vw)
+            eff = QGraphicsOpacityEffect(surface)
             eff.setOpacity(self._opacity)
-            vw.setGraphicsEffect(eff)
-        vw.show()
+            surface.setGraphicsEffect(eff)
+        surface.show()
         player.play()
-        self._video, self._player, self._audio = vw, player, audio
+        self._video, self._player, self._audio, self._sink = (
+            surface, player, audio, sink)
+
+    def _on_video_frame(self, frame) -> None:
+        """Slot for ``QVideoSink.videoFrameChanged`` → paint into the surface."""
+        surface = self._video
+        if surface is None or not isinstance(surface, _VideoSurface):
+            return
+        try:
+            if not frame.isValid():
+                return
+            img = frame.toImage()
+        except Exception:  # noqa: BLE001 - a bad frame must not kill the UI
+            return
+        surface.set_frame(img)
 
     # ------------------------------------------------------------ painting
     def resizeEvent(self, e):
@@ -1005,3 +1075,30 @@ class WallpaperWidget(QWidget):
     def stop(self) -> None:
         self._teardown_dynamic()
         self._stop_panorama()
+
+    # ------------------------------------------------------ load shedding
+    def suspend(self) -> None:
+        """round-156：游戏运行期间释放大图 / 全景缓存并暂停一切动画。
+
+        对齐 LumilioCL「游戏启动后释放不在屏幕上的图片」：动图/视频停播并销毁，
+        全景六面贴图与缩放缓存全部丢弃，壁纸层隐藏。配置仍由窗口持有，游戏退出
+        后 ``resume()`` + ``apply()`` 原样恢复。
+        """
+        if self._suspended:
+            return
+        self._suspended = True
+        try:
+            self._set_playing(False)
+        except Exception:  # noqa: BLE001 - 状态错乱最多停一下
+            pass
+        self._teardown_dynamic()
+        self._stop_panorama()
+        self._pixmap = None
+        self._scaled = None
+        self._pano_buffer = None
+        self._media_luma = None
+        self.setVisible(False)
+
+    def resume(self) -> None:
+        """结束降载；真正的重新上屏由窗口随后的 ``apply()`` 完成。"""
+        self._suspended = False

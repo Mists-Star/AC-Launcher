@@ -7,9 +7,9 @@ stack (no more popup dialog). Left menu has flat categories (no collapsing):
 The page is a plain QWidget added to MainWindow.stack; "保存" persists the
 config and emits `saved` (MainWindow refreshes UI + navigates home).
 """
-import json, os, sys
+import json, os, sys, threading
 
-from PySide6.QtCore import QSize, Qt, Signal, QEvent
+from PySide6.QtCore import QSize, Qt, Signal, QEvent, QTimer
 from PySide6.QtGui import QFontDatabase, QFont, QIcon
 
 from PySide6.QtWidgets import (
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QLineEdit, QSpinBox, QTextEdit, QGroupBox, QCheckBox, QComboBox,
     QWidget, QRadioButton, QButtonGroup,
-    QSlider,
+    QSlider, QProgressBar,
     QScrollArea, QListWidget, QListWidgetItem, QStackedWidget, QFrame,
     QSizePolicy, QStyledItemDelegate, QStyleOptionViewItem,
 )
@@ -32,7 +32,7 @@ from . import brand_custom
 from .worker import Worker
 from .core import authlib as authlib_dl
 from .core.java import scan_javas
-from .win_rounded import info, warn, pick_files, dark_color
+from .win_rounded import info, warn, confirm, pick_files, dark_color
 
 CONFIG_FILE = get_config_path("launcher_config.json")
 # round-83 设置导出/导入：这些键永不写入/还原备份文件（密钥/脏开关）。
@@ -124,6 +124,10 @@ _DEFAULTS = {
     # round-100 成就解锁弹窗：默认关（右下角 MC 风格 toast 会打断操作）。
     # round-107 起与毛玻璃/透底/流光/页面动画一样改为可选模块。
     "achievement_toasts": False,
+    # round-152 无障碍：减少动效。与上面几个「可选模块」不同——它不是装饰，
+    # 而是让所有过渡瞬时完成（页面切换/列表淡入/流光/toast 滑入），
+    # 因此不受 EFFECT_CONFIG_KEYS 的模块归属回写影响。
+    "reduce_motion": False,
     # ---- 退出释放资源（round-50）----
     "close_after_launch": True,      # 游戏启动并稳定运行后自动关闭启动器
     "close_after_launch_delay": 5,   # 检测游戏稳定运行的等待秒数
@@ -131,6 +135,11 @@ _DEFAULTS = {
     # 游戏进程/下载任务不受影响；False = 恢复「关闭即退出」。
     # round-92 默认改「关闭即退出」：玩家点 X 即退出是主流直觉；想藏托盘可勾选。
     "tray_minimize": False,
+    # ---- round-161 启动器更新（签名信任链）----
+    # 留空 = 官方 GitHub Releases latest.json；填写则覆盖为自建源（必须 https）。
+    "update_manifest_url": "",
+    # ---- round-162 条款版本化：低于当前版本时启动需重新同意 ----
+    "terms_accepted_version": 0,
     # ---- download mirror ----
     # round-113 实测改默认：官方源 8.35MB/s vs BMCLAPI 0.84MB/s（同口径
     # 80 个资源对象），官方 CDN 是 TCP_HIT 无 302 抖动，BMCLAPI 单连接只有
@@ -152,10 +161,8 @@ _DEFAULTS = {
     # ---- developer mode (gates experimental/test features) ----
     "dev_mode": False,               # enabled only after key verification
     "dev_mode_key": "",              # stored only for UI display; real key comes from env/file
-    # ---- round-93 模块化内容市场 + JS 扩展宿主 ----
+    # ---- round-93 模块化内容市场 ----
     "enabled_modules": [],            # 已启用内容模块 id 集合
-    "ext_grants": {},                 # 扩展权限授权表 {ext_id: {perm: bool}}
-    "ext_launch_arg_jobs": [],        # 扩展 changeArgs 写入的启动参数任务（launch 侧消费）
     "crash_policy": None,             # 已应用的崩溃策略载荷（crash 流程消费）
     "_jvm_module": "",                # 当前 JVM 预设来源模块 id
     "_sfx_module": "",                # 当前音效来源模块 id
@@ -167,6 +174,33 @@ _DEFAULTS = {
     "nav_layout": "ac",               # ac（侧边导航）/ pcl2（顶部，需 dev_mode）
     "topmost": False,                 # 窗口置顶
     "warn_non_ascii_path": True,      # 非 ASCII 路径警告
+}
+
+
+# round-161：TrustError.code → 用户可读文案；未知码回退 update_err_other。
+_UPDATE_ERROR_KEYS = {
+    "network": "settings.update_err_network",
+    "manifest_https": "settings.update_err_url",
+    "manifest_url": "settings.update_err_url",
+    "signature_invalid": "settings.update_err_signature",
+    "signature_unknown_key": "settings.update_err_key",
+    "signature_json": "settings.update_err_signature",
+    "signature_too_large": "settings.update_err_signature",
+    "manifest_too_large": "settings.update_err_manifest",
+    "manifest_json": "settings.update_err_manifest",
+    "manifest_schema": "settings.update_err_manifest",
+    "manifest_kind": "settings.update_err_manifest",
+    "manifest_version": "settings.update_err_manifest",
+    "manifest_asset": "settings.update_err_manifest",
+    "manifest_notes": "settings.update_err_manifest",
+    "manifest_field": "settings.update_err_manifest",
+    "manifest_requires_newer": "settings.update_err_requires",
+    "asset_size": "settings.update_err_asset",
+    "asset_hash": "settings.update_err_asset",
+    "asset_missing": "settings.update_err_asset",
+    "asset_write": "settings.update_err_asset",
+    "too_large": "settings.update_err_asset",
+    "upgrade_dev_build": "settings.update_dev_only",
 }
 
 
@@ -275,6 +309,8 @@ class SettingsPage(QWidget):
     # round-107 页面入口：设置页内按钮跳转到其它页（音乐 / 成就 / 控制台，
     # 这几个入口已从左侧导航移除）。载荷是页面 key。
     open_page = Signal(str)
+    # round-161 更新下载进度（worker 线程 emit → 主线程槽，Qt 自动排队）。
+    update_progress_sig = Signal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -282,6 +318,11 @@ class SettingsPage(QWidget):
         # Back-reference to the MainWindow; set after construction. Used for
         # live-refreshing home/wallpaper when a setting changes.
         self._window = None
+        # round-161 更新器状态
+        self._update_manifest = None
+        self._update_worker = None
+        self._update_cancel_evt = None
+        self.update_progress_sig.connect(self._on_update_progress)
         self._build_ui()
 
     def eventFilter(self, obj, event):
@@ -421,6 +462,7 @@ class SettingsPage(QWidget):
 
         root.addWidget(footer)
 
+    # ia[settings]: 点左侧分区 | 设置左栏 | 首次进入时构建该分区，之后只切换（未保存草稿保留）
     def _show_section(self, idx: int) -> None:
         """Build the section on first visit, then switch the stack to it.
 
@@ -483,12 +525,12 @@ class SettingsPage(QWidget):
             self._rebuilding = False
 
     # ═══════════════════════════════════════════════════════════════════════
-    # MODULES PANEL（round-93：模块化内容市场 + JS 扩展宿主）
+    # MODULES PANEL（round-93：模块化内容市场）
     # ═══════════════════════════════════════════════════════════════════════
     def _build_modules(self) -> QWidget:
-        """「模块与扩展」分区：模块市场 / 已装模块 / 从文件安装 / JS 扩展。
+        """「模块」分区：模块市场 / 已装模块 / 从文件安装。
 
-        独立分区而不是塞进「设置」页，因其操作（安装/卸载/授权）都是
+        独立分区而不是塞进「设置」页，因其操作（安装/卸载/应用）都是
         立即生效型，不参加 _save 收集；每次进入本页时重建（reload 安全）。
         """
         from .modules_page import ModulesPage
@@ -650,7 +692,8 @@ class SettingsPage(QWidget):
         # round-49 液态流光 effect：流光卡片 / 页面动画 / 全局透明度
         # round-103：改两列网格——此前 8 个复选框挤在一行，窄窗口下标签被截断。
         # round-107：毛玻璃/透底/流光/页面动画/成就弹窗 5 项已移出设置页（改为
-        # 「可选模块」，设置 → 模块与扩展，默认不装）。此处只留窗口行为三开关。
+        # 「可选模块」，设置 → 模块与扩展，默认不装）。此处保留窗口行为开关
+        # 与 round-152 的「减少动效」（无障碍，不属装饰模块）。
         fx_grid = QGridLayout()
         fx_grid.setHorizontalSpacing(24)
         fx_grid.setVerticalSpacing(6)
@@ -665,7 +708,12 @@ class SettingsPage(QWidget):
         self.topmost_chk = QCheckBox(t("settings.always_on_top"))
         self.topmost_chk.setChecked(self.cfg.get("topmost", False))
         self.topmost_chk.toggled.connect(self._on_topmost_toggle)
-        _fx_boxes = [self.close_launch_chk, self.tray_chk, self.topmost_chk]
+        # round-152 减少动效：页面切换/列表淡入/流光/toast 全部瞬时完成
+        self.reduce_motion_chk = QCheckBox(t("settings.reduce_motion"))
+        self.reduce_motion_chk.setChecked(self.cfg.get("reduce_motion", False))
+        self.reduce_motion_chk.setToolTip(t("settings.reduce_motion_hint"))
+        _fx_boxes = [self.close_launch_chk, self.tray_chk, self.topmost_chk,
+                     self.reduce_motion_chk]
         for _i, _cb in enumerate(_fx_boxes):
             fx_grid.addWidget(_cb, _i // 2, _i % 2)
         fx_grid.setColumnStretch(2, 1)
@@ -1356,6 +1404,54 @@ class SettingsPage(QWidget):
         lkl.addLayout(links_row)
         lay.addWidget(links_grp)
 
+        # ── 启动器更新（round-161：签名清单 → 下载校验 → 自替换重启）──
+        upd_grp = QGroupBox(t("settings.update"))
+        upl = QVBoxLayout(upd_grp)
+        upl.setSpacing(8)
+        src_row = QHBoxLayout()
+        src_row.setSpacing(8)
+        src_row.addWidget(QLabel(t("settings.update_source")))
+        self.update_source_edit = QLineEdit(self.cfg.get("update_manifest_url", ""))
+        from .core.update_trust import GITHUB_MANIFEST_URL
+        self.update_source_edit.setPlaceholderText(GITHUB_MANIFEST_URL)
+        self.update_source_edit.setMinimumWidth(0)
+        self.update_source_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed)
+        src_row.addWidget(self.update_source_edit, stretch=1)
+        upl.addLayout(src_row)
+        upl.addWidget(self._wrap_hint(t("settings.update_source_hint")))
+
+        upd_row = QHBoxLayout()
+        upd_row.setSpacing(8)
+        self.update_status = QLabel(t("settings.update_idle"))
+        self.update_status.setProperty("cls", "sub")
+        self.update_status.setWordWrap(True)
+        self.update_check_btn = QPushButton(t("settings.update_check"))
+        self.update_check_btn.setMinimumHeight(32)
+        self.update_check_btn.clicked.connect(self._check_update)
+        self.update_download_btn = QPushButton(t("settings.update_download"))
+        self.update_download_btn.setProperty("cls", "accent")
+        self.update_download_btn.setMinimumHeight(32)
+        self.update_download_btn.setVisible(False)
+        self.update_download_btn.clicked.connect(self._start_update_download)
+        self.update_cancel_btn = QPushButton(t("settings.update_cancel"))
+        self.update_cancel_btn.setMinimumHeight(32)
+        self.update_cancel_btn.setVisible(False)
+        self.update_cancel_btn.clicked.connect(self._cancel_update)
+        upd_row.addWidget(self.update_status, stretch=1)
+        upd_row.addWidget(self.update_check_btn)
+        upd_row.addWidget(self.update_download_btn)
+        upd_row.addWidget(self.update_cancel_btn)
+        upl.addLayout(upd_row)
+
+        self.update_progress = QProgressBar()
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        self.update_progress.setTextVisible(False)
+        self.update_progress.setVisible(False)
+        upl.addWidget(self.update_progress)
+        lay.addWidget(upd_grp)
+
         # ── 关于 / 守则（置底）──
         about_grp = QGroupBox(t("settings.about"))
         al = QVBoxLayout(about_grp)
@@ -1621,40 +1717,180 @@ class SettingsPage(QWidget):
         if path:
             le.setText(path)
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # round-161 UPDATE FLOW
+    #   check (signed manifest) → confirm → download+verify → write helper →
+    #   launch helper → quit. The helper waits for our PID and swaps the exe.
+    # ═══════════════════════════════════════════════════════════════════════
+    @staticmethod
+    def _update_check_job(url):
+        from .core import update_trust as upd
+        try:
+            return ("ok", upd.check_for_update(manifest_url=url or None))
+        except upd.TrustError as exc:
+            return ("trust", exc.code)
+        except Exception:  # noqa: BLE001 - surfaced without leaking details
+            return ("error", "")
+
+    @staticmethod
+    def _update_download_job(manifest, cancel_evt, emit):
+        from .core import update_install as upd_i, update_trust as upd
+        try:
+            path = upd_i.download_update(
+                manifest, progress=emit, cancel=cancel_evt.is_set)
+            script = upd_i.write_upgrade_script(manifest, path)
+            return ("ok", script)
+        except upd_i.UpdateCancelled:
+            return ("cancelled",)
+        except upd.TrustError as exc:
+            return ("trust", exc.code)
+        except Exception:  # noqa: BLE001
+            return ("error", "")
+
+    @staticmethod
+    def _update_error_text(code):
+        key = _UPDATE_ERROR_KEYS.get(code or "")
+        return t(key) if key else t("settings.update_err_other", code=code or "?")
+
+    def _reset_update_ui(self):
+        self.update_progress.setVisible(False)
+        self.update_progress.setValue(0)
+        self.update_cancel_btn.setVisible(False)
+        self.update_cancel_btn.setEnabled(True)
+        self.update_check_btn.setEnabled(True)
+        self.update_download_btn.setEnabled(True)
+
+    def _check_update(self):
+        from . import effects
+        if effects.GAME_RUNNING:
+            warn(self, t("settings.update"), t("settings.update_running"))
+            return
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return
+        url = self.update_source_edit.text().strip()
+        self.update_status.setText(t("settings.update_checking"))
+        self.update_check_btn.setEnabled(False)
+        self.update_download_btn.setVisible(False)
+        w = Worker(self._update_check_job, url)
+        w.finished.connect(self._on_update_checked)
+        w.error.connect(self._on_update_worker_error)
+        self._update_worker = w
+        w.start()
+
+    def _on_update_checked(self, result):
+        self._update_worker = None
+        self.update_check_btn.setEnabled(True)
+        kind = result[0] if isinstance(result, tuple) and result else "error"
+        if kind != "ok":
+            code = result[1] if len(result) > 1 else ""
+            self.update_status.setText(self._update_error_text(code))
+            return
+        check = result[1]
+        manifest = getattr(check, "manifest", None)
+        if getattr(check, "status", "") == "current":
+            self._update_manifest = manifest
+            self.update_status.setText(
+                t("settings.update_latest", version=manifest.version))
+            self.update_download_btn.setVisible(False)
+            return
+        self._update_manifest = manifest
+        self.update_status.setText(
+            t("settings.update_found", version=manifest.version))
+        self.update_download_btn.setVisible(True)
+        self.update_download_btn.setEnabled(True)
+
+    def _start_update_download(self):
+        m = self._update_manifest
+        if m is None:
+            return
+        from . import effects
+        if effects.GAME_RUNNING:
+            warn(self, t("settings.update"), t("settings.update_running"))
+            return
+        if not getattr(sys, "frozen", False):
+            warn(self, t("settings.update"), t("settings.update_dev_only"))
+            return
+        notes = "\n".join("· " + n for n in m.notes) or t("settings.update_no_notes")
+        if not confirm(self, t("settings.update_confirm_title"),
+                       t("settings.update_confirm_text", version=m.version), notes):
+            return
+        self._update_cancel_evt = threading.Event()
+        self.update_progress.setVisible(True)
+        self.update_progress.setValue(0)
+        self.update_status.setText(t("settings.update_downloading", percent=0))
+        self.update_check_btn.setEnabled(False)
+        self.update_download_btn.setEnabled(False)
+        self.update_cancel_btn.setVisible(True)
+        self.update_cancel_btn.setEnabled(True)
+        w = Worker(self._update_download_job, m, self._update_cancel_evt,
+                   self.update_progress_sig.emit)
+        w.finished.connect(self._on_update_downloaded)
+        w.error.connect(self._on_update_worker_error)
+        self._update_worker = w
+        w.start()
+
+    def _on_update_progress(self, received, total):
+        pct = int(received * 100.0 / total) if total else 0
+        pct = max(0, min(100, pct))
+        self.update_progress.setValue(pct)
+        self.update_status.setText(t("settings.update_downloading", percent=pct))
+
+    def _cancel_update(self):
+        if self._update_cancel_evt is not None:
+            self._update_cancel_evt.set()
+            self.update_cancel_btn.setEnabled(False)
+            self.update_status.setText(t("settings.update_cancelling"))
+
+    def _on_update_downloaded(self, result):
+        self._update_worker = None
+        self._update_cancel_evt = None
+        kind = result[0] if isinstance(result, tuple) and result else "error"
+        if kind != "ok":
+            self._reset_update_ui()
+            if kind == "cancelled":
+                self.update_status.setText(t("settings.update_cancelled"))
+            else:
+                code = result[1] if len(result) > 1 else ""
+                self.update_status.setText(self._update_error_text(code))
+            return
+
+        # 更新源等设置随进程重启才生效 → 先落盘再做替换。
+        try:
+            self._sync_ui_to_cfg()
+            save_config(self.cfg)
+        except Exception:  # noqa: BLE001 - never block the install
+            pass
+        self.update_status.setText(t("settings.update_restarting"))
+        self.update_progress.setValue(100)
+        from .core import update_install as upd_i, update_trust as upd
+        try:
+            upd_i.launch_upgrade_helper(result[1])
+        except upd.TrustError as exc:
+            try:
+                upd_i.clear_pending_notes()
+            except Exception:  # noqa: BLE001
+                pass
+            self._reset_update_ui()
+            self.update_status.setText(self._update_error_text(exc.code))
+            warn(self, t("settings.update"), self._update_error_text(exc.code))
+            return
+        QTimer.singleShot(300, QApplication.quit)
+
+    def _on_update_worker_error(self, error_text):
+        self._update_worker = None
+        self._update_cancel_evt = None
+        self._reset_update_ui()
+        self.update_status.setText(
+            t("settings.update_err_other", code=(error_text or "?")[:40]))
+
     def _open_legal(self, key: str):
-        """Open privacy / TOS / disclaimer — show a simple text dialog."""
-        texts = {
-            "privacy": (
-                "AC Launcher 隐私协议\n\n"
-                "1. AC Launcher 是一款本地运行的 Minecraft Java 版启动器，\n"
-                "   所有数据存储在你的设备上。\n"
-                "2. 我们不收集、上传或共享任何个人信息。\n"
-                "3. 你的游戏实例、账户凭据、皮肤文件均保留在本地。\n"
-                "4. 联网功能（版本下载、皮肤获取）仅在你主动操作时触发，\n"
-                "   且仅与 Mojang 官方 API 或你指定的服务器通信。\n"
-                "5. 本启动器开源透明，你可以随时审查源码。\n\n"
-                "最后更新：2026-07-30"
-            ),
-            "tos": (
-                "AC Launcher 用户守则\n\n"
-                "1. 本启动器仅供合法使用 Minecraft 的用户。\n"
-                "2. 你需要自行拥有 Minecraft 正版授权。\n"
-                "3. 禁止利用本启动器进行任何违法活动。\n"
-                "4. Mod / 资源包 / 光影的版权归属其原作者。\n"
-                "5. 使用联机大厅功能时请遵守社区规范。\n\n"
-                "最后更新：2026-07-30"
-            ),
-            "disclaimer": (
-                "AC Launcher 免责声明\n\n"
-                "1. AC Launcher 由雾星（Mists Star）开发维护。\n"
-                "2. 本软件按「现状」提供，不作任何明示或暗示的保证。\n"
-                "3. 开发者不对因使用本软件造成的任何直接或间接损失负责。\n"
-                "4. Minecraft 是 Mojang Studios 的商标，本启动器与其无关。\n"
-                "5. 第三方 Mod / 资源 / 皮肤由其原作者负责，与本启动器无关。\n\n"
-                "最后更新：2026-07-30"
-            ),
-        }
-        info(self, t(f"settings.{key}"), texts.get(key, ""))
+        """Open privacy / TOS / disclaimer — show a simple text dialog.
+
+        round-162：正文收敛到 ``src/terms.py``（与启动条款门禁共用一份，
+        改条款只需改一处并 bump ``TERMS_VERSION``）。
+        """
+        from . import terms
+        info(self, t(f"settings.{key}"), terms.legal_text(key))
 
     def _reset_tutorial(self):
         # round-103 修复「重置新手教程」点了无反应：教程开关自 round-45 起改为
@@ -2401,6 +2637,10 @@ class SettingsPage(QWidget):
         # round-79b 窗口置顶
         target["topmost"] = self._safe(
             lambda: self.topmost_chk.isChecked(), bool(target.get("topmost", False)))
+        # round-152 减少动效（无障碍开关，不参与 EFFECT_CONFIG_KEYS 回写）
+        target["reduce_motion"] = self._safe(
+            lambda: self.reduce_motion_chk.isChecked(),
+            bool(target.get("reduce_motion", False)))
         # round-68 Quilt 加载器显示开关
         target["show_quilt"] = self._safe(
             lambda: self.show_quilt_chk.isChecked(), bool(target.get("show_quilt", True)))
@@ -2411,6 +2651,11 @@ class SettingsPage(QWidget):
         target["process_priority"] = self._safe(
             lambda: self.priority_combo.currentData() or "normal",
             target.get("process_priority", "normal"))
+        # round-161 更新源（高级分区懒加载 → 未构建时保留原值，避免误判脏）
+        if hasattr(self, "update_source_edit"):
+            target["update_manifest_url"] = self._safe(
+                lambda: self.update_source_edit.text().strip(),
+                target.get("update_manifest_url", ""))
 
     # ── dirty detection + unsaved-changes prompt ──
     def is_dirty(self) -> bool:
@@ -2482,6 +2727,7 @@ class SettingsPage(QWidget):
             pass
 
     # ── save ──
+    # ia[settings]: 点「保存」 | 底部操作条 | 写配置并即时应用主题/音效/壁纸，然后回到首页
     def _save(self):
         self._sync_ui_to_cfg()
         # round-104 清理已移除的配置键（启动器内存 / 折叠状态），避免历史残留
@@ -2524,8 +2770,11 @@ class SettingsPage(QWidget):
 
         # round-49 全局透明度（透底）即时生效
         try:
-            from .effects import set_window_opacity, set_effects_enabled
+            from .effects import (set_window_opacity, set_effects_enabled,
+                                  set_reduce_motion)
             set_effects_enabled(self.cfg.get("effect_light_trail", False))
+            # round-152 减少动效即时生效（无需重启）
+            set_reduce_motion(self.cfg.get("reduce_motion", False))
             set_window_opacity(self._window, self.cfg.get("window_opacity", 1.0))
         except Exception:  # noqa: BLE001
             pass

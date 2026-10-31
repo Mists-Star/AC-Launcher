@@ -141,6 +141,51 @@ def import_mrpack(path: str, mgr, mirror: str = "official") -> object:
     return inst
 
 
+def _launcher_settings() -> dict:
+    """Best-effort launcher config for install-time options (round-150)."""
+    try:
+        from .settings_dialog import load_config
+        return load_config() or {}
+    except Exception:  # noqa: BLE001 - 配置读不到就按默认值处理
+        return {}
+
+
+def _install_after_import(inst, progress) -> None:
+    """Install the game version + loader as part of the import (round-150).
+
+    旧行为只写元数据：首次启动时 ``launch_instance`` 才发现版本/加载器没装，
+    弹「安装 / 修复游戏版本」（用户感知为「重启后打开又在补全版本」）；安装
+    失败（官方 maven 超时）时每次启动都会重跑一遍。导入时一次性装好，
+    之后的启动就是零下载直启。
+
+    绝不抛出：已经下载好的整合包内容必须保留。错误挂到实例上，由 UI 提示
+    「首次启动会再试一次」。
+    """
+    from .core.install import install_instance
+
+    cfg = _launcher_settings()
+    cb = None
+    if progress is not None:
+        def _status(raw: str) -> None:
+            progress(f"{t('modpack.installing_loader')} {raw}", -1, 0)
+        cb = {"setStatus": _status}
+    try:
+        install_instance(
+            inst,
+            java_auto=bool(cfg.get("java_auto", True)),
+            java_path=(cfg.get("java_path") or "").strip(),
+            mirror=(cfg.get("download_mirror") or "official"),
+            proxy=(cfg.get("download_proxy") or ""),
+            callback=cb,
+        )
+    except Exception as e:  # noqa: BLE001 - 安装失败不丢整合包
+        print(f"[modpack_import] 游戏版本/加载器安装失败: {e}")
+        try:
+            inst.loader_install_error = str(e)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def import_curseforge_zip(
     path: str,
     mgr,
@@ -194,7 +239,6 @@ def import_curseforge_zip(
     # create mods dir and download required files
     os.makedirs(inst.mods_dir, exist_ok=True)
     files = [f for f in info["files"] if f.get("required", True)]
-    total = len(files)
     # round-73：单个文件逐个顺序下载 + 一个失败就中断整批 → 改为并发批下载，
     # 失败记录继续（对齐 MCLauncher 20-worker 队列 / 主流 LoaderDownload）。
     from .batch_download import BatchDownloader, BatchItem
@@ -218,8 +262,11 @@ def import_curseforge_zip(
     failures: list[str] = []
 
     def _on_progress(done, total_dl):
+        # round-150：total 用批任务数（total_dl），不再用 manifest 条目数——
+        # 两者可能不等（缺 projectID 的条目不入批），会导致百分比永远到不了
+        # 100%、收尾状态提前/滞后。
         if progress is not None:
-            progress(f"{done}/{total_dl}", done, total)
+            progress(f"{done}/{total_dl}", done, total_dl)
 
     def _on_finish(items) -> None:
         failed = [it for it in items if not it.ok and not it.cancelled]
@@ -237,6 +284,12 @@ def import_curseforge_zip(
             "\n".join(failures[:5])
             + ("" if len(failures) <= 5 else f"\n… 另有 {len(failures)-5} 个失败")
         ) from None
+    # 先落盘再安装：安装失败也不至于丢掉已下载的整合包内容（round-150）。
+    mgr._persist(inst)
+    if progress is not None:
+        progress(t("modpack.installing_loader"), -1, 0)
+    _install_after_import(inst, progress)
+    # 安装阶段可能补全了 loader_version（manifest 未指定时）→ 再落盘一次。
     mgr._persist(inst)
     return inst
 

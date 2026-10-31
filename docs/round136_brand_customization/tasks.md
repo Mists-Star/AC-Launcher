@@ -8,7 +8,7 @@
 
 ## T1 · 新增统一入口 `src/brand_custom.py`
 
-- [x] 新建 `<本地工作区>\mc_launcher\src\brand_custom.py`
+- [x] 新建 `src\brand_custom.py`
 - [x] 常量：`CUSTOM_LOGO_KEY` / `CUSTOM_TITLE_KEY` / `SPLASH_BG_KEY` / `SUPPORTED_EXTS`
 - [x] `load_brand_cfg()` —— 读 `launcher_config.json` 里 3 个键，异常 → `{}`
 - [x] `normalize_path(raw)` —— 空/非 str → `""`；否则 `abspath+expanduser+normpath`

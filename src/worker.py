@@ -232,9 +232,19 @@ class ProgressWorker(TrackedThread):
         self._kwargs = kwargs
         self._max = 0
         self._ctx = None
+        # round-155：安装上下文销毁前留下来源链快照，供完成回调读取。
+        self._trace = None
         self._stall = None
         self._stall_lock = threading.Lock()
         self._speed_stop = threading.Event()
+
+    @property
+    def trace(self):
+        """本次任务的来源链记录（运行中读上下文，结束后读快照；没有则 None）。"""
+        ctx = self._ctx
+        if ctx is not None:
+            return getattr(ctx, "trace", None)
+        return self._trace
 
     def abort(self) -> None:
         """取消本次安装：在途下载立即抛错退出（线程不再写盘）。"""
@@ -332,5 +342,7 @@ class ProgressWorker(TrackedThread):
             if not self.isInterruptionRequested():
                 self.error.emit(str(e))
         finally:
+            ctx = self._ctx
+            self._trace = getattr(ctx, "trace", None) if ctx is not None else None
             self._ctx = None
             self._disarm_stall()

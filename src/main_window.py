@@ -23,9 +23,11 @@ from PySide6.QtGui import (QFont, QIcon, QPainter, QPainterPath, QColor, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 from .theme import (COLORS, RoundedCard, set_theme_mode, get_theme_mode,
-                    on_theme_change, F_MD, F_SM, with_alpha)
+                    on_theme_change, F_MD, F_SM, with_alpha, MOTION_QUICK_MS,
+                    MOTION_SETTLE_MS)
 from .effects import (
-    LightTrailCard, set_effects_enabled, set_window_opacity, fade_page_transition,
+    LightTrailCard, set_effects_enabled, set_reduce_motion, set_window_opacity,
+    fade_page_transition, motion_ms,
 )
 from .icons import icon, on_accent, screen_dpr
 from .i18n import t
@@ -300,6 +302,64 @@ class _InstanceCard(LightTrailCard):
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:
             self._on_select_cb(self._inst.id)
+        super().mouseReleaseEvent(e)
+
+
+class _AttentionRow(QFrame):
+    """首页「需要留意 / 继续」一行（round-153）。
+
+    整行可点，右侧按钮是同一动作的显式入口。样式走主题 QSS 的
+    ``QFrame[cls="card"]``，随明暗主题切换，不写死颜色。
+    """
+
+    def __init__(self, item, on_action, parent=None):
+        super().__init__(parent)
+        self.setProperty("cls", "card")
+        self._item = item
+        self._on_action = on_action
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(46)
+
+        h = QHBoxLayout(self)
+        h.setContentsMargins(14, 9, 12, 9)
+        h.setSpacing(10)
+
+        dot = QLabel("●")
+        if item.severity == "critical":
+            color = COLORS.get("danger", "#EF4444")
+        elif item.severity == "warning":
+            color = "#F59E0B"
+        else:
+            color = COLORS.get("accent", "#7C3AED")
+        dot.setStyleSheet(f"color: {color}; font-size: 11px;")
+        h.addWidget(dot, alignment=Qt.AlignVCenter)
+
+        try:
+            title = t(item.title_key, **(item.meta or {}))
+        except Exception:  # noqa: BLE001 - 缺键不该让整行消失
+            title = item.title_key
+        text = f"{item.instance_name}  ·  {title}" if item.instance_name else title
+        lbl = QLabel(text)
+        lbl.setStyleSheet("font-size: 13px;")
+        lbl.setWordWrap(True)
+        h.addWidget(lbl, stretch=1)
+
+        if item.more:
+            more = QLabel(t("home.attn.more", n=item.more))
+            more.setProperty("cls", "sub")
+            more.setStyleSheet("font-size: 11px;")
+            h.addWidget(more, alignment=Qt.AlignVCenter)
+
+        btn = QPushButton(t(item.action_key))
+        btn.setProperty("cls", "secondary")
+        btn.setMinimumHeight(28)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(lambda *_: self._on_action(self._item))
+        h.addWidget(btn, alignment=Qt.AlignVCenter)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._on_action(self._item)
         super().mouseReleaseEvent(e)
 
 
@@ -843,6 +903,16 @@ class HomePage(QWidget):
         lay.addWidget(hero)
         lay.addSpacing(14)
 
+        # ── round-153 首页两问：继续哪个 + 哪些挡住你（一行一条）──
+        # 无内容时整块隐藏，不占高度；有内容才把 hero 下方的留白用起来。
+        self.attention_wrap = QWidget()
+        self.attention_lay = QVBoxLayout(self.attention_wrap)
+        self.attention_lay.setContentsMargins(0, 0, 0, 0)
+        self.attention_lay.setSpacing(6)
+        self.attention_wrap.setVisible(False)
+        lay.addWidget(self.attention_wrap)
+        lay.addSpacing(6)
+
         # ── 一行修复 / 异常提示（原「修复日志卡 + 快捷操作行」压缩为单行）──
         # round-107：首页只保留「当前实例 + 开始游戏 + 一行提示」。实例网格与
         # 快捷操作行与其他页重复，删掉。
@@ -1025,6 +1095,8 @@ class HomePage(QWidget):
 
         # ── 统御统计条（direction A）──
         self._refresh_stats(instances)
+        # round-153：继续哪个 / 哪些挡住你（hero 下方一行一条）
+        self._refresh_home_summary(instances, inst)
         # 实例卡片网格（无论是否有当前实例都刷新）
         self._refresh_inst_grid(instances, inst.id if inst else "")
 
@@ -1096,6 +1168,129 @@ class HomePage(QWidget):
                 parts.append(f"{t('home.version')} {ver}")
             parts.append(f"{t('home.loader')} {inst.loader}")
             self.detail_lbl.setText("  ·  ".join(parts))
+
+    # ── round-153 首页两问（继续 / 需要留意）──
+    def _clear_attention_rows(self):
+        lay = getattr(self, "attention_lay", None)
+        if lay is None:
+            return
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                try:
+                    from shiboken6 import delete as _sh
+                    _sh(w)
+                except Exception:
+                    w.deleteLater()
+
+    def _refresh_home_summary(self, instances, inst):
+        """聚合「继续哪个 + 哪些挡住你」，hero 下方一行一条。
+
+        健康扫描只对当前实例 + 最近玩过的 2 个实例跑（带 TTL 缓存），其余
+        实例只做廉价检查（目录 / Java / 内存 / 上次会话），避免首页刷新时
+        把全库的模组 jar 读一遍。Info 级问题不进入列表。
+        """
+        if not (hasattr(self, "attention_wrap") and self._alive(self.attention_wrap)):
+            return
+        self._clear_attention_rows()
+        self.attention_wrap.setVisible(False)
+        if not instances:
+            return
+        try:
+            from .core import home_summary as hs
+            from .settings_dialog import load_config
+            settings = load_config()
+            cur_id = getattr(inst, "id", "") if inst is not None else ""
+            recent = sorted(
+                instances,
+                key=lambda i: getattr(i, "last_played", 0) or 0,
+                reverse=True)[:2]
+            health_ids = {getattr(i, "id", "") for i in recent}
+            if cur_id:
+                health_ids.add(cur_id)
+            win = self.window()
+            summary = hs.diagnose_instances(
+                instances, settings, health_ids=health_ids,
+                with_account=True,
+                has_account=bool(getattr(win, "current_account", None)))
+        except Exception:  # noqa: BLE001 - 聚合失败只是不显示，不影响首页
+            return
+
+        rows = 0
+        if summary.continue_with and summary.continue_with != cur_id:
+            names = {getattr(i, "id", ""): getattr(i, "name", "") for i in instances}
+            name = names.get(summary.continue_with, "")
+            if name:
+                continue_item = hs.AttentionItem(
+                    instance_id=summary.continue_with, instance_name="",
+                    severity="info", kind="continue",
+                    title_key="home.attn.continue", meta={"name": name},
+                    action="continue",
+                    action_key="home.attn.action.continue")
+                self.attention_lay.addWidget(
+                    _AttentionRow(continue_item, self._on_attention_action))
+                rows += 1
+        for item in summary.needs_attention[:4]:
+            self.attention_lay.addWidget(
+                _AttentionRow(item, self._on_attention_action))
+            rows += 1
+        self.attention_wrap.setVisible(rows > 0)
+
+    # ia[home]: 点「继续玩」 | 首页留意行 | 切到实例页并启动该实例
+    # ia[home]: 点「登录」 | 首页留意行 | 打开账户页（登录 / 切换账户）
+    # ia[home]: 点「更换 Java」 | 首页留意行 | 打开设置页并定位 Java 分区
+    # ia[home]: 点「修复」 | 首页留意行 | 切到实例页并应用该修复
+    def _on_attention_action(self, item):
+        """首页一行 → 先切到实例页，再执行动作。"""
+        action = getattr(item, "action", "")
+        if action == "login":
+            win = self.window()
+            if win is not None and hasattr(win, "_open_account"):
+                win._open_account()
+            return
+        iid = getattr(item, "instance_id", "")
+        if iid:
+            self.set_current_instance(iid)
+        if action == "continue":
+            self._open_instances()
+            cur = self.get_current_instance()
+            if cur is not None:
+                self.on_play(cur)
+            return
+        if action == "java":
+            self._open_settings()
+            win = self.window()
+            if win is not None and hasattr(win, "_select_settings_section"):
+                win._select_settings_section("java")
+            return
+        self._open_instances()
+        if action == "fix" and getattr(item, "fix", None):
+            QTimer.singleShot(0, lambda it=item: self._apply_home_fix(it))
+
+    def _apply_home_fix(self, item):
+        inst = None
+        if self.inst_mgr is not None:
+            try:
+                inst = self.inst_mgr.get(item.instance_id)
+            except Exception:  # noqa: BLE001 - 实例读失败就退回当前实例
+                inst = None
+        if inst is None:
+            inst = self.get_current_instance()
+        if inst is None:
+            return
+        try:
+            from .core import instance_health
+            changed = instance_health.apply_fix(inst, item.fix)
+            if changed and self.inst_mgr is not None:
+                self.inst_mgr.save(inst)
+            from .win_rounded import toast
+            toast(self, t("health.dialog_title"),
+                  t("health.fixed_toast", n=1) if changed else t("health.fix_none"))
+        except Exception:  # noqa: BLE001 - 修复失败不阻断首页
+            pass
+        self._refresh()
 
     # ── 实例卡片网格 ──
     def _make_instance_card(self, inst, is_current):
@@ -1190,6 +1385,7 @@ class HomePage(QWidget):
         if inst is not None:
             self.on_play(inst)
 
+    # ia[home]: 点「启动」 | hero 主按钮 | 启动当前实例（缺 Java/账户时先拦截提示）
     def _on_play(self):
         inst = self.get_current_instance()
         if inst is None:
@@ -1197,6 +1393,7 @@ class HomePage(QWidget):
         self.play_btn.setEnabled(False)
         self.on_play(inst)
 
+    # ia[home]: 点「结束游戏」 | hero 主按钮（运行中） | 强杀游戏进程并恢复待机状态
     def _on_kill_game(self):
         """首页「结束游戏」按钮：强杀运行中的游戏进程（round-37 轴心3）。"""
         try:
@@ -1609,6 +1806,11 @@ class MainWindow(QMainWindow):
         self._dl_workers: dict[str, object] = {}
         self._dl_dlgs: dict[str, object] = {}
         self._dl_pct: dict[str, int] = {}      # round-109：实例 → 最新下载百分比
+        # round-154：实例 → TaskCenter 任务 id（统一任务记录 / 持久历史）
+        self._dl_task_ids: dict[str, str] = {}
+        self._launch_task_id = ""
+        # round-151：任务发起时所在页面 → 点击状态栏召回时先切回该页。
+        self._task_page_key = ""
         self._game_proc = None      # round-34：运行中游戏进程
         self._game_procs = {}       # round-92 多开：按实例 id 登记运行中游戏
         self._game_name = ""
@@ -1631,6 +1833,8 @@ class MainWindow(QMainWindow):
         set_font_family(self.cfg.get("font_family", ""))
         # round-49 液态流光 effect：按配置开启流光卡片 + 全局透明度。
         set_effects_enabled(self.cfg.get("effect_light_trail", False))
+        # round-152 减少动效：必须在任何页面/卡片构建之前生效。
+        set_reduce_motion(self.cfg.get("reduce_motion", False))
         set_window_opacity(self, self.cfg.get("window_opacity", 1.0))
 
         # round-51 透底效果：系统 Acrylic 在 FramelessHelper 设置完窗口标志后
@@ -1665,6 +1869,10 @@ class MainWindow(QMainWindow):
         self.backdrop = WallpaperWidget(self)
         self.backdrop.setGeometry(self.rect())
         self.backdrop.lower()
+        # round-150：版本背景没有可用资源时回到默认白底；真实全景到达后再切回
+        # 「壁纸垫底」的透明页面（否则卡片会一直透明压在白底上）。
+        self.backdrop.panorama_unavailable.connect(self._on_wallpaper_unavailable)
+        self.backdrop.panorama_ready.connect(self._on_panorama_shown)
 
         # ── full-width custom title bar (drag area + window controls) ──
         self.titlebar = self._build_titlebar()
@@ -1771,6 +1979,12 @@ class MainWindow(QMainWindow):
         ver = QLabel(f"{APP_DISPLAY}  {APP_VERSION}")
         ver.setProperty("cls", "sub")
         self.statusBar().addPermanentWidget(ver)
+        # round-151：整条状态栏都可点击召回（原来只有 8px 进度条本身能点，
+        # 用户点左侧进度文案没有任何反应）。子控件逐个装过滤器，保证点文案/
+        # 速度标签也能命中；没有进行中的任务时一律不响应。
+        self.statusBar().installEventFilter(self)
+        for _w in self.statusBar().findChildren(QWidget):
+            _w.installEventFilter(self)
 
         # ── Frameless: no native window chrome ──
         self._frameless = FramelessHelper(self)
@@ -1840,6 +2054,8 @@ class MainWindow(QMainWindow):
             set_app_background_translucent(
                 self.cfg.get("transparent_window", False))
             set_effects_enabled(self.cfg.get("effect_light_trail", False))
+            # round-152 减少动效：设置 / 新手向导保存后即时生效
+            set_reduce_motion(self.cfg.get("reduce_motion", False))
             set_window_opacity(self, self.cfg.get("window_opacity", 1.0))
             apply_qss()
             # RoundedCard snapshots its fill colour at construction, so cards
@@ -1969,9 +2185,9 @@ class MainWindow(QMainWindow):
         toast.show()
         toast.raise_()
 
-        # 入场动画（280ms 从右滑入）
+        # 入场动画（280ms 从右滑入；round-152 减少动效时 duration=0 直接落位）
         anim_in = QPropertyAnimation(toast, b"pos")
-        anim_in.setDuration(280)
+        anim_in.setDuration(motion_ms(MOTION_SETTLE_MS))
         anim_in.setStartValue(toast.pos())
         anim_in.setEndValue(QPoint(end_x, end_y))
         anim_in.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -2091,7 +2307,7 @@ class MainWindow(QMainWindow):
         toast.raise_()
 
         anim_in = QPropertyAnimation(toast, b"pos")
-        anim_in.setDuration(260)
+        anim_in.setDuration(motion_ms(MOTION_SETTLE_MS))
         anim_in.setStartValue(toast.pos())
         anim_in.setEndValue(QPoint(end_x, end_y))
         anim_in.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -2221,6 +2437,26 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - a bad wallpaper must not kill the window
             pass
 
+    def _set_wallpaper_surface(self, on: bool) -> None:
+        """Switch the translucent page surface and repolish (round-150)."""
+        try:
+            from .theme import apply_qss, set_wallpaper_surface
+            set_wallpaper_surface(on)
+            apply_qss()
+            home = getattr(self, "home", None)
+            if home is not None:
+                home._refresh_overlay_style()
+        except Exception:  # noqa: BLE001 - styling must never break the window
+            pass
+
+    def _on_wallpaper_unavailable(self):
+        """版本背景没有资源 → 隐藏壁纸层，页面回到默认白底（不显示紫底）。"""
+        self._set_wallpaper_surface(False)
+
+    def _on_panorama_shown(self):
+        """真实版本全景已上屏 → 恢复「壁纸垫底」的透明页面。"""
+        self._set_wallpaper_surface(True)
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
         backdrop = getattr(self, "backdrop", None)
@@ -2311,6 +2547,16 @@ class MainWindow(QMainWindow):
         from .core.install import install_instance
         from .launch_dialog import LaunchProgressDialog
 
+        # round-151：记录任务所属页面，供「点状态栏召回」时切回这里。
+        self._task_page_key = "instances"
+        # round-154：统一任务记录（完成后落 task_history.json）
+        try:
+            from .core.task_center import get_task_center
+            _task = get_task_center().start(
+                "download", inst.name or inst_id, target_page="instances")
+            self._dl_task_ids[inst_id] = _task.id
+        except Exception:  # noqa: BLE001 - 任务记录失败不阻断下载
+            pass
         settings = load_config()
         self._progress.setVisible(True)
         self._progress.setMaximum(0)  # 未定长起步
@@ -2329,6 +2575,8 @@ class MainWindow(QMainWindow):
         )
         w.status.connect(self.statusBar().showMessage)
         w.status.connect(dlg.set_status_text)
+        w.status.connect(
+            lambda s, iid=inst_id: self._on_download_status(iid, s))
         w.step.connect(dlg.set_step)
         w.speed.connect(dlg.set_speed)
         w.speed.connect(self._set_speed)
@@ -2341,17 +2589,72 @@ class MainWindow(QMainWindow):
         self._dl_workers[inst_id] = w
         w.start()
 
+    def _on_download_status(self, inst_id: str, text: str) -> None:
+        """round-154：把下载阶段写进任务记录（历史里能看到卡在哪一步）。"""
+        try:
+            from .core.task_center import get_task_center
+            tid = self._dl_task_ids.get(inst_id, "")
+            if tid:
+                get_task_center().update(tid, stage=text)
+        except Exception:  # noqa: BLE001
+            pass
+        # round-155：来源链逐源失败可见（任务记录 + 下载详情）。
+        self._push_sources(self._dl_task_ids.get(inst_id, ""),
+                           self._dl_workers.get(inst_id),
+                           self._dl_dlgs.get(inst_id))
+
+    def _push_sources(self, tid: str, worker, dialog) -> None:
+        """把 worker 的来源链 trace 推到任务记录与详情对话框。"""
+        trace = getattr(worker, "trace", None)
+        if trace is None:
+            return
+        try:
+            summary = trace.summary()
+            detail = trace.describe()
+        except Exception:  # noqa: BLE001 - 记录异常不影响下载
+            return
+        try:
+            from .core.task_center import get_task_center
+            if tid and summary:
+                get_task_center().update(tid, sources=summary)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if dialog is not None:
+                dialog.set_sources(
+                    t("launch.sources_line", detail=detail) if detail else "")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _on_download_progress(self, inst_id: str, value: int, maximum: int) -> None:
         pct = int(value * 100 / maximum) if maximum and maximum > 0 else 0
         self._dl_pct[inst_id] = pct
+        try:
+            from .core.task_center import get_task_center
+            tid = self._dl_task_ids.get(inst_id, "")
+            if tid:
+                get_task_center().update(tid, completed=pct, total=100)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self.instances_page.set_instance_task(inst_id, "downloading", pct)
         except Exception:  # noqa: BLE001
             pass
 
     def _on_download_done(self, inst_id: str) -> None:
+        # round-155：结束前再推一次来源链（worker 即将从表里移除）。
+        self._push_sources(self._dl_task_ids.get(inst_id, ""),
+                           self._dl_workers.get(inst_id),
+                           self._dl_dlgs.get(inst_id))
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
+        try:
+            from .core.task_center import get_task_center
+            tid = self._dl_task_ids.pop(inst_id, "")
+            if tid:
+                get_task_center().finish(tid, t("launch.download_ready"))
+        except Exception:  # noqa: BLE001
+            pass
         inst = self.inst_mgr.get(inst_id)
         name = getattr(inst, "name", "") or inst_id
         self._progress.setVisible(False)
@@ -2367,8 +2670,19 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1200, dlg.close)
 
     def _on_download_error(self, inst_id: str, err: str) -> None:
+        # round-155：失败时把逐源原因先写进任务记录（历史里可追）。
+        self._push_sources(self._dl_task_ids.get(inst_id, ""),
+                           self._dl_workers.get(inst_id),
+                           self._dl_dlgs.get(inst_id))
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
+        try:
+            from .core.task_center import get_task_center
+            tid = self._dl_task_ids.pop(inst_id, "")
+            if tid:
+                get_task_center().fail(tid, err or "")
+        except Exception:  # noqa: BLE001
+            pass
         inst = self.inst_mgr.get(inst_id)
         name = getattr(inst, "name", "") or inst_id
         self._progress.setVisible(False)
@@ -2404,36 +2718,75 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(True)
 
     def eventFilter(self, obj, event):
-        """round-107：点击底部状态栏进度条 → 召回被收起的启动/下载对话框。"""
-        if obj is self._progress and event.type() == QEvent.Type.MouseButtonPress:
-            self._reopen_launch_task()
-            return False
+        """round-107 / round-151：点击底部状态栏（任意位置）→ 召回任务对话框。"""
+        if event.type() == QEvent.Type.MouseButtonPress:
+            bar = self.statusBar()
+            if obj is bar or (isinstance(obj, QWidget) and bar.isAncestorOf(obj)):
+                self._reopen_launch_task()
+                return False
         return super().eventFilter(obj, event)
 
-    def _reopen_launch_task(self):
-        """把后台仍在进行的启动/下载任务对话框重新拉到前台。
-
-        round-107 T8：若实例下载任务仍在跑，优先召回下载对话框。
-        """
-        dlg = None
+    def _active_task_dialog(self):
+        """返回 ``(对话框, 页面 key)``；没有进行中的任务时返回 ``(None, "")``。"""
+        for iid, w in list(getattr(self, "_dl_workers", {}).items()):
+            try:
+                if not w.isRunning():
+                    continue
+            except RuntimeError:  # 已销毁的 QThread
+                continue
+            dlg = getattr(self, "_dl_dlgs", {}).get(iid)
+            if dlg is not None:
+                return dlg, "instances"
+        pw = getattr(self, "_play_worker", None)
+        dlg = getattr(self, "_launch_dlg", None)
         try:
-            # 有下载任务在跑 → 召回其对话框（多实例并发时取仍在跑的那个）
-            for iid, w in getattr(self, "_dl_workers", {}).items():
-                if w.isRunning():
-                    dlg = getattr(self, "_dl_dlgs", {}).get(iid)
-                    break
-        except RuntimeError:  # C++ 对象已删除
+            running = bool(pw is not None and pw.isRunning())
+        except RuntimeError:
+            running = False
+        if running and dlg is not None:
+            return dlg, (getattr(self, "_task_page_key", "") or "instances")
+        return None, ""
+
+    def _current_page_key(self) -> str:
+        """当前栈页对应的导航 key（找不到映射时回退 ``instances``）。"""
+        try:
+            idx = self.stack.currentIndex()
+        except Exception:  # noqa: BLE001
+            return "instances"
+        for key, i in STACK_INDEX.items():
+            if i == idx:
+                return key
+        return "instances"
+
+    def _goto_page_key(self, key: str) -> None:
+        """切回任务发起时所在的页面（不改变实例选中状态）。"""
+        if not key:
+            return
+        if self.nav_layout == "pcl2":
+            self._pcl2_goto(key)
+            return
+        try:
+            self.nav.setCurrentRow(self._nav_row(key))
+        except Exception:  # noqa: BLE001 - 导航不可用时不阻断召回
             pass
-        if dlg is None:
-            dlg = getattr(self, "_launch_dlg", None)
+
+    def _reopen_launch_task(self):
+        """把后台仍在进行的启动/下载任务对话框重新拉到前台，并回到对应页面。
+
+        round-151：无进行中的任务时**不响应**（不切页、不弹窗）；点击状态栏
+        任意位置都算，不再要求精准点中 8px 进度条。
+        """
+        dlg, page_key = self._active_task_dialog()
         if dlg is None:
             return
+        self._goto_page_key(page_key)
         try:
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
         except RuntimeError:  # 对话框已被销毁（C++ 对象已删除）
-            self._launch_dlg = None
+            if dlg is getattr(self, "_launch_dlg", None):
+                self._launch_dlg = None
 
     # ---- top bar (full width, custom title bar) ----
     def _build_titlebar(self):
@@ -2828,22 +3181,32 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         from PySide6.QtCore import QVariantAnimation, QEasingCurve
-        anim = QVariantAnimation(self)
-        anim.setDuration(180)
-        anim.setStartValue(self.nav.width())
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-
-        def _step(v):
+        _dur = motion_ms(MOTION_QUICK_MS)   # round-152：减少动效时归零
+        if _dur <= 0:
+            # 减少动效：不做宽度过渡，直接落位。
             try:
-                self.nav.setMinimumWidth(int(v))
-                self.nav.setMaximumWidth(int(v))
-            except Exception:
+                self.nav.setMinimumWidth(target)
+                self.nav.setMaximumWidth(target)
+            except Exception:  # noqa: BLE001
                 pass
+            self._nav_anim = None
+        else:
+            anim = QVariantAnimation(self)
+            anim.setDuration(_dur)
+            anim.setStartValue(self.nav.width())
+            anim.setEndValue(target)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
 
-        anim.valueChanged.connect(_step)
-        anim.start()
-        self._nav_anim = anim  # 防 GC
+            def _step(v):
+                try:
+                    self.nav.setMinimumWidth(int(v))
+                    self.nav.setMaximumWidth(int(v))
+                except Exception:  # noqa: BLE001
+                    pass
+
+            anim.valueChanged.connect(_step)
+            anim.start()
+            self._nav_anim = anim  # 防 GC
         try:
             self.cfg["nav_collapsed"] = self._nav_icons_only
             save_config(self.cfg)
@@ -3592,6 +3955,23 @@ class MainWindow(QMainWindow):
         except Exception:
             pass  # never let a broken settings page crash the nav
 
+    def _select_settings_section(self, key: str) -> None:
+        """Open settings and focus a section by its ``UserRole`` data key.
+
+        round-153：首页「安装 Java」动作落到 Java 分区，而不是设置页顶部。
+        """
+        try:
+            self._open_settings()
+            lst = getattr(self, "_sec_list", None)
+            if lst is None:
+                return
+            for i in range(lst.count()):
+                if lst.item(i).data(Qt.UserRole) == key:
+                    lst.setCurrentRow(i)
+                    return
+        except Exception:  # noqa: BLE001 - 定位失败停在设置页即可
+            pass
+
     def _on_settings_saved(self):
         """Settings saved: language/theme may have changed → refresh all UI."""
         self.cfg = load_config()
@@ -3732,6 +4112,80 @@ class MainWindow(QMainWindow):
 
         DiagnosticsDialog(self).exec()
 
+    def _confirm_java_before_launch(self, inst, settings) -> tuple[bool, str]:
+        """round-153：若启动会更换玩家指定的 Java，先在启动前问一次。
+
+        Returns ``(proceed, java_override)``：
+          * 自动模式且没有实例级固定 Java → 不换，直接放行；
+          * 指定的 Java 兼容 / 找不到替代 → 放行（后者交给 launch_instance
+            报错并引导安装）；
+          * 指定的 Java 不兼容但存在替代 → 弹确认，同意则返回替代路径，
+            ``launch_instance(java_override=...)`` 本次直接用它。
+
+        只影响这一次启动：不写实例/全局设置（与 Lumilio 的启动前确认一致）。
+        """
+        try:
+            from .core.java import (find_version_json, is_java_compatible,
+                                    required_java_major_for, scan_javas,
+                                    select_java)
+        except Exception:  # noqa: BLE001 - Java 模块不可用时不拦启动
+            return True, ""
+
+        try:
+            auto = bool(settings.get("java_auto", True))
+            inst_path = (getattr(inst, "java_path", "") or "").strip()
+            if auto and not inst_path:
+                return True, ""
+            user_path = inst_path or (settings.get("java_path") or "").strip()
+            if not user_path or not os.path.isfile(user_path):
+                return True, ""  # 无效路径交给 launch_instance 的既有报错
+
+            version = getattr(inst, "version_id", "") or getattr(inst, "game_version", "")
+            vjson = find_version_json(getattr(inst, "mc_dir", "") or "", version)
+            need = required_java_major_for(
+                getattr(inst, "game_version", ""),
+                getattr(inst, "loader", "") or "", version_json=vjson)
+
+            norm = os.path.normcase(os.path.normpath(user_path))
+            major = 0
+            for j in scan_javas(deep=False):
+                if os.path.normcase(os.path.normpath(j.get("path") or "")) == norm:
+                    major = int(j.get("major") or 0)
+                    break
+            if not major or is_java_compatible(need, major):
+                return True, ""
+
+            alt = select_java(getattr(inst, "game_version", ""),
+                              java_auto=True, need_override=need)
+            if not alt or os.path.normcase(os.path.normpath(alt)) == norm:
+                return True, ""  # 没有替代 → 让启动报错并引导安装 Java
+
+            alt_major = 0
+            alt_norm = os.path.normcase(os.path.normpath(alt))
+            for j in scan_javas(deep=False):
+                if os.path.normcase(os.path.normpath(j.get("path") or "")) == alt_norm:
+                    alt_major = int(j.get("major") or 0)
+                    break
+            display = alt_major or need
+
+            from PySide6.QtWidgets import QMessageBox
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle(t("launch.java_confirm_title"))
+            box.setText(t("launch.java_confirm_msg",
+                          have=major, need=need, use=display))
+            use_btn = box.addButton(
+                t("launch.java_confirm_use", major=display),
+                QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(t("common.cancel"), QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(use_btn)
+            box.exec()
+            if box.clickedButton() is not use_btn:
+                return False, ""
+            return True, alt
+        except Exception:  # noqa: BLE001 - 确认失败绝不阻断启动
+            return True, ""
+
     def _handle_play(self, inst: Instance, *, server: str | None = None,
                      port: str | None = None):
         self._last_inst = inst  # round-46：记住实例，Java 选完可重试
@@ -3808,6 +4262,24 @@ class MainWindow(QMainWindow):
             _box.exec()
             if _box.clickedButton() is not _continue:
                 return
+        # round-153 启动前 Java 确认：会更换玩家指定的 Java 时先问一次，
+        # 同意则本次直接用替代路径（只影响这一次，不改设置）。
+        _java_ok, _java_override = self._confirm_java_before_launch(inst, settings)
+        if not _java_ok:
+            return
+        # 记住最近一次启动（首页「继续哪个」依据），并记录会话开始。
+        try:
+            import time as _time
+            inst.last_played = _time.time()
+            if self.inst_mgr is not None:
+                self.inst_mgr.save(inst)
+        except Exception:  # noqa: BLE001 - 记录失败不影响启动
+            pass
+        try:
+            from .core import last_session
+            last_session.record(getattr(inst, "id", ""), "starting")
+        except Exception:  # noqa: BLE001
+            pass
         log_dir = get_data_dir()
         # round-71 借鉴主流实现：保存本次登录 token，console 展示打码用
         self._game_token = account.get("token", "")
@@ -3825,19 +4297,33 @@ class MainWindow(QMainWindow):
         # round-52 启动进度对话框（对齐主流的启动检查步骤面板）：
         # 隐藏只收起点窗口，启动仍由后台 worker 继续（状态栏进度兜底）。
         from .launch_dialog import LaunchProgressDialog
+        # round-151：记住本次启动是从哪一页发起的（点状态栏召回时切回去）。
+        self._task_page_key = self._current_page_key()
+        # round-154：启动也是任务中心的一条记录（失败原因进历史）
+        try:
+            from .core.task_center import get_task_center
+            _task = get_task_center().start(
+                "launch", inst.name or "Minecraft",
+                target_page=self._task_page_key or "home")
+            self._launch_task_id = _task.id
+        except Exception:  # noqa: BLE001 - 任务记录失败不阻断启动
+            pass
         self._launch_dlg = LaunchProgressDialog(inst, parent=self)
         self._launch_dlg.show()
 
         self._play_worker = ProgressWorker(
             launch_instance, inst, account, settings, log_dir=log_dir,
-            server_override=server, port_override=port
+            server_override=server, port_override=port,
+            java_override=_java_override,
         )
         self._play_worker.status.connect(self.statusBar().showMessage)
+        self._play_worker.status.connect(self._on_launch_status)
         self._play_worker.step.connect(self._launch_dlg.set_step)
         self._play_worker.status.connect(self._launch_dlg.set_status_text)
         self._play_worker.speed.connect(self._launch_dlg.set_speed)
         self._play_worker.speed.connect(self._set_speed)
         self._play_worker.progress.connect(self._set_progress)
+        self._play_worker.progress.connect(self._on_launch_progress)
         self._play_worker.progress.connect(self._launch_dlg.set_progress)
         # launch_instance 返回 (proc, log_path)；round-34 把 proc 交给进程跟踪
         self._play_worker.finished.connect(
@@ -3848,9 +4334,49 @@ class MainWindow(QMainWindow):
         self._play_worker.error.connect(self._on_launch_error)
         self._play_worker.start()
 
+    def _on_launch_status(self, text: str) -> None:
+        """round-155：启动/安装阶段文本 + 来源链写进任务记录与对话框。"""
+        try:
+            from .core.task_center import get_task_center
+            if self._launch_task_id:
+                get_task_center().update(self._launch_task_id, stage=text)
+        except Exception:  # noqa: BLE001
+            pass
+        self._push_sources(self._launch_task_id,
+                           getattr(self, "_play_worker", None),
+                           getattr(self, "_launch_dlg", None))
+
+    def _on_launch_progress(self, value: int, maximum: int) -> None:
+        """round-154：启动进度写入任务记录。"""
+        try:
+            from .core.task_center import get_task_center
+            if self._launch_task_id:
+                get_task_center().update(self._launch_task_id,
+                                         completed=max(0, value),
+                                         total=max(0, maximum))
+        except Exception:  # noqa: BLE001
+            pass
+
     def _on_launch_done(self, inst: Instance, _proc=None, _log_path=None):
         self._progress.setVisible(False)
         self._set_speed("")
+        # round-155：启动成功前把来源链一并落进任务记录。
+        self._push_sources(self._launch_task_id,
+                           getattr(self, "_play_worker", None),
+                           getattr(self, "_launch_dlg", None))
+        try:
+            from .core.task_center import get_task_center
+            if self._launch_task_id:
+                get_task_center().finish(self._launch_task_id,
+                                         t("status.launched", name=inst.name))
+                self._launch_task_id = ""
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .core import last_session
+            last_session.record(getattr(inst, "id", ""), "ok")
+        except Exception:  # noqa: BLE001 - 会话记录失败不影响 UI
+            pass
         self.statusBar().showMessage(t("status.launched", name=inst.name))
         self.home.play_btn.setEnabled(True)
         # round-52：进度对话框全部点亮后稍作停留再关（玩家能看到「启动游戏✔」）
@@ -4012,6 +4538,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"{base} · {reason}" if reason else base)
             # round-80 崩溃诊断：非零退出时弹窗给可操作按钮（不只改状态栏）
             if code not in (0, None):
+                try:
+                    from .core import last_session
+                    last_session.record(_iid, "crashed",
+                                        reason or f"exit {code}")
+                except Exception:  # noqa: BLE001 - 会话记录失败不影响诊断
+                    pass
                 self._show_crash_dialog(code, log_path=log_path, base_dir=cwd, inst_id=_iid)
         if not procs:
             try:
@@ -4193,6 +4725,23 @@ class MainWindow(QMainWindow):
                 play.setText(t("home.play_again") if running else t("home.play"))
         except Exception:
             pass
+        # round-156 启动即降载：游戏运行中暂停装饰动画、释放壁纸大图/全景缓存。
+        try:
+            from .effects import set_game_running
+            set_game_running(running)
+        except Exception:  # noqa: BLE001 - 动画开关失败不影响功能
+            pass
+        backdrop = getattr(self, "backdrop", None)
+        if backdrop is not None:
+            try:
+                if running:
+                    backdrop.suspend()
+                    self._set_wallpaper_surface(False)
+                elif getattr(backdrop, "_suspended", False):
+                    backdrop.resume()
+                    self._apply_wallpaper()
+            except Exception:  # noqa: BLE001 - 壁纸降载失败不影响游戏
+                pass
 
     def kill_game(self) -> bool:
         """强制结束全部游戏进程（多实例并行）。返回是否成功。"""
@@ -4230,6 +4779,24 @@ class MainWindow(QMainWindow):
     def _on_launch_error(self, msg: str):
         self._progress.setVisible(False)
         self._set_speed("")
+        # round-155：失败前把逐源原因写进任务记录。
+        self._push_sources(self._launch_task_id,
+                           getattr(self, "_play_worker", None),
+                           getattr(self, "_launch_dlg", None))
+        try:
+            from .core.task_center import get_task_center
+            if self._launch_task_id:
+                get_task_center().fail(self._launch_task_id, msg or "")
+                self._launch_task_id = ""
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .core import last_session
+            inst = getattr(self, "_last_inst", None)
+            if inst is not None:
+                last_session.record(getattr(inst, "id", ""), "failed", msg or "")
+        except Exception:  # noqa: BLE001 - 会话记录失败不影响 UI
+            pass
         # round-52：关闭启动进度对话框（避免错误弹窗与进度面板叠着）
         _dlg = getattr(self, "_launch_dlg", None)
         if _dlg is not None:

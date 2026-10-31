@@ -1528,6 +1528,7 @@ class InstancesPage(QWidget):
         # round-100 列表淡入（克制）：重建后整列轻量淡入
         fade_in_widget(self.list_scroll.viewport())
 
+    # ia[instances]: 点左侧实例行 | 实例列表 | 右侧详情切换到该实例
     def _render_detail(self):
         """Fill the right-hand details panel for the selected instance."""
         # clear previous detail widgets
@@ -1930,6 +1931,7 @@ class InstancesPage(QWidget):
         from .crash_dialog import CrashDialog
         CrashDialog(inst, parent=self).exec()
 
+    # ia[instances]: 「⋯ → 体检」 | 详情更多菜单 | 打开实例体检对话框（静态扫描 + 本地修复）
     def _health_check(self, inst: Instance):
         """实例体检（N5 冲突预检的升级）：静态扫描 + 弹报告 + 一键本地修复。
 
@@ -1942,6 +1944,7 @@ class InstancesPage(QWidget):
         """旧入口（模组冲突预检）→ 转调体检，保持兼容。"""
         self._health_check(inst)
 
+    # ia[instances]: 点「删除」 | 详情操作条 | 二次确认后移除实例并刷新列表
     def _delete_instance(self, inst: Instance):
         from .win_rounded import confirm
         if not confirm(
@@ -1952,12 +1955,14 @@ class InstancesPage(QWidget):
         self.mgr.remove(inst.id)
         self._refresh()
 
+    # ia[instances]: 点「启动」 | 详情主操作 | 设为当前实例并通知主窗口刷新（首页随即可启动）
     def _launch(self, inst_id: str):
         """Select in manager and jump to home (the launch button lives there)."""
         self.mgr.set_current(inst_id)
         self._refresh()
         self.current_changed.emit(inst_id)
 
+    # ia[instances]: 点「打开文件夹」 | 详情操作条 | 用系统文件管理器打开实例目录
     def _open_folder(self, inst: Instance):
         from PySide6.QtGui import QDesktopServices
         p = inst.mc_dir
@@ -2176,6 +2181,14 @@ class InstancesPage(QWidget):
             return
 
         settings = load_config()
+        # round-154：整合包应用 → 任务中心（完成后落历史）
+        try:
+            from .core.task_center import get_task_center
+            _task = get_task_center().start(
+                "import", inst.name or "Minecraft", target_page="instances")
+            self._pack_task_id = _task.id
+        except Exception:  # noqa: BLE001 - 任务记录失败不阻断导入
+            self._pack_task_id = ""
         self._pack_worker = ProgressWorker(
             apply_mrpack_to_instance, path, inst,
             mirror=settings.get("download_mirror", "official"),
@@ -2183,11 +2196,22 @@ class InstancesPage(QWidget):
         )
         self._pack_worker.status.connect(
             lambda s: self.window().statusBar().showMessage(s))
+        self._pack_worker.status.connect(self._on_pack_status)
         self._pack_worker.finished.connect(
             lambda v: self._on_pack_applied(inst, v))
         self._pack_worker.error.connect(
             lambda e: self._on_pack_error(e))
         self._pack_worker.start()
+
+    def _on_pack_status(self, text: str) -> None:
+        """round-154：导入阶段写入任务记录。"""
+        try:
+            from .core.task_center import get_task_center
+            tid = getattr(self, "_pack_task_id", "")
+            if tid:
+                get_task_center().update(tid, stage=text)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_pack_applied(self, inst: Instance, launch_version):
         try:
@@ -2195,11 +2219,28 @@ class InstancesPage(QWidget):
             self._refresh()
         except Exception:
             pass
+        try:
+            from .core.task_center import get_task_center
+            tid = getattr(self, "_pack_task_id", "")
+            if tid:
+                get_task_center().finish(
+                    tid, t("instances.apply_pack_done", ver=launch_version or ""))
+                self._pack_task_id = ""
+        except Exception:  # noqa: BLE001
+            pass
         from .win_rounded import toast
         toast(self, t("instances.apply_pack_title"),
               t("instances.apply_pack_done", ver=launch_version or ""))
 
     def _on_pack_error(self, msg: str):
+        try:
+            from .core.task_center import get_task_center
+            tid = getattr(self, "_pack_task_id", "")
+            if tid:
+                get_task_center().fail(tid, msg or "")
+                self._pack_task_id = ""
+        except Exception:  # noqa: BLE001
+            pass
         from .win_rounded import warn
         warn(self, t("instances.apply_pack_title"),
              t("instances.apply_pack_fail", err=msg))
@@ -2415,6 +2456,12 @@ class InstancesPage(QWidget):
         progress.setAutoReset(False)
         progress.setRange(0, 0)  # indeterminate（先解析 manifest/overrides）
         progress.setMinimumWidth(420)
+        # round-149：全局 QSS 把 QProgressBar 定死 8px 高，内嵌「38%」文字
+        # 只画得出一半（自动导入进度条「被遮挡」的根因）。按 round-107 的约定
+        # 关掉内嵌文字，百分比改由 label 显示。
+        _bar = progress.findChild(QProgressBar)
+        if _bar is not None:
+            _bar.setTextVisible(False)
 
         # round-142b：CF 导入给实时 n/N 计数 —— 此前只有无限转圈，
         # 用户体感「导入怎么这么久」（轮询 state，跨线程零信号管道）。
@@ -2431,6 +2478,18 @@ class InstancesPage(QWidget):
 
         def _on_tick():
             d, tot = state["done"], state["total"]
+            if d < 0:
+                # round-150：不定长阶段（装游戏版本/加载器）用回调带来的自定义文案，
+                # 不再只显示笼统的「正在收尾」。
+                txt = state.get("label") or t("modpack.finishing")
+                if progress.maximum() != 0:
+                    progress.setRange(0, 0)
+                if state.get("txt") != txt:
+                    state["txt"] = txt
+                    progress.setLabelText(txt)
+                if not progress.isVisible():
+                    progress.show()
+                return
             if not tot:
                 return
             if d < tot:
@@ -2438,7 +2497,7 @@ class InstancesPage(QWidget):
                     progress.setRange(0, tot)
                 if progress.value() != d:
                     progress.setValue(d)
-                txt = f"{t('modpack.importing')}（{d}/{tot}）"
+                txt = f"{t('modpack.importing')}（{d}/{tot} · {d * 100 // tot}%）"
                 if state.get("txt") != txt:
                     state["txt"] = txt
                     progress.setLabelText(txt)
@@ -2455,7 +2514,13 @@ class InstancesPage(QWidget):
         def _done(inst):
             tick.stop()
             progress.hide()
-            toast(self, t("modpack.title"), t("modpack.done"))
+            # round-150：导入时已尝试安装版本/加载器；失败不丢整合包，但要让
+            # 用户知道首次启动还会再装一次（而不是以为「导入失败」）。
+            err = getattr(inst, "loader_install_error", "")
+            if err:
+                warn(self, t("modpack.title"), t("modpack.loader_failed_hint", e=err))
+            else:
+                toast(self, t("modpack.title"), t("modpack.done"))
             self._refresh()
             if inst and getattr(inst, "id", None):
                 self.mgr.set_current(inst.id)
@@ -2586,6 +2651,7 @@ class InstancesPage(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
+    # ia[instances]: 点「设为当前」 | 详情操作条 | 切换当前实例并刷新列表/首页
     def _set_current(self, inst_id: str):
         self.mgr.set_current(inst_id)
         self._refresh()

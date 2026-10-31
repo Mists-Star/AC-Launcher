@@ -2,7 +2,7 @@
 
 状态：**待批准**（批准后按 `tasks.md` 顺序施工）
 日期：2026-10-28
-归属项目：`<本地工作区>\mc_launcher`（AC Launcher）
+归属项目：`mc_launcher 仓库根`（AC Launcher）
 
 ---
 
@@ -474,15 +474,15 @@ def _app_icon() -> QIcon:
 
 | 文件 | 改动性质 |
 |---|---|
-| `<本地工作区>\mc_launcher\src\brand_custom.py` | **新增**（统一解析入口） |
-| `<本地工作区>\mc_launcher\src\main_window.py` | 改：标题栏 logo/文本、窗口图标、设置保存刷新 |
-| `<本地工作区>\mc_launcher\src\main.py` | 改：`_app_icon()` 优先自定义图 |
-| `<本地工作区>\mc_launcher\src\splash_window.py` | 改：背景图 + 自定义标志分支，保留进度条 |
-| `<本地工作区>\mc_launcher\src\settings_dialog.py` | 改：3 个配置键 + 外观页「品牌自定义」组 + 启动页背景控件 + `_sync_ui_to_cfg` |
-| `<本地工作区>\mc_launcher\src\i18n.py` | 改：+7 对中英文案 + 修正 `settings.splash_hint` |
-| `<本地工作区>\mc_launcher\tests\test_brand_custom.py` | **新增** |
-| `<本地工作区>\mc_launcher\regress.py` | 改：SUITES +1 |
-| `<本地工作区>\mc_launcher\CHANGELOG.md` | 改：round-136 条目 |
+| `src\brand_custom.py` | **新增**（统一解析入口） |
+| `src\main_window.py` | 改：标题栏 logo/文本、窗口图标、设置保存刷新 |
+| `src\main.py` | 改：`_app_icon()` 优先自定义图 |
+| `src\splash_window.py` | 改：背景图 + 自定义标志分支，保留进度条 |
+| `src\settings_dialog.py` | 改：3 个配置键 + 外观页「品牌自定义」组 + 启动页背景控件 + `_sync_ui_to_cfg` |
+| `src\i18n.py` | 改：+7 对中英文案 + 修正 `settings.splash_hint` |
+| `tests\test_brand_custom.py` | **新增** |
+| `regress.py` | 改：SUITES +1 |
+| `CHANGELOG.md` | 改：round-136 条目 |
 | `<本地工作区>\2026-10-28_AC启动器_round136_品牌自定义.md` | **新增**（任务记忆） |
 
 ---

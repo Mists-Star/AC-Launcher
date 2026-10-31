@@ -265,6 +265,15 @@ def _java_major_for(javas: list[dict], path: str) -> int:
 
 
 def _check_java(inst, settings) -> list[Finding]:
+    """Java 三档语义（对齐 Lumilio 的 Error / Warning / Info 拆分）。
+
+    * Error   —— 缺可用 Java，或实例/全局指定的 Java 不兼容且没有替代：
+                启动一定失败，必须用户处理。
+    * Warning —— 指定的 Java 不兼容，但扫描到可自动切换的兼容版本：
+                启动器能在启动前换掉（会先确认），不拦路。
+    * Info    —— 当前 Java 能跑但不是推荐版本，且已装精确匹配版本：
+                只建议切换，不改变任何行为。
+    """
     from .java import (required_java_major_for, select_java, scan_javas,
                        find_version_json, is_java_compatible)
 
@@ -293,16 +302,40 @@ def _check_java(inst, settings) -> list[Finding]:
         # 说明是玩家手填的 JDK，不运行无法得知版本 → 不误报）。
         if major and not is_java_compatible(need, major):
             fixed = select_java(gv, java_auto=True, need_override=need)
-            fix = (_fix("set_java_path", "health.fixlabel.set_java_path",
-                        {"path": fixed}) if fixed
-                   else _fix("clear_java_path", "health.fixlabel.clear_java_path"))
-            findings.append(Finding(
-                kind="java_mismatch", severity=SEV_CRITICAL,
-                title="health.kind.java_mismatch",
-                reason="health.reason.java_mismatch",
-                suggestion="health.fix.java_mismatch",
-                meta={"need": need, "have": major},
-                fix=fix))
+            same = bool(fixed) and os.path.normcase(os.path.normpath(fixed)) \
+                == os.path.normcase(os.path.normpath(eff_path))
+            if fixed and not same:
+                # 有替代 → Warning：启动前会提示「本次改用 Java N」。
+                findings.append(Finding(
+                    kind="java_mismatch", severity=SEV_WARNING,
+                    title="health.kind.java_mismatch",
+                    reason="health.reason.java_mismatch",
+                    suggestion="health.fix.java_mismatch",
+                    meta={"need": need, "have": major},
+                    fix=_fix("set_java_path", "health.fixlabel.set_java_path",
+                             {"path": fixed}, {"advised": need})))
+            else:
+                # 没有替代 → Error：启动一定失败，只能先装 Java。
+                findings.append(Finding(
+                    kind="java_mismatch", severity=SEV_CRITICAL,
+                    title="health.kind.java_mismatch",
+                    reason="health.reason.java_mismatch",
+                    suggestion="health.fix.java_mismatch_install",
+                    meta={"need": need, "have": major}))
+        elif major and major != need:
+            # 能跑但不是推荐版本：只有装了精确匹配版本才给 Info。
+            fixed = select_java(gv, java_auto=True, need_override=need)
+            if fixed and _java_major_for(javas, fixed) == need \
+                    and os.path.normcase(os.path.normpath(fixed)) \
+                    != os.path.normcase(os.path.normpath(eff_path)):
+                findings.append(Finding(
+                    kind="java_advice", severity=SEV_INFO,
+                    title="health.kind.java_advice",
+                    reason="health.reason.java_advice",
+                    suggestion="health.fix.java_advice",
+                    meta={"need": need, "have": major},
+                    fix=_fix("set_java_path", "health.fixlabel.java_advice",
+                             {"path": fixed}, {"advised": need})))
     else:
         # 跟随自动：连一个兼容 JDK 都找不到才报（无法自动修 → 只提示装 Java）
         if select_java(gv, java_auto=True, need_override=need) is None:
@@ -391,6 +424,22 @@ def scan_health(inst, settings: dict | None = None) -> dict:
         "scanned": (conflict or {}).get("scanned", 0),
         "fixable": fixable,
     }
+
+
+def quick_check(inst, settings: dict | None = None) -> list[Finding]:
+    """首页聚合用的廉价体检：Java / JVM 内存 / 启动参数。
+
+    刻意跳过模组层（读上百个 jar 的元数据会拖住 UI 线程）；完整报告仍走
+    ``scan_health``（诊断对话框）。单项失败不影响其余项。
+    """
+    out: list[Finding] = []
+    for fn in (_check_java, _check_jvm, _check_launch_args):
+        try:
+            out.extend(fn(inst, settings) if fn in (_check_java, _check_jvm)
+                       else fn(inst))
+        except Exception:  # noqa: BLE001 - 单项检查失败绝不影响整体
+            continue
+    return out
 
 
 def apply_fix(inst, fix: dict) -> bool:

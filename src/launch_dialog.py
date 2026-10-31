@@ -68,6 +68,7 @@ class LaunchProgressDialog(QDialog):
         # round-107 T8：mode="download" 复用同一套步骤列表/进度条范式，
         # 只显示「安装 / 补齐」两步（实例创建后即下载时使用）。
         self.mode = mode
+        self._fitting = False
         self._steps = list(_DL_STEPS if mode == "download" else STEPS)
         self.setWindowTitle(t("launch.download_title") if mode == "download"
                             else t("launch.title"))
@@ -168,11 +169,19 @@ class LaunchProgressDialog(QDialog):
         self.status_lbl.setWordWrap(True)
         lay.addWidget(self.status_lbl)
 
+        # ── round-155：来源链行（哪个源失败、最后走通哪个）──
+        self.sources_lbl = QLabel("")
+        self.sources_lbl.setProperty("cls", "sub")
+        self.sources_lbl.setWordWrap(True)
+        self.sources_lbl.setVisible(False)
+        lay.addWidget(self.sources_lbl)
+
         # ── footer ──
         foot = QHBoxLayout()
         hint = QLabel(t("launch.download_hint") if mode == "download"
                       else t("launch.auto_close_hint"))
         hint.setStyleSheet(f"font-size: 11px; color: {COLORS['text_disabled']};")
+        self.hint_lbl = hint
         foot.addWidget(hint, 1)
         hide_btn = QPushButton(t("launch.hide_to_bg"))
         hide_btn.setCursor(Qt.PointingHandCursor)
@@ -206,6 +215,47 @@ class LaunchProgressDialog(QDialog):
         self.status_lbl.setText(_wrap(text))
         self.status_lbl.setStyleSheet(
             f"color: {COLORS['text_sub']}; font-size: 12px;")
+        # round-151：文案换行后需要的高度可能变化 → 立即补足，避免下一拍被裁。
+        self._fit_text_heights()
+
+    def _fit_text_heights(self) -> None:
+        """round-151：按字体度量补足每一行文本的高度。
+
+        像素字体（Minecraft AE 等）的 ascent/descent 与 QSS 行高不一致，
+        QLabel 只拿到 ``fontMetrics().height()`` 的一行高度 → 上下半截被裁；
+        wordWrap 的状态行需要 2~3 行时，布局也只给 1 行（用户看到的「文本被
+        挤压」）。这里对单行标签给固定最小高度、对状态行按实际宽度算换行高度。
+        """
+        if self._fitting:
+            return
+        self._fitting = True
+        try:
+            for lbl in (self.title_lbl, self.sub_lbl, self.speed_lbl,
+                        self.hint_lbl, *self._rows.values()):
+                fm = lbl.fontMetrics()
+                line = max(fm.lineSpacing(), fm.height())
+                lbl.setMinimumHeight(line + 6)
+            # 会换行的标签按实际宽度补足（状态行必有，来源行内容为空时也按住一行高）。
+            for lbl in (self.status_lbl, self.sources_lbl):
+                fm = lbl.fontMetrics()
+                line = max(fm.lineSpacing(), fm.height())
+                w = lbl.width()
+                if w <= 0:
+                    w = max(220, self.width() - 40)
+                need = lbl.heightForWidth(w)
+                if need <= 0:
+                    need = line * 2
+                lbl.setMinimumHeight(max(need, line * 2) + 4)
+        finally:
+            self._fitting = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_text_heights()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_text_heights()
 
     def set_progress(self, value: int, maximum: int):
         """Worker.progress slot — determinate bar while installing."""
@@ -224,6 +274,15 @@ class LaunchProgressDialog(QDialog):
         """Worker.speed slot — 显示「1.2 MB/s · 已下载 34.5 MB」。"""
         self.speed_lbl.setText(_wrap(text or ""))
         self.speed_lbl.setVisible(bool(text))
+
+    def set_sources(self, text: str):
+        """round-155：显示来源链（失败源 + 最后成功源）；空串隐藏。"""
+        text = (text or "").strip()
+        if text == self.sources_lbl.text() and bool(text) == self.sources_lbl.isVisible():
+            return
+        self.sources_lbl.setText(_wrap(text, 90))
+        self.sources_lbl.setVisible(bool(text))
+        self._fit_text_heights()
 
     def mark_launched(self):
         """Game process spawned — flip every step to done (called by MainWindow)."""

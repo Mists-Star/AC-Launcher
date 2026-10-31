@@ -53,6 +53,9 @@ from collections import deque
 
 import requests
 
+from .transfer import (MirrorRule, OfficialProvider, PrefixMirrorProvider,
+                       SourceChain, SourceTrace, MIRROR_FIRST, OFFICIAL_ONLY)
+
 _BMCL_BASE = "https://bmclapi2.bangbang93.com"
 
 # round-113 路径感知重写表：(完整 URL 前缀, 替换前缀)。
@@ -121,6 +124,17 @@ _MAX_WORKERS = 48
 # 连接池要能同时容纳全部并发，否则多余的请求每次都要重新握手。
 _POOL_SIZE = 64
 
+# round-155：来源链 —— 把上面的重写表变成可展开的数据规则。
+# 镜像开启时保持既有行为：镜像优先（BMCLAPI → 官方）；关闭时只有官方候选。
+_TRANSFER_RULES = [MirrorRule(official, mirror)
+                   for official, mirror in _MIRROR_RULES]
+_CHAIN = SourceChain(
+    [OfficialProvider(),
+     PrefixMirrorProvider(_TRANSFER_RULES, name="bmclapi",
+                          max_concurrency=_MAX_WORKERS)],
+    prefer=MIRROR_FIRST,
+)
+
 
 # ── round-110 A：字节记账 + 滑动时间窗测速 ──────────────────────────────────
 class SpeedMeter:
@@ -132,7 +146,7 @@ class SpeedMeter:
     """
 
     __slots__ = ("_lock", "_pending", "_pending_since", "_samples", "_total",
-                 "_window")
+                 "_window", "__weakref__")
 
     def __init__(self, window: float = 5.0) -> None:
         self._lock = threading.Lock()
@@ -232,12 +246,14 @@ class InstallContext:
     （B）—— 某主机在镜像上返回 403 时记入，后续该主机的请求直接走官方源。
     """
 
-    __slots__ = ("_ev", "meter", "mirror_dead")
+    __slots__ = ("_ev", "meter", "mirror_dead", "trace")
 
     def __init__(self) -> None:
         self._ev = threading.Event()
         self.meter = SpeedMeter()
         self.mirror_dead: set = set()
+        # round-155：本次安装的逐源失败记录（UI / 任务历史可读）。
+        self.trace = SourceTrace()
 
     def abort(self) -> None:
         self._ev.set()
@@ -308,26 +324,63 @@ class MirrorSession(requests.Session):
             kwargs["timeout"] = _SEND_TIMEOUT
         url = getattr(request, "url", None)
         started = time.monotonic()
+        cands = []
         if isinstance(url, str) and request.method == "GET":
-            rewritten = _rewrite(url)
-            if rewritten != url:
-                # 游戏文件：主源 = BMCLAPI；失败再试官方源，仍失败则显式抛错。
-                request.url = rewritten
-                got = self._try_source(request, **kwargs)
-                if got is not None:
-                    _diag(url, rewritten, got, started)
-                    return _wrap_raw(got, self._ctx)
-                # 镜像对本主机不可用：记为失效，后续同主机请求直接走官方源，
-                # 不再每个文件都白试一次（round-110 B）。
-                self._mark_mirror_dead(url)
-                request.url = url
+            cands = _candidates(url, self._ctx)
+            if len(cands) > 1:
+                # round-155：来源链逐候选尝试；非末位失败记录原因并换源，
+                # 末位 strict（游戏文件两源皆失败 = 安装已损坏，必须显式失败）。
+                for i, cand in enumerate(cands):
+                    last = i == len(cands) - 1
+                    request.url = cand.url
+                    try:
+                        resp = self._try_source(request, last=last, strict=last,
+                                                **kwargs)
+                    except requests.RequestException as exc:
+                        # 末位源失败会抛错（strict / 连接不可用）：先记账再放行。
+                        status = self._last_status
+                        reason = (("HTTP %s" % status) if status
+                                  else (str(exc) or "connection error"))
+                        self._note_source(cand.source, cand.url, ok=False,
+                                          reason=reason, status=status)
+                        raise
+                    if resp is not None and resp.status_code < 400:
+                        self._note_source(cand.source, cand.url, ok=True)
+                        _diag(url, cand.url, resp, started)
+                        return _wrap_raw(resp, self._ctx)
+                    status = self._last_status
+                    reason = ("HTTP %s" % status) if status else "connection error"
+                    self._note_source(cand.source, cand.url, ok=False,
+                                      reason=reason, status=status)
+                    if i == 0 and cand.mirrored:
+                        # 镜像对本主机不可用：记为失效，后续同主机请求直接走
+                        # 官方源，不再每个文件都白试一次（round-110 B）。
+                        self._mark_mirror_dead(url)
+                # 理论不可达：末位 strict 失败会抛错。
+                request.url = cands[-1].url
                 resp = self._try_source(request, last=True, strict=True, **kwargs)
-                _diag(url, url, resp, started)
+                _diag(url, cands[-1].url, resp, started)
                 return _wrap_raw(resp, self._ctx)
-        # 非 Mojang 主机（Modrinth / maven / 自有 API）：原样透传，只加超时/重试。
+        # 单候选（非 Mojang 主机 / 镜像关闭）：原样透传，只加超时/重试。
         resp = self._try_source(request, last=True, strict=False, **kwargs)
+        if cands and cands[0].mirrored and resp is not None and resp.status_code < 400:
+            self._note_source(cands[0].source, cands[0].url, ok=True)
         _diag(url, url, resp, started)
         return _wrap_raw(resp, self._ctx)
+
+    def _note_source(self, source: str, url: str, *, ok: bool,
+                     reason: str = "", status: int | None = None) -> None:
+        """把一次来源尝试写进本次安装的 trace（无上下文时忽略）。"""
+        trace = getattr(self._ctx, "trace", None)
+        if trace is None:
+            return
+        try:
+            if ok:
+                trace.success(source, url)
+            else:
+                trace.failure(source, url, reason, status)
+        except Exception:  # noqa: BLE001 - 记录失败绝不影响下载
+            pass
 
     def _mark_mirror_dead(self, original_url: str) -> None:
         """镜像对 ``original_url`` 所属主机返回「被拦」状态 → 本次安装内不再走它。
@@ -481,22 +534,21 @@ class _RequestsShim:
 _PATCH_MODULES = ("_helper", "install", "runtime")
 
 
+def _candidates(url, ctx=None):
+    """当前 URL 的候选来源链（镜像关闭 → 只有官方候选）。"""
+    if not _MIRROR_ON or not isinstance(url, str):
+        return _CHAIN.candidates(url, prefer=OFFICIAL_ONLY)
+    dead = getattr(ctx, "mirror_dead", None) if ctx is not None else None
+    return _CHAIN.candidates(url, dead=dead)
+
+
 def _rewrite(url):
+    """单 URL 重写（分片并行等自有路径用）；等价于候选链里的镜像候选。"""
     if not _MIRROR_ON or not isinstance(url, str):
         return url
-    ctx = active_context()
-    dead = ctx.mirror_dead if ctx is not None else None
-    for prefix, repl in _MIRROR_RULES:
-        host = prefix.split("/")[2]
-        if dead and host in dead:
-            continue  # round-110 B：该主机已被镜像拒绝，本次安装直接走官方源
-        if not url.startswith(prefix):
-            continue
-        rest = url[len(prefix):]
-        # 前缀必须落在路径边界上，否则 https://host/a 会被 https://host/ab 命中
-        if rest and not rest.startswith("/"):
-            continue
-        return repl + rest
+    for cand in _candidates(url, active_context()):
+        if cand.mirrored:
+            return cand.url
     return url
 
 
