@@ -7,8 +7,9 @@ simple API for the rest of the launcher to fire events:
     from .achievements import achievements
     achievements.unlock("first_launch")
 
-The achievements page (src/achievements_page.py) renders progress; the
-toast overlay is owned by MainWindow (it connects to `achievements.toast`).
+The achievements page lives in the ``achievements`` feature pack
+(``assets/features/achievements/entry.py``) after the round-167 module split;
+the toast overlay is owned by MainWindow (it connects to `achievements.toast`).
 """
 import json
 import os

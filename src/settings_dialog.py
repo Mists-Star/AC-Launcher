@@ -66,6 +66,7 @@ _DEFAULTS = {
     # ---- advanced ----
     "java_auto": True,
     "java_path": "",
+    "java_force_incompatible": False,
     "jvm_args": "",
     # round-55 启动高级设置（对齐主流「启动游戏/版本设置」）：
     "jvm_preset": "default",           # default / aikar / custom
@@ -73,6 +74,9 @@ _DEFAULTS = {
     "version_isolation": "default",    # default / isolated
     "post_launch_cmd": "",             # 游戏启动后执行命令（shell）
     "exit_cmd": "",                    # 游戏退出后执行命令（shell）
+    # round-170（对齐 LumilioCL / 主流）：启动前命令（等待完成）+ 包装命令。
+    "pre_launch_cmd": "",              # 启动前执行并等待（失败中止启动）
+    "wrapper_cmd": "",                 # 包装 Java 命令（{java} 指定插入位置）
     "ms_client_id": "",
     "authlib_path": "",
     # round-108 第三方服务：CurseForge 官方 API 需要用户自己的 3rd-party key。
@@ -128,6 +132,8 @@ _DEFAULTS = {
     # 而是让所有过渡瞬时完成（页面切换/列表淡入/流光/toast 滑入），
     # 因此不受 EFFECT_CONFIG_KEYS 的模块归属回写影响。
     "reduce_motion": False,
+    # round-167 低配模式：压制壁纸/动效/音效/启动画面等重效果（不改写玩家偏好）
+    "slim_mode": False,
     # ---- 退出释放资源（round-50）----
     "close_after_launch": True,      # 游戏启动并稳定运行后自动关闭启动器
     "close_after_launch_delay": 5,   # 检测游戏稳定运行的等待秒数
@@ -612,6 +618,21 @@ class SettingsPage(QWidget):
         ml.addLayout(mode_row)
         lay.addWidget(mode_grp)
 
+        # ── round-167 性能：低配模式（压制重效果，配置偏好原样保留）──
+        perf_grp = QGroupBox(t("settings.performance"))
+        pl = QVBoxLayout(perf_grp)
+        self.slim_chk = QCheckBox(t("settings.slim_mode"))
+        self.slim_chk.setChecked(bool(self.cfg.get("slim_mode", False)))
+        pl.addWidget(self.slim_chk)
+        pl.addWidget(self._wrap_hint(t("settings.slim_mode_hint")))
+        # round-169：低配模式与外观/音效开关并存时给出「暂不生效」提示，
+        # 避免玩家以为两套开关互相冲突（偏好仍保留，关闭低配即恢复）。
+        self.slim_note = self._wrap_hint(t("settings.slim_inactive_note"))
+        self.slim_note.setObjectName("slim_note")
+        pl.addWidget(self.slim_note)
+        self.slim_chk.toggled.connect(self._sync_slim_hint)
+        lay.addWidget(perf_grp)
+
         # ── Cache cleanup（独立 grp，避免和外观挤一起）──
         cache_grp = QGroupBox(t("settings.cache_section"))
         cgl = QVBoxLayout(cache_grp)
@@ -718,6 +739,15 @@ class SettingsPage(QWidget):
             fx_grid.addWidget(_cb, _i // 2, _i % 2)
         fx_grid.setColumnStretch(2, 1)
         apl.addLayout(fx_grid)
+        # round-169：跨字段冲突说明——「启动后自动关闭」与托盘常驻/退出后命令
+        # 可以同时勾选，但优先级在运行期才生效，这里把规则显式写出来。
+        self.behavior_note = self._wrap_hint("")
+        self.behavior_note.setObjectName("behavior_note")
+        apl.addWidget(self.behavior_note)
+        self.close_launch_chk.toggled.connect(self._sync_behavior_hints)
+        self.tray_chk.toggled.connect(self._sync_behavior_hints)
+        self._sync_behavior_hints()
+        self._sync_slim_hint()
 
         op_row = QHBoxLayout()
         op_row.setSpacing(8)
@@ -970,9 +1000,25 @@ class SettingsPage(QWidget):
         vil.addWidget(self._wrap_hint(t("settings.process_priority_hint")))
         lay.addWidget(viso_grp)
 
-        # ── 启动后 / 退出后命令（round-55，对齐主流「启动后执行命令」）──
+        # ── 启动前 / 启动后 / 退出后命令（round-55，对齐主流「启动后执行命令」）──
         hook_grp = QGroupBox(t("settings.hook_cmd"))
         hl = QVBoxLayout(hook_grp)
+        # round-170：启动前命令（等它跑完再继续）+ 包装命令（wrapper）。
+        hl.addWidget(QLabel(t("settings.pre_launch_cmd")))
+        self.pre_cmd_edit = QLineEdit(self.cfg.get("pre_launch_cmd", ""))
+        self.pre_cmd_edit.setPlaceholderText(t("settings.hook_ph"))
+        self.pre_cmd_edit.setMinimumWidth(0)
+        self.pre_cmd_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        hl.addWidget(self.pre_cmd_edit)
+        hl.addWidget(self._wrap_hint(t("settings.pre_launch_hint")))
+        hl.addWidget(QLabel(t("settings.wrapper_cmd")))
+        self.wrapper_cmd_edit = QLineEdit(self.cfg.get("wrapper_cmd", ""))
+        self.wrapper_cmd_edit.setPlaceholderText(
+            t("settings.wrapper_ph"))
+        self.wrapper_cmd_edit.setMinimumWidth(0)
+        self.wrapper_cmd_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        hl.addWidget(self.wrapper_cmd_edit)
+        hl.addWidget(self._wrap_hint(t("settings.wrapper_hint")))
         hl.addWidget(QLabel(t("settings.post_launch_cmd")))
         self.post_cmd_edit = QLineEdit(self.cfg.get("post_launch_cmd", ""))
         self.post_cmd_edit.setPlaceholderText(t("settings.hook_ph"))
@@ -985,6 +1031,9 @@ class SettingsPage(QWidget):
         self.exit_cmd_edit.setMinimumWidth(0)
         self.exit_cmd_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         hl.addWidget(self.exit_cmd_edit)
+        # round-169：退出后命令会让「启动后自动关闭」在运行期被跳过，
+        # 文字变化时同步刷新外观页的冲突说明。
+        self.exit_cmd_edit.textChanged.connect(self._sync_behavior_hints)
         hl.addWidget(self._wrap_hint(t("settings.hook_hint")))
         lay.addWidget(hook_grp)
 
@@ -1530,6 +1579,59 @@ class SettingsPage(QWidget):
             b.setChecked(b is match)
         self.ram_btns.setExclusive(True)
 
+    # ── round-169 跨字段冲突提示（只说明优先级，不改任何配置语义）──────
+
+    def _sync_behavior_hints(self, *_):
+        """刷新「启动后自动关闭 / 托盘常驻 / 退出后命令」的冲突说明。"""
+        lbl = getattr(self, "behavior_note", None)
+        if lbl is None:
+            return
+        try:
+            close_on = bool(self.close_launch_chk.isChecked())
+            tray_on = bool(self.tray_chk.isChecked())
+        except RuntimeError:  # 控件已随重建销毁
+            return
+        cmd = ""
+        try:
+            edit = getattr(self, "exit_cmd_edit", None)
+            cmd = (edit.text() if edit is not None
+                   else str(self.cfg.get("exit_cmd", "") or "")).strip()
+        except RuntimeError:
+            cmd = str(self.cfg.get("exit_cmd", "") or "").strip()
+        lines = []
+        if close_on and tray_on:
+            lines.append(t("settings.behavior_note_tray"))
+        if close_on and cmd:
+            lines.append(t("settings.behavior_note_exit_cmd"))
+        lbl.setText("\n".join(lines))
+        lbl.setVisible(bool(lines))
+
+    def _sync_slim_hint(self, *_):
+        """低配模式开启时提示哪些开关暂时被压制（偏好保留）。"""
+        lbl = getattr(self, "slim_note", None)
+        chk = getattr(self, "slim_chk", None)
+        if lbl is None or chk is None:
+            return
+        try:
+            lbl.setVisible(bool(chk.isChecked()))
+        except RuntimeError:
+            pass
+
+    def _sync_java_hints(self, *_):
+        """自动检测 Java 开启时，强制不兼容 Java 没有作用对象 → 禁用并说明。"""
+        auto = getattr(self, "java_auto", None)
+        force = getattr(self, "java_force", None)
+        note = getattr(self, "java_force_note", None)
+        if auto is None or force is None:
+            return
+        try:
+            on = bool(auto.isChecked())
+            force.setEnabled(not on)
+            if note is not None:
+                note.setVisible(on)
+        except RuntimeError:
+            pass
+
     # ── helpers ────────────────────────────────────────────────────────────
 
     def _browse_bgm_folder(self):
@@ -1923,6 +2025,23 @@ class SettingsPage(QWidget):
         self.java_auto = QCheckBox(t("settings.java_auto"))
         self.java_auto.setChecked(bool(self.cfg["java_auto"]))
         sl.addWidget(self.java_auto)
+
+        self.java_force = QCheckBox(t("settings.java_force"))
+        self.java_force.setChecked(bool(self.cfg.get("java_force_incompatible", False)))
+        sl.addWidget(self.java_force)
+        force_hint = QLabel(t("settings.java_force_hint"))
+        force_hint.setWordWrap(True)
+        force_hint.setProperty("cls", "sub")
+        sl.addWidget(force_hint)
+        # round-169：自动检测开启时 path 由 select_java 决定，强制开关没有作用
+        # 对象 → 禁用并说明，避免两个互斥语义的选项同时"有效"。
+        self.java_force_note = QLabel(t("settings.java_force_inert"))
+        self.java_force_note.setWordWrap(True)
+        self.java_force_note.setProperty("cls", "sub")
+        self.java_force_note.setObjectName("java_force_note")
+        sl.addWidget(self.java_force_note)
+        self.java_auto.toggled.connect(self._sync_java_hints)
+        self._sync_java_hints()
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -2488,6 +2607,13 @@ class SettingsPage(QWidget):
             lambda: self.post_cmd_edit.text().strip(), target.get("post_launch_cmd", ""))
         target["exit_cmd"] = self._safe(
             lambda: self.exit_cmd_edit.text().strip(), target.get("exit_cmd", ""))
+        # round-170：启动前命令 / 包装命令
+        target["pre_launch_cmd"] = self._safe(
+            lambda: self.pre_cmd_edit.text().strip(),
+            target.get("pre_launch_cmd", ""))
+        target["wrapper_cmd"] = self._safe(
+            lambda: self.wrapper_cmd_edit.text().strip(),
+            target.get("wrapper_cmd", ""))
         # round-108 第三方服务：CF API Key（敏感键，只在本地 cfg，不导出）+ 免 key 通道开关
         target["curseforge_api_key"] = self._safe(
             lambda: self.cf_key_edit.text().strip(),
@@ -2539,6 +2665,9 @@ class SettingsPage(QWidget):
             lambda: self.java_auto.isChecked(), bool(target["java_auto"]))
         target["java_path"] = self._safe(
             lambda: self.java_path.text(), target["java_path"])
+        target["java_force_incompatible"] = self._safe(
+            lambda: self.java_force.isChecked(),
+            bool(target.get("java_force_incompatible", False)))
         target["jvm_args"] = self._safe(
             lambda: self.jvm.toPlainText(), target["jvm_args"])
         checked_mirror = self._safe(lambda: self.mirror_btns.checkedButton(), None)
@@ -2641,6 +2770,10 @@ class SettingsPage(QWidget):
         target["reduce_motion"] = self._safe(
             lambda: self.reduce_motion_chk.isChecked(),
             bool(target.get("reduce_motion", False)))
+        # round-167 低配模式（基础分区懒加载 → 未构建时保留原值）
+        target["slim_mode"] = self._safe(
+            lambda: self.slim_chk.isChecked(),
+            bool(target.get("slim_mode", False)))
         # round-68 Quilt 加载器显示开关
         target["show_quilt"] = self._safe(
             lambda: self.show_quilt_chk.isChecked(), bool(target.get("show_quilt", True)))
@@ -2738,7 +2871,9 @@ class SettingsPage(QWidget):
         # Background music — start/stop to match the new setting
         try:
             from .core.sound import apply_bgm
-            apply_bgm(self.cfg)
+            from . import slim
+            # round-167 低配模式：音效/背景音乐按有效值压制
+            apply_bgm(slim.effective(self.cfg))
         except Exception:  # noqa: BLE001 - audio must never block the save
             pass
 
@@ -2796,6 +2931,15 @@ class SettingsPage(QWidget):
                 # helper and would break the custom title bar. The launcher's own
                 # window size is persisted separately (see MainWindow geometry).
         except Exception:
+            pass
+
+        # round-167 低配模式：所有原始偏好应用完之后再统一压制
+        # （壁纸/效果/缓存/音效），关闭低配时这里也会恢复玩家原设置。
+        try:
+            win = self._window
+            if win is not None and hasattr(win, "_apply_slim_mode"):
+                win._apply_slim_mode()
+        except Exception:  # noqa: BLE001
             pass
 
         self.saved.emit()

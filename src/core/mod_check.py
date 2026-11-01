@@ -55,6 +55,9 @@ class Finding:
     # fix：可选的一键修复描述符（仅 core.instance_health 产出，None = 只报告）。
     # 结构见 instance_health.apply_fix；scan_conflicts 恒为 None，保持既有语义。
     fix: dict | None = None
+    # extra_fixes：同一发现的其它可选修复（round-163，例如
+    # 「仍然使用并强制这个 Java」）。对话框为每条渲染一个按钮。
+    extra_fixes: list[dict] = field(default_factory=list)
 
 
 @dataclass

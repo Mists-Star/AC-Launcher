@@ -28,6 +28,18 @@ from .paths import get_data_dir, get_resource_path
 
 
 # ----------------------------------------------------------------------- loader
+_MEM_MAX = 256          # 默认图片内存缓存条数（round-167 低配模式可降到 64）
+
+
+def set_mem_limit(n: int) -> None:
+    """调整图片内存缓存上限（round-167 低配模式：256 → 64）。"""
+    global _MEM_MAX
+    try:
+        _MEM_MAX = max(8, int(n))
+    except (TypeError, ValueError):
+        _MEM_MAX = 256
+
+
 def _dpr_tag(dpr: float) -> int:
     """Stable integer key for a device pixel ratio (125% → 125)."""
     return int(round(max(1.0, float(dpr or 1.0)) * 100))
@@ -49,7 +61,8 @@ class ImageLoader(QObject):
         # page or rebuilding a list with the same icons effectively instant.
         # round-40 P2-7：LRU 上限 256——OrderedDict 访问即置顶，超限丢最老。
         self._mem: "OrderedDict[tuple[str, int, int], QPixmap]" = OrderedDict()
-        self._mem_max = 256
+        # 读取模块级上限：后创建的 loader 自动继承低配模式的值
+        self._mem_max = _MEM_MAX
         # Pending request registry: request-id -> (target QLabel, size).
         # CRITICAL: never store the target widget pointer as a QNetworkReply
         # dynamic property — PySide6 round-trips it through QVariant as a raw

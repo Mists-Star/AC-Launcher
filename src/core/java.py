@@ -339,3 +339,84 @@ def select_java(game_version: str, *, java_auto: bool = True, user_path: str = "
         return pick["path"]
     # 没有任何兼容 Java → None（调用方给出明确安装提示），不再 fallback
     return None
+
+
+def java_major_or_zero(path: str) -> int:
+    """Best-effort major for an arbitrary Java executable path (0 = unknown).
+
+    Tries the already-scanned list first (exact path match), then the version
+    embedded in the file name, then the folder-name heuristic. Never scans
+    deeply itself, so it stays cheap enough for UI threads.
+    """
+    p = (path or "").strip()
+    if not p:
+        return 0
+    key = os.path.normcase(os.path.normpath(p))
+    try:
+        for j in scan_javas(deep=False):
+            jp = j.get("path") or ""
+            if jp and os.path.normcase(os.path.normpath(jp)) == key:
+                major = int(j.get("major") or 0)
+                if major > 0:
+                    return major
+    except Exception:  # noqa: BLE001 - scan failures must not break the plan
+        pass
+    major = java_major(os.path.basename(p))
+    if major > 0:
+        return major
+    return _major_from_path(p)
+
+
+def java_plan(inst, settings: dict | None = None) -> dict:
+    """Unified Java decision for an instance (round-163).
+
+    Launch, health-check and the instance/settings UI all share this one
+    answer, so what the UI shows is exactly what the launcher will use.
+
+    Returns dict with keys:
+      need        int   major the instance requires
+      path        str   executable that will be used ("" = none found)
+      major       int   major of ``path`` (0 = unknown)
+      compatible  bool  ``path`` satisfies ``need``
+      forced      bool  incompatible but the user forced it (instance/global)
+      auto        bool  auto-selection is in effect
+      user        str   user-supplied path (instance override / global)
+      detected    list  installed candidates [{path, major}] (only when
+                        nothing usable was found and ``need`` > 0)
+    """
+    st = settings if isinstance(settings, dict) else {}
+    gv = (getattr(inst, "game_version", "") or "").strip()
+    loader = (getattr(inst, "loader", "") or "").strip()
+    version = (getattr(inst, "version_id", "") or "").strip() or gv
+    mc_dir = getattr(inst, "mc_dir", "") or ""
+    need = required_java_major_for(
+        gv, loader, version_json=find_version_json(mc_dir, version))
+    inst_path = (getattr(inst, "java_path", "") or "").strip()
+    auto = bool(st.get("java_auto", True)) and not inst_path
+    user = inst_path or (st.get("java_path") or "").strip()
+    if auto:
+        path = select_java(gv, java_auto=True, need_override=need) or ""
+    else:
+        path = user
+    major = java_major_or_zero(path)
+    compatible = bool(path) and is_java_compatible(need, major or 1)
+    forced = (not compatible) and bool(
+        getattr(inst, "java_force", False)
+        or st.get("java_force_incompatible", False))
+    detected: list[dict] = []
+    if not path and need > 0:
+        try:
+            detected = [{"path": j.get("path", ""), "major": int(j.get("major") or 0)}
+                        for j in scan_javas(deep=True)[:5]]
+        except Exception:  # noqa: BLE001
+            detected = []
+    return {
+        "need": int(need),
+        "path": path,
+        "major": int(major),
+        "compatible": bool(compatible),
+        "forced": bool(forced),
+        "auto": bool(auto),
+        "user": user,
+        "detected": detected,
+    }

@@ -3,10 +3,10 @@
 对齐 LumilioCL 的任务模型：下载 / 安装 / 修复 / 更新 / 导入 / 启动不再各管
 各的，而是同一张 ``TaskRecord`` 表 + 一台状态机：
 
-    queued → running → done | failed | cancelled
+    queued → running ↔ paused → done | failed | cancelled
 
 本轮只做**地基**：记录、状态转换、事件查询、完成后落盘（最近 N 条）。
-不做任务页 UI、不做任务级重试/暂停（第二步）。
+不做任务页 UI、不做任务级重试（第二步；round-170 已支持下载暂停/继续）。
 
 调用约定（全部在主线程调用；内部加锁，重复上报无害）：
 
@@ -32,12 +32,15 @@ from ..paths import get_data_dir
 
 STATE_QUEUED = "queued"
 STATE_RUNNING = "running"
+# round-170：暂停是「开路」状态——同一任务可 paused → running 继续，
+# 也可以从 paused 直接取消。暂停中的任务不落盘（进程退出即丢弃）。
+STATE_PAUSED = "paused"
 STATE_DONE = "done"
 STATE_FAILED = "failed"
 STATE_CANCELLED = "cancelled"
 
 _FINAL_STATES = {STATE_DONE, STATE_FAILED, STATE_CANCELLED}
-_OPEN_STATES = {STATE_QUEUED, STATE_RUNNING}
+_OPEN_STATES = {STATE_QUEUED, STATE_RUNNING, STATE_PAUSED}
 
 # 历史文件只留最近 N 条已结束任务。
 _KEEP_HISTORY = 50

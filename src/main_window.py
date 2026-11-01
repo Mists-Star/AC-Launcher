@@ -44,6 +44,8 @@ from .skins import manager as skin_manager
 from .skin_render import render_head, render_skin_frames, skin_model
 from .brand import APP_DISPLAY, APP_VERSION
 from . import brand_custom
+from . import features
+from . import slim
 from .win_rounded import enable_win11_round_corners
 
 
@@ -92,11 +94,16 @@ NAV_GROUPS = [
 # Stack index of every page — single source of truth for BOTH nav layouts
 # (AC left sidebar and the optional top-bar). Add a new page here and it
 # becomes reachable from whichever nav includes its key.
+# round-167：音乐/成就/控制台已移出核心栈，改为可删除功能扩展包，
+# 动态页面从 FEATURE_BASE_INDEX 起编号（见 _register_feature_pack）。
 STACK_INDEX = {
     "home": 0, "instances": 1, "mods": 2, "store": 3,
     "versions": 4, "lobby": 5, "settings": 6, "toolbox": 7,
-    "music": 8, "achievements": 9, "console": 10,
 }
+FEATURE_BASE_INDEX = 8
+# 设置页里的旧入口 key → 功能包 id（包被删除时点击回首页并提示）
+FEATURE_ALIASES = {"music": "music", "achievements": "achievements",
+                   "console": "console"}
 
 # ── top-bar navigation model (optional layout, chosen in settings) ──
 # 对齐真实顶栏（顶部导航）：
@@ -1806,6 +1813,13 @@ class MainWindow(QMainWindow):
         self._dl_workers: dict[str, object] = {}
         self._dl_dlgs: dict[str, object] = {}
         self._dl_pct: dict[str, int] = {}      # round-109：实例 → 最新下载百分比
+        # round-168：取消后仍在收尾的下载 worker（线程退出前禁止同实例重新下载，
+        # 防止两个 worker 同时写同一份游戏目录）。
+        self._dl_stopping: dict[str, object] = {}
+        # round-170：暂停中的下载（worker 已停、对话框保留，可继续/取消）。
+        self._dl_paused: dict[str, bool] = {}
+        # round-168：启动任务已取消、worker 尚在收尾（禁止重入启动）。
+        self._play_stopping = False
         # round-154：实例 → TaskCenter 任务 id（统一任务记录 / 持久历史）
         self._dl_task_ids: dict[str, str] = {}
         self._launch_task_id = ""
@@ -1832,10 +1846,18 @@ class MainWindow(QMainWindow):
         from .theme import set_font_family
         set_font_family(self.cfg.get("font_family", ""))
         # round-49 液态流光 effect：按配置开启流光卡片 + 全局透明度。
-        set_effects_enabled(self.cfg.get("effect_light_trail", False))
+        # round-167 低配模式：消费端取有效值（不改写玩家偏好）。
+        set_effects_enabled(bool(slim.eff(self.cfg, "effect_light_trail")))
         # round-152 减少动效：必须在任何页面/卡片构建之前生效。
-        set_reduce_motion(self.cfg.get("reduce_motion", False))
-        set_window_opacity(self, self.cfg.get("window_opacity", 1.0))
+        set_reduce_motion(bool(slim.eff(self.cfg, "reduce_motion")))
+        set_window_opacity(self, slim.eff(self.cfg, "window_opacity") or 1.0)
+        # round-167 低配模式：图片内存缓存上限要在页面构建前生效
+        try:
+            from .async_image import set_mem_limit
+            set_mem_limit(slim.IMAGE_MEM_LIMIT_SLIM if slim.is_slim(self.cfg)
+                          else slim.IMAGE_MEM_LIMIT_NORMAL)
+        except Exception:  # noqa: BLE001
+            pass
 
         # round-51 透底效果：系统 Acrylic 在 FramelessHelper 设置完窗口标志后
         # 再应用（见 __init__ 末尾 _apply_transparent_window），此处仅占位。
@@ -1928,11 +1950,25 @@ class MainWindow(QMainWindow):
             5: self._build_lobby,
             6: self._build_settings,
             7: self._build_toolbox,
-            8: self._build_music,
-            9: self._build_achievements,
-            10: self._build_console,
         }
-        for _idx in range(1, 11):
+        # round-167：功能扩展包（音乐/成就/控制台等）可被玩家整包删除。
+        # 首次启动复制内置包；玩家删掉后不再自动装回（见 features.ensure_builtins）。
+        try:
+            features.ensure_builtins()
+        except Exception:  # noqa: BLE001 - 扩展系统坏了也不能挡启动
+            pass
+        self._feature_packs = []
+        self._feature_index = {}
+        self._feature_keys = {}
+        self._feature_objects = {}
+        try:
+            self._feature_packs = features.scan_installed()
+        except Exception:  # noqa: BLE001
+            self._feature_packs = []
+        for _fp in self._feature_packs:
+            self._register_feature_pack(_fp)
+        _stack_n = FEATURE_BASE_INDEX + len(self._feature_keys)
+        for _idx in range(1, _stack_n):
             _ph = QWidget()
             self._placeholders[_idx] = _ph
             self.stack.addWidget(_ph)
@@ -2011,6 +2047,8 @@ class MainWindow(QMainWindow):
 
         # ── round-83 系统托盘：关窗藏托盘常驻（游戏/下载不中断）──
         self._init_tray()
+        # round-167 低配模式：窗口/页面就绪后统一应用一次（壁纸/效果/缓存）
+        self._apply_slim_mode()
         _boot_trace("10 tray ok")
 
     def _preheat_versions(self) -> None:
@@ -2050,13 +2088,13 @@ class MainWindow(QMainWindow):
             set_theme_mode(self.cfg.get("theme_mode", "light"))
             set_accent_color(self.cfg.get("accent_color", "#7C3AED"))
             set_font_family(self.cfg.get("font_family", ""))
-            set_frosted(self.cfg.get("frosted_theme", False))
+            set_frosted(bool(slim.eff(self.cfg, "frosted_theme")))
             set_app_background_translucent(
-                self.cfg.get("transparent_window", False))
-            set_effects_enabled(self.cfg.get("effect_light_trail", False))
+                bool(slim.eff(self.cfg, "transparent_window")))
+            set_effects_enabled(bool(slim.eff(self.cfg, "effect_light_trail")))
             # round-152 减少动效：设置 / 新手向导保存后即时生效
-            set_reduce_motion(self.cfg.get("reduce_motion", False))
-            set_window_opacity(self, self.cfg.get("window_opacity", 1.0))
+            set_reduce_motion(bool(slim.eff(self.cfg, "reduce_motion")))
+            set_window_opacity(self, slim.eff(self.cfg, "window_opacity") or 1.0)
             apply_qss()
             # RoundedCard snapshots its fill colour at construction, so cards
             # built before the wizard ran keep the un-frosted palette until
@@ -2079,7 +2117,7 @@ class MainWindow(QMainWindow):
         否则 Acrylic 会被实色背景盖住。关闭时回退圆角即可。
         """
         try:
-            if self.cfg.get("transparent_window", False):
+            if slim.eff(self.cfg, "transparent_window"):
                 from .win_acrylic import enable_acrylic
                 self.setAttribute(Qt.WA_TranslucentBackground, True)
                 enable_acrylic(self, dark=get_theme_mode() == "dark")
@@ -2088,6 +2126,46 @@ class MainWindow(QMainWindow):
                 disable_acrylic(self, dark=get_theme_mode() == "dark")
         except Exception:
             # 非 Windows 或 DWM 不可用 → 静默回退实色圆角窗口
+            pass
+
+    def _apply_slim_mode(self) -> None:
+        """round-167 低配模式即时生效：压制效果 / 恢复玩家偏好。
+
+        只改运行时表现，不写配置——关闭低配后立即回到玩家原本的壁纸/动效。
+        """
+        try:
+            from .theme import (apply_qss, set_app_background_translucent,
+                                set_frosted)
+            from .effects import set_window_opacity
+            set_frosted(bool(slim.eff(self.cfg, "frosted_theme")))
+            set_app_background_translucent(
+                bool(slim.eff(self.cfg, "transparent_window")))
+            set_effects_enabled(bool(slim.eff(self.cfg, "effect_light_trail")))
+            set_reduce_motion(bool(slim.eff(self.cfg, "reduce_motion")))
+            set_window_opacity(self, slim.eff(self.cfg, "window_opacity") or 1.0)
+            apply_qss()
+        except Exception:  # noqa: BLE001 - 低配开关不能崩窗口
+            pass
+        self._apply_transparent_window()
+        try:
+            from .async_image import set_mem_limit
+            set_mem_limit(slim.IMAGE_MEM_LIMIT_SLIM if slim.is_slim(self.cfg)
+                          else slim.IMAGE_MEM_LIMIT_NORMAL)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .core.sound import apply_bgm
+            apply_bgm(slim.effective(self.cfg))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            home = getattr(self, "home", None)
+            if home is not None and hasattr(home, "_apply_wallpaper"):
+                # 传原始 cfg：_apply_wallpaper 内部按有效值压制，
+                # 不能把压制副本写回 self.cfg（否则偏好被永久覆盖）。
+                home._apply_wallpaper(
+                    self.cfg, version_id=self._current_version_id())
+        except Exception:  # noqa: BLE001
             pass
 
     def _show_achievement_toast(self, aid: str):
@@ -2100,7 +2178,7 @@ class MainWindow(QMainWindow):
         round-100：默认关（设置「成就解锁弹窗」开启才弹）——弹窗会打断操作，
         成就本身仍记录，可在左侧「成就」页查看。
         """
-        if not self.cfg.get("achievement_toasts", False):
+        if not slim.eff(self.cfg, "achievement_toasts"):
             return
         try:
             from .achievements import ACHIEVEMENTS
@@ -2349,8 +2427,10 @@ class MainWindow(QMainWindow):
         try:
             from .core.sound import play_launch_sound, start_bgm
 
-            play_launch_sound("app", self.cfg)
-            start_bgm(self.cfg)
+            # round-167 低配模式：音效/背景音乐消费压制后的配置副本
+            _eff = slim.effective(self.cfg)
+            play_launch_sound("app", _eff)
+            start_bgm(_eff)
         except Exception:  # noqa: BLE001 - audio must never block the app
             pass
 
@@ -2425,10 +2505,12 @@ class MainWindow(QMainWindow):
             return
         try:
             from .theme import apply_qss, set_wallpaper_surface
-            mode = str(self.cfg.get("wallpaper_mode", "none") or "none")
+            # round-167 低配模式：壁纸按有效值压制（关闭低配后自动恢复）
+            _wcfg = slim.effective(self.cfg)
+            mode = str(_wcfg.get("wallpaper_mode", "none") or "none")
             set_wallpaper_surface(mode != "none")
             apply_qss()
-            backdrop.apply(self.cfg, version_id, *self._panorama_source())
+            backdrop.apply(_wcfg, version_id, *self._panorama_source())
             backdrop.setGeometry(self.rect())   # round-144b: 挂主窗，盖到状态栏
             backdrop.lower()
             home = getattr(self, "home", None)
@@ -2528,33 +2610,80 @@ class MainWindow(QMainWindow):
             self._pcl2_goto("instances")
         else:
             self.nav.setCurrentRow(self._nav_row("instances"))
-        self._start_instance_download(inst_id)
+        self._start_instance_download(inst_id, allow_external=True)
 
     # ── round-107 T8 实例创建后即后台下载（对齐主流「选版本即下载」）────────
-    def _start_instance_download(self, inst_id: str) -> None:
+    def _dl_dialog_for(self, inst_id: str, inst):
+        """round-170：取（或新建）实例的下载对话框，信号只在新建时连接一次。
+
+        暂停 / 失败重试后对话框会保留，继续时复用同一个对象——重复连接会让
+        一次点击触发多轮下载。
+        """
+        from .launch_dialog import LaunchProgressDialog
+        dlg = self._dl_dlgs.get(inst_id)
+        if dlg is not None:
+            try:
+                dlg.isVisible()  # 已销毁的 C++ 对象会抛 RuntimeError
+            except RuntimeError:
+                dlg = None
+        if dlg is None:
+            dlg = LaunchProgressDialog(inst, parent=self, mode="download")
+            # round-168：面板底部「取消下载」→ 主窗口确认后中断任务。
+            dlg.cancel_requested.connect(
+                lambda iid=inst_id: self._cancel_download(iid))
+            # round-170：暂停 / 继续 / 重试同样交给主窗口执行。
+            dlg.pause_requested.connect(
+                lambda iid=inst_id: self._pause_download(iid))
+            dlg.resume_requested.connect(
+                lambda iid=inst_id: self._resume_download(iid))
+            dlg.retry_requested.connect(
+                lambda iid=inst_id: self._retry_download(iid))
+        self._dl_dlgs[inst_id] = dlg
+        return dlg
+
+    def _start_instance_download(self, inst_id: str,
+                                 allow_external: bool = False,
+                                 resume: bool = False) -> None:
         """后台下载/修复实例游戏文件；状态栏 + 可召回对话框显示进度。
 
         复用 ``install_instance``（幂等：只补缺失文件）。因此「启动时就绪即跳过」
-        天然成立——文件齐备后启动走 ``launch.py`` 的 _skip 直通。仅对 AC 自建
-        （非 external）实例执行，绝不向其他启动器的真实目录写入。
+        天然成立——文件齐备后启动走 ``launch.py`` 的 _skip 直通。
+
+        导入实例绝不自动写入；round-165 起，向导里玩家显式选择了「已有游戏
+        目录」的新实例（external）才允许下载到该目录（allow_external=True）。
+        round-170：``resume=True`` 用于暂停后继续 / 失败后重试——复用对话框与
+        任务记录，沿用 ``.part`` 断点续传。
         """
         inst = self.inst_mgr.get(inst_id)
-        if inst is None or getattr(inst, "external", False):
+        if inst is None:
             return
-        prev = self._dl_workers.get(inst_id)
+        if getattr(inst, "external", False) and not allow_external:
+            return
+        prev = self._dl_workers.get(inst_id) or self._dl_stopping.get(inst_id)
         if prev is not None and prev.isRunning():
+            # round-168：上一次下载正在取消收尾，等线程退出再允许重下（防双写）。
+            if inst_id in self._dl_stopping:
+                self.statusBar().showMessage(
+                    t("launch.cancel_pending", name=inst.name), 5000)
             return
         from .core.install import install_instance
-        from .launch_dialog import LaunchProgressDialog
 
+        if resume:
+            self._dl_paused.pop(inst_id, None)
         # round-151：记录任务所属页面，供「点状态栏召回」时切回这里。
         self._task_page_key = "instances"
         # round-154：统一任务记录（完成后落 task_history.json）
         try:
             from .core.task_center import get_task_center
-            _task = get_task_center().start(
-                "download", inst.name or inst_id, target_page="instances")
-            self._dl_task_ids[inst_id] = _task.id
+            _tc = get_task_center()
+            _tid = self._dl_task_ids.get(inst_id, "")
+            if resume and _tid:
+                # 暂停的任务继续跑（同一任务 id，状态回到 running）。
+                _tc.update(_tid, state="running", stage="")
+            else:
+                _task = _tc.start(
+                    "download", inst.name or inst_id, target_page="instances")
+                self._dl_task_ids[inst_id] = _task.id
         except Exception:  # noqa: BLE001 - 任务记录失败不阻断下载
             pass
         settings = load_config()
@@ -2562,9 +2691,18 @@ class MainWindow(QMainWindow):
         self._progress.setMaximum(0)  # 未定长起步
         self.statusBar().showMessage(t("status.downloading", name=inst.name))
 
-        dlg = LaunchProgressDialog(inst, parent=self, mode="download")
+        # round-170：继续 / 重试复用原对话框（保留步骤灯与来源链）。
+        dlg = self._dl_dialog_for(inst_id, inst)
         dlg.show()
-        self._dl_dlgs[inst_id] = dlg
+        try:
+            dlg.raise_()
+        except RuntimeError:  # C++ 对象已删除
+            pass
+        if resume:
+            try:
+                dlg.mark_resumed(t("launch.resuming"))
+            except RuntimeError:
+                pass
 
         w = ProgressWorker(
             install_instance, inst,
@@ -2591,6 +2729,9 @@ class MainWindow(QMainWindow):
 
     def _on_download_status(self, inst_id: str, text: str) -> None:
         """round-154：把下载阶段写进任务记录（历史里能看到卡在哪一步）。"""
+        # round-168：已取消的任务，残留信号一律丢弃（防止 UI 回滚成「下载中」）。
+        if inst_id not in self._dl_workers:
+            return
         try:
             from .core.task_center import get_task_center
             tid = self._dl_task_ids.get(inst_id, "")
@@ -2627,6 +2768,9 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_download_progress(self, inst_id: str, value: int, maximum: int) -> None:
+        # round-168：取消后不再刷新进度/徽标。
+        if inst_id not in self._dl_workers:
+            return
         pct = int(value * 100 / maximum) if maximum and maximum > 0 else 0
         self._dl_pct[inst_id] = pct
         try:
@@ -2642,12 +2786,16 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_download_done(self, inst_id: str) -> None:
+        # round-168：已被取消（worker 已从表里移除）→ 不再记完成。
+        if inst_id not in self._dl_workers:
+            return
         # round-155：结束前再推一次来源链（worker 即将从表里移除）。
         self._push_sources(self._dl_task_ids.get(inst_id, ""),
                            self._dl_workers.get(inst_id),
                            self._dl_dlgs.get(inst_id))
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
+        self._dl_paused.pop(inst_id, None)
         try:
             from .core.task_center import get_task_center
             tid = self._dl_task_ids.pop(inst_id, "")
@@ -2670,12 +2818,28 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1200, dlg.close)
 
     def _on_download_error(self, inst_id: str, err: str) -> None:
+        # round-168：已取消的任务不再弹错误/记失败（取消 ≠ 失败）。
+        if inst_id not in self._dl_workers:
+            return
         # round-155：失败时把逐源原因先写进任务记录（历史里可追）。
         self._push_sources(self._dl_task_ids.get(inst_id, ""),
                            self._dl_workers.get(inst_id),
                            self._dl_dlgs.get(inst_id))
+        # round-170：失败线程可能还在收尾——登记「收尾中」，重试要等它退出，
+        # 避免两个 worker 同时写同一份游戏目录。
+        _w = self._dl_workers.get(inst_id)
+        if _w is not None:
+            try:
+                if _w.isRunning():
+                    self._dl_stopping[inst_id] = _w
+                    QTimer.singleShot(
+                        300, lambda iid=inst_id, ww=_w:
+                        self._poll_dl_stopping(iid, ww))
+            except RuntimeError:  # C++ 对象已删除
+                pass
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
+        self._dl_paused.pop(inst_id, None)
         try:
             from .core.task_center import get_task_center
             tid = self._dl_task_ids.pop(inst_id, "")
@@ -2687,9 +2851,7 @@ class MainWindow(QMainWindow):
         name = getattr(inst, "name", "") or inst_id
         self._progress.setVisible(False)
         self._set_speed("")
-        dlg = self._dl_dlgs.pop(inst_id, None)
-        # round-146：取消下载的唯一入口（「取消下载并启动」）已随硬护栏移除，
-        # 走到这里的一律是真失败。
+        # round-170：失败不再自动关框——保留对话框并提供「重试下载」。
         # 失败不阻断：实例仍可创建，首次启动会重新触发下载/修复（install 幂等）。
         self.statusBar().showMessage(
             t("status.download_error", name=name, err=err), 9000)
@@ -2697,9 +2859,215 @@ class MainWindow(QMainWindow):
             self.instances_page.set_instance_task(inst_id, "")
         except Exception:  # noqa: BLE001
             pass
+        dlg = self._dl_dlgs.get(inst_id)
         if dlg is not None:
-            dlg.set_status_text(err)
-            QTimer.singleShot(2500, dlg.close)
+            try:
+                dlg.mark_failed(err)
+            except RuntimeError:  # 对话框已销毁
+                self._dl_dlgs.pop(inst_id, None)
+
+    def _pause_download(self, inst_id: str) -> bool:
+        """round-170：暂停下载（协作式中断，已下载分片保留）。
+
+        worker 停下前登记 ``_dl_stopping``；真正退出由 ``_poll_dl_stopping``
+        确认。任务记录进入 paused（开路状态，可继续或取消）。
+        """
+        w = self._dl_workers.get(inst_id)
+        if w is None:
+            return False
+        try:
+            running = bool(w.isRunning())
+        except RuntimeError:  # C++ 对象已删除
+            running = False
+        if not running:
+            return False
+        try:
+            w.abort()
+            w.requestInterruption()
+        except Exception:  # noqa: BLE001
+            pass
+        self._dl_stopping[inst_id] = w
+        self._dl_paused[inst_id] = True
+        QTimer.singleShot(
+            300, lambda iid=inst_id, ww=w: self._poll_dl_stopping(iid, ww))
+        try:
+            from .core.task_center import get_task_center
+            tid = self._dl_task_ids.get(inst_id, "")
+            if tid:
+                get_task_center().update(
+                    tid, state="paused", detail=t("launch.dl_paused"))
+        except Exception:  # noqa: BLE001
+            pass
+        # 残留 status/progress 信号因 worker 已移出表而被丢弃。
+        self._dl_workers.pop(inst_id, None)
+        try:
+            self._progress.setVisible(False)
+            self._set_speed("")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.instances_page.set_instance_task(
+                inst_id, "paused", self._dl_pct.get(inst_id, 0))
+        except Exception:  # noqa: BLE001
+            pass
+        dlg = self._dl_dlgs.get(inst_id)
+        if dlg is not None:
+            try:
+                dlg.mark_paused(t("launch.dl_paused"))
+            except RuntimeError:  # 对话框已销毁
+                self._dl_dlgs.pop(inst_id, None)
+        inst = self.inst_mgr.get(inst_id)
+        name = getattr(inst, "name", "") or inst_id
+        self.statusBar().showMessage(
+            t("status.download_paused", name=name), 6000)
+        return True
+
+    def _resume_download(self, inst_id: str) -> bool:
+        """round-170：从暂停恢复下载（复用对话框与任务记录）。"""
+        if not self._dl_paused.get(inst_id):
+            return False
+        prev = self._dl_stopping.get(inst_id)
+        try:
+            still = bool(prev is not None and prev.isRunning())
+        except RuntimeError:  # C++ 对象已删除
+            still = False
+        if still:
+            # 线程还没真正停下——按钮回到「已暂停」，提示稍候再点。
+            dlg = self._dl_dlgs.get(inst_id)
+            if dlg is not None:
+                try:
+                    dlg.mark_paused(t("launch.resume_wait"))
+                except RuntimeError:
+                    pass
+            return False
+        self._dl_stopping.pop(inst_id, None)
+        self._dl_paused.pop(inst_id, None)
+        dlg = self._dl_dlgs.get(inst_id)
+        if dlg is not None:
+            try:
+                dlg.mark_resumed(t("launch.resuming"))
+            except RuntimeError:  # 对话框已销毁
+                self._dl_dlgs.pop(inst_id, None)
+        self._start_instance_download(inst_id, allow_external=True, resume=True)
+        return True
+
+    def _retry_download(self, inst_id: str) -> bool:
+        """round-170：下载失败后重试（已下载分片保留，对话框复用）。"""
+        prev = self._dl_stopping.get(inst_id)
+        try:
+            still = bool(prev is not None and prev.isRunning())
+        except RuntimeError:  # C++ 对象已删除
+            still = False
+        if still:
+            dlg = self._dl_dlgs.get(inst_id)
+            if dlg is not None:
+                try:
+                    dlg.mark_failed(t("launch.retry_wait"))
+                except RuntimeError:
+                    pass
+            return False
+        self._dl_stopping.pop(inst_id, None)
+        self._dl_paused.pop(inst_id, None)
+        self._start_instance_download(inst_id, allow_external=True, resume=True)
+        return True
+
+    def _cancel_download(self, inst_id: str, *, confirmed: bool = False,
+                         silent: bool = False) -> bool:
+        """round-168：中断一个后台下载任务（协作式取消，不破坏已下载文件）。
+
+        未确认时先弹确认框（选取消 → 什么都不变）；确认后 abort +
+        requestInterruption，worker 真正退出前该实例禁止重新下载。
+        取消不记失败、不弹错误框——任务中心记「已取消」。
+        round-170：暂停中的任务也走这里（worker 已停，直接清理并取消）。
+        """
+        w = self._dl_workers.get(inst_id)
+        paused = bool(self._dl_paused.get(inst_id))
+        if w is None and not paused:
+            return False
+        if w is not None:
+            try:
+                running = bool(w.isRunning())
+            except RuntimeError:  # C++ 对象已删除
+                running = False
+            if not running:
+                return False
+        inst = self.inst_mgr.get(inst_id)
+        name = getattr(inst, "name", "") or inst_id
+        if not confirmed and not paused:
+            try:
+                from .win_rounded import ask
+                _yes = t("launch.cancel_download")
+                ans = ask(self, t("launch.cancel_download_title"),
+                          t("launch.cancel_download_msg", name=name),
+                          buttons=(t("common.cancel"), _yes))
+            except Exception:  # noqa: BLE001 - 确认框不可用就不取消
+                return False
+            if ans != _yes:
+                return False
+        # 1) 协作式中断：在途下载抛错，线程不再写盘。
+        if w is not None:
+            try:
+                w.abort()
+                w.requestInterruption()
+            except Exception:  # noqa: BLE001
+                pass
+            # 2) 登记「收尾中」：ProgressWorker 的 finished 被自定义信号遮蔽
+            #    （取消时不会发出），所以用轮询 isRunning() 等线程真正停下。
+            self._dl_stopping[inst_id] = w
+            QTimer.singleShot(
+                300, lambda iid=inst_id, ww=w: self._poll_dl_stopping(iid, ww))
+        # 3) 任务记录：取消不是失败。
+        try:
+            from .core.task_center import get_task_center
+            tid = self._dl_task_ids.pop(inst_id, "")
+            if tid:
+                get_task_center().cancel(tid, t("launch.dl_cancelled"))
+        except Exception:  # noqa: BLE001
+            pass
+        self._dl_workers.pop(inst_id, None)
+        self._dl_pct.pop(inst_id, None)
+        self._dl_paused.pop(inst_id, None)
+        # 4) UI 复位（残留 status/progress 已被上游 guard 丢弃）。
+        try:
+            self._progress.setVisible(False)
+            self._set_speed("")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.instances_page.set_instance_task(inst_id, "")
+        except Exception:  # noqa: BLE001
+            pass
+        if not silent:
+            try:
+                self.statusBar().showMessage(
+                    t("status.download_cancelled", name=name), 6000)
+            except Exception:  # noqa: BLE001
+                pass
+        dlg = self._dl_dlgs.pop(inst_id, None)
+        if dlg is not None:
+            try:
+                dlg.mark_cancelled(t("launch.dl_cancelled"))
+                QTimer.singleShot(1200, dlg.close)
+            except Exception:  # noqa: BLE001
+                pass
+        return True
+
+    def _poll_dl_stopping(self, inst_id: str, worker, tries: int = 0) -> None:
+        """round-168：轮询取消收尾的 worker 是否已停止（最多约 18 秒）。"""
+        try:
+            running = bool(worker.isRunning())
+        except RuntimeError:  # C++ 对象已删除
+            running = False
+        if not running or tries >= 60:
+            self._on_dl_stopping_done(inst_id, worker)
+            return
+        QTimer.singleShot(
+            300, lambda: self._poll_dl_stopping(inst_id, worker, tries + 1))
+
+    def _on_dl_stopping_done(self, inst_id: str, worker) -> None:
+        """round-168：取消收尾完成 → 允许同实例重新下载。"""
+        if self._dl_stopping.get(inst_id) is worker:
+            self._dl_stopping.pop(inst_id, None)
 
     def _set_speed(self, text: str) -> None:
         """round-110 A：状态栏实时速度标签（空串则收起）。"""
@@ -2737,6 +3105,15 @@ class MainWindow(QMainWindow):
             dlg = getattr(self, "_dl_dlgs", {}).get(iid)
             if dlg is not None:
                 return dlg, "instances"
+        # round-170：暂停中的下载 worker 已停，但对话框仍有效。
+        for iid, dlg in list(getattr(self, "_dl_dlgs", {}).items()):
+            if not self._dl_paused.get(iid):
+                continue
+            try:
+                dlg.isVisible()
+            except RuntimeError:  # 已销毁的对话框
+                continue
+            return dlg, "instances"
         pw = getattr(self, "_play_worker", None)
         dlg = getattr(self, "_launch_dlg", None)
         try:
@@ -3066,6 +3443,9 @@ class MainWindow(QMainWindow):
             act_kill = menu.addAction(t("tray.kill_game"))
             act_kill.triggered.connect(self.kill_game)
             menu.addSeparator()
+            # round-168：显式强制退出——杀游戏 + 断任务 + 退出，不弹确认。
+            act_force = menu.addAction(t("tray.force_quit"))
+            act_force.triggered.connect(self._force_quit)
             act_quit = menu.addAction(t("tray.quit"))
             act_quit.triggered.connect(self._tray_quit)
             tray.setContextMenu(menu)
@@ -3096,9 +3476,77 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _tray_quit(self) -> None:
-        """托盘「退出启动器」：真正退出（不藏托盘）。"""
+        """托盘「退出启动器」：真正退出（不藏托盘）。
+
+        round-168：有任务/游戏在跑时先确认，避免误点中断下载或让人误以为
+        游戏也会被关掉。
+        """
+        if self._has_active_tasks() or getattr(self, "_game_procs", None):
+            if not self._confirm_quit_with_tasks():
+                return
         self._tray_force_quit = True
         self.close()
+
+    def _force_quit(self) -> None:
+        """round-168：托盘「强制退出（结束游戏）」——无确认，杀游戏 + 断任务。"""
+        self._tray_force_quit = True
+        try:
+            self.kill_game()
+        except Exception:  # noqa: BLE001 - 强退绝不能被清理失败挡住
+            pass
+        try:
+            self._abort_all_tasks()
+        except Exception:  # noqa: BLE001
+            pass
+        self.close()
+
+    def _has_active_tasks(self) -> bool:
+        """round-168：是否还有下载/启动 worker 在跑（含取消收尾）。"""
+        seen = set()
+        for w in list(getattr(self, "_dl_workers", {}).values()) + \
+                list(getattr(self, "_dl_stopping", {}).values()):
+            if id(w) in seen:
+                continue
+            seen.add(id(w))
+            try:
+                if w.isRunning():
+                    return True
+            except RuntimeError:  # C++ 对象已删除
+                continue
+        pw = getattr(self, "_play_worker", None)
+        try:
+            return bool(pw is not None and pw.isRunning())
+        except RuntimeError:
+            return False
+
+    def _abort_all_tasks(self) -> None:
+        """round-168：退出前主动取消全部任务，缩短 drain_workers 的等待。"""
+        for iid in list(getattr(self, "_dl_workers", {}).keys()):
+            try:
+                self._cancel_download(iid, confirmed=True, silent=True)
+            except Exception:  # noqa: BLE001
+                pass
+        pw = getattr(self, "_play_worker", None)
+        try:
+            if pw is not None and pw.isRunning():
+                self._cancel_launch(getattr(self, "_last_inst", None),
+                                    confirmed=True, silent=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _confirm_quit_with_tasks(self) -> bool:
+        """round-168：带着任务退出前的确认；确认框不可用时允许退出。"""
+        try:
+            from .win_rounded import ask
+            msg = t("tray.quit_confirm_msg")
+            if getattr(self, "_game_procs", None):
+                msg = msg + "\n" + t("tray.quit_game_note")
+            _yes = t("tray.quit_and_abort")
+            ans = ask(self, t("tray.quit_confirm_title"), msg,
+                      buttons=(t("common.cancel"), _yes))
+            return ans == _yes
+        except Exception:  # noqa: BLE001 - 宁可退出也不把窗口卡住
+            return True
 
     def _tray_notify_hide(self) -> None:
         """首次藏入托盘时气泡提示一次（避免用户误以为程序退出）。"""
@@ -3132,6 +3580,19 @@ class MainWindow(QMainWindow):
             self.hide()
             self._tray_notify_hide()
             return
+        # round-168：真关闭时若还有下载/启动任务，先确认（托盘退出已确认过，
+        # _tray_force_quit 会跳过这里）。选「取消」→ 窗口保持打开。
+        if (not getattr(self, "_tray_force_quit", False)
+                and not getattr(self, "_tray_auto_quit", False)
+                and self._has_active_tasks()):
+            if not self._confirm_quit_with_tasks():
+                event.ignore()
+                return
+        # 退出前主动 abort，避免 aboutToQuit 的 drain_workers 等满 4 秒。
+        try:
+            self._abort_all_tasks()
+        except Exception:  # noqa: BLE001
+            pass
         super().closeEvent(event)
         # main.py 已把 quitOnLastWindowClosed 置 False（防首启 splash→教程
         # 空窗期误退出），因此主窗口的**实关闭**必须显式退出 app，否则窗口关了
@@ -3254,6 +3715,25 @@ class MainWindow(QMainWindow):
                     it.setSizeHint(QSize(0, _IconNavDelegate.ROW_H))
                 nav.addItem(it)
                 self._nav_row_map[nav.count() - 1] = key
+        # round-167：已安装的功能扩展包单列「扩展」分组（删包后整组消失）
+        _feat = self._feature_nav_items()
+        if _feat:
+            if not icons_only:
+                hdr = QListWidgetItem()
+                hdr.setFlags(Qt.NoItemFlags)
+                hdr.setSizeHint(QSize(0, 26))
+                nav.addItem(hdr)
+                hlabel = QLabel("   " + t("nav.group.extensions"))
+                hlabel.setProperty("cls", "nav-group")
+                nav.setItemWidget(hdr, hlabel)
+            for label, key, ico_name in _feat:
+                it = QListWidgetItem(icon(ico_name), "" if icons_only else label)
+                if icons_only:
+                    it.setTextAlignment(Qt.AlignCenter)
+                    it.setToolTip(label)
+                    it.setSizeHint(QSize(0, _IconNavDelegate.ROW_H))
+                nav.addItem(it)
+                self._nav_row_map[nav.count() - 1] = key
         # select the home row (first entry, no header above it → row 0)
         nav.setCurrentRow(0)
         nav.blockSignals(False)
@@ -3303,12 +3783,29 @@ class MainWindow(QMainWindow):
 
         self._pcl2_select_top("launch")
 
+    def _pcl2_subs(self, key: str) -> list:
+        """顶栏某一页的子导航项；「更多」追加已安装的功能扩展包。"""
+        subs = list(PCL2_SIDEBAR.get(key, []))
+        if key == "more":
+            for pack in getattr(self, "_feature_packs", []):
+                subs.append((self._feature_label(pack), f"feature:{pack.id}"))
+        return subs
+
+    def _nav_icon_name(self, key: str) -> str:
+        """feature:<id> → 扩展清单里的图标名；其余 key 原样返回。"""
+        if key.startswith("feature:"):
+            fid = key.split(":", 1)[1]
+            for pack in getattr(self, "_feature_packs", []):
+                if pack.id == fid:
+                    return pack.icon
+        return key
+
     def _pcl2_select_top(self, key: str):
         """Switch the active top pill and (re)build its context sidebar."""
         self._pcl2_active_top = key
         for k, b in self._pcl2_top_btns.items():
             b.setChecked(k == key)
-        subs = PCL2_SIDEBAR.get(key, [])
+        subs = self._pcl2_subs(key)
         self.pcl2_side.blockSignals(True)
         self.pcl2_side.clear()
         if not subs:
@@ -3322,7 +3819,10 @@ class MainWindow(QMainWindow):
         else:
             self.pcl2_side.setVisible(True)
             for label_key, sub in subs:
-                self.pcl2_side.addItem(QListWidgetItem(icon(sub), t(label_key)))
+                # 功能扩展包的名字已由清单本地化，不再走 i18n key
+                label = label_key if sub.startswith("feature:") else t(label_key)
+                self.pcl2_side.addItem(
+                    QListWidgetItem(icon(self._nav_icon_name(sub)), label))
             # Restore the last-used sub-page for this tab, else the first one.
             last = self._pcl2_last_sub.get(key)
             idx = 0
@@ -3341,7 +3841,7 @@ class MainWindow(QMainWindow):
     def _pcl2_on_side(self, row: int):
         if row < 0:
             return
-        subs = PCL2_SIDEBAR.get(self._pcl2_active_top, [])
+        subs = self._pcl2_subs(self._pcl2_active_top)
         if 0 <= row < len(subs):
             key = subs[row][1]
             self._pcl2_last_sub[self._pcl2_active_top] = key
@@ -3349,7 +3849,10 @@ class MainWindow(QMainWindow):
 
     def _pcl2_apply_sub(self, key: str):
         """Show the stack page for a sidebar / top item (top-nav layout)."""
-        idx = STACK_INDEX.get(key)
+        if key.startswith("feature:"):
+            idx = self._feature_index.get(key.split(":", 1)[1])
+        else:
+            idx = STACK_INDEX.get(key)
         if idx is None:
             # No real page yet → show the "敬请期待" placeholder so the entry
             # is reachable but clearly marked as coming soon (用户方案：功能
@@ -3405,7 +3908,7 @@ class MainWindow(QMainWindow):
         # home now lives under the "launch" top pill; settings is its own pill.
         if key == "home":
             self._pcl2_select_top("launch")
-            for i, (_, s) in enumerate(PCL2_SIDEBAR.get("launch", [])):
+            for i, (_, s) in enumerate(self._pcl2_subs("launch")):
                 if s == "home":
                     self.pcl2_side.blockSignals(True)
                     self.pcl2_side.setCurrentRow(i)
@@ -3417,7 +3920,8 @@ class MainWindow(QMainWindow):
         if key == "settings":
             self._pcl2_select_top("settings")
             return
-        for top, subs in PCL2_SIDEBAR.items():
+        for top in PCL2_SIDEBAR:
+            subs = self._pcl2_subs(top)
             for _, s in subs:
                 if s == key:
                     self._pcl2_select_top(top)
@@ -3438,14 +3942,18 @@ class MainWindow(QMainWindow):
         # Remember the row the user was on BEFORE clicking — used to restore
         # the nav highlight after a dialog (account / lobby) closes, so it
         # feels like a pop-up rather than a navigation.
-        _PAGE_KEYS = ("home", "instances", "mods", "store", "versions",
-                      "music", "achievements", "settings", "console")
-        if key in _PAGE_KEYS:
+        _PAGE_KEYS = ("home", "instances", "mods", "store", "versions", "settings")
+        if key in _PAGE_KEYS or key.startswith("feature:"):
             self._last_page_row = row
+        if key.startswith("feature:"):
+            fid = key.split(":", 1)[1]
+            idx = self._feature_index.get(fid)
+            if idx is not None:
+                self._switch_stack(idx)
+            return
         idx = {
             "home": 0, "instances": 1, "mods": 2, "store": 3,
-            "versions": 4, "lobby": 5, "settings": 6, "music": 8,
-            "achievements": 9, "console": 10,
+            "versions": 4, "lobby": 5, "settings": 6,
         }.get(key)
         if idx is not None:
             if key == "home":
@@ -3673,25 +4181,131 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
-    def _build_music(self):
-        from .music_page import MusicPage
-        self.music_page = MusicPage()
-        return self.music_page
+    # ── round-167 功能扩展包（可删除页面）───────────────────────────────
+    @staticmethod
+    def _feature_label(pack) -> str:
+        try:
+            from .i18n import get_language
+            if get_language().startswith("en") and pack.name_en:
+                return pack.name_en
+        except Exception:  # noqa: BLE001
+            pass
+        return pack.name
 
-    def _build_achievements(self):
-        from .achievements_page import AchievementsPage
-        self.achievements_page = AchievementsPage()
-        return self.achievements_page
+    def _feature_ctx(self):
+        return features.FeatureContext(self, self.cfg)
 
-    def _build_console(self):
-        from .pages_console import ConsolePage
-        self.console_page = ConsolePage()
-        # 若游戏已启动（切页前就 launch 了），把当前日志绑定进控制台
-        _p = getattr(self, "_game_log_path", None)
-        _n = getattr(self, "_game_name", None)
-        if _p:
-            self.console_page.set_game(_p, _n)
-        return self.console_page
+    def _build_feature_page(self, pack):
+        """构建扩展页面。入口坏掉时退回一个可读的错误占位，不崩启动器。"""
+        page = features.load_page(pack, self._feature_ctx())
+        if isinstance(page, QWidget):
+            self._feature_objects[pack.id] = page
+            return page
+        self._feature_objects.pop(pack.id, None)
+        if page is None:
+            detail = features.last_error() or "create_page(ctx) 未返回页面对象"
+        else:
+            detail = "create_page(ctx) 必须返回 QWidget"
+        return self._feature_error_page(pack, detail)
+
+    def _feature_error_page(self, pack, detail: str):
+        err = QWidget()
+        el = QVBoxLayout(err)
+        el.setContentsMargins(40, 32, 40, 32)
+        el.addStretch(1)
+        title = QLabel(t("features.load_failed", default="扩展加载失败"))
+        title.setProperty("cls", "title")
+        title.setAlignment(Qt.AlignCenter)
+        el.addWidget(title)
+        line = QLabel(f"{pack.id}: {detail}")
+        line.setProperty("cls", "sub")
+        line.setWordWrap(True)
+        line.setAlignment(Qt.AlignCenter)
+        el.addWidget(line)
+        el.addStretch(1)
+        return err
+
+    def _register_feature_pack(self, pack):
+        """启动期为已安装扩展分配栈索引（只登记，不建 widget）。"""
+        idx = FEATURE_BASE_INDEX + len(self._feature_keys)
+        self._feature_index[pack.id] = idx
+        self._feature_keys[idx] = f"feature:{pack.id}"
+        self._page_builders[idx] = lambda p=pack: self._build_feature_page(p)
+
+    def _feature_nav_items(self) -> list:
+        return [(self._feature_label(p), f"feature:{p.id}", p.icon)
+                for p in getattr(self, "_feature_packs", [])]
+
+    def _resolve_page_key(self, key: str) -> str:
+        """旧别名（music/achievements/console）→ feature: key；包缺失回首页。"""
+        if key.startswith("feature:"):
+            if key.split(":", 1)[1] in self._feature_index:
+                return key
+            self.show_toast(t("toast.feature_missing"))
+            return "home"
+        alias = FEATURE_ALIASES.get(key)
+        if alias:
+            if alias in self._feature_index:
+                return f"feature:{alias}"
+            self.show_toast(t("toast.feature_missing"))
+            return "home"
+        return key
+
+    def _page_key_of_index(self, idx: int) -> str:
+        if idx in getattr(self, "_feature_keys", {}):
+            return self._feature_keys[idx]
+        for k, v in STACK_INDEX.items():
+            if v == idx:
+                return k
+        return ""
+
+    def _reload_feature_packs(self):
+        """设置页安装/删除扩展后调用：重建导航与栈槽。
+
+        删包时保留原栈槽（本次会话不缩栈），避免已有索引漂移；下次启动
+        重新扫描后自然恢复紧凑编号。
+        """
+        try:
+            packs = features.scan_installed()
+        except Exception:  # noqa: BLE001
+            return
+        live = {p.id for p in packs}
+        cur_key = self._page_key_of_index(self.stack.currentIndex())
+        removed_current = False
+        for fid in list(self._feature_index.keys()):
+            if fid in live:
+                continue
+            idx = self._feature_index.pop(fid, None)
+            self._feature_keys.pop(idx, None)
+            self._feature_objects.pop(fid, None)
+            self._page_builders.pop(idx, None)
+            self._built.discard(idx)
+            if cur_key == f"feature:{fid}":
+                removed_current = True
+        self._feature_packs = packs
+        for pack in packs:
+            if pack.id in self._feature_index:
+                continue
+            idx = max(list(self._feature_keys.keys()) + [FEATURE_BASE_INDEX - 1]) + 1
+            self._feature_index[pack.id] = idx
+            self._feature_keys[idx] = f"feature:{pack.id}"
+            self._page_builders[idx] = lambda p=pack: self._build_feature_page(p)
+            while self.stack.count() <= idx:
+                _slot = self.stack.count()
+                _ph = QWidget()
+                # 新槽位也要登记占位，_ensure_page 才能原地替换而不是叠出空页
+                self._placeholders[_slot] = _ph
+                self.stack.addWidget(_ph)
+        if self.nav_layout == "pcl2":
+            self._pcl2_select_top(self._pcl2_active_top)
+            if removed_current:
+                self._switch_stack(0)
+        else:
+            self._populate_ac_nav()
+            if removed_current:
+                self._switch_stack(0)
+            else:
+                self.nav.setCurrentRow(self._nav_row(cur_key) if cur_key else 0)
 
     def _switch_stack(self, idx: int):
         """Switch the content stack.
@@ -3716,7 +4330,7 @@ class MainWindow(QMainWindow):
         self._ensure_page(idx)  # 首次切换才真正构建该页（延迟加载）
         # round-107：页面切换动画已改为「可选模块」（page_transition 模块），
         # 默认关 → 瞬时切换；装了模块后再走淡入。
-        if self.cfg.get("page_transition", False):
+        if slim.eff(self.cfg, "page_transition"):
             fade_page_transition(self.stack, idx)
         else:
             self.stack.setCurrentIndex(idx)
@@ -3738,6 +4352,9 @@ class MainWindow(QMainWindow):
 
     def _show_page(self, key: str):
         """Programmatically switch the content stack to the given nav key."""
+        # round-167：旧别名（music/achievements/console）先解析成 feature: key；
+        # 包被玩家删除时回首页并提示，而不是落在空白页。
+        key = self._resolve_page_key(key)
         if self.nav_layout == "pcl2":
             self._pcl2_goto(key)
             return
@@ -3750,15 +4367,21 @@ class MainWindow(QMainWindow):
                 # round-120：从「版本库」等无导航行的子页面返回时，侧栏仍高亮
                 # 父行（如首页）。setCurrentRow 到同一行不会再发 currentRowChanged
                 # → 页面永远切不回去；此时必须直接切栈。
-                idx = STACK_INDEX.get(key)
+                idx = self._page_index_of_key(key)
                 if idx is not None:
                     self._switch_stack(idx)
             else:
                 self.nav.setCurrentRow(row)
             return
-        idx = STACK_INDEX.get(key)
+        idx = self._page_index_of_key(key)
         if idx is not None:
             self._switch_stack(idx)
+
+    def _page_index_of_key(self, key: str) -> int | None:
+        """nav key / feature: key → 栈索引；不存在返回 None（round-167）。"""
+        if key.startswith("feature:"):
+            return self._feature_index.get(key.split(":", 1)[1])
+        return STACK_INDEX.get(key)
 
     def show_page(self, key: str) -> bool:
         """Public page switch (nav key → page).
@@ -3771,7 +4394,9 @@ class MainWindow(QMainWindow):
         key = (key or "").strip()
         if not key:
             return False
-        if key not in STACK_INDEX and key not in getattr(self, "_nav_row_map", {}):
+        if (key not in STACK_INDEX and key not in FEATURE_ALIASES
+                and not key.startswith("feature:")
+                and key not in getattr(self, "_nav_row_map", {})):
             return False
         self._show_page(key)
         return True
@@ -4041,11 +4666,14 @@ class MainWindow(QMainWindow):
             self._lobby_create.setText(t("lobby.create"))
             self._lobby_create_help.setText(t("lobby.create_help"))
 
-        # 7. round-44 补全：music/achievements/toolbox + 设置页设置项 label
-        if hasattr(self, 'music_page') and hasattr(self.music_page, 'retranslate_ui'):
-            self.music_page.retranslate_ui()
-        if hasattr(self, 'achievements_page') and hasattr(self.achievements_page, 'retranslate_ui'):
-            self.achievements_page.retranslate_ui()
+        # 7. round-167：已构建的功能扩展页（音乐/成就/控制台…）逐个重译；
+        #    包被删除后对象不在字典里，自然跳过。
+        for _fobj in getattr(self, "_feature_objects", {}).values():
+            if hasattr(_fobj, "retranslate_ui"):
+                try:
+                    _fobj.retranslate_ui()
+                except Exception:  # noqa: BLE001 - 单个扩展坏掉不拖垮全局
+                    pass
         if hasattr(self, 'toolbox_widget') and hasattr(self.toolbox_widget, 'retranslate_ui'):
             self.toolbox_widget.retranslate_ui()
         if hasattr(self, 'settings_dialog') and self.settings_dialog is not None \
@@ -4112,16 +4740,20 @@ class MainWindow(QMainWindow):
 
         DiagnosticsDialog(self).exec()
 
-    def _confirm_java_before_launch(self, inst, settings) -> tuple[bool, str]:
-        """round-153：若启动会更换玩家指定的 Java，先在启动前问一次。
+    def _confirm_java_before_launch(self, inst, settings) -> tuple[bool, str, bool]:
+        """round-153 / round-163：启动前 Java 三选一确认。
 
-        Returns ``(proceed, java_override)``：
-          * 自动模式且没有实例级固定 Java → 不换，直接放行；
-          * 指定的 Java 兼容 / 找不到替代 → 放行（后者交给 launch_instance
-            报错并引导安装）；
-          * 指定的 Java 不兼容但存在替代 → 弹确认，同意则返回替代路径，
-            ``launch_instance(java_override=...)`` 本次直接用它。
+        Returns ``(proceed, java_override, force)``：
+          * 自动模式且没有实例级固定 Java → 不换，直接放行 ``(True, "", False)``；
+          * 指定的 Java 兼容 / 找不到替代 / 版本未知 → 放行；
+          * 实例或全局已开启「允许强制使用不兼容的 Java」→ 不弹框，
+            直接 ``(True, 当前路径, True)``；
+          * 指定的 Java 不兼容且有替代 → 弹三选一：本次改用替代 Java
+            ``(True, alt, False)`` / 强行用不兼容的 Java ``(True, 当前路径, True)``
+            / 取消 ``(False, "", False)``；
+          * 指定的 Java 不兼容且无替代 → 弹确认：强行使用或取消（默认取消）。
 
+        ``force=True`` 时 ``launch_instance(force_java=True)`` 只提示不再拦截。
         只影响这一次启动：不写实例/全局设置（与 Lumilio 的启动前确认一致）。
         """
         try:
@@ -4129,16 +4761,16 @@ class MainWindow(QMainWindow):
                                     required_java_major_for, scan_javas,
                                     select_java)
         except Exception:  # noqa: BLE001 - Java 模块不可用时不拦启动
-            return True, ""
+            return True, "", False
 
         try:
             auto = bool(settings.get("java_auto", True))
             inst_path = (getattr(inst, "java_path", "") or "").strip()
             if auto and not inst_path:
-                return True, ""
+                return True, "", False
             user_path = inst_path or (settings.get("java_path") or "").strip()
             if not user_path or not os.path.isfile(user_path):
-                return True, ""  # 无效路径交给 launch_instance 的既有报错
+                return True, "", False  # 无效路径交给 launch_instance 的既有报错
 
             version = getattr(inst, "version_id", "") or getattr(inst, "game_version", "")
             vjson = find_version_json(getattr(inst, "mc_dir", "") or "", version)
@@ -4153,43 +4785,129 @@ class MainWindow(QMainWindow):
                     major = int(j.get("major") or 0)
                     break
             if not major or is_java_compatible(need, major):
-                return True, ""
+                return True, "", False
+
+            # round-163：玩家/实例已开启强制 → 不弹框，直接授权本次强制启动。
+            if bool(getattr(inst, "java_force", False)) \
+                    or bool(settings.get("java_force_incompatible", False)):
+                return True, user_path, True
 
             alt = select_java(getattr(inst, "game_version", ""),
                               java_auto=True, need_override=need)
-            if not alt or os.path.normcase(os.path.normpath(alt)) == norm:
-                return True, ""  # 没有替代 → 让启动报错并引导安装 Java
-
-            alt_major = 0
-            alt_norm = os.path.normcase(os.path.normpath(alt))
-            for j in scan_javas(deep=False):
-                if os.path.normcase(os.path.normpath(j.get("path") or "")) == alt_norm:
-                    alt_major = int(j.get("major") or 0)
-                    break
-            display = alt_major or need
-
+            _has_alt = bool(alt) and \
+                os.path.normcase(os.path.normpath(alt)) != norm
             from PySide6.QtWidgets import QMessageBox
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Icon.Warning)
             box.setWindowTitle(t("launch.java_confirm_title"))
-            box.setText(t("launch.java_confirm_msg",
-                          have=major, need=need, use=display))
-            use_btn = box.addButton(
-                t("launch.java_confirm_use", major=display),
+            box.setText(t(
+                "launch.java_confirm_msg2", need=need, major=major,
+                default=("指定的 Java {major} 不适用于这个版本（需要 Java {need}）。\n"
+                         "本次要改用兼容的 Java，还是仍用 Java {major}（可能启动失败）？"
+                         if _has_alt else
+                         "指定的 Java {major} 不适用于这个版本（需要 Java {need}），"
+                         "且没找到可替代的 Java。\n仍要强制用 Java {major} 启动吗（可能失败）？")))
+            if _has_alt:
+                alt_major = 0
+                alt_norm = os.path.normcase(os.path.normpath(alt))
+                for j in scan_javas(deep=False):
+                    if os.path.normcase(os.path.normpath(j.get("path") or "")) == alt_norm:
+                        alt_major = int(j.get("major") or 0)
+                        break
+                display = alt_major or need
+                use_btn = box.addButton(
+                    t("launch.java_confirm_use", major=display),
+                    QMessageBox.ButtonRole.AcceptRole)
+                force_btn = box.addButton(
+                    t("launch.java_force_btn", major=major,
+                      default="仍然使用 Java {major}（不兼容）"),
+                    QMessageBox.ButtonRole.DestructiveRole)
+                box.addButton(t("common.cancel"), QMessageBox.ButtonRole.RejectRole)
+                box.setDefaultButton(use_btn)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked is use_btn:
+                    return True, alt, False
+                if clicked is force_btn:
+                    return True, user_path, True
+                return False, "", False
+
+            # 没有替代 Java：只能「强行用不兼容」或取消，默认落在取消。
+            force_btn = box.addButton(
+                t("launch.java_force_btn", major=major,
+                  default="仍然使用 Java {major}（不兼容）"),
                 QMessageBox.ButtonRole.AcceptRole)
-            box.addButton(t("common.cancel"), QMessageBox.ButtonRole.RejectRole)
-            box.setDefaultButton(use_btn)
+            cancel_btn = box.addButton(t("common.cancel"),
+                                       QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(cancel_btn)
             box.exec()
-            if box.clickedButton() is not use_btn:
-                return False, ""
-            return True, alt
+            if box.clickedButton() is force_btn:
+                return True, user_path, True
+            return False, "", False
         except Exception:  # noqa: BLE001 - 确认失败绝不阻断启动
-            return True, ""
+            return True, "", False
+
+    def _resolve_missing_game_dir(self, inst, gdir: str) -> bool:
+        """round-170：实例目录丢失时的三选一处置。
+
+        返回 True = 目录可用了（已新建），继续启动；False = 用户放弃。
+        「打开所在位置」只打开最近的现存上级目录，不阻塞、不改任何文件。
+        """
+        import sys
+        import subprocess
+        import html as _html
+        from .win_rounded import ask, toast
+
+        parent = os.path.dirname(gdir) or gdir
+        while parent and not os.path.isdir(parent):
+            _up = os.path.dirname(parent)
+            if not _up or _up == parent:
+                break
+            parent = _up
+        _new = t("launch.dir_new")
+        _open = t("launch.dir_open")
+        try:
+            ans = ask(self, t("launch.dir_missing_title"),
+                      t("launch.dir_missing_msg",
+                        name=_html.escape(getattr(inst, "name", "") or ""),
+                        path=_html.escape(gdir)),
+                      buttons=(t("common.cancel"), _open, _new),
+                      icon="warning")
+        except Exception:  # noqa: BLE001 - 弹窗不可用就当用户取消
+            return False
+        if ans == _new:
+            try:
+                os.makedirs(gdir, exist_ok=True)
+            except OSError as e:
+                try:
+                    toast(self, t("launch.dir_new_failed_title"),
+                          t("launch.dir_new_failed", err=e), duration=5000)
+                except Exception:  # noqa: BLE001
+                    pass
+                return False
+            try:
+                toast(self, t("launch.dir_missing_title"),
+                      t("launch.dir_created", path=gdir))
+            except Exception:  # noqa: BLE001
+                pass
+            return os.path.isdir(gdir)
+        if ans == _open:
+            try:
+                if sys.platform == "win32":
+                    os.startfile(parent)  # noqa: S606 - 本地目录，无外部输入
+                else:
+                    subprocess.Popen(["xdg-open", parent])
+            except Exception:  # noqa: BLE001 - 打不开就静默放弃
+                pass
+        return False
 
     def _handle_play(self, inst: Instance, *, server: str | None = None,
                      port: str | None = None):
         self._last_inst = inst  # round-46：记住实例，Java 选完可重试
         if self._play_worker is not None and self._play_worker.isRunning():
+            # round-168：刚点过「取消启动」→ 说明还在收尾，别让玩家以为没反应。
+            if self._play_stopping:
+                self.statusBar().showMessage(t("status.launch_cancelling"), 5000)
             return
         # round-81 多实例并行：同一实例已在运行 → 提示不重复启动
         # （双开同一实例会争抢存档/资源，同款护栏；不同实例可并行）
@@ -4241,6 +4959,11 @@ class MainWindow(QMainWindow):
             _gdir = resolve_game_dir(inst, settings)
         except Exception:  # noqa: BLE001 - 路径解析失败就跳过磁盘检查
             _gdir = ""
+        # round-170：目录丢失处置向导——不再只报错，给「新建空目录 / 打开
+        # 所在位置 / 取消」三条出路（对齐 LumilioCL 的目录修复体验）。
+        if _gdir and not os.path.isdir(_gdir):
+            if not self._resolve_missing_game_dir(inst, _gdir):
+                return
         if _gdir:
             try:
                 import shutil
@@ -4264,7 +4987,8 @@ class MainWindow(QMainWindow):
                 return
         # round-153 启动前 Java 确认：会更换玩家指定的 Java 时先问一次，
         # 同意则本次直接用替代路径（只影响这一次，不改设置）。
-        _java_ok, _java_override = self._confirm_java_before_launch(inst, settings)
+        # round-163：三选一 —— 改用兼容 Java / 强制用不兼容 Java / 取消。
+        _java_ok, _java_override, _force_java = self._confirm_java_before_launch(inst, settings)
         if not _java_ok:
             return
         # 记住最近一次启动（首页「继续哪个」依据），并记录会话开始。
@@ -4287,7 +5011,7 @@ class MainWindow(QMainWindow):
         # signature launch chime when starting the game
         try:
             from .core.sound import play_launch_sound
-            play_launch_sound("game", settings)
+            play_launch_sound("game", slim.effective(settings))
         except Exception:
             pass
         self._progress.setVisible(True)
@@ -4309,12 +5033,15 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - 任务记录失败不阻断启动
             pass
         self._launch_dlg = LaunchProgressDialog(inst, parent=self)
+        # round-168：面板底部「取消启动」→ 主窗口确认后中断准备阶段。
+        self._launch_dlg.cancel_requested.connect(
+            lambda: self._cancel_launch(inst))
         self._launch_dlg.show()
 
         self._play_worker = ProgressWorker(
             launch_instance, inst, account, settings, log_dir=log_dir,
             server_override=server, port_override=port,
-            java_override=_java_override,
+            java_override=_java_override, force_java=_force_java,
         )
         self._play_worker.status.connect(self.statusBar().showMessage)
         self._play_worker.status.connect(self._on_launch_status)
@@ -4332,6 +5059,11 @@ class MainWindow(QMainWindow):
                 _res[0] if isinstance(_res, (tuple, list)) and _res else None,
                 _res[1] if isinstance(_res, (tuple, list)) and len(_res) > 1 else None))
         self._play_worker.error.connect(self._on_launch_error)
+        # round-168：取消后 worker 仍可能已 spawn 游戏进程 → 交给强杀兜底。
+        _pw = self._play_worker
+        _pw.cancelled.connect(
+            lambda res, ww=_pw: self._on_launch_cancelled(inst, res, ww))
+        self._play_stopping = False
         self._play_worker.start()
 
     def _on_launch_status(self, text: str) -> None:
@@ -4391,6 +5123,135 @@ class MainWindow(QMainWindow):
             self._launch_dlg = None
         # round-34：游戏进程生命周期——保存 proc 引用并轮询退出状态
         self._track_game_process(_proc, inst.name, _log_path, inst)
+
+    def _cancel_launch(self, inst, *, confirmed: bool = False,
+                       silent: bool = False) -> bool:
+        """round-168：取消启动准备阶段（协作式中断安装/修复）。
+
+        已确认取消后不会弹「启动失败」错误框；若 worker 已 spawn 游戏进程，
+        由 :meth:`_on_launch_cancelled` 强杀，绝不留孤儿进程。
+        """
+        w = getattr(self, "_play_worker", None)
+        try:
+            running = bool(w is not None and w.isRunning())
+        except RuntimeError:  # C++ 对象已删除
+            running = False
+        if not running:
+            return False
+        name = getattr(inst, "name", "") or "Minecraft"
+        if not confirmed:
+            try:
+                from .win_rounded import ask
+                _yes = t("launch.cancel_launch")
+                ans = ask(self, t("launch.cancel_launch_title"),
+                          t("launch.cancel_launch_msg", name=name),
+                          buttons=(t("common.cancel"), _yes))
+            except Exception:  # noqa: BLE001 - 确认框不可用就不取消
+                return False
+            if ans != _yes:
+                return False
+        self._play_stopping = True
+        try:
+            w.abort()
+            w.requestInterruption()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .core.task_center import get_task_center
+            if self._launch_task_id:
+                get_task_center().cancel(self._launch_task_id,
+                                         t("launch.cancelled"))
+                self._launch_task_id = ""
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._progress.setVisible(False)
+            self._set_speed("")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.home.play_btn.setEnabled(True)
+        except Exception:  # noqa: BLE001
+            pass
+        if not silent:
+            try:
+                self.statusBar().showMessage(
+                    t("status.launch_cancelled", name=name), 6000)
+            except Exception:  # noqa: BLE001
+                pass
+        dlg = getattr(self, "_launch_dlg", None)
+        if dlg is not None:
+            try:
+                dlg.mark_cancelled(t("launch.cancelled"))
+                QTimer.singleShot(1200, dlg.close)
+            except Exception:  # noqa: BLE001
+                pass
+            self._launch_dlg = None
+        # 兜底：cancelled 信号可能因异常路径不发出 → 轮询线程退出后复位状态。
+        QTimer.singleShot(300, lambda ww=w: self._poll_play_stopping(ww))
+        return True
+
+    def _poll_play_stopping(self, worker, tries: int = 0) -> None:
+        """round-168：轮询取消收尾的启动 worker（最多约 18 秒）。"""
+        if not getattr(self, "_play_stopping", False):
+            return
+        if getattr(self, "_play_worker", None) is not worker:
+            self._play_stopping = False
+            return
+        try:
+            running = bool(worker.isRunning())
+        except RuntimeError:  # C++ 对象已删除
+            running = False
+        if not running or tries >= 60:
+            self._on_launch_cancelled(
+                getattr(self, "_last_inst", None), None, worker)
+            return
+        QTimer.singleShot(
+            300, lambda: self._poll_play_stopping(worker, tries + 1))
+
+    def _on_launch_cancelled(self, inst, res, worker=None) -> None:
+        """round-168：取消后的收尾；取消竞态下已 spawn 的游戏进程必须强杀。"""
+        if worker is not None and getattr(self, "_play_worker", None) is not worker:
+            return  # 已开始新的启动任务 → 旧 worker 的收尾不碰当前状态
+        self._play_stopping = False
+        self._play_worker = None
+        proc = None
+        if isinstance(res, (tuple, list)) and res:
+            proc = res[0]
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    import subprocess
+                    import sys
+                    if sys.platform == "win32":
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                            capture_output=True, timeout=10)
+                    else:
+                        proc.kill()
+            except Exception:  # noqa: BLE001 - 强杀失败也不崩 UI
+                pass
+            try:
+                self.statusBar().showMessage(
+                    t("status.launch_cancelled",
+                      name=getattr(inst, "name", "") or "Minecraft"), 6000)
+            except Exception:  # noqa: BLE001
+                pass
+        dlg = getattr(self, "_launch_dlg", None)
+        if dlg is not None:
+            try:
+                dlg.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._launch_dlg = None
+        try:
+            from .core.task_center import get_task_center
+            if self._launch_task_id:
+                get_task_center().cancel(self._launch_task_id,
+                                         t("launch.cancelled"))
+                self._launch_task_id = ""
+        except Exception:  # noqa: BLE001
+            pass
 
     def _track_game_process(self, proc, name: str, log_path: str | None = None, instance=None):
         """注册游戏进程（round-81 多实例并行）。
@@ -4772,8 +5633,12 @@ class MainWindow(QMainWindow):
         self._game_procs.clear()
         self._game_proc = None
         self._set_game_running_ui(False)
-        self.statusBar().showMessage(t("status.game_killed",
-                                       name=", ".join(e.get("name", "") for e in alive)))
+        try:
+            self.statusBar().showMessage(
+                t("status.game_killed",
+                  name=", ".join(e.get("name", "") for e in alive)))
+        except Exception:  # noqa: BLE001 - 强制退出期间窗口可能已不可用
+            pass
         return True if ok else False
 
     def _on_launch_error(self, msg: str):

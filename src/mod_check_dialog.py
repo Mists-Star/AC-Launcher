@@ -106,6 +106,14 @@ class HealthDialog(QDialog):
         row.addWidget(self.close_btn)
         bl.addLayout(row)
 
+        # round-163：修复反馈行——apply_fix 返回 False（已是目标状态）时
+        # 之前完全没有任何提示，玩家会以为「点了没反应」。
+        self.note_lbl = QLabel("")
+        self.note_lbl.setProperty("cls", "sub")
+        self.note_lbl.setWordWrap(True)
+        self.note_lbl.setVisible(False)
+        bl.addWidget(self.note_lbl)
+
         self._render(self._result)
 
     # ── 渲染 ──────────────────────────────────────────────────────────────
@@ -154,25 +162,111 @@ class HealthDialog(QDialog):
     def _build_card(self, f) -> "_FindingCard":
         color = _SEV_COLOR.get(f.severity, COLORS["text_sub"])
         title, reason, suggestion = _localize(f)
-        fix_label = ""
-        on_fix = None
-        if getattr(f, "fix", None):
+        actions: list[tuple[str, object]] = []
+        for fx in [getattr(f, "fix", None)] + list(getattr(f, "extra_fixes", []) or []):
+            if not isinstance(fx, dict):
+                continue
             try:
-                fix_label = t(f.fix.get("label") or "health.fix",
-                              **(f.fix.get("label_kwargs") or {}))
+                label = t(fx.get("label") or "health.fix",
+                          **(fx.get("label_kwargs") or {}))
             except Exception:  # noqa: BLE001
-                fix_label = t("health.fix")
-            on_fix = (lambda _checked=False, ff=f: self._apply(ff))
+                label = t("health.fix")
+            actions.append((
+                label,
+                (lambda _checked=False, ff=f, fxx=fx: self._apply(ff, fxx)),
+            ))
         return _FindingCard(
             color, t(f"health.sev.{f.severity}"), title, reason, suggestion,
-            list(f.filenames or []), fix_label, on_fix)
+            list(f.filenames or []), actions)
 
     # ── 动作 ──────────────────────────────────────────────────────────────
-    def _apply(self, f) -> None:
+    def _apply(self, f, fix: dict | None = None) -> None:
+        fx = fix if fix is not None else getattr(f, "fix", None)
+        # 网络补装：apply_fix 只改实例字段，绝不能在这里联网。
+        if isinstance(fx, dict) and fx.get("mode") == "install":
+            self._run_install()
+            return
         from .core import instance_health
-        if instance_health.apply_fix(self.inst, getattr(f, "fix", None)) and self.mgr:
+        try:
+            label = t((fx or {}).get("label") or "health.fix",
+                      **((fx or {}).get("label_kwargs") or {}))
+        except Exception:  # noqa: BLE001
+            label = t("health.fix")
+        changed = bool(instance_health.apply_fix(self.inst, fx))
+        if changed and self.mgr:
             self.mgr.save(self.inst)
+        self._note(t("health.applied", label=label) if changed
+                   else t("health.no_change"))
         self._rescan()
+
+    def _note(self, text: str) -> None:
+        self.note_lbl.setText(text or "")
+        self.note_lbl.setVisible(bool(text))
+
+    # ── 网络补装（round-163）─────────────────────────────────────────────
+    def _run_install(self) -> None:
+        """体检里点「补装」→ 复用启动进度对话框 + 安装 Worker。"""
+        if getattr(self, "_installing", False):
+            return
+        self._installing = True
+        self.close_btn.setEnabled(False)
+        self._note(t("health.installing"))
+        try:
+            from .settings_dialog import load_config
+            cfg = load_config()
+        except Exception:  # noqa: BLE001 - 无配置就按默认
+            cfg = {}
+        from .core.install import install_instance
+        from .worker import ProgressWorker
+        from .launch_dialog import LaunchProgressDialog
+        dlg = LaunchProgressDialog(self.inst, self, mode="download")
+        worker = ProgressWorker(
+            install_instance, self.inst,
+            java_auto=bool(cfg.get("java_auto", True)),
+            java_path=(cfg.get("java_path") or ""),
+            mirror=cfg.get("download_mirror", "official"),
+            proxy=cfg.get("download_proxy", ""),
+        )
+        worker.status.connect(dlg.set_status_text)
+        worker.progress.connect(dlg.set_progress)
+        worker.step.connect(dlg.set_step)
+        worker.speed.connect(dlg.set_speed)
+        worker.finished.connect(self._on_install_finished)
+        worker.error.connect(self._on_install_error)
+        # 线程对象必须持有引用，否则可能被回收导致信号丢失。
+        self._install_worker = worker
+        self._install_dlg = dlg
+        dlg.show()
+        worker.start()
+
+    def _on_install_finished(self, _result=None) -> None:
+        self._installing = False
+        self.close_btn.setEnabled(True)
+        dlg = getattr(self, "_install_dlg", None)
+        if dlg is not None:
+            try:
+                dlg.mark_done(t("health.install_done"))
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(600, dlg.accept)
+            except Exception:  # noqa: BLE001 - 对话框已关闭
+                pass
+        if self.mgr:
+            self.mgr.save(self.inst)
+        self._note(t("health.install_done"))
+        self._rescan()
+
+    def _on_install_error(self, msg: str) -> None:
+        self._installing = False
+        self.close_btn.setEnabled(True)
+        dlg = getattr(self, "_install_dlg", None)
+        if dlg is not None:
+            try:
+                dlg.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._note(t("health.install_failed"))
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.critical(self, t("health.dialog_title"), msg or "?")
 
     def _fix_all(self) -> None:
         from .core import instance_health
@@ -202,7 +296,7 @@ class HealthDialog(QDialog):
 class _FindingCard(QFrame):
     def __init__(self, color: str, sev_text: str, title: str, reason: str,
                  suggestion: str, filenames: list[str],
-                 fix_label: str = "", on_fix=None):
+                 actions: list | None = None):
         super().__init__()
         # 走主题 QSS 的 QFrame[cls="card"]，随明暗主题自动切换，避免内联硬编码色。
         self.setProperty("cls", "card")
@@ -244,11 +338,12 @@ class _FindingCard(QFrame):
             s_lbl.setStyleSheet(f"color: {COLORS.get('text_sub', '#6B7280')}; font-size: 12px;")
             v.addWidget(s_lbl)
 
-        if fix_label and on_fix is not None:
+        if actions:
             brow = QHBoxLayout()
             brow.addStretch(1)
-            brow.addWidget(ui_kit.make_button(
-                fix_label, kind="surface", on_click=on_fix, min_h=30))
+            for fix_label, on_fix in actions:
+                brow.addWidget(ui_kit.make_button(
+                    fix_label, kind="surface", on_click=on_fix, min_h=30))
             v.addLayout(brow)
 
 

@@ -104,7 +104,14 @@ def check_updates(inst, *, mc_version: str = "", loader: str = "",
             if not versions:
                 unknown.append(filename)
                 continue
-            new_filename, url = _version_primary_file(versions[0], pid)
+            # round-170（对齐 LumilioCL 0.2.3）：优先正式版，避免正式版内容被
+            # 「更新」到测试版；只有该项目在这个游戏版本/加载器下完全没有
+            # 正式版时，才回退到列表第一条（beta / alpha）。
+            pick = next(
+                (v for v in versions
+                 if str(v.get("version_type", "")).lower() == "release"),
+                versions[0])
+            new_filename, url = _version_primary_file(pick, pid)
             # 本地版本号：文件名去 slug 前缀后的部分（仅用于展示）
             local_ver = filename[:-4]
             for c in parse_mod_slug(filename):

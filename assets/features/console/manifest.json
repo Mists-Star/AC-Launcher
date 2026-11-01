@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "console",
+  "name": "游戏控制台",
+  "name_en": "Game console",
+  "version": "1.0.0",
+  "entry": "entry.py",
+  "icon": "console",
+  "nav_group": "extensions",
+  "order": 30,
+  "description": "实时查看正在运行的游戏日志，可随时删除。",
+  "description_en": "Live-tail the running game log. Safe to remove.",
+  "source": "builtin"
+}

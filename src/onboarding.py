@@ -15,6 +15,7 @@ to avoid re-render crashes on a not-yet-revealed main window.
 Pure Qt, no external assets.
 """
 import os
+import threading
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -851,14 +852,33 @@ class OnboardingDialog(QDialog):
         if getattr(self, "_java_thread", None) and self._java_thread.isRunning():
             return
         major = self.java_combo.currentData()
+        self._java_major = major
         self.java_install_btn.setEnabled(False)
         self.java_progress.setVisible(True)
         self.java_status.setText(t("onboard.java_installing", major=major))
         self._java_thread = _JavaInstallThread(major)
         self._java_thread.progressed.connect(self._on_java_progress)
+        self._java_thread.phase_changed.connect(self._on_java_phase)
         self._java_thread.done.connect(self._on_java_done)
         self._java_thread.failed.connect(self._on_java_failed)
         self._java_thread.start()
+
+    def _on_java_phase(self, phase: str, speed: float):
+        """round-173：下载阶段可见 —— 连接 / 下载（带速度）/ 解压。"""
+        try:
+            major = getattr(self, "_java_major", "")
+            if phase == "extract":
+                self.java_progress.setMaximum(0)
+                self.java_status.setText(t("onboard.java_extracting", major=major))
+            elif phase == "connect":
+                self.java_progress.setMaximum(0)
+                self.java_status.setText(t("javamgr.phase_connect"))
+            elif speed > 0:
+                self.java_status.setText(
+                    t("onboard.java_installing", major=major)
+                    + " · " + t("javamgr.dl_speed", speed=_fmt_speed(speed)))
+        except Exception:  # noqa: BLE001 - widget may be mid-teardown
+            pass
 
     def _on_java_progress(self, done: int, mx: int):
         try:
@@ -940,29 +960,78 @@ class _JavaScanThread(TrackedThread):
             self.done.emit((None, {}))
 
 
+def _fmt_size(n: float) -> str:
+    """字节数 → 人读文本（1.2 MB / 340 KB）。"""
+    if n >= 1 << 30:
+        return f"{n / float(1 << 30):.1f} GB"
+    if n >= 1 << 20:
+        return f"{n / float(1 << 20):.1f} MB"
+    if n >= 1 << 10:
+        return f"{n / float(1 << 10):.0f} KB"
+    return f"{int(n)} B"
+
+
+def _fmt_speed(bps: float) -> str:
+    """平均速度 → 人读文本（1.2 MB/s）。"""
+    return _fmt_size(bps) + "/s"
+
+
 class _JavaInstallThread(TrackedThread):
     """Download + unpack a portable Java runtime off the GUI thread.
 
     Bridges ``java_install.install_java``'s (done, total, phase) callback to Qt
     signals so the wizard can show a live progress bar without blocking.
+
+    round-173：补上「连接 / 下载 / 解压」阶段、平均速度与取消——此前 UI 只有
+    一根进度条，服务器不给 Content-Length 时就一直空白，玩家看不出在下什么。
     """
 
-    progressed = Signal(int, int)   # value, max (-1 = unknown)
+    progressed = Signal(int, int)        # value, max (-1 = unknown)
+    phase_changed = Signal(str, float)   # phase, bytes/s
     done = Signal(str)
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, major: int):
         super().__init__()
         self._major = major
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
 
     def run(self) -> None:
+        import time
         try:
             from .core import java_install
-
-            def _cb(done: int, total: int, phase: str) -> None:
-                self.progressed.emit(done, total if total else -1)
-
-            path = java_install.install_java(self._major, progress=_cb)
-            self.done.emit(path)
-        except Exception as e:  # noqa: BLE001 - surface to the UI
+        except Exception as e:  # noqa: BLE001 - import 失败直接报给 UI
             self.failed.emit(str(e))
+            return
+        started = time.monotonic()
+        last_emit = [0.0]
+
+        def _cb(done: int, total: int, phase: str) -> None:
+            now = time.monotonic()
+            # 16 KB 一块 → 一个 50 MB 的包会回调三千多次，按 100ms 节流。
+            if phase == "download" and now - last_emit[0] < 0.1:
+                return
+            last_emit[0] = now
+            speed = done / max(now - started, 0.001) if phase == "download" else 0.0
+            self.progressed.emit(done, total if total else -1)
+            self.phase_changed.emit(phase, speed)
+
+        try:
+            path = java_install.install_java(self._major, progress=_cb,
+                                             cancel=self._cancel.is_set)
+        except java_install.JavaInstallCancelled:
+            self.cancelled.emit()
+        except Exception as e:  # noqa: BLE001 - surface to the UI
+            if self._cancel.is_set():
+                self.cancelled.emit()
+            else:
+                self.failed.emit(str(e))
+        else:
+            if self._cancel.is_set():
+                self.cancelled.emit()
+            else:
+                self.done.emit(path)

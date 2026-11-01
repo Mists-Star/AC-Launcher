@@ -181,6 +181,15 @@ def confirm(parent, title: str, text: str, detail: str = "", **kw) -> bool:
                    buttons=("No", "Yes")) == "Yes"
 
 
+def ask(parent, title: str, text: str, buttons: tuple[str, ...],
+        detail: str = "", icon: str = "warning") -> str | None:
+    """round-168：带自定义按钮文案的主题确认框（取消任务 / 退出确认用）。
+
+    最后一个按钮是默认（accent）。返回被点击按钮的文案；直接关闭返回 None。
+    """
+    return _msgbox(parent, title, text, detail, icon=icon, buttons=buttons)
+
+
 # ── Themed native-style dialogs (replace raw QColorDialog / QFileDialog / ──
 # ── QInputDialog which render with the OS's light chrome on a dark theme) ──
 

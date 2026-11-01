@@ -351,9 +351,9 @@ class VersionsPage(QWidget):
         dlg = NewInstanceDialog(self, preset_version=version_id)
         if dlg.exec() != QDialog.Accepted:
             return
-        name, version, loader, java_path, ldver = dlg.result_data()
+        name, version, loader, java_path, ldver, fmt, base = dlg.result_data()
         inst = self.mgr.add(name, version, loader, loader_version=ldver,
-                            java_path=java_path)
+                            java_path=java_path, format=fmt, base=base)
         info(
             self, t("versions.created_title"),
             t("versions.created_msg",

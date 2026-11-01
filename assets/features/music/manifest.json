@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "music",
+  "name": "音乐播放器",
+  "name_en": "Music player",
+  "version": "1.0.0",
+  "entry": "entry.py",
+  "icon": "music",
+  "nav_group": "extensions",
+  "order": 10,
+  "description": "多文件播放列表、播放模式与音量控制，可随时删除。",
+  "description_en": "Playlist, play modes and volume control. Safe to remove.",
+  "source": "builtin"
+}

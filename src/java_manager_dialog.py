@@ -25,7 +25,7 @@ from .win_rounded import enable_win11_round_corners, confirm, warn, info
 from .frameless import FramelessHelper, TitleBar
 from .core import java_install
 from .core.java import scan_javas
-from .onboarding import _JavaInstallThread
+from .onboarding import _JavaInstallThread, _fmt_size, _fmt_speed
 from .worker import Worker
 
 
@@ -171,6 +171,10 @@ class JavaManagerDialog(QDialog):
         self._scan_worker = None
         self._dl_thread = None
         self._dl_major = 0
+        self._dl_phase = "connect"
+        self._dl_done = 0
+        self._dl_total = -1
+        self._dl_speed = 0.0
         self._rows: list[_JavaDetectedRow] = []
         self._last_javas: list[dict] | None = []
 
@@ -264,8 +268,20 @@ class JavaManagerDialog(QDialog):
         self.dl_btn.setMinimumHeight(32)
         self.dl_btn.clicked.connect(self._download)
         dl_btn_row.addWidget(self.dl_btn)
+        self.dl_cancel_btn = QPushButton(t("javamgr.dl_cancel"))
+        self.dl_cancel_btn.setMinimumHeight(32)
+        self.dl_cancel_btn.setVisible(False)
+        self.dl_cancel_btn.clicked.connect(self._cancel_download)
+        dl_btn_row.addWidget(self.dl_cancel_btn)
         dl_btn_row.addStretch(1)
         dl.addLayout(dl_btn_row)
+
+        # round-173：下载阶段 / 进度 / 速度三行可见（此前只有一根空进度条）。
+        self.dl_status = QLabel("")
+        self.dl_status.setProperty("cls", "sub")
+        self.dl_status.setWordWrap(True)
+        self.dl_status.setVisible(False)
+        dl.addWidget(self.dl_status)
 
         self.dl_bar = QProgressBar()
         self.dl_bar.setTextVisible(False)
@@ -376,24 +392,79 @@ class JavaManagerDialog(QDialog):
             warn(self, t("javamgr.title"), t("javamgr.custom_major"))
             return
         self._dl_major = major
+        self._dl_phase = "connect"
+        self._dl_done = 0
+        self._dl_total = -1
+        self._dl_speed = 0.0
         self.dl_btn.setEnabled(False)
         self.dl_btn.setText(t("javamgr.downloading"))
+        self.dl_status.setVisible(True)
+        self.dl_status.setText(t("javamgr.phase_connect"))
+        self.dl_cancel_btn.setVisible(True)
+        self.dl_cancel_btn.setEnabled(True)
         self.dl_bar.setVisible(True)
         self.dl_bar.setMaximum(0)
         self._dl_thread = _JavaInstallThread(major)
         self._dl_thread.progressed.connect(self._on_dl_progress)
+        self._dl_thread.phase_changed.connect(self._on_dl_phase)
         self._dl_thread.done.connect(self._on_dl_done)
         self._dl_thread.failed.connect(self._on_dl_failed)
+        self._dl_thread.cancelled.connect(self._on_dl_cancelled)
         self._dl_thread.start()
 
+    def _render_dl_status(self):
+        """round-173：一行说清「在干什么 + 走到哪 + 多快」。"""
+        if self._dl_phase == "extract":
+            self.dl_status.setText(t("javamgr.phase_extract"))
+            return
+        if self._dl_phase != "download":
+            self.dl_status.setText(t("javamgr.phase_connect"))
+            return
+        if self._dl_total and self._dl_total > 0:
+            pct = int(self._dl_done * 100 / self._dl_total)
+            txt = t("javamgr.dl_progress", done=_fmt_size(self._dl_done),
+                    total=_fmt_size(self._dl_total), pct=pct)
+        else:
+            txt = t("javamgr.dl_progress_unknown", done=_fmt_size(self._dl_done))
+        if self._dl_speed > 0:
+            txt += " · " + t("javamgr.dl_speed", speed=_fmt_speed(self._dl_speed))
+        self.dl_status.setText(txt)
+
     def _on_dl_progress(self, done, total):
+        self._dl_done = done
+        self._dl_total = total
         if total and total > 0:
             self.dl_bar.setMaximum(total)
             self.dl_bar.setValue(done)
+        self._render_dl_status()
+
+    def _on_dl_phase(self, phase, speed):
+        self._dl_phase = phase
+        self._dl_speed = speed
+        if phase in ("connect", "extract"):
+            self.dl_bar.setMaximum(0)
+        self._render_dl_status()
+
+    def _cancel_download(self):
+        if self._dl_thread is None:
+            return
+        self.dl_cancel_btn.setEnabled(False)
+        self.dl_status.setText(t("javamgr.dl_cancelling"))
+        self._dl_thread.cancel()
+
+    def _on_dl_cancelled(self):
+        self._dl_thread = None
+        self.dl_bar.setVisible(False)
+        self.dl_cancel_btn.setVisible(False)
+        self.dl_btn.setEnabled(True)
+        self.dl_btn.setText(t("javamgr.download"))
+        self.dl_status.setText(t("javamgr.dl_cancelled"))
 
     def _on_dl_done(self, path):
         self._dl_thread = None
         self.dl_bar.setVisible(False)
+        self.dl_cancel_btn.setVisible(False)
+        self.dl_status.setVisible(False)
         self.dl_btn.setEnabled(True)
         self.dl_btn.setText(t("javamgr.download"))
         # make sure the new runtime shows up without a full re-scan
@@ -411,6 +482,8 @@ class JavaManagerDialog(QDialog):
     def _on_dl_failed(self, err):
         self._dl_thread = None
         self.dl_bar.setVisible(False)
+        self.dl_cancel_btn.setVisible(False)
+        self.dl_status.setVisible(False)
         self.dl_btn.setEnabled(True)
         self.dl_btn.setText(t("javamgr.download"))
         warn(self, t("javamgr.title"),
@@ -435,6 +508,16 @@ class JavaManagerDialog(QDialog):
                 for m, p in installed.items()
             ]
         self._build_rows(self._last_javas)
+
+    def done(self, r):
+        # round-173：无论点标题栏关闭还是底部「关闭」按钮，先把下载线程停下来，
+        # 否则对话框没了、线程还在后台拉几 MB 的包（用户反馈过这种「关了还在下」）。
+        thr = self._dl_thread
+        if thr is not None:
+            thr.cancel()
+            thr.wait(2000)
+            self._dl_thread = None
+        super().done(r)
 
     def closeEvent(self, e):
         busy = self._dl_thread is not None

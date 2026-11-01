@@ -19,6 +19,22 @@ app = QApplication(sys.argv)
 
 # ── 配置走内存，绝不碰真实文件 ──
 import src.settings_dialog as sd  # noqa: E402
+# round-169：冒烟不碰真实网络。离屏下 Wait 网络线程会活到解释器退出，
+# 偶发 0xC0000005（requests 在已析构的解释器里继续跑），把「构造全过」
+# 误判成 FAIL；版本查询给个空结果即可覆盖 UI 构造路径。
+import src.net_api as _net  # noqa: E402
+_net._modrinth_versions = lambda *a, **k: []
+_net.get_project_info = lambda *a, **k: None
+# mod_updater 在模块顶层 from-import 了同名函数，必须同时替换其引用。
+import src.mod_updater as _upd  # noqa: E402
+_upd._modrinth_versions = lambda *a, **k: []
+_upd.get_project_info = lambda *a, **k: None
+
+# 冒烟只验「能不能构造」：后台线程一律不启动（Worker / ProgressWorker /
+# 下载队列都继承 TrackedThread）。诊断/Java 扫描这类长任务会和正在构造的
+# 对话框并发，偶发 0xC0000005 把「构造全过」误判成 FAIL。
+from src.worker import TrackedThread as _TT  # noqa: E402
+_TT.start = lambda self, *a, **k: None
 
 _CFG = dict(sd._DEFAULTS) if hasattr(sd, "_DEFAULTS") else {}
 sd.load_config = lambda *a, **k: dict(_CFG)

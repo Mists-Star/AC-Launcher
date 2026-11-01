@@ -223,6 +223,8 @@ class ProgressWorker(TrackedThread):
     step = Signal(str)           # launch-stage key (check/install/...)
     speed = Signal(str)          # round-110：人读速度行（"1.2 MB/s · 已下载 34 MB"）
     finished = Signal(object)
+    # round-168：被取消但 fn 已产出结果（可能是已 spawn 的游戏进程）→ 交 UI 清理。
+    cancelled = Signal(object)
     error = Signal(str)
 
     def __init__(self, fn, *args, **kwargs):
@@ -232,6 +234,9 @@ class ProgressWorker(TrackedThread):
         self._kwargs = kwargs
         self._max = 0
         self._ctx = None
+        # round-168 取消标记：UI 线程写、worker 线程读。覆盖「取消时 ctx 尚未建立」
+        # 的竞态——run() 建好 ctx 后会再查一次并立即 abort。
+        self._cancel_requested = False
         # round-155：安装上下文销毁前留下来源链快照，供完成回调读取。
         self._trace = None
         self._stall = None
@@ -247,10 +252,27 @@ class ProgressWorker(TrackedThread):
         return self._trace
 
     def abort(self) -> None:
-        """取消本次安装：在途下载立即抛错退出（线程不再写盘）。"""
+        """取消本次任务：在途下载立即抛错退出，线程不再写盘。
+
+        round-168：同时置 ``requestInterruption``，保证取消后既不会发 finished
+        也不会发 error（由 :attr:`cancelled` 兜底已产出的结果）。
+        """
+        self._cancel_requested = True
+        try:
+            self.requestInterruption()
+        except RuntimeError:  # C++ 对象已删除
+            pass
         ctx = self._ctx
         if ctx is not None:
             ctx.abort()
+
+    def _is_cancelled(self) -> bool:
+        """取消判定：自己的标记 + Qt 的 interruption（后者仅在运行期可靠）。
+
+        Qt 6 的 ``requestInterruption()`` 在线程未运行时会被忽略，所以不能只
+        依赖 ``isInterruptionRequested()``——``abort()`` 总是先置自己的标记。
+        """
+        return self._cancel_requested or self.isInterruptionRequested()
 
     def _arm_stall(self) -> None:
         """每次收到 mll 回调都重新计时；静默超时则提示用户。"""
@@ -327,6 +349,10 @@ class ProgressWorker(TrackedThread):
             from .core.mirror import install_scope
             with install_scope() as ctx:
                 self._ctx = ctx
+                # round-168：点取消时 ctx 可能还没建好 → 这里补一次检查，
+                # 避免「取消按钮点了但下载照跑」。
+                if self._cancel_requested:
+                    ctx.abort()
                 self._speed_stop.clear()
                 ticker = threading.Thread(target=self._speed_loop, daemon=True,
                                           name="AC-DlSpeed")
@@ -336,11 +362,16 @@ class ProgressWorker(TrackedThread):
                 finally:
                     self._speed_stop.set()
                     ticker.join(1.0)
-            if not self.isInterruptionRequested():
-                self.finished.emit(result)
         except Exception as e:  # noqa: BLE001 - surface to UI
-            if not self.isInterruptionRequested():
+            if not self._is_cancelled():
                 self.error.emit(str(e))
+        else:
+            if self._is_cancelled():
+                # 取消时不发 finished（原语义），但仍把 fn 的结果交给 UI：
+                # 启动流程可能已经在取消瞬间 spawn 了游戏进程，必须让 UI 强杀。
+                self.cancelled.emit(result)
+            else:
+                self.finished.emit(result)
         finally:
             ctx = self._ctx
             self._trace = getattr(ctx, "trace", None) if ctx is not None else None

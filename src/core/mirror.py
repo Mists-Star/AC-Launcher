@@ -41,14 +41,22 @@ round-111 大文件分片并行：把 mll 的 ``download_file`` 包一层，让*
 一次完整安装有数百到上千次 ``download_file`` 调用，无差别探测大小会是净回归；
 只认这一个确定是大文件的目标，其余零开销原样转发。见
 :func:`_is_big_target` / :func:`_try_parallel_mll`。
+
+round-174 源健康与超时策略：把「bmclapi 总是等待响应」按**源级**止血 ——
+镜像用更短的超时（5/15s）且失败不重试；连续 2 次连接类失败 / 5xx 即冷却
+90 秒，期间所有请求直接走官方；响应明显变慢（EWMA ≥ 4s）时官方优先。
+所有状态都在 :class:`SourceHealth` 里，进程内共享、重启归零。
 """
 from __future__ import annotations
 
 import contextlib
 import importlib
 import os
+import socket
+import subprocess
 import threading
 import time
+import weakref
 from collections import deque
 
 import requests
@@ -134,6 +142,175 @@ _CHAIN = SourceChain(
                           max_concurrency=_MAX_WORKERS)],
     prefer=MIRROR_FIRST,
 )
+
+# ── round-174：源健康 + 超时策略 ─────────────────────────────────────────────
+# 用户实测「bmclapi 总是等待响应」：镜像挂住时，每个文件都要按官方源的口径等
+# 连接 10s + 读 30s，还在同一源上再重试一次（≈80s/文件）；就算最后回退官方，
+# 几百个文件累加就是「一直在等」。三项改动：
+#
+# 1. 镜像用更短的超时（连接 5s / 相邻读 15s）——它是「加速手段」，不值得为它
+#    长时间等待；官方源保持 (10, 30)（跨境连接本来就慢）。
+# 2. 镜像失败不重试：超时 / 连接错误直接换官方，省掉一次白等。
+# 3. 连续 2 次连接类失败（超时 / 连接被重置 / 5xx）判定镜像不健康，冷却 90 秒
+#    内所有请求直接走官方；冷却结束后重新探测（再给它 2 次机会）。
+#    404 不算：可能只是某个文件镜像没同步，逐文件回退即可。
+# 另外镜像响应变慢（EWMA ≥ 4s、样本 ≥ 5）时，把官方排到前面，镜像只作回退。
+_MIRROR_TIMEOUT = (5, 15)
+_OFFICIAL_TIMEOUT = _SEND_TIMEOUT
+_MIRROR_FAIL_LIMIT = 2
+_MIRROR_COOLDOWN = 90.0
+_SLOW_MS = 4000.0
+_SLOW_SAMPLES = 5
+
+
+class SourceHealth:
+    """进程内的来源健康表：连续失败 → 冷却；成功 → 记录响应耗时。
+
+    mll 一次安装会发几百到上千个请求，全部并发 —— 这里所有方法都必须持锁，
+    且只在内存里记账（不落盘），重启启动器即重新探测。
+    """
+
+    __slots__ = ("_lock", "_fails", "_down_until", "_ewma", "_samples",
+                 "_reason", "_fail_limit", "_cooldown", "_slow_ms",
+                 "_slow_samples")
+
+    def __init__(self, *, fail_limit: int = _MIRROR_FAIL_LIMIT,
+                 cooldown: float = _MIRROR_COOLDOWN,
+                 slow_ms: float = _SLOW_MS,
+                 slow_samples: int = _SLOW_SAMPLES) -> None:
+        self._lock = threading.Lock()
+        self._fails: dict[str, int] = {}
+        self._down_until: dict[str, float] = {}
+        self._ewma: dict[str, float] = {}
+        self._samples: dict[str, int] = {}
+        self._reason: dict[str, str] = {}
+        self._fail_limit = max(1, int(fail_limit))
+        self._cooldown = float(cooldown)
+        self._slow_ms = float(slow_ms)
+        self._slow_samples = max(1, int(slow_samples))
+
+    def is_down(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            until = self._down_until.get(key)
+            if until is None:
+                return False
+            if now >= until:
+                self._down_until.pop(key, None)
+                self._fails.pop(key, None)
+                return False
+            return True
+
+    def is_slow(self, key: str) -> bool:
+        with self._lock:
+            return (self._samples.get(key, 0) >= self._slow_samples
+                    and self._ewma.get(key, 0.0) >= self._slow_ms)
+
+    def note_ok(self, key: str, elapsed: float) -> None:
+        """一次成功响应：清零连败，并把「到响应头」的耗时并入 EWMA。"""
+        ms = max(0.0, elapsed) * 1000.0
+        with self._lock:
+            self._fails.pop(key, None)
+            self._down_until.pop(key, None)
+            self._reason.pop(key, None)
+            old = self._ewma.get(key)
+            self._ewma[key] = ms if old is None else (old * 0.7 + ms * 0.3)
+            self._samples[key] = min(10000, self._samples.get(key, 0) + 1)
+
+    def note_fail(self, key: str, reason: str = "") -> None:
+        """一次连接类失败（超时 / 连接错误 / 5xx）：累计到阈值即进入冷却。"""
+        with self._lock:
+            n = self._fails.get(key, 0) + 1
+            self._fails[key] = n
+            self._reason[key] = reason or "connection error"
+            if n >= self._fail_limit:
+                self._down_until[key] = time.monotonic() + self._cooldown
+                self._fails[key] = 0
+                self._samples.pop(key, None)   # 恢复后重新积累速度样本
+
+    def note_rejected(self, key: str, reason: str = "rejected") -> None:
+        """被明确拒绝（401/403/406）：立刻进入冷却，不等累计。"""
+        with self._lock:
+            self._down_until[key] = time.monotonic() + self._cooldown
+            self._fails[key] = 0
+            self._reason[key] = reason
+
+    def reason(self, key: str) -> str:
+        with self._lock:
+            return self._reason.get(key, "")
+
+    def snapshot(self) -> dict[str, dict]:
+        """诊断用快照：``{source: {down, fails, ewma_ms, samples, reason}}``。"""
+        now = time.monotonic()
+        with self._lock:
+            keys = set(self._fails) | set(self._down_until) | set(self._ewma)
+            out: dict[str, dict] = {}
+            for k in keys:
+                until = self._down_until.get(k)
+                out[k] = {
+                    "down": bool(until is not None and now < until),
+                    "fails": self._fails.get(k, 0),
+                    "ewma_ms": round(self._ewma.get(k, 0.0), 1),
+                    "samples": self._samples.get(k, 0),
+                    "reason": self._reason.get(k, ""),
+                }
+            return out
+
+    def reset(self) -> None:
+        with self._lock:
+            self._fails.clear()
+            self._down_until.clear()
+            self._ewma.clear()
+            self._samples.clear()
+            self._reason.clear()
+
+
+_HEALTH = SourceHealth()
+
+
+def source_health() -> SourceHealth:
+    """进程级来源健康表（测试可 :func:`reset_source_health` 清空）。"""
+    return _HEALTH
+
+
+def reset_source_health() -> None:
+    _HEALTH.reset()
+
+
+def _source_key(cand) -> str:
+    """健康表的键：镜像按来源名（bmclapi），官方固定 official。"""
+    return getattr(cand, "source", "") or (
+        "mirror" if getattr(cand, "mirrored", False) else "official")
+
+
+def _timeout_for(cand) -> tuple[float, float]:
+    """每个来源自己的 (connect, read) 超时。"""
+    return _MIRROR_TIMEOUT if getattr(cand, "mirrored", False) else _OFFICIAL_TIMEOUT
+
+
+def _retries_for(cand) -> int:
+    """镜像失败不重试（直接换官方）；官方保留一次重试。"""
+    return 0 if getattr(cand, "mirrored", False) else _RETRIES
+
+
+def _rank_candidates(cands):
+    """按健康表调整候选顺序：丢不健康镜像；慢镜像让位给官方（保留作回退）。
+
+    官方候选永不丢弃 —— 它既是回退目标，也是「镜像全灭」时唯一能用的源。
+    """
+    if not cands:
+        return cands
+    kept = [c for c in cands
+            if not (getattr(c, "mirrored", False) and _HEALTH.is_down(_source_key(c)))]
+    if not kept:
+        kept = list(cands)
+    first = kept[0]
+    if getattr(first, "mirrored", False) and _HEALTH.is_slow(_source_key(first)):
+        official = [c for c in kept if not getattr(c, "mirrored", False)]
+        mirror = [c for c in kept if getattr(c, "mirrored", False)]
+        if official:
+            return official + mirror
+    return kept
 
 
 # ── round-110 A：字节记账 + 滑动时间窗测速 ──────────────────────────────────
@@ -232,6 +409,14 @@ def set_mirror(enabled: bool) -> None:
     _MIRROR_ON = bool(enabled)
 
 
+class InstallCancelled(Exception):
+    """用户主动取消安装。
+
+    和网络失败区分开：取消不该触发换源重试（:func:`install_instance` 的
+    ``_retry_with_mirror``），也不该被报成「启动失败」。
+    """
+
+
 class InstallContext:
     """Cooperative cancellation token for one install run.
 
@@ -244,9 +429,16 @@ class InstallContext:
 
     round-110：同时挂载该次安装的 :class:`SpeedMeter`（A）与「镜像失效主机」集合
     （B）—— 某主机在镜像上返回 403 时记入，后续该主机的请求直接走官方源。
+
+    round-172：取消要能**真正**停下正在跑的下载 —— 之前的 ``abort()`` 只在
+    「下一个请求发出前」生效，已经在 ``copyfileobj`` 里读流的文件会一直读到
+    结束（BMCLAPI 挂住时更久，read timeout 最长 30 秒）。现在每个响应都登记
+    在案，``abort()`` 直接 ``shutdown`` 其底层 socket，阻塞中的读立刻抛错；
+    由 :func:`run_cancellable` 启动的安装器子进程一并结束。
     """
 
-    __slots__ = ("_ev", "meter", "mirror_dead", "trace")
+    __slots__ = ("_ev", "meter", "mirror_dead", "trace", "_resps", "_procs",
+                 "_lock")
 
     def __init__(self) -> None:
         self._ev = threading.Event()
@@ -254,13 +446,182 @@ class InstallContext:
         self.mirror_dead: set = set()
         # round-155：本次安装的逐源失败记录（UI / 任务历史可读）。
         self.trace = SourceTrace()
+        # 在途响应 / 子进程（弱引用，安装结束自动释放）
+        self._resps: list = []
+        self._procs: list = []
+        self._lock = threading.Lock()
 
     def abort(self) -> None:
         self._ev.set()
+        with self._lock:
+            resps = list(self._resps)
+            self._resps.clear()
+            procs = list(self._procs)
+            self._procs.clear()
+        for ref in resps:
+            resp = ref() if callable(ref) else None
+            if resp is not None:
+                shutdown_response(resp)
+        for proc in procs:
+            kill_process_tree(proc)
 
     @property
     def aborted(self) -> bool:
         return self._ev.is_set()
+
+    def track_response(self, resp) -> None:
+        """登记一个正在读流的响应，供 ``abort()`` 立刻掐断。"""
+        try:
+            ref = weakref.ref(resp)
+        except TypeError:  # 不支持弱引用（极少见）→ 放弃登记，不影响下载
+            return
+        with self._lock:
+            if len(self._resps) > 2048:  # 超长安装：清掉已死引用
+                self._resps = [r for r in self._resps if r() is not None]
+            self._resps.append(ref)
+
+    def track_proc(self, proc) -> None:
+        with self._lock:
+            self._procs.append(proc)
+
+    def untrack_proc(self, proc) -> None:
+        with self._lock:
+            self._procs = [p for p in self._procs if p is not proc]
+
+
+def _response_socket(resp):
+    """从 requests 响应里挖出底层 socket（urllib3 v1/v2 都覆盖）。"""
+    obj = getattr(resp, "raw", None)
+    if isinstance(obj, _CountingRaw):
+        obj = object.__getattribute__(obj, "_raw")
+    for _ in range(6):
+        if obj is None:
+            return None
+        sock = getattr(obj, "_sock", None)
+        if isinstance(sock, socket.socket):
+            return sock
+        conn = getattr(obj, "_connection", None)
+        if conn is not None:
+            sock = getattr(conn, "sock", None)
+            if isinstance(sock, socket.socket):
+                return sock
+        nxt = getattr(obj, "_fp", None) or getattr(obj, "fp", None)
+        if nxt is None or nxt is obj:
+            return None
+        obj = nxt
+    return None
+
+
+def shutdown_response(resp) -> None:
+    """掐断一个响应：shutdown socket + close，让阻塞中的读立刻抛错。"""
+    sock = _response_socket(resp)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    try:
+        resp.close()
+    except Exception:  # noqa: BLE001 - 关不掉也不影响取消
+        pass
+
+
+def kill_process_tree(proc) -> None:
+    """结束安装器子进程（Windows 连子进程一起杀）。"""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=10)
+        else:
+            proc.kill()
+    except Exception:  # noqa: BLE001 - 杀不掉就让进程自己结束
+        pass
+
+
+def abort_requested() -> bool:
+    """当前安装是否已被用户取消（无安装上下文时恒为 False）。"""
+    ctx = active_context()
+    return ctx is not None and ctx.aborted
+
+
+def run_cancellable(command, *, cwd=None, timeout=None, check=False, **kwargs):
+    """跑一个安装器子进程，取消时立刻结束它（含子进程树）。
+
+    替代 ``subprocess.run``：Forge / NeoForge / Fabric / Quilt 的安装器 jar
+    自己会下载几百 MB 的库，取消启动时必须能停下来。返回
+    :class:`subprocess.CompletedProcess`，语义与 ``subprocess.run`` 对齐
+    （``capture_output`` / ``text`` / ``check`` / ``timeout``）。
+    """
+    if abort_requested():
+        raise InstallCancelled("install cancelled by user")
+    capture = kwargs.pop("capture_output", False)
+    if capture:
+        kwargs.setdefault("stdout", subprocess.PIPE)
+        kwargs.setdefault("stderr", subprocess.PIPE)
+    allowed = ("stdout", "stderr", "stdin", "startupinfo", "env", "text",
+               "encoding", "errors", "shell")
+    popen_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
+    data = kwargs.get("input")
+    if data is not None:
+        # Popen 没有 input（那是 run() 的糖）：转成本进程 stdin 管道
+        popen_kwargs["stdin"] = subprocess.PIPE
+    proc = subprocess.Popen(command, cwd=cwd, **popen_kwargs)
+    ctx = active_context()
+    if ctx is not None:
+        ctx.track_proc(proc)
+    deadline = time.monotonic() + timeout if timeout else None
+    out = err = None
+    sent = False
+    try:
+        while True:
+            step = 0.2
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    kill_process_tree(proc)
+                    raise subprocess.TimeoutExpired(command, timeout)
+                step = min(step, left)
+            try:
+                # communicate 只允许第一次带 input（之后再传会 ValueError）
+                inp, sent = (data if not sent else None), True
+                out, err = proc.communicate(input=inp, timeout=step)
+                break
+            except subprocess.TimeoutExpired:
+                if abort_requested():
+                    kill_process_tree(proc)
+                    proc.communicate()
+                    raise InstallCancelled("install cancelled by user")
+    finally:
+        if ctx is not None:
+            ctx.untrack_proc(proc)
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(
+            proc.returncode, command, output=out, stderr=err)
+    return subprocess.CompletedProcess(command, proc.returncode, out, err)
+
+
+class _SubprocessShim:
+    """把 ``subprocess.run`` 换成可取消版本（供 mll 安装器模块使用）。"""
+
+    __slots__ = ("_real",)
+
+    def __init__(self, real):
+        self._real = real
+
+    def run(self, *args, **kwargs):
+        check = kwargs.pop("check", False)
+        timeout = kwargs.pop("timeout", None)
+        return run_cancellable(*args, check=check, timeout=timeout, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
 
 _SCOPE = threading.local()
@@ -320,22 +681,36 @@ class MirrorSession(requests.Session):
         # mll 从不传 timeout，而 requests 的 Session.request() 总会把 timeout
         # 显式塞进 kwargs（默认值是 None）——所以这里必须判断「是 None」而不是
         # setdefault，否则超时永远补不上。
-        if kwargs.get("timeout") is None:
+        explicit_timeout = kwargs.get("timeout")
+        if explicit_timeout is None:
             kwargs["timeout"] = _SEND_TIMEOUT
         url = getattr(request, "url", None)
         started = time.monotonic()
         cands = []
+        strict_single = False
         if isinstance(url, str) and request.method == "GET":
-            cands = _candidates(url, self._ctx)
+            # round-174：先按健康表排序（不健康镜像直接跳过、慢镜像让位官方）。
+            raw_cands = _candidates(url, self._ctx)
+            cands = _rank_candidates(raw_cands)
+            # 原本有镜像候选（= 游戏文件双源）时，官方单源也要保持 strict：
+            # 两源皆失败必须显式报错，不能被 mll 的 `download_file` 静默吞掉。
+            strict_single = len(raw_cands) > 1 and bool(cands) and not cands[0].mirrored
             if len(cands) > 1:
                 # round-155：来源链逐候选尝试；非末位失败记录原因并换源，
                 # 末位 strict（游戏文件两源皆失败 = 安装已损坏，必须显式失败）。
                 for i, cand in enumerate(cands):
                     last = i == len(cands) - 1
                     request.url = cand.url
+                    call_kw = kwargs
+                    if explicit_timeout is None:
+                        call_kw = dict(kwargs)
+                        call_kw["timeout"] = _timeout_for(cand)
+                    key = _source_key(cand)
+                    t0 = time.monotonic()
                     try:
-                        resp = self._try_source(request, last=last, strict=last,
-                                                **kwargs)
+                        resp = self._try_source(
+                            request, last=last, strict=last,
+                            retries=_retries_for(cand), **call_kw)
                     except requests.RequestException as exc:
                         # 末位源失败会抛错（strict / 连接不可用）：先记账再放行。
                         status = self._last_status
@@ -343,8 +718,12 @@ class MirrorSession(requests.Session):
                                   else (str(exc) or "connection error"))
                         self._note_source(cand.source, cand.url, ok=False,
                                           reason=reason, status=status)
+                        _HEALTH.note_fail(key, reason)
+                        if _DIAG:
+                            _diag_log("health %s down (%s)" % (key, reason))
                         raise
                     if resp is not None and resp.status_code < 400:
+                        _HEALTH.note_ok(key, time.monotonic() - t0)
                         self._note_source(cand.source, cand.url, ok=True)
                         _diag(url, cand.url, resp, started)
                         return _wrap_raw(resp, self._ctx)
@@ -352,20 +731,51 @@ class MirrorSession(requests.Session):
                     reason = ("HTTP %s" % status) if status else "connection error"
                     self._note_source(cand.source, cand.url, ok=False,
                                       reason=reason, status=status)
-                    if i == 0 and cand.mirrored:
+                    # 只有连接类失败 / 5xx 才影响「源健康」；404 只是这个文件
+                    # 镜像没同步，不代表整台主机不能用。
+                    if status is None or status >= 500:
+                        _HEALTH.note_fail(key, reason)
+                    if cand.mirrored:
                         # 镜像对本主机不可用：记为失效，后续同主机请求直接走
                         # 官方源，不再每个文件都白试一次（round-110 B）。
-                        self._mark_mirror_dead(url)
+                        # round-174：不再要求它是第 0 个候选 —— 慢镜像可能被
+                        # 健康表排到官方后面。
+                        self._mark_mirror_dead(url, cand.source)
                 # 理论不可达：末位 strict 失败会抛错。
                 request.url = cands[-1].url
-                resp = self._try_source(request, last=True, strict=True, **kwargs)
+                last_kw = kwargs
+                if explicit_timeout is None:
+                    last_kw = dict(kwargs)
+                    last_kw["timeout"] = _timeout_for(cands[-1])
+                resp = self._try_source(
+                    request, last=True, strict=True,
+                    retries=_retries_for(cands[-1]), **last_kw)
                 _diag(url, cands[-1].url, resp, started)
                 return _wrap_raw(resp, self._ctx)
-        # 单候选（非 Mojang 主机 / 镜像关闭）：原样透传，只加超时/重试。
-        resp = self._try_source(request, last=True, strict=False, **kwargs)
-        if cands and cands[0].mirrored and resp is not None and resp.status_code < 400:
-            self._note_source(cands[0].source, cands[0].url, ok=True)
-        _diag(url, url, resp, started)
+        # 单候选（非 Mojang 主机 / 镜像关闭 / 镜像已被健康表剔除）：
+        # 原样透传，只加超时/重试。
+        target = cands[0] if cands else None
+        if target is not None:
+            request.url = target.url
+        call_kw = kwargs
+        if target is not None and explicit_timeout is None:
+            call_kw = dict(kwargs)
+            call_kw["timeout"] = _timeout_for(target)
+        t0 = time.monotonic()
+        resp = self._try_source(
+            request, last=True,
+            strict=bool(cands and strict_single),
+            retries=_retries_for(target) if target is not None else _RETRIES,
+            **call_kw)
+        if target is not None:
+            key = _source_key(target)
+            if resp is not None and resp.status_code < 400:
+                _HEALTH.note_ok(key, time.monotonic() - t0)
+                if target.mirrored:
+                    self._note_source(target.source, target.url, ok=True)
+            elif resp is not None and resp.status_code >= 500:
+                _HEALTH.note_fail(key, "HTTP %s" % resp.status_code)
+        _diag(url, target.url if target is not None else url, resp, started)
         return _wrap_raw(resp, self._ctx)
 
     def _note_source(self, source: str, url: str, *, ok: bool,
@@ -382,14 +792,16 @@ class MirrorSession(requests.Session):
         except Exception:  # noqa: BLE001 - 记录失败绝不影响下载
             pass
 
-    def _mark_mirror_dead(self, original_url: str) -> None:
+    def _mark_mirror_dead(self, original_url: str, source: str = "bmclapi") -> None:
         """镜像对 ``original_url`` 所属主机返回「被拦」状态 → 本次安装内不再走它。
 
         只在 401/403/406 这类「明确拒绝」上生效：404 可能只是该文件镜像没同步，
-        逐个回退即可，不足以判定整台主机失效。
+        逐个回退即可，不足以判定整台主机失效。round-174 起同时把该来源记入
+        进程级健康表（立刻冷却），即使用户不重开安装也不会再被同一台镜子拖住。
         """
         if self._last_status not in (401, 403, 406):
             return
+        _HEALTH.note_rejected(source, "HTTP %s" % self._last_status)
         ctx = self._ctx
         if ctx is None:
             return
@@ -399,21 +811,26 @@ class MirrorSession(requests.Session):
                 ctx.mirror_dead.add(host)
                 return
 
-    def _try_source(self, request, *, last=False, strict=False, **kwargs):
-        """在**单一源**上发请求，最多重试 ``_RETRIES`` 次。
+    def _try_source(self, request, *, last=False, strict=False, retries=None,
+                    **kwargs):
+        """在**单一源**上发请求，最多重试 ``retries`` 次。
 
         返回 2xx 响应即成功。``last=False`` 且本源不可用时返回 None，表示「本源
         不可用，请上层换源」；``last=True`` 时连接失败会向上抛异常，且 ``strict``
         时 HTTP ≥400 也抛错（游戏文件两源皆失败 = 安装已损坏，必须显式失败）。
+
+        round-174：``retries`` 按来源区分 —— 镜像 0 次（挂住就立刻换官方），
+        官方仍是 1 次。
         """
-        for attempt in range(_RETRIES + 1):
+        tries = _RETRIES if retries is None else max(0, int(retries))
+        for attempt in range(tries + 1):
             ctx = self._ctx
             if ctx is not None and ctx.aborted:
                 raise requests.RequestException("download aborted by user")
             try:
                 resp = super().send(request, **kwargs)
             except requests.RequestException:
-                if attempt < _RETRIES:
+                if attempt < tries:
                     continue  # 超时 / 连接错误 → 同一源再试一次
                 self._last_status = None
                 if last:
@@ -470,9 +887,16 @@ class _CountingRaw:
 
 
 def _wrap_raw(resp, ctx):
-    """给响应的 ``raw`` 装上计数代理（无速度计量器时原样返回）。"""
+    """登记在途响应（供取消掐断），并给 ``raw`` 装上计数代理。"""
+    if resp is None:
+        return resp
+    if ctx is not None:
+        try:
+            ctx.track_response(resp)
+        except Exception:  # noqa: BLE001 - 登记失败不影响下载
+            pass
     meter = getattr(ctx, "meter", None) if ctx is not None else None
-    if meter is None or resp is None:
+    if meter is None:
         return resp
     try:
         raw = resp.raw
@@ -533,6 +957,11 @@ class _RequestsShim:
 # ``install.install_minecraft_version``, so patching the three below covers them.
 _PATCH_MODULES = ("_helper", "install", "runtime")
 
+# round-172：这些加载器安装函数用 ``subprocess.run`` 跑安装器 jar，jar 自己还会
+# 下载几百 MB —— 取消启动时必须能连带杀掉子进程，否则「取消」看起来毫无反应。
+_SPROC_PATCH_MODULES = ("mod_loader._fabric", "mod_loader._forge",
+                        "mod_loader._neoforge", "mod_loader._quilt")
+
 
 def _candidates(url, ctx=None):
     """当前 URL 的候选来源链（镜像关闭 → 只有官方候选）。"""
@@ -543,11 +972,15 @@ def _candidates(url, ctx=None):
 
 
 def _rewrite(url):
-    """单 URL 重写（分片并行等自有路径用）；等价于候选链里的镜像候选。"""
+    """单 URL 重写（分片并行等自有路径用）；等价于候选链里的镜像候选。
+
+    round-174：镜像被健康表判为不健康时不再改写 —— 大文件（客户端 jar）宁可
+    走官方，也不要在挂住的镜子上等到超时。
+    """
     if not _MIRROR_ON or not isinstance(url, str):
         return url
     for cand in _candidates(url, active_context()):
-        if cand.mirrored:
+        if cand.mirrored and not _HEALTH.is_down(_source_key(cand)):
             return cand.url
     return url
 
@@ -583,7 +1016,7 @@ def _is_big_target(path) -> bool:
 
 
 def _try_parallel_mll(url, path, sha1, callback, minecraft_directory,
-                      overwrite) -> bool:
+                      overwrite, ctx=None) -> bool:
     """尝试用分片并行下载 mll 的一个大文件。
 
     返回 True = 已由本函数完成下载（调用方直接 ``return True``）；
@@ -630,8 +1063,10 @@ def _try_parallel_mll(url, path, sha1, callback, minecraft_directory,
         pass
 
     def _cancel():
-        ctx = active_context()
-        return ctx is not None and ctx.aborted()
+        if ctx is not None:
+            return ctx.aborted
+        c = active_context()
+        return c is not None and c.aborted()
 
     try:
         # round-113 P1-c：chunk_mb 4 → 2，threads 显式给 16。
@@ -645,9 +1080,11 @@ def _try_parallel_mll(url, path, sha1, callback, minecraft_directory,
         net_api.parallel_download_file(real_url, path, timeout=120,
                                        threads=16, chunk_mb=2, cancel=_cancel)
     except Exception:  # noqa: BLE001 - 分片失败一律回退 mll 原实现
-        ctx = active_context()
-        if ctx is not None and ctx.aborted():
-            raise  # 取消是协作式指令，不能被回退掩盖
+        # round-172：取消是协作式指令，不能被回退掩盖（池线程里没有线程局部
+        # 上下文，这里改用会话带来的 ctx）。
+        c = ctx if ctx is not None else active_context()
+        if c is not None and c.aborted:
+            raise
         return False
 
     if sha1 is not None:
@@ -666,7 +1103,8 @@ def _wrap_download_file(orig):
         # lzma 内容是变换过的，不能分片；只对「确定是大文件」的目标探测一次。
         if (not lzma_compressed and _is_big_target(path)
                 and _try_parallel_mll(url, path, sha1, callback,
-                                      minecraft_directory, overwrite)):
+                                      minecraft_directory, overwrite,
+                                      ctx=getattr(session, "_ctx", None))):
             return True
         return orig(url, path, callback, sha1, lzma_compressed, session,
                     minecraft_directory, overwrite)
@@ -798,7 +1236,22 @@ def patch_install_session() -> None:
     _patch_download_file()
     # round-113 P0-b：库/资源下载并发 16 → 48。
     _patch_install_concurrency()
+    # round-172：加载器安装器子进程可取消。
+    _patch_subprocess()
     _PATCHED = True
+
+
+def _patch_subprocess() -> None:
+    """把 mll 加载器安装函数里的 ``subprocess.run`` 换成可取消版本。"""
+    for name in _SPROC_PATCH_MODULES:
+        try:
+            mod = importlib.import_module("minecraft_launcher_lib." + name)
+        except ImportError:
+            continue
+        real = getattr(mod, "subprocess", None)
+        if real is None or isinstance(real, _SubprocessShim):
+            continue
+        setattr(mod, "subprocess", _SubprocessShim(real))
 
 
 def proxy_dict(proxy) -> dict | None:

@@ -1,11 +1,13 @@
-"""「模块」设置分区 — 内容模块市场 + 从文件安装。
+"""「模块」设置分区 — 功能扩展包 + 内容模块市场 + 从文件安装。
 
-三个分组（自上而下）：
-  1. 内容模块     已安装模块的开关 / 应用 / 导出 / 卸载
-  2. 模块市场     内置精选（主题 / JVM 预设 / 音效包 / 崩溃策略）
-  3. 从文件安装   .zip 模块包 / 旧版主题包 .json 自动转模块
+四个分组（自上而下）：
+  1. 功能扩展     可物理删除的页面扩展（音乐/成就/控制台…）安装 / 删除 / 从链接装
+  2. 内容模块     已安装模块的开关 / 应用 / 导出 / 卸载
+  3. 模块市场     内置精选（主题 / JVM 预设 / 音效包 / 崩溃策略）
+  4. 从文件安装   .zip 模块包 / 旧版主题包 .json 自动转模块
 
-模块数据操作在 src/modules.py；本页只管编排 UI。
+模块数据操作在 src/modules.py；功能扩展数据操作在 src/features.py；
+本页只管编排 UI。
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import modules as M
+from . import features as F
 from .i18n import t, get_language
 from .theme import COLORS, with_alpha
 from .icons import icon
@@ -71,6 +74,29 @@ class ModulesPage(QWidget):
         lay.setContentsMargins(24, 20, 24, 24)
         lay.setSpacing(16)
 
+        # ── round-167 功能扩展包：可物理删除的页面 ──
+        self._feat_grp = QGroupBox(t("features.group"))
+        fg = QVBoxLayout(self._feat_grp)
+        fg.setSpacing(8)
+        fhint = QLabel(t("features.hint"))
+        fhint.setProperty("cls", "sub")
+        fhint.setWordWrap(True)
+        fg.addWidget(fhint)
+        self._feat_lay = QVBoxLayout()
+        fg.addLayout(self._feat_lay)
+        frow = QHBoxLayout()
+        fb_file = QPushButton(t("features.install_file"))
+        fb_file.setMinimumHeight(32)
+        fb_file.clicked.connect(self._install_feature_file)
+        fb_url = QPushButton(t("features.install_url"))
+        fb_url.setMinimumHeight(32)
+        fb_url.clicked.connect(self._install_feature_url)
+        frow.addWidget(fb_file)
+        frow.addWidget(fb_url)
+        frow.addStretch(1)
+        fg.addLayout(frow)
+        lay.addWidget(self._feat_grp)
+
         self._inst_grp = QGroupBox(t("modules.installed"))
         self._inst_lay = QVBoxLayout(self._inst_grp)
         self._inst_lay.setSpacing(6)
@@ -115,6 +141,7 @@ class ModulesPage(QWidget):
         self._refresh()
 
     def _refresh(self):
+        self._fill_features()
         self._fill_installed()
         self._fill_market()
 
@@ -125,6 +152,160 @@ class ModulesPage(QWidget):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+
+    # ── 0. 功能扩展包（round-167）─────────────────────────────────────────
+    def _fill_features(self):
+        """已装扩展 + 可恢复的内置包。删除/安装后主窗口会重建导航。"""
+        self._clear(self._feat_lay)
+        try:
+            packs = F.scan_installed()
+            builtin_ids = F.bundled_ids()
+        except Exception:  # noqa: BLE001 - 扩展目录坏掉不拖垮设置页
+            packs, builtin_ids = [], set()
+        if not packs:
+            empty = QLabel(t("features.none"))
+            empty.setProperty("cls", "sub")
+            empty.setWordWrap(True)
+            self._feat_lay.addWidget(empty)
+        for p in packs:
+            self._feat_lay.addWidget(
+                self._feature_row(p, p.id in builtin_ids))
+        try:
+            avail = F.list_builtins()
+        except Exception:  # noqa: BLE001
+            avail = []
+        for item in avail:
+            self._feat_lay.addWidget(self._feature_avail_row(item))
+
+    def _feature_row(self, pack, is_builtin: bool) -> QFrame:
+        row = QFrame()
+        row.setProperty("cls", "card")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(12, 8, 12, 8)
+        h.setSpacing(10)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        name = QLabel(f"{_lname(pack.name, pack.name_en)}  v{pack.version}")
+        name.setStyleSheet("font-size: 13px; font-weight: 700;")
+        col.addWidget(name)
+        desc = QLabel(_lname(pack.description, pack.description_en) or " ")
+        desc.setProperty("cls", "sub")
+        desc.setWordWrap(True)
+        col.addWidget(desc)
+        h.addLayout(col, stretch=1)
+        badge = QLabel(t("features.builtin") if is_builtin else t("features.manual"))
+        badge.setProperty("cls", "badge")
+        h.addWidget(badge)
+        del_b = QPushButton(t("features.delete"))
+        del_b.setProperty("cls", "secondary")
+        del_b.setMinimumHeight(30)
+        del_b.clicked.connect(lambda _=False, p=pack: self._uninstall_feature(p))
+        h.addWidget(del_b)
+        return row
+
+    def _feature_avail_row(self, item: dict) -> QFrame:
+        row = QFrame()
+        row.setProperty("cls", "card")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(12, 8, 12, 8)
+        h.setSpacing(10)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        name = QLabel(
+            f"{_lname(item.get('name', ''), item.get('name_en', ''))}"
+            f"  v{item.get('version', '')}")
+        name.setStyleSheet("font-size: 13px; font-weight: 700;")
+        col.addWidget(name)
+        desc = QLabel(
+            _lname(item.get("description", ""), item.get("description_en", "")) or " ")
+        desc.setProperty("cls", "sub")
+        desc.setWordWrap(True)
+        col.addWidget(desc)
+        h.addLayout(col, stretch=1)
+        badge = QLabel(t("features.builtin"))
+        badge.setProperty("cls", "badge")
+        h.addWidget(badge)
+        ins_b = QPushButton(t("features.install"))
+        ins_b.setMinimumHeight(30)
+        ins_b.clicked.connect(lambda _=False, it=item: self._restore_feature(it))
+        h.addWidget(ins_b)
+        return row
+
+    def _uninstall_feature(self, pack):
+        if not confirm(self, t("features.delete"),
+                       t("features.delete_confirm",
+                         name=_lname(pack.name, pack.name_en))):
+            return
+        try:
+            F.uninstall(pack.id)
+        except Exception as e:  # noqa: BLE001
+            warn(self, t("features.failed"), str(e))
+            return
+        self._fill_features()
+        self._notify_features_changed()
+
+    def _restore_feature(self, item: dict):
+        try:
+            pack = F.restore_builtin(item.get("id", ""))
+        except Exception as e:  # noqa: BLE001
+            warn(self, t("features.failed"), str(e))
+            return
+        self._after_feature_install(pack)
+
+    def _install_feature_file(self):
+        path = pick_files(self, t("features.install_file"), "",
+                          t("features.file_filter"))
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".py"):
+                # 单脚本扩展拥有启动器同等权限 → 安装前必须明示确认
+                if not confirm(self, t("features.script_warn_title"),
+                               t("features.script_warn")):
+                    return
+                pack = F.install_from_script(path)
+            else:
+                # zip 里同样是可执行代码，装前必须确认来源可信
+                if not confirm(self, t("features.pack_warn_title"),
+                               t("features.pack_warn")):
+                    return
+                pack = F.install_from_zip(path)
+        except Exception as e:  # noqa: BLE001
+            warn(self, t("features.failed"), str(e))
+            return
+        self._after_feature_install(pack)
+
+    def _install_feature_url(self):
+        from PySide6.QtWidgets import QInputDialog
+        url, ok = QInputDialog.getText(
+            self, t("features.url_title"), t("features.url_hint"))
+        if not ok or not str(url).strip():
+            return
+        if not confirm(self, t("features.pack_warn_title"),
+                       t("features.pack_warn")):
+            return
+        try:
+            pack = F.install_from_url(str(url).strip())
+        except Exception as e:  # noqa: BLE001
+            warn(self, t("features.failed"), str(e))
+            return
+        self._after_feature_install(pack)
+
+    def _after_feature_install(self, pack):
+        info(self, t("features.ok"),
+             t("features.installed", name=_lname(pack.name, pack.name_en)))
+        self._fill_features()
+        self._notify_features_changed()
+
+    def _notify_features_changed(self):
+        """安装/删除后让主窗口重建导航与栈槽（本页嵌在设置页里）。"""
+        try:
+            win = self.window()
+            fn = getattr(win, "_reload_feature_packs", None)
+            if callable(fn):
+                fn()
+        except Exception:  # noqa: BLE001 - 导航刷新失败不影响设置页
+            pass
 
     # ── 1. 已安装模块 ────────────────────────────────────────────────────
     def _fill_installed(self):

@@ -520,7 +520,8 @@ def _reapply_appearance() -> None:
     """把 config 里的视觉特效重新应用到当前运行窗口（装/卸模块后立即见效）。"""
     try:
         from . import theme
-        c = _cfg()
+        from . import slim
+        c = slim.effective(_cfg())   # round-167 低配模式：压制特效键
         theme.set_frosted(c.get("frosted_theme", False))
         theme.set_app_background_translucent(c.get("transparent_window", False))
         theme.apply_qss()
@@ -528,7 +529,8 @@ def _reapply_appearance() -> None:
         pass
     try:
         from .effects import set_effects_enabled
-        set_effects_enabled(_cfg().get("effect_light_trail", False))
+        from . import slim
+        set_effects_enabled(bool(slim.eff(_cfg(), "effect_light_trail")))
     except Exception:
         pass
     try:

@@ -12,6 +12,7 @@ import shutil
 
 import minecraft_launcher_lib
 
+from ..i18n import t
 from .java import java25_path, select_java
 
 SUPPORTED_LOADERS = [
@@ -97,7 +98,11 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
             mirror = "official"
     # round-109：打补丁与走镜像解耦 —— 镜像与否由 set_mirror 在请求时决定，
     # 补丁本身永远打上，好让官方源也拿到「超时 + 重试 + 可取消」。
-    from .mirror import active_meter, patch_install_session, set_diag, set_mirror, set_proxy
+    from .mirror import (InstallCancelled, abort_requested, active_meter,
+                         patch_install_session, set_diag, set_mirror, set_proxy)
+    if abort_requested():
+        # round-172：上一阶段刚被取消，别再开下一段下载。
+        raise InstallCancelled("install cancelled by user")
     set_proxy(proxy or None)
     set_mirror(mirror == "bmclapi")
     set_diag(_diag_enabled())
@@ -106,17 +111,26 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
         # round-151：官方源「能连但极慢」时 30s 无字节进展自动切 BMCLAPI。
         _start_source_watchdog(active_meter(), callback)
 
-    mc_dir = inst.mc_dir
+    # round-164：补全写盘根必须与启动解析根同一口径。外来版本隔离实例
+    # （mc_dir 就是 versions/<id> 目录）如果按 mc_dir 安装，mll 会写出
+    # <mc>/versions/<id>/<id>.json 的嵌套目录，而启动只认 <mc>/<id>.json
+    # ——体检/启动永远判定「缺失」，玩家看到「补不完」。layout_of 在
+    # flat/iso 布局下把根上移两层，安装产物正好落在真实 json 位置。
+    from ..instances import layout_of
+    mc_dir = layout_of(inst).get("install_dir") or inst.mc_dir
     loader = inst.loader if inst.loader in SUPPORTED_LOADERS else "vanilla"
-    # Cleanroom runs 1.12.2 on Java 25 and its installer demands exactly that
-    # major. When no 25 is installed the installer itself only needs a modern
-    # JVM to run — it provisions the 25 the client will use.
-    _need = 25 if loader == "cleanroom" else 0
-    java = select_java(inst.game_version, java_auto=java_auto,
-                       user_path=java_path, need_override=_need)
-    if not java and loader == "cleanroom":
+    if loader == "cleanroom":
+        # Cleanroom 0.7.x 的安装器自己要求 Java 25，但它也提供
+        # --provision-java：只要用来「运行安装器 jar」的 JVM 足够新（17+），
+        # 目标 Java 25 可以由安装器自己下载。之前这里只走
+        # select_java(need=25)，机器没有 25 时就退化成 21/裸 java，
+        # 无法保证安装器能跑；现在统一由 cleanroom_installer_java() 决策。
+        java = cleanroom_installer_java()
+        if not java:
+            raise RuntimeError(t("err.cleanroom_installer_java"))
+    else:
         java = select_java(inst.game_version, java_auto=java_auto,
-                           user_path=java_path, need_override=21)
+                           user_path=java_path, need_override=0)
     java = java or "java"
 
     def _retry_with_mirror(fn):
@@ -129,7 +143,9 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
         try:
             return fn()
         except Exception:
-            if mirror == "bmclapi":
+            if mirror == "bmclapi" or abort_requested():
+                # round-172：用户取消不是「源不好」——绝不能换源把整个安装
+                # 再跑一遍（那正是「点了取消还在下载」的观感来源）。
                 raise
             set_mirror(True)
             try:
@@ -217,6 +233,75 @@ def list_installed_versions(mc_dir: str) -> list[str]:
         if os.path.isfile(os.path.join(vdir, name, f"{name}.json")):
             out.append(name)
     return out
+
+
+def find_installed_loader(mc_dir: str, loader: str, game_version: str) -> str | None:
+    """在 versions/ 下找该加载器对应当前 MC 版本的已安装版本 id（round-163）。
+
+    多数加载器的版本 id 自带 MC 版本（``fabric-loader-0.15.11-1.20.1`` /
+    ``1.20.1-forge-47.2.0``），子串匹配即可；但 NeoForge 1.21+ 的 id 是
+    ``neoforge-21.1.0``、Cleanroom 是 ``Cleanroom-0.7.12-alpha``——都不含
+    MC 版本，只能读版本 json 的 ``inheritsFrom`` 判定。
+
+    这是启动「已安装」判定与体检「完整性」层的共同真理源；放在 install.py
+    避免 instance_health / launch 互相 import 成环。
+    """
+    loader = (loader or "").strip().lower()
+    if not mc_dir or not loader or not os.path.isdir(mc_dir):
+        return None
+    vdir = os.path.join(mc_dir, "versions")
+    if not os.path.isdir(vdir):
+        return None
+    try:
+        names = sorted(os.listdir(vdir))
+    except OSError:
+        return None
+    for name in names:
+        low = name.lower()
+        if loader not in low:
+            continue
+        # 子串撞名防护：*forge* 会命中 neoforge、*fabric* 会命中 legacyfabric。
+        if loader == "forge" and "neoforge" in low:
+            continue
+        if loader == "fabric" and "legacyfabric" in low:
+            continue
+        jp = os.path.join(vdir, name, f"{name}.json")
+        if not os.path.isfile(jp):
+            continue
+        if game_version and game_version in name:
+            return name
+        try:
+            with open(jp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if str(data.get("inheritsFrom") or "") == game_version:
+            return name
+    return None
+
+
+def cleanroom_installer_java() -> str | None:
+    """运行 Cleanroom 安装器 jar 的 JVM（与游戏实际使用的 Java 25 分离）。
+
+    优先 Java 25；没有则取「最高且 >=17」的已装 JDK——安装器 jar 自身只
+    需要现代 JVM，目标 Java 25 交给安装器的 ``--provision-java`` 下载到
+    ``~/.cleanroom/java``。一个 Java 都没有时返回 None，由调用方给出明确
+    中文错误（round-163）。
+    """
+    from .java import java25_path, scan_javas
+    j25 = java25_path()
+    if j25:
+        return j25
+    javas = [j for j in scan_javas(deep=True) if int(j.get("major") or 0) > 0]
+    modern = [j for j in javas if int(j["major"]) >= 17]
+    if modern:
+        modern.sort(key=lambda j: (int(j["major"]), bool(j.get("is_64bit", True)),
+                                   j.get("path", "")))
+        return modern[-1]["path"]
+    if javas:
+        javas.sort(key=lambda j: (int(j["major"]), j.get("path", "")))
+        return javas[-1]["path"]
+    return None
 
 
 def repair_minecraft_dir(mc_dir: str, callback=None) -> list[str]:
@@ -515,6 +600,9 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
         try:
             parallel_download_file(installer_url, jar_path, timeout=180)
         except Exception:
+            from .mirror import abort_requested
+            if abort_requested():
+                raise  # round-172：取消时不再换另一个主机重下安装器
             # GitHub release vs Maven mirror: retry on the other host before
             # surfacing the download error (CN networks often block one).
             alt = cleanroom_installer_url(
@@ -536,6 +624,13 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
         # ~/.cleanroom/java when the machine has none (round-126: the old
         # `--installClient <dir>` call is from the pre-0.7 Forge-style
         # installer and made every Cleanroom install fail).
+        # javaw 也能跑 jar，但 stderr/stdout 为空会让安装失败只剩「no output」。
+        # 安装器是控制台程序，统一归一为同目录 java.exe 以保留错误详情。
+        from .mirror import run_cancellable
+        if java.lower().endswith("javaw.exe"):
+            _java_exe = os.path.join(os.path.dirname(java), "java.exe")
+            if os.path.isfile(_java_exe):
+                java = _java_exe
         cmd = [java, "-jar", jar_path, "client", "-d", mc_dir, "-y",
                "--json", "--quiet"]
         if build:
@@ -546,13 +641,21 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
         else:
             cmd += ["--provision-java"]
             cleanroom_java = True
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            # round-163：让玩家知道「为什么这一步很慢」——安装器会自行下载
+            # 一个 Java 25 到 ~/.cleanroom/java。
+            if callback:
+                st = callback.get("setStatus") if isinstance(callback, dict) else None
+                if callable(st):
+                    st(t("launch.cleanroom_provision"))
+        # round-172：安装器自己会下载库 / 可用 --provision-java 下载 Java 25，
+        # 必须走可取消版本，否则「取消启动」停不下它。
+        r = run_cancellable(cmd, capture_output=True, text=True, timeout=900)
         if r.returncode != 0:
             # Pre-0.7 builds still use the Forge-style installer, which
             # installs into its working directory.
-            r2 = subprocess.run([java, "-jar", jar_path, "--installClient"],
-                                cwd=mc_dir, capture_output=True, text=True,
-                                timeout=900)
+            r2 = run_cancellable([java, "-jar", jar_path, "--installClient"],
+                                 cwd=mc_dir, capture_output=True, text=True,
+                                 timeout=900)
             if r2.returncode != 0:
                 detail = ((r.stderr or "") + (r.stdout or "")).strip()
                 raise RuntimeError(
@@ -620,7 +723,8 @@ def _install_optifine(mc_version, mc_dir, *, build="", java="java", callback=Non
             st = callback.get("setStatus")
             if callable(st):
                 st("运行 OptiFine 安装器…")
-        subprocess.run(
+        from .mirror import run_cancellable
+        run_cancellable(
             [java, "-jar", jar_path, "--installDir", mc_dir],
             check=True, capture_output=True, timeout=300,
         )

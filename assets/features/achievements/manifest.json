@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "achievements",
+  "name": "成就",
+  "name_en": "Achievements",
+  "version": "1.0.0",
+  "entry": "entry.py",
+  "icon": "achievements",
+  "nav_group": "extensions",
+  "order": 20,
+  "description": "查看全部成就与解锁进度，可随时删除。",
+  "description_en": "Browse all achievements and progress. Safe to remove.",
+  "source": "builtin"
+}

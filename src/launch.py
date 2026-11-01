@@ -15,12 +15,14 @@ import threading
 
 from .core.java import find_java, select_java, required_java_major
 from .core.install import install_instance
+from .core.mirror import InstallCancelled, abort_requested
 from .paths import get_data_dir
 from .brand import APP_NAME
 from .core.authlib import ensure_authlib
 
 __all__ = ["find_java", "build_options", "get_command", "launch_process", "launch_instance",
-           "run_hook_cmd", "resolve_game_dir", "parse_game_args"]
+           "run_hook_cmd", "run_pre_launch_cmd", "apply_wrapper", "resolve_game_dir",
+           "parse_game_args"]
 
 # round-55 JVM 参数预设「Aikar 优化」组（对齐主流预设里社区推荐的 Aikar 调优，
 # 多数整合包作者亦沿用此组）。带引号的参数交给 JVM 前由 shlex 保持完整。
@@ -107,6 +109,65 @@ def resolve_game_dir(inst, settings: dict) -> str:
                 return os.path.join(inst.mc_dir, os.path.normpath(custom))
             return os.path.normpath(custom)
     return inst.mc_dir
+
+
+def apply_wrapper(cmd: list[str], wrapper: str) -> list[str]:
+    """round-170：把完整 Java 命令交给「包装命令」（对齐主流 wrapper）。
+
+    ``wrapper`` 里可写 ``{java}`` 指定 Java 命令的插入位置；不写则作为前缀。
+    整串交给系统 shell，支持引号/环境变量/管道等写法。失败不在这里兜底——
+    包装错误由启动失败对话框呈现。
+    """
+    wrapper = (wrapper or "").strip()
+    if not wrapper:
+        return cmd
+    if sys.platform == "win32":
+        java_part = subprocess.list2cmdline(list(cmd))
+        line = (wrapper.replace("{java}", java_part) if "{java}" in wrapper
+                else f"{wrapper} {java_part}")
+        return ["cmd", "/c", line]
+    import shlex
+    java_part = " ".join(shlex.quote(x) for x in cmd)
+    line = (wrapper.replace("{java}", java_part) if "{java}" in wrapper
+            else f"{wrapper} {java_part}")
+    return ["/bin/sh", "-c", line]
+
+
+def run_pre_launch_cmd(cmd: str, cwd: str = "", timeout: int = 60) -> tuple[bool, str]:
+    """round-170：执行「启动前命令」，**等待完成**（可用来准备文件）。
+
+    返回 ``(成功, 说明)``。超时或非零退出都算失败，由调用方决定是否中止启动；
+    输出只保留末尾 400 字符用于错误提示。平台差异：Windows 走 cmd /c，
+    其余走 /bin/sh -c，与「启动后 / 退出后命令」同一套写法。
+    """
+    cmd = (cmd or "").strip()
+    if not cmd:
+        return True, ""
+    try:
+        p = subprocess.run(
+            cmd,
+            cwd=cwd or None,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout)),
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                           if sys.platform == "win32" else 0),
+        )
+    except subprocess.TimeoutExpired:
+        return False, t_timeout(timeout)
+    except Exception as e:  # noqa: BLE001 - 启动前命令失败要可见
+        return False, str(e)
+    tail = ((p.stdout or "") + (p.stderr or "")).strip()[-400:]
+    if p.returncode != 0:
+        return False, f"exit {p.returncode}" + (f" · {tail}" if tail else "")
+    return True, ""
+
+
+def t_timeout(seconds: int) -> str:
+    """启动前命令超时的提示文案（i18n 惰性解析，便于切换语言）。"""
+    from .i18n import t
+    return t("launch.pre_cmd_timeout", seconds=seconds)
 
 
 def run_hook_cmd(cmd: str, cwd: str = "") -> None:
@@ -294,9 +355,10 @@ def versions_root(inst, version: str = "") -> str:
         return ""
     version = version or getattr(inst, "version_id", "") or getattr(inst, "game_version", "")
     try:
-        from .instances import detect_format
-        if detect_format(inst) == "iso":
-            return os.path.dirname(os.path.dirname(os.path.normpath(mc)))
+        # round-164：布局判定统一收拢到 instances.layout_of——启动、补全、
+        # 体检共用同一口径，避免「识别为隔离布局却把版本文件补进嵌套目录」。
+        from .instances import layout_of
+        return layout_of(inst, version).get("versions_root") or mc
     except Exception:  # noqa: BLE001 - 检测失败退回特征兜底
         pass
     if version and os.path.isfile(os.path.join(mc, f"{version}.json")):
@@ -513,38 +575,29 @@ def launch_process(cmd: list[str], mc_dir: str, log_path: str | None = None,
 
 
 def _find_installed_loader(mc_dir: str, loader: str, game_version: str) -> str | None:
-    """在 versions/ 下找该加载器对应当前 MC 版本的已安装版本 id。
+    """薄转发：实现在 core.install（体检完整性层共用同一真理源）。"""
+    from .core.install import find_installed_loader
+    return find_installed_loader(mc_dir, loader, game_version)
 
-    多数加载器的版本 id 自带 MC 版本（``fabric-loader-0.15.11-1.20.1`` /
-    ``1.20.1-forge-47.2.0``），子串匹配即可；但 NeoForge 1.21+ 的 id 是
-    ``neoforge-21.1.0``、Cleanroom 是 ``Cleanroom-0.7.12-alpha`` —— 都不含
-    MC 版本，只能读版本 json 的 ``inheritsFrom`` 判定。否则这两类实例每次
-    启动都被判成「未安装」，重跑安装器（Cleanroom 一次可达数分钟）。
+
+def _java_detected_text() -> str:
+    """round-163：列出已检测到的 Java（最多 5 条）供报错信息使用。
+
+    ``scan_javas(deep=True)`` 有 5 分钟缓存，重复调用不会反复全盘扫描。
     """
-    import glob as _glob
-    import json as _json
-    for d in sorted(_glob.glob(os.path.join(mc_dir, "versions", f"*{loader}*"))):
-        base = os.path.basename(d)
-        # 子串撞名防护：glob 的 *forge* 会命中 neoforge、*fabric* 会命中
-        # legacyfabric —— 逐个排除，避免把另一种加载器当成目标加载器启动。
-        _low = base.lower()
-        if loader == "forge" and "neoforge" in _low:
-            continue
-        if loader == "fabric" and "legacyfabric" in _low:
-            continue
-        jp = os.path.join(d, f"{base}.json")
-        if not os.path.isfile(jp):
-            continue
-        if game_version and game_version in base:
-            return base
-        try:
-            with open(jp, "r", encoding="utf-8") as f:
-                data = _json.load(f)
-        except (OSError, ValueError):
-            continue
-        if str(data.get("inheritsFrom") or "") == game_version:
-            return base
-    return None
+    try:
+        from .core.java import scan_javas
+        items = []
+        for _j in scan_javas(deep=True):
+            _m = int(_j.get("major") or 0)
+            if _m <= 0:
+                continue
+            items.append(f"Java {_m} · {os.path.basename(os.path.dirname(_j.get('path') or ''))}")
+            if len(items) >= 5:
+                break
+        return "\n".join(items) or "—"
+    except Exception:  # noqa: BLE001 - 扫描失败不影响报错本身
+        return "—"
 
 
 def launch_instance(
@@ -561,8 +614,15 @@ def launch_instance(
     # round-153 启动前 Java 确认：非空 = 玩家已同意「本次改用 Java N」，
     # 直接使用该路径，不再走 select_java 的静默切换。
     java_override: str = "",
+    # round-163 强制使用不兼容 Java：True 时不再因手动 Java 不兼容而拦截/
+    # 自动切换，改由调用方（启动前确认框的三选一）显式授权。
+    force_java: bool = False,
 ):
-    """Install (if needed) + assemble command + spawn. Returns (proc, log_path)."""
+    """Install (if needed) + assemble command + spawn. Returns (proc, log_path).
+
+    ``force_java=True``：玩家已明确要求「本次就用这个不兼容的 Java」，
+    兼容性检查只提示不拦截（不再自动切换，也不抛 err.java_compat_missing）。
+    """
     # round-41 玩家视角加固：实例目录被玩家删了 / 移动后点启动——
     # 给友好中文错误而不是裸 FileNotFoundError（玩家看不懂原始异常）。
     if not os.path.isdir(inst.mc_dir):
@@ -657,10 +717,11 @@ def launch_instance(
         from .i18n import t as _t
         need = _need
         raise RuntimeError(
-            _t("err.java_compat_missing",
-               default="此版本需要 Java {need}，但未检测到兼容的 Java 运行时。\n"
-                       "请到 设置 → Java → 管理，安装 Java {need} 后再启动。",
-               need=need)
+            _t("err.java_compat_missing_list",
+               default="此版本需要 Java {need}，未找到兼容的 Java 运行时。\n"
+                       "已检测到：{detected}\n"
+                       "请安装 Java {need}，或在 设置 → Java 开启「允许强制使用不兼容的 Java」。",
+               need=need, detected=_java_detected_text())
         )
     if not java_override and not java_auto and user_java and not os.path.isfile(user_java):
         from .i18n import t as _t
@@ -700,28 +761,39 @@ def launch_instance(
                 _jmajor = 8 if _n == 1 else _n
         from .core.java import is_java_compatible as _java_ok
         if _jmajor and not _java_ok(_need, _jmajor):
-            # 手动路径版本不符 → 尝试自动找一个兼容 Java；找到就切换并明示
-            _alt = None
-            if not java_auto:
-                _alt = select_java(inst.game_version, java_auto=True,
-                                   need_override=_need)
-            if _alt and _alt != java:
+            if force_java:
+                # round-163：玩家已显式授权「本次就用这个不兼容的 Java」——
+                # 不切换、不拦错，仅通过状态栏明示后果。
                 from .i18n import t as _t
                 _warn = callback.get("setStatus") if callback and hasattr(callback, "get") else None
                 if callable(_warn):
-                    _warn(_t("launch.java_mismatch_auto",
-                             default="所选 Java {jv} 不适用于此版本（需要 Java {need}），已自动改用 {used}",
-                             jv=f"Java {_jmajor}", need=_need,
-                             used=os.path.basename(os.path.dirname(_alt))))
-                java = _alt
-            elif not _alt:
-                from .i18n import t as _t
-                raise RuntimeError(
-                    _t("err.java_compat_missing",
-                       default="此版本需要 Java {need}，但未检测到兼容的 Java 运行时。\n"
-                               "请到 设置 → Java → 管理，安装 Java {need} 后再启动。",
-                       need=_need)
-                )
+                    _warn(_t("launch.java_forced",
+                             major=_jmajor, need=_need,
+                             default="已按你的要求强制使用 Java {major}（该版本建议 Java {need}）"))
+            else:
+                # 手动路径版本不符 → 尝试自动找一个兼容 Java；找到就切换并明示
+                _alt = None
+                if not java_auto:
+                    _alt = select_java(inst.game_version, java_auto=True,
+                                       need_override=_need)
+                if _alt and _alt != java:
+                    from .i18n import t as _t
+                    _warn = callback.get("setStatus") if callback and hasattr(callback, "get") else None
+                    if callable(_warn):
+                        _warn(_t("launch.java_mismatch_auto",
+                                 default="所选 Java {jv} 不适用于此版本（需要 Java {need}），已自动改用 {used}",
+                                 jv=f"Java {_jmajor}", need=_need,
+                                 used=os.path.basename(os.path.dirname(_alt))))
+                    java = _alt
+                elif not _alt:
+                    from .i18n import t as _t
+                    raise RuntimeError(
+                        _t("err.java_compat_missing_list",
+                           default="此版本需要 Java {need}，未找到兼容的 Java 运行时。\n"
+                                   "已检测到：{detected}\n"
+                                   "请安装 Java {need}，或在 设置 → Java 开启「允许强制使用不兼容的 Java」。",
+                           need=_need, detected=_java_detected_text())
+                    )
         if sys.platform == "win32" and java.lower().endswith("java.exe"):
             _javaw = os.path.join(os.path.dirname(java), "javaw.exe")
             if os.path.isfile(_javaw) and java != _javaw:
@@ -862,12 +934,17 @@ def launch_instance(
     #   2) 仍补不齐（库不在官方仓库 / 网络失败）→ 宽容启动：JVM 会静默忽略缺失的
     #      classpath 条目（可选平台包缺了通常不影响进主菜单），仅提示不拦截。
     _libs_root = os.path.join(inst.mc_dir, "libraries") if inst else ""
+    if abort_requested():
+        # round-172：玩家在安装/补全期间点了「取消启动」——不再进入任何补全下载。
+        raise InstallCancelled("launch cancelled by user")
     if _needs_repair(missing) and getattr(inst, "version_id", ""):
         if missing and os.path.isdir(_libs_root):
             try:
                 from .core.mirror import MirrorSession
                 with MirrorSession() as _sess:
                     for _p in list(missing):
+                        if abort_requested():
+                            raise InstallCancelled("launch cancelled by user")
                         _rel = os.path.relpath(_p, _libs_root)
                         if _rel.startswith(".."):
                             continue  # 目根之外的不属于本库区，跳过
@@ -884,6 +961,8 @@ def launch_instance(
                                 missing.remove(_p)
                         except Exception:  # noqa: BLE001 - 单个库下载失败不阻断
                             pass
+            except InstallCancelled:
+                raise  # round-172：取消必须真正中止，不能当成「镜像不可用」降级
             except Exception:  # noqa: BLE001 - 镜像整体不可用时降级到宽容启动
                 pass
         if missing:
@@ -908,8 +987,13 @@ def launch_instance(
             _mll.install.install_minecraft_version(
                 inst.game_version, vroot, callback=callback or None
             )
-        except Exception:  # noqa: BLE001 - 补全失败不阻塞启动，由 crash 分析兜底
-            pass
+        except InstallCancelled:
+            raise  # round-172：取消启动 = 真的停下，绝不吞掉后继续拉起游戏
+        except Exception as _e:  # noqa: BLE001 - 补全失败不阻塞启动，由 crash 分析兜底
+            if abort_requested():
+                # 取消时响应被 shutdown，底层抛的是 AttributeError/ConnectionError 等
+                # 杂项异常——统一归一为 InstallCancelled，界面按「已取消」显示。
+                raise InstallCancelled("launch cancelled by user") from _e
         cmd = _assemble_command()
         # 修复后再扫一次：若仍有可选遗留库（如 1.8.9 的 jinput/twitch 平台包，
         # Mojang 已停供）缺失——它们不参与游戏主线程加载，JVM 会静默忽略缺失的
@@ -951,6 +1035,23 @@ def launch_instance(
                 _warn(_t2("launch.warn_non_ascii_path"))
     except Exception:  # noqa: BLE001 - 警告失败绝不影响启动
         pass
+
+    # round-170：启动前命令——等它跑完再继续（常用来替换/清理文件）。
+    # 超时 60 秒、非零退出都中止启动，并把命令输出尾巴带进错误提示。
+    _pre = (settings.get("pre_launch_cmd") or "").strip()
+    if _pre:
+        from .i18n import t as _t3
+        _st = callback.get("setStatus") if callback and hasattr(callback, "get") else None
+        if callable(_st):
+            _st(_t3("launch.pre_cmd_running"))
+        _ok, _why = run_pre_launch_cmd(_pre, game_dir, timeout=60)
+        if not _ok:
+            raise RuntimeError(_t3("err.pre_launch_failed", err=_why))
+
+    # round-170：包装命令在 spawn 前套用（超时/缺命令等错误由启动失败框呈现）。
+    _wrap = (settings.get("wrapper_cmd") or "").strip()
+    if _wrap:
+        cmd = apply_wrapper(cmd, _wrap)
 
     # round-52 阶段上报：即将拉起游戏进程（点第 5 步）。
     _emit_step(callback, "start")

@@ -273,12 +273,14 @@ def main():
     pack = find_theme_pack(cfg.get("theme_pack", "")) if cfg.get("theme_pack") else None
     if pack:
         apply_theme_pack(pack)
+    # round-167 低配模式：毛玻璃/透底按有效值压制，不改写玩家配置
+    from src import slim
     from src.theme import set_frosted
-    set_frosted(cfg.get("frosted_theme", False))
+    set_frosted(bool(slim.eff(cfg, "frosted_theme")))
     # round-51 透底效果：按配置把应用层背景切半透明（配合系统 Acrylic）。
     try:
         from src.theme import set_app_background_translucent
-        set_app_background_translucent(cfg.get("transparent_window", False))
+        set_app_background_translucent(bool(slim.eff(cfg, "transparent_window")))
     except Exception:
         pass
     apply_qss()
@@ -324,7 +326,8 @@ def main():
     splash = None
     # round-114 live view：live 实例跳过启动动画——画面第一帧就该是主窗口，
     # 否则 Agent 截图时看到的是 splash。
-    if cfg.get("splash_enabled", True) and os.environ.get("AC_NO_SPLASH") != "1":
+    # round-167 低配模式同样跳过启动画面（slim.eff 返回 False）
+    if slim.eff(cfg, "splash_enabled") and os.environ.get("AC_NO_SPLASH") != "1":
         _log.write("6 splash construct\n"); _log.flush()
         # round-63：接入 SplashWindow 完整品牌动画（AC 字母自绘 + 旋转光晕
         # + 标语打字 + 进度条）。AC 用 MC 像素字体渲染（用户指定 round-62），

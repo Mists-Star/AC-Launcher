@@ -67,6 +67,10 @@ class Instance:
     # launcher setting. Lets one instance force a specific JDK (e.g. older Forge
     # on Java 8, newer vanilla on Java 21) without changing the global default.
     java_path: str = ""
+    # round-163：实例级「强制使用所选 Java」开关。True 时即使 java_path
+    # 不满足该版本的 Java 要求，启动器也不再拦截/自动换 Java。
+    # 全局开关见设置 java_force_incompatible；两者任一为真即强制。
+    java_force: bool = False
     # round-42 实例级覆盖（对齐主流做法）：0/空 = 用全局设置
     ram_mb: int = 0       # 0 = 全局 ram_mb
     jvm_args: str = ""    # 空 = 全局 jvm_args
@@ -317,9 +321,11 @@ def detect_format(inst) -> str:
     """判定实例的启动格式（round-82，round-135 补全）。
 
     优先级：
-    1. 玩家已手动指定（format 非空且非 auto）→ 直接用；
-    2. AC 自有布局（``_base`` 为空 ⇒ 实例住在 data/instances/<id>/.minecraft，
-       libraries 走共享池联接）→ ``ac``；
+    1. AC 自有布局（``_base`` 为空 ⇒ 实例住在 data/instances/<id>/.minecraft，
+       libraries 走共享池联接）→ ``ac``。这是**结构性事实**，优先于任何
+       遗留的显式 format（round-163：导入时写的 curseforge/multimc 标签
+       会让徽章和格式提示长期错标）；
+    2. 玩家已手动指定（format 非空且非 auto）→ 直接用；
     3. 自适应（auto / 空）→ ``_probe_format`` 按磁盘特征实时探测：
        MMC 布局（mmc-pack.json）> 外来版本隔离（导入，
        mc_dir 内直接躺 <version>.json）> CurseForge（minecraftinstance.json）
@@ -330,14 +336,14 @@ def detect_format(inst) -> str:
     返回始终是 INSTANCE_FORMATS 之一；原版标准布局之外的改装/奇怪目录由
     versions_root 的 <id>.json 特征兜底自适应（round-78）。
     """
+    if _is_ac_owned(inst):
+        return "ac"
     fmt = (getattr(inst, "format", "") or "").strip() or "auto"
     if fmt != "auto":
         if fmt in INSTANCE_FORMATS:
             return fmt
         # round-135：非法值（老版本遗留 / 手改配置）不该返回 "auto" 字符串——
         # 那样徽章会显示「自适应（自动识别）」且永远不再探测。改为按自适应探测。
-    if _is_ac_owned(inst):
-        return "ac"
     return _probe_format(inst)
 
 
@@ -387,6 +393,61 @@ def _probe_format(inst) -> str:
     #    特征全 miss 时按导入时判定的 kind 兜底，避免把其它启动器的实例
     #    误标成原版（目录改名/移动/元数据文件缺失时仍能认出来源）。
     return _KIND_TO_FORMAT.get(kind, "vanilla")
+
+
+# AC 自有布局绝不可能属于这些外来格式：读到这样的组合说明是旧导入标签
+# 残留（round-164）。只纠正「结构上确定」的 AC 实例，外来实例保留手选。
+_ADAPT_STALE_FORMATS = ("vanilla", "iso", "multimc", "curseforge", "modrinth",
+                        "custom")
+
+
+def adapt_format(inst) -> bool:
+    """把 AC 自有布局上残留的外来格式标签纠正为 ``ac``（round-164）。
+
+    ``_base`` 为空且非 external ⇒ 游戏目录固定落在
+    ``data/instances/<id>/.minecraft``，不可能是 CurseForge / MultiMC /
+    版本隔离。旧导入写入的标签会让格式徽章、设置下拉和「按格式补全」长期
+    走错分支，所以在读到实例时一次性纠正（内存中生效，下次保存落盘）。
+    """
+    fmt = (getattr(inst, "format", "") or "").strip()
+    if fmt in _ADAPT_STALE_FORMATS and _is_ac_owned(inst):
+        inst.format = "ac"
+        return True
+    return False
+
+
+def layout_of(inst, version: str = "") -> dict:
+    """检测后的统一布局（round-164）：启动解析根 / 补全写盘根 / 版本 id。
+
+    启动（``launch.versions_root``）、补全（``core.install.install_instance``）
+    与体检必须共用同一口径，否则「识别为隔离布局，却把文件补进嵌套
+    versions/」会永远补不完——这正是「识别错误 → 错误补全」的来源。
+
+    返回：
+      * ``format``       — ``detect_format`` 的结果；
+      * ``version``      — 实际版本 id（参数 > version_id > game_version）；
+      * ``flat``         — 版本 json 是否扁平躺在 ``<mc>/<version>.json``
+                           （外来版本隔离/扁平布局）；
+      * ``install_dir``  — mll 安装器应写入的根（flat → mc 的上级两层）；
+      * ``versions_root``— mll 启动时解析 ``versions/<id>/<id>.json`` 的根。
+
+    AC 自有布局即使目录里出现 ``<mc>/<version>.json`` 也不切换根目录：
+    那是实例自己的文件，不是外来隔离布局。
+    """
+    fmt = detect_format(inst)
+    mc = (getattr(inst, "mc_dir", "") or "").strip()
+    ver = (version or (getattr(inst, "version_id", "") or "")
+           or (getattr(inst, "game_version", "") or ""))
+    flat = False
+    root = mc
+    if mc:
+        flat_json = os.path.join(mc, f"{ver}.json") if ver else ""
+        if fmt == "iso" or (flat_json and not _is_ac_owned(inst)
+                            and os.path.isfile(flat_json)):
+            flat = True
+            root = os.path.dirname(os.path.dirname(os.path.normpath(mc)))
+    return {"format": fmt, "version": ver, "flat": flat,
+            "install_dir": root, "versions_root": root}
 
 
 class InstancesManager:
@@ -553,7 +614,7 @@ class InstancesManager:
             last_played = float(raw.get("last_played", 0) or 0)
         except (TypeError, ValueError):
             last_played = 0.0
-        return Instance(
+        inst = Instance(
             id=raw.get("id") or iid,
             name=raw.get("name", ""),
             game_version=raw.get("game_version", ""),
@@ -565,6 +626,7 @@ class InstancesManager:
             created_at=raw.get("created_at", ""),
             last_played=last_played,
             java_path=raw.get("java_path", ""),
+            java_force=bool(raw.get("java_force", False)),
             ram_mb=raw.get("ram_mb", 0) or 0,
             jvm_args=raw.get("jvm_args", "") or "",
             renderer=raw.get("renderer", "auto") or "auto",
@@ -583,6 +645,9 @@ class InstancesManager:
             _base=raw.get("_base", ""),
             launcher=raw.get("launcher", "AC"),
         )
+        # round-164：读到即纠正结构上确定错标的外来格式（AC 自有布局）。
+        adapt_format(inst)
+        return inst
 
     @staticmethod
     def _to_dict(inst: Instance) -> dict:
@@ -688,7 +753,17 @@ class InstancesManager:
         loader: str = "vanilla",
         loader_version: str = "",
         java_path: str = "",
+        format: str = "",
+        base: str = "",
     ) -> Instance:
+        """新建实例。
+
+        round-165：``base`` 非空 = 玩家在新建/下载向导里自选了已有游戏目录
+        （``format`` 为 vanilla / iso / custom），实例按 external 记入——
+        下载/补全写入该目录，删除实例时绝不动玩家真实文件。``base`` 为空
+        仍是 AC 自有布局（format 归一为空 = 自适应 → 结构判定为 ac）。
+        """
+        base = (base or "").strip()
         inst = Instance(
             id=_new_id(),
             name=name,
@@ -696,6 +771,9 @@ class InstancesManager:
             loader=loader if loader in LOADERS else "vanilla",
             loader_version=loader_version,
             java_path=java_path or "",
+            format=(format or "").strip() if base else "",
+            external=bool(base),
+            _base=base,
         )
         inst.ensure_dirs()
         self._instances[inst.id] = inst
@@ -753,6 +831,7 @@ class InstancesManager:
             needs_convert=src.needs_convert,
             created_at=src.created_at,
             java_path=src.java_path,
+            java_force=src.java_force,
             ram_mb=src.ram_mb,
             jvm_args=src.jvm_args,
             renderer=src.renderer,

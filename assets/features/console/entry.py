@@ -249,3 +249,8 @@ class ConsolePage(QWidget):
         folder = os.path.dirname(path)
         if os.path.isdir(folder):
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+
+def create_page(ctx=None):
+    """round-167 功能扩展入口：由 src/features.py 动态调用。"""
+    return ConsolePage()

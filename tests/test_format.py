@@ -32,7 +32,7 @@ os.makedirs(_FIXED_DATA, exist_ok=True)
 _inst_mod.get_data_dir = lambda: _FIXED_DATA
 
 from src.instances import (Instance, INSTANCE_FORMATS, detect_format,  # noqa: E402
-                           _KIND_TO_FORMAT)
+                           _KIND_TO_FORMAT, adapt_format, layout_of)
 from src.launch import versions_root  # noqa: E402
 
 fails = []
@@ -77,12 +77,12 @@ try:
     check("复制导入（_base 空）→ ac", detect_format(ac_copy) == "ac",
           detect_format(ac_copy))
 
-    # ── 2. 手动指定优先于探测 ──
+    # ── 2. 手动指定 vs 结构判定 ──
     forced = Instance(id="c", name="c", game_version="1.20.1", format="multimc")
-    check("手动指定优先于 AC 首判", detect_format(forced) == "multimc",
+    check("AC 自有布局压过手动格式（round-163）", detect_format(forced) == "ac",
           detect_format(forced))
     forced2 = inst(mk("f_multimc", ["mmc-pack.json"]), format="custom")
-    check("手动指定优先于磁盘特征", detect_format(forced2) == "custom",
+    check("外来实例手动指定优先于磁盘特征", detect_format(forced2) == "custom",
           detect_format(forced2))
     bad = Instance(id="d", name="d", game_version="1.20.1", format="nonsense")
     check("非法手动值退回探测", detect_format(bad) == "ac", detect_format(bad))
@@ -149,7 +149,44 @@ try:
     check("multimc 的解析根 = mc_dir", versions_root(i_mmc) == i_mmc.mc_dir,
           versions_root(i_mmc))
 
-    # ── 6. 枚举与 UI 契约 ──
+    # ── 6. 识别结果联动补全/启动（round-164）──
+    # 6.1 读到实例即纠正 AC 自有布局上的外来格式残留
+    stale = Instance(id="s", name="s", game_version="1.20.1",
+                     format="curseforge", external=False)
+    check("AC 实例残留 curseforge 被纠正",
+          adapt_format(stale) is True and stale.format == "ac", stale.format)
+    check("外来实例的手动格式不被改写",
+          adapt_format(forced2) is False and forced2.format == "custom",
+          forced2.format)
+    check("auto 保持不变", adapt_format(Instance(
+        id="s2", name="s2", game_version="1.20.1", format="")) is False)
+
+    # 6.2 补全写盘根与启动解析根必须同一口径
+    lo_ac = layout_of(ac)
+    check("AC 补全根 = mc_dir", lo_ac["install_dir"] == ac.mc_dir,
+          lo_ac["install_dir"])
+    lo_iso = layout_of(i_iso)
+    check("iso 补全根上溯两级", lo_iso["install_dir"] == os.path.dirname(
+        os.path.dirname(iso)), lo_iso["install_dir"])
+    check("iso 标记 flat", lo_iso["flat"] is True)
+    check("iso 版本 id 取 version_id", lo_iso["version"] == "1.20.1-forge",
+          lo_iso["version"])
+    check("启动根 = 补全根", versions_root(i_iso) == lo_iso["install_dir"])
+    lo_van = layout_of(i_van)
+    check("vanilla 补全根 = mc_dir", lo_van["install_dir"] == van,
+          lo_van["install_dir"])
+    check("vanilla 不标记 flat", lo_van["flat"] is False)
+    # AC 目录里即使有同名扁平 json，也不得把根移到上级（保护自有布局）
+    ac_flat = Instance(id="af", name="af", game_version="1.20.1")
+    os.makedirs(ac_flat.mc_dir, exist_ok=True)
+    with open(os.path.join(ac_flat.mc_dir, "1.20.1.json"), "w",
+              encoding="utf-8") as fh:
+        fh.write("{}")
+    lo_af = layout_of(ac_flat)
+    check("AC 扁平 json 不切根", lo_af["install_dir"] == ac_flat.mc_dir and
+          lo_af["flat"] is False, lo_af["install_dir"])
+
+    # ── 7. 枚举与 UI 契约 ──
     check("INSTANCE_FORMATS 含 ac", "ac" in INSTANCE_FORMATS,
           str(INSTANCE_FORMATS))
     check("INSTANCE_FORMATS 含 auto", "auto" in INSTANCE_FORMATS)

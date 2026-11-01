@@ -15,6 +15,7 @@ back to global values then use instance fields only.
 """
 from __future__ import annotations
 
+import json
 import os
 import shlex
 
@@ -115,6 +116,96 @@ def _fix(action: str, label: str, params: dict | None = None,
     if label_kwargs:
         d["label_kwargs"] = label_kwargs
     return d
+
+
+def _install_fix(label: str) -> dict:
+    """网络类修复描述符（round-163）：对话框识别 mode=="install" 后走后台补装。
+
+    它**不能**由 apply_fix 执行——apply_fix 只改实例字段，绝不联网。
+    """
+    return {"action": "install_loader", "mode": "install",
+            "safety": FIX_SAFE, "label": label}
+
+
+# --------------------------------------------------------------------------- #
+# layer 0: install integrity（round-163）
+# --------------------------------------------------------------------------- #
+def _version_json(mc: str, vid: str) -> str:
+    """实例可启动版本 json 的两个合法位置（与 launch_instance 判据一致）。"""
+    if not mc or not vid:
+        return ""
+    for cand in (os.path.join(mc, "versions", vid, f"{vid}.json"),
+                 os.path.join(mc, f"{vid}.json")):
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _check_install(inst) -> list[Finding]:
+    """安装完整性：版本 json / 加载器版本目录是否真的存在。
+
+    体检此前只有 mods/perf/jvm/java/args，两个「只有原版 json」的实例在
+    体检里完全看不出问题，用户点「修复」自然无反馈。本层与启动的
+    「已安装」判据共用 core.install.find_installed_loader，缺失即 CRITICAL
+    （启动一定触发重装/失败），并提供一键补装按钮。
+    """
+    findings: list[Finding] = []
+    mc = (getattr(inst, "mc_dir", "") or "")
+    if not mc or not os.path.isdir(mc):
+        return findings
+    loader = (getattr(inst, "loader", "") or "").strip().lower()
+    version_id = (getattr(inst, "version_id", "") or "").strip()
+    game_version = (getattr(inst, "game_version", "") or "").strip()
+
+    def _missing(loader_side: bool, vid: str, extra: dict | None = None) -> Finding:
+        if loader_side:
+            return Finding(
+                kind="loader_missing", severity=SEV_CRITICAL,
+                title="health.kind.loader_missing",
+                reason="health.reason.loader_missing",
+                suggestion="health.fix.loader_missing",
+                meta={"loader": loader or "vanilla", "version": vid},
+                fix=_install_fix("health.fixlabel.loader_missing"))
+        return Finding(
+            kind="client_missing", severity=SEV_CRITICAL,
+            title="health.kind.client_missing",
+            reason="health.reason.client_missing",
+            suggestion="health.fix.client_missing",
+            meta={"version": vid, **(extra or {})},
+            fix=_install_fix("health.fixlabel.client_missing"))
+
+    loader_side = bool(loader and loader != "vanilla")
+    if version_id:
+        vj = _version_json(mc, version_id)
+        if not vj:
+            return [_missing(loader_side, version_id)]
+    elif loader_side:
+        from .install import find_installed_loader
+        vid = find_installed_loader(mc, loader, game_version)
+        if not vid:
+            return [_missing(True, game_version)]
+        vj = _version_json(mc, vid)
+    else:
+        vj = _version_json(mc, game_version)
+        if not vj:
+            return [_missing(False, game_version)]
+
+    # 父版本（inheritsFrom）也必须存在，否则 mll 解析/启动仍会失败。
+    parent = ""
+    try:
+        with open(vj, "r", encoding="utf-8") as f:
+            parent = str(json.load(f).get("inheritsFrom") or "").strip()
+    except (OSError, ValueError):
+        parent = ""
+    if parent and parent != version_id and not _version_json(mc, parent):
+        findings.append(Finding(
+            kind="base_missing", severity=SEV_WARNING,
+            title="health.kind.base_missing",
+            reason="health.reason.base_missing",
+            suggestion="health.fix.client_missing",
+            meta={"base": parent},
+            fix=_install_fix("health.fixlabel.client_missing")))
+    return findings
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +385,10 @@ def _check_java(inst, settings) -> list[Finding]:
     eff_path = inst_path
     if not eff_path and not settings.get("java_auto", True):
         eff_path = (settings.get("java_path") or "").strip()
+    # round-163：实例/全局任一「强制」开关为真时，不兼容 Java 不再报错，
+    # 改为 Info（玩家已明确接受风险）。
+    force = bool(getattr(inst, "java_force", False)) \
+        or bool(settings.get("java_force_incompatible", False))
 
     if eff_path:
         javas = scan_javas()
@@ -301,27 +396,41 @@ def _check_java(inst, settings) -> list[Finding]:
         # 只有能从扫描结果确认版本、且确实不兼容时才报（路径不在扫描表里
         # 说明是玩家手填的 JDK，不运行无法得知版本 → 不误报）。
         if major and not is_java_compatible(need, major):
-            fixed = select_java(gv, java_auto=True, need_override=need)
-            same = bool(fixed) and os.path.normcase(os.path.normpath(fixed)) \
-                == os.path.normcase(os.path.normpath(eff_path))
-            if fixed and not same:
-                # 有替代 → Warning：启动前会提示「本次改用 Java N」。
+            if force:
                 findings.append(Finding(
-                    kind="java_mismatch", severity=SEV_WARNING,
-                    title="health.kind.java_mismatch",
-                    reason="health.reason.java_mismatch",
-                    suggestion="health.fix.java_mismatch",
-                    meta={"need": need, "have": major},
-                    fix=_fix("set_java_path", "health.fixlabel.set_java_path",
-                             {"path": fixed}, {"advised": need})))
-            else:
-                # 没有替代 → Error：启动一定失败，只能先装 Java。
-                findings.append(Finding(
-                    kind="java_mismatch", severity=SEV_CRITICAL,
-                    title="health.kind.java_mismatch",
-                    reason="health.reason.java_mismatch",
-                    suggestion="health.fix.java_mismatch_install",
+                    kind="java_forced", severity=SEV_INFO,
+                    title="health.kind.java_forced",
+                    reason="health.reason.java_forced",
+                    suggestion="health.fix.java_forced",
                     meta={"need": need, "have": major}))
+            else:
+                fixed = select_java(gv, java_auto=True, need_override=need)
+                same = bool(fixed) and os.path.normcase(os.path.normpath(fixed)) \
+                    == os.path.normcase(os.path.normpath(eff_path))
+                if fixed and not same:
+                    # 有替代 → Warning：启动前会提示「本次改用 Java N」。
+                    f = Finding(
+                        kind="java_mismatch", severity=SEV_WARNING,
+                        title="health.kind.java_mismatch",
+                        reason="health.reason.java_mismatch",
+                        suggestion="health.fix.java_mismatch",
+                        meta={"need": need, "have": major},
+                        fix=_fix("set_java_path", "health.fixlabel.set_java_path",
+                                 {"path": fixed}, {"advised": need}))
+                else:
+                    # 没有替代 → Error：启动一定失败，只能先装 Java。
+                    f = Finding(
+                        kind="java_mismatch", severity=SEV_CRITICAL,
+                        title="health.kind.java_mismatch",
+                        reason="health.reason.java_mismatch",
+                        suggestion="health.fix.java_mismatch_install",
+                        meta={"need": need, "have": major})
+                # round-163：无论有没有替代，都给出「仍然使用并强制」的第二修复。
+                f.extra_fixes = [
+                    _fix("set_java_force", "health.fixlabel.set_java_force",
+                          {"path": eff_path}),
+                ]
+                findings.append(f)
         elif major and major != need:
             # 能跑但不是推荐版本：只有装了精确匹配版本才给 Info。
             fixed = select_java(gv, java_auto=True, need_override=need)
@@ -402,6 +511,7 @@ def scan_health(inst, settings: dict | None = None) -> dict:
     conflict_findings = list(conflict.get("findings") or []) if conflict else []
 
     sections = [
+        ("install", _safe(_check_install, inst)),
         ("mods", conflict_findings),
         ("perf", _safe(_check_perf_mods, inst, settings)),
         ("jvm", _safe(_check_jvm, inst, settings)),
@@ -427,13 +537,13 @@ def scan_health(inst, settings: dict | None = None) -> dict:
 
 
 def quick_check(inst, settings: dict | None = None) -> list[Finding]:
-    """首页聚合用的廉价体检：Java / JVM 内存 / 启动参数。
+    """首页聚合用的廉价体检：安装完整性 / Java / JVM 内存 / 启动参数。
 
     刻意跳过模组层（读上百个 jar 的元数据会拖住 UI 线程）；完整报告仍走
     ``scan_health``（诊断对话框）。单项失败不影响其余项。
     """
     out: list[Finding] = []
-    for fn in (_check_java, _check_jvm, _check_launch_args):
+    for fn in (_check_install, _check_java, _check_jvm, _check_launch_args):
         try:
             out.extend(fn(inst, settings) if fn in (_check_java, _check_jvm)
                        else fn(inst))
@@ -507,6 +617,25 @@ def apply_fix(inst, fix: dict) -> bool:
         if getattr(inst, "java_path", ""):
             inst.java_path = ""
             return True
+        return False
+    # round-163：强制使用不兼容 Java（实例级开关）。
+    if action == "set_java_force":
+        p = (params.get("path") or "").strip()
+        changed = False
+        if p and (getattr(inst, "java_path", "") or "") != p:
+            inst.java_path = p
+            changed = True
+        if not getattr(inst, "java_force", False):
+            inst.java_force = True
+            changed = True
+        return changed
+    if action == "clear_java_force":
+        if getattr(inst, "java_force", False):
+            inst.java_force = False
+            return True
+        return False
+    # 网络补装由 HealthDialog 识别 mode=="install" 后执行；本函数绝不联网。
+    if action == "install_loader":
         return False
     return False
 

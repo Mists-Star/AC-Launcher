@@ -100,11 +100,20 @@ def download_url(major: int, image_type: str = "jre") -> str:
     )
 
 
-def install_java(major: int, progress=None, image_type: str = "jre") -> str:
+class JavaInstallCancelled(Exception):
+    """玩家取消了 Java 下载（与网络失败区分，UI 按「已取消」显示）。"""
+
+
+def install_java(major: int, progress=None, image_type: str = "jre",
+                 cancel=None) -> str:
     """Download + unpack Java *major*. Returns the java executable path.
 
     ``progress(done_bytes, total_bytes, phase)`` is called during the download
-    (``total`` may be 0 when the server omits Content-Length).
+    (``total`` may be 0 when the server omits Content-Length). ``phase`` 取
+    ``connect`` / ``download`` / ``extract``，UI 据此显示「连接 / 下载 / 解压」。
+
+    ``cancel`` 是返回 bool 的可调用对象（通常是 ``threading.Event.is_set``）：
+    每读一块检查一次，取消时删掉半截 zip 并抛 :class:`JavaInstallCancelled`。
     """
     exe_name = "java.exe" if platform.system() == "Windows" else "java"
     already = installed_majors().get(major)
@@ -117,38 +126,61 @@ def install_java(major: int, progress=None, image_type: str = "jre") -> str:
     tmp_zip = os.path.join(root, f"_dl_{major}.zip")
 
     url = download_url(major, image_type)
+    if cancel is not None and cancel():
+        raise JavaInstallCancelled("java download cancelled")
     if progress:
         progress(0, 0, "connect")
-    with requests.get(url, stream=True, timeout=60, allow_redirects=True) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("Content-Length") or 0)
-        done = 0
-        with open(tmp_zip, "wb") as f:
-            for chunk in r.iter_content(1 << 16):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done, total, "download")
-
-    if progress:
-        progress(0, 0, "extract")
-    if os.path.isdir(target):
-        shutil.rmtree(target, ignore_errors=True)
-    os.makedirs(target, exist_ok=True)
     try:
-        if tmp_zip.endswith(".zip") and zipfile.is_zipfile(tmp_zip):
-            with zipfile.ZipFile(tmp_zip) as z:
-                from .utils import safe_extract_zip
-                safe_extract_zip(z, target)  # round-35 zip-slip 防护
-        else:  # linux/mac tarballs
-            shutil.unpack_archive(tmp_zip, target)
-    finally:
+        # round-173：(10, 30) 而不是裸 60 —— 点取消时最多等一个读超时就能退出，
+        # 不会卡满一分钟看着「正在取消…」不动。
+        with requests.get(url, stream=True, timeout=(10, 30), allow_redirects=True) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            with open(tmp_zip, "wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    if cancel is not None and cancel():
+                        raise JavaInstallCancelled("java download cancelled")
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total, "download")
+
+        if cancel is not None and cancel():
+            raise JavaInstallCancelled("java download cancelled")
+
+        if progress:
+            progress(0, 0, "extract")
+        if os.path.isdir(target):
+            shutil.rmtree(target, ignore_errors=True)
+        os.makedirs(target, exist_ok=True)
+        try:
+            if tmp_zip.endswith(".zip") and zipfile.is_zipfile(tmp_zip):
+                with zipfile.ZipFile(tmp_zip) as z:
+                    from .utils import safe_extract_zip
+                    safe_extract_zip(z, target)  # round-35 zip-slip 防护
+            else:  # linux/mac tarballs
+                shutil.unpack_archive(tmp_zip, target)
+            # 解压本身不可中断（zipfile 没有取消点）：解完再查一次，
+            # 玩家在解压期间点了取消就丢弃这个半成品，别留一个坏运行时。
+            if cancel is not None and cancel():
+                raise JavaInstallCancelled("java extract cancelled")
+        finally:
+            try:
+                os.remove(tmp_zip)
+            except OSError:
+                pass
+    except BaseException:
+        # round-173：下载/解压中途失败或取消时，别把半截 zip / 半成品目录留在 data 目录。
         try:
             os.remove(tmp_zip)
         except OSError:
             pass
+        if cancel is not None and cancel():
+            shutil.rmtree(target, ignore_errors=True)
+        raise
 
     for base, _dirs, files in os.walk(target):
         if exe_name in files and os.path.basename(base) == "bin":

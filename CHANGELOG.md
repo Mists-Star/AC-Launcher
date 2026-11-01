@@ -8,6 +8,554 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-174（2026-11-01）— 来源健康与超时策略（BMCLAPI 不再「一直等响应」）
+
+> 来源：用户现场反馈「部分情况下载慢，还有 bmclapi 总是等待响应」。排查结论：
+> 镜像挂住时，每个文件都按官方源口径等连接 10s + 读 30s，还在同一个镜像上再
+> 重试一次（≈80 秒/文件）；即便最后回退官方，几百个文件累加就是「一直在等」。
+> 403/404 之外的超时/连接错误也没有任何记忆，下一个文件继续白等。
+
+### 修复 / 改进
+
+* **按来源超时**：镜像 `(5, 15)`、官方 `(10, 30)`。镜像只是「加速手段」，
+  不值得为它长时间等待；官方跨境连接慢，超时保持原值。显式传入 timeout 的
+  调用方（如分片下载）不受影响。
+* **镜像失败不重试**：超时 / 连接错误直接换官方，省掉一次完整的白等；
+  官方源仍保留 1 次重试。`_try_source` 新增 `retries` 参数按来源区分。
+* **进程级来源健康表 `SourceHealth`**：连续 2 次连接类失败（超时 / 连接重置）
+  或 5xx → 冷却 90 秒，冷却期内所有请求直接走官方、不再逐文件试探；冷却结束
+  自动恢复探测（再给 2 次机会）。401/403/406（镜像明确拒绝）立刻冷却。
+  404 不计入 —— 可能只是该文件没同步，逐文件回退即可。
+* **慢镜像让位**：响应头 EWMA ≥ 4 秒且样本 ≥ 5 时，把官方排到候选链首位，
+  镜像保留作回退（不直接判死，避免「官方也慢」时反而没得用）。
+* **大文件分片路径一并生效**：`_rewrite()`（客户端 jar 分片并行用）在镜像
+  不健康时不再改写为 BMCLAPI，20~25MB 的 jar 不会卡在挂住的镜子上。
+* **保持 strict 语义**：镜像被健康表剔除后官方变成单候选，仍按「双源皆失败
+  必须显式报错」处理，避免 mll 的 `download_file` 把 404 静默吞成「安装完成」。
+* 诊断日志（`set_diag(True)`）新增 `health <source> down (<reason>)` 行。
+
+### 🔍 验证
+
+* 新增 `tests/test_mirror_health.py`（第 34 套）：超时/重试按来源区分；健康表
+  连续 2 次失败进入冷却、0.4s 后自动恢复、403 立刻冷却、EWMA 慢源判定；
+  `_rank_candidates` 三种形态（镜像在前 / 只剩官方 / 官方+镜像回退）；
+  `MirrorSession.send` 真流程前两次「镜像失败→官方」、第三次起只发官方且
+  仍 `strict=True`；`_rewrite` 在镜像不健康时保持官方 URL。
+* `python -m compileall -q src tests` → 通过。
+* `python regress.py` → **34 / 34 全绿**（i18n 1605 / 1605、文案门禁全过）。
+
+## round-173（2026-11-01）— Java 下载看得见：阶段 / 大小 / 速度 / 可取消
+
+> 来源：用户现场反馈「其他下载进度和大部分信息看不到，比如说 java 下载」。
+> AC 自有的 Java 下载器（`core/java_install.py`，Adoptium Temurin）此前在
+> 「设置 → Java」里只有一根进度条：服务器不给 `Content-Length` 时永远空白，
+> 解压阶段完全没提示，而且**没有取消**——关掉对话框线程还在后台拉几十 MB。
+
+### 修复 / 改进
+
+* **一行说清在干什么**：下载区新增状态标签，按 `connect`（连接下载服务器）→
+  `download`（`已下载 10.0 MB / 50.0 MB（20%） · 2.0 MB/s`）→ `extract`
+  （解压运行时）切换；总大小未知时退回「已下载 X（总大小未知）」，不再一根空条。
+* **可以取消**：`install_java(..., cancel=...)` 每读一块检查一次取消标记，
+  抛 `JavaInstallCancelled`；下载区新增「取消下载」按钮，点后变「正在取消…」，
+  收尾后显示「已取消下载」。
+* **不留垃圾**：取消 / 失败一律删掉半截 `_dl_<major>.zip`；解压中途取消
+  （zipfile 没有取消点）会在解压后复查一次，直接丢弃半成品目录，避免留下
+  一个启动不了的坏运行时。
+* **关掉对话框就真的停**：重写 `done()`——点标题栏关闭或底部「关闭」，都先
+  `cancel()` + `wait(2000)` 再收尾，不再出现「窗口关了还在下」。
+  连接超时从裸 `60` 改为 `(10, 30)`，点取消最多等一个读超时即可退出。
+* **新手教程同一套信息**：`_JavaInstallThread` 增加 `phase_changed(str, float)`
+  与 `cancelled` 信号（下载回调按 100ms 节流，顺带算平均速度），教程页
+  也显示「连接 / 下载 + 速度 / 解压 Java {major}」。
+
+### 🔍 验证
+
+* 新增 `tests/test_java_download.py`（第 33 套）：假响应 2 MB / 8 KB 一片（不取消
+  要 ~2.5s）→ 下载中取消，断言 0.01s 抛出 `JavaInstallCancelled`、zip 与半成品
+  目录都不在；正常路径断言阶段顺序 `connect → download → extract` 并落盘
+  `bin/java.exe`；`_JavaInstallThread.cancel()` 只发 `cancelled`；对话框状态行
+  实测「已下载 10.0 MB / 50.0 MB（20%） · 2.0 MB/s」，关闭时 `cancel()` +
+  `wait(2000)` 被调用；i18n 中英 9 个新键齐全。
+* `python -m compileall -q src tests` → 通过。
+* `python regress.py` → **33 / 33 全绿**（i18n 1605 / 1605、文案门禁全过）。
+
+## round-172（2026-11-01）— 取消启动真正停下下载（在途响应 / 安装器子进程 / 补全分支）
+
+> 来源：用户实测「启动时补全版本，点取消启动后下载不会停」。排查结论是取消
+> 一直是「协作式」的——只在**下一个请求发出前**生效，已经在读的文件会读到
+> 结束；加载器安装器 jar 的 `subprocess.run` 更是完全不可取消。
+
+### 修复
+
+* **在途下载立刻中断**：`InstallContext` 现在用弱引用登记每个在途响应，
+  `abort()` 直接 `shutdown(SHUT_RDWR)` 底层 socket + `close()`，阻塞中的
+  `copyfileobj` 当场抛错（实测中断耗时 **0.00s**，此前要读完整个文件）。
+  `_wrap_raw` 在没有测速计时器时也会登记，避免「无 meter 就漏登记」。
+* **安装器子进程可取消**：新增 `run_cancellable()`（`Popen` + 每 0.2s 轮询，
+  取消即 `taskkill /F /T` 杀整棵进程树并抛 `InstallCancelled`），并把
+  `subprocess.run` 换成 `_SubprocessShim` 注入 fabric / forge / neoforge /
+  quilt 四个 mll 模块——这几个安装器 jar 自己还会下载几百 MB。
+  Cleanroom / OptiFine 的 `java -jar` 调用一并改走 `run_cancellable`。
+* **取消不再换源重跑**：`_retry_with_mirror` 之前把取消异常当成「源失败」，
+  会切到另一个源把整套安装重来一遍。现在 `abort_requested()` 时直接抛
+  `InstallCancelled`；`install_instance` 入口也先判一次取消标记。
+* **启动期补全不再吞掉取消**：`launch.py` 的 classpath 补全分支原先
+  `except Exception: pass` → 取消后还会继续拉起游戏。现在进入补全前先查取消
+  标记，取消异常（含 socket 被掐后抛出的杂项异常）统一归一为
+  `InstallCancelled` 向上抛，界面按「已取消」显示。
+* **大文件分片下载也停**：分片下载跑在 mll 的池线程里，线程局部上下文为
+  空，`_cancel()` 之前恒返回 False。现在从会话带上 `ctx`（并让「分片失败 →
+  回退单流」的判断也用它），取消时不再退回单流接着下。
+
+### 🔍 验证
+
+* `tests/test_cancel.py` 新增 round-172 段：本地慢速 HTTP（1 MB / 20ms 一片，
+  不取消要读 ~2.5 秒）→ 0.4s 后 `abort()`，断言线程 < 1.5s 内结束且**记为
+  异常而非正常完成**（实测 `0.00s raised:AttributeError`）；子进程那条用
+  `sleep 30` 的 Python 进程 → 断言 < 2s 结束、抛 `InstallCancelled`。
+* `python -m compileall -q src tests` → 通过。
+* `python regress.py` → **32 / 32 全绿**（含第 29 套「任务取消/强制退出」）。
+
+## round-171（2026-11-01）— 投影材料清单 / 存档地图 / 2D 分层预览（round-170 规格落地）
+
+> 来源：round-170 只写了 `docs/world_map_schematic_spec.md`，本批按规格
+> P1 → P2 → P3 真做出来。全部自研（不引入 `numpy` / `nbtlib` / 原版纹理），
+> 只用标准库 + PySide6。
+
+### 新增
+
+* **投影材料清单（P1）**：实例右键「导出材料清单」→ 选 `.litematic` → 后台
+  解析 → 同目录写 CSV（UTF-8 BOM，Excel 双击不乱码；表头
+  `block_id,count,percentage`，按数量降序）。未知方块种类数、文件头
+  `TotalBlocks` 与实际统计不符都会在提示里写明。
+* **存档地图（P2）**：实例右键「查看存档地图」→ 世界 / 维度（主世界 / 下界 /
+  末地）切换、1/2/4/8× 缩放、左键拖动平移、玩家与出生点标记。只读 `.mca`，
+  **绝不写存档**；缓存落在 `<data>/map_cache/`，以 mca 的 mtime + size 失效。
+* **投影 2D 分层预览（P3）**：实例右键「投影预览」→ 层滑杆（Y 范围取自投影
+  包围盒）、悬停显示方块短名、一键导出材料清单；空气留空，超过 6 像素/格时
+  画网格线。
+* 自建依赖：`core/nbt.py`（只读 NBT，gzip / zlib / 未压缩；深度 64、单数组
+  8M、解压 512 MB 三道安全上限）、`core/block_palette.py` +
+  `assets/block_colors.json`（约 190 条**自建近似色**，未知方块按 id 的 sha1
+  稳定灰阶，不打包任何 Mojang 纹理）、`core/schematic.py`（材料统计 /
+  分层网格 / CSV）、`core/world_map.py`（高度图定位表层 → 调色板取块 → 顶视图
+  RGBA）、`src/map_dialog.py`、`src/schematic_dialog.py`。
+
+### 变更
+
+* `pages_instances.py`：右键菜单新增「导出材料清单 / 投影预览 / 查看存档地图」
+  三项，解析与渲染全部在 `Worker` 后台线程，UI 不阻塞。
+* i18n 新增 34 键 × 2 语言（zh 1596 / en 1596，差异 0）。
+* `AC_PiTest_noupx.spec`：`_src_modules` 补 `src.core.nbt` / `block_palette` /
+  `schematic` / `world_map` / `src.map_dialog` / `src.schematic_dialog`。
+
+### 修复
+
+* **NBT 长数组字节序**：`array.frombytes` 按本机小端解释，而 NBT 是大端 →
+  `BlockStates` / 高度图在 x86 上整体错位、解出的方块索引全错。已加
+  `_to_big_endian()`（小端机器 `byteswap`）。这条由新测试当场抓出。
+
+### 🔍 验证
+
+* 新增 `tests/test_schematic_tools.py`（63 项断言，测试内自造 NBT 字节，
+  不依赖外部样本）：NBT 三种压缩 / 负数数组长度 / 超上限 / 递归深度；
+  位解包「1.16+ 不跨 long」与「1.15- 跨 long」互不等价；材料统计与空气过滤、
+  CSV BOM / 表头 / 降序 / 百分比、负尺寸区域起点回退、体积超限、旧版
+  `.schematic` 与空 `Regions` 的明确报错；合成 `.mca` → 顶视图 RGBA、
+  未生成区块透明、模组方块计入未知种类、磁盘缓存命中、`level.dat` 出生点与
+  玩家坐标；`MapDialog` 无存档空态 / 有存档铺图 / 两个标记；`SchematicDialog`
+  层滑杆范围 / 切层出图 / 悬停方块名 / 空层占位。
+* `python regress.py` → **32 / 32 全绿**（新增第 32 套「投影/存档地图解析」）。
+
+## round-170（2026-11-01）— 对齐 LumilioCL 0.2.3：启动命令双件套 / 正式版优先 / 目录向导 / 下载暂停重试
+
+> 来源：用户指出「LumilioCL 有一些新功能我们是没有的」。对照
+> `docs/lumiliocl_study.md` 第 11 节差距清单，补四项可直接落地、收益明确的
+> 能力；世界地图 / 投影预览 / 材料清单另出调研规格（只文档、不实现）。
+
+### 新增
+
+* **启动前命令（`pre_launch_cmd`）**：设置页「启动钩子」组新增输入框，
+  启动时在游戏目录执行并**等待完成**（上限 60 秒）。非零退出 / 超时都中止
+  启动，错误提示带末 400 字输出，避免「准备脚本没跑完就进游戏」。
+* **包装命令（`wrapper_cmd`）**：把完整 Java 命令交给外层工具，`{java}`
+  指定插入位置、不写则作为前缀（如 `mangohud {java}` / `prime-run`）。
+  Windows 走 `cmd /c`、POSIX 走 `/bin/sh -c`，支持引号 / 环境变量 / 管道。
+* **下载暂停 / 继续 / 重试**：下载对话框底部新增「暂停下载」→「继续下载」，
+  失败后保留对话框并出现「重试下载」（取消按钮变「关闭」）。暂停 =
+  协作式中断 + 保留 `.part`；继续 / 重试复用同一对话框与任务记录，从断点续传。
+  任务中心新增 `paused` 开路状态，实例卡显示「已暂停 N%」。
+* **目录丢失处置向导**：点击启动时游戏目录不存在，不再只报错，改为三选一
+  「新建空目录 / 打开所在位置 / 取消」；新建成功即继续启动，打开位置只
+  定位到最近现存上级目录。
+* **Modrinth 更新正式版优先**：一键更新优先选 `version_type == release`，
+  只有该游戏版本 + 加载器下完全没有正式版时才回退到列表首条（beta/alpha），
+  避免正式版内容被「更新」成测试版。
+
+### 变更
+
+* `launch.py`：新增并导出 `apply_wrapper()` / `run_pre_launch_cmd()`；
+  `launch_instance` 组装命令后先跑启动前命令、再套包装命令，任一步失败即抛错。
+* `launch_dialog.py`：新增 `pause_requested` / `resume_requested` /
+  `retry_requested` 信号与 `mark_paused` / `mark_resumed` / `mark_failed`；
+  `mark_failed` 不再自动关框；`set_cancelling` 同时禁用暂停 / 重试。
+* `main_window.py`：`_dl_dialog_for()` 复用对话框（信号只在新建时连一次）；
+  新增 `_pause_download` / `_resume_download` / `_retry_download` /
+  `_resolve_missing_game_dir`；`_on_download_error` 保留对话框改为「重试」入口；
+  `_on_download_error` / `_pause_download` 均登记 `_dl_stopping` 并轮询
+  `isRunning()`，等线程真正退出再允许继续 / 重试（防两个 worker 同写一份目录）；
+  `_cancel_download` 支持暂停态（worker 已停时不再要确认）；
+  `_active_task_dialog` 把暂停态也算作活动任务（状态栏可召回）。
+* `pages_instances.py`：`set_task_state` 新增 `paused`（警示色 + 「已暂停」），
+  不再把暂停误显示成「就绪」。
+* `core/task_center.py`：新增 `STATE_PAUSED`，`_OPEN_STATES` 含 `paused`
+  （状态机 `queued → running ↔ paused → done | failed | cancelled`）。
+* i18n 新增 25 键 × 2 语言（zh 1561 / en 1561，差异 0），未改
+  `tests/copy_allowlist.txt`（提示文案均压在长度预算内）。
+* 新增 `docs/world_map_schematic_spec.md`：世界地图 / 投影 2D/3D 预览 /
+  材料清单 CSV 的调研与规格。结论：材料清单 CSV 先做 → 世界地图次之 →
+  3D 预览最后；不打包原版纹理（用自建近似色表规避版权）。
+
+### 🔍 验证
+
+* 新增 `tests/test_launch_extras.py`（63 项断言）：包装命令（空 / 纯空白 /
+  前缀 / `{java}` 插入 / 非首位插入）、启动前命令（空 / 成功 / 非零退出 /
+  超时）、正式版优先与「无正式版回退」、目录向导三路分支（Windows 下 patch
+  `os.startfile` 记录打开的是最近现存上级目录）、下载对话框暂停 / 继续 /
+  重试按钮与信号、任务中心 `paused` 状态链、24 个新增 i18n 键实际取值。
+* `python regress.py` → **31 / 31 全绿**（新增第 31 套「启动命令/暂停下载」；
+  i18n 1561/1561 差异 0，`tests/check_copy.py` 全 PASS）。
+* 离屏真构造 `MainWindow` + 假 worker 探针（`_probe_170.py`，不入库）走完
+  新建 → 暂停 → 继续 → 失败 → 重试 → 暂停中取消，**29 项全 OK**：
+  复用同一对话框、恢复后新 worker、失败不关框、任务 id 正确翻开 / 收口。
+
+## round-169（2026-11-01）— 设置页冲突选项可见化（只加提示，不改行为）
+
+> 来源：用户截图指出「启动后自动关闭启动器」与「最小化到系统托盘（关窗不
+> 退出）」可以同时勾选，问「为什么一些冲突选项可以一起选择？」排查后确认
+> 设置页是扁平表单、逐键独立写配置，没有跨字段互斥或联动，运行期优先级
+> 只存在于代码里，玩家看不到。
+
+### 变更
+
+* **自动关闭 + 托盘常驻**：外观页新增说明——自动关闭会真正退出、优先于
+  托盘常驻；托盘常驻只对启动前手动关窗生效。
+* **自动关闭 + 退出后命令**：命令非空时提示自动关闭在运行期会被跳过、
+  命令仍会执行（行为未变，只是把静默跳过说出来）。
+* **低配模式**：开启后显示「外观/音效开关暂不生效，偏好保留」，对应
+  `slim.effective()` 对被压制项的处理，避免误以为两套开关冲突。
+* **Java 自动检测 + 强制不兼容**：自动检测开启时禁用「强制」开关并提示
+  「请先关闭自动检测」（自动检测下没有作用对象）。
+* i18n 新增 4 键 × 2 语言（zh 1536 / en 1536，差异 0），文案均压在
+  提示长度预算内，未改 `tests/copy_allowlist.txt`。
+
+### 🔍 验证
+
+* 新增 `tests/test_settings_conflicts.py`（17 项）：懒加载逐页进入后，
+  自动关闭/托盘的说明随勾选出现与消失、退出后命令输入的变化同步、
+  低配模式提示随开关切换、自动检测 Java 时强制开关禁用且取消后恢复。
+* `python regress.py` → **30 / 30 全绿**（i18n 1536/1536 差异 0，
+  `tests/check_copy.py` 全 PASS）。
+* 全页面构造冒烟消除 flake：冒烟只验构造，统一 no-op
+  `TrackedThread.start`（Worker / ProgressWorker / 下载队列都继承它），
+  不再让体检/Java 扫描线程与正在构造的对话框并发；带
+  `QT_QPA_FONTDIR` 连跑 8 次均 `exit=0`。
+
+## round-168（2026-11-01）— 下载可中断 / 启动可取消 / 强制退出与强制关闭
+
+> 来源：用户连问三句——「下载不能中断取消？启动游戏不能强制退出？不能强制
+> 关闭？」此前下载与启动只能在完成或失败时结束，玩家点 × 会被托盘隐藏，
+> 后台任务会一直拖住进程。
+
+### 新增
+
+* **下载可取消**：下载/补全对话框底部新增「取消下载」按钮
+  （`launch_dialog.py` 的 `cancel_requested` 信号）。点击后主窗弹确认
+  （「取消下载」/「继续下载」），确认即 `ProgressWorker.abort()` +
+  `requestInterruption()`，任务中心记「已取消」，进度条/速度/实例徽标复位，
+  面板显示「已取消下载」1.2 秒后自动关闭。
+* **启动可取消**：启动准备阶段同一位置显示「取消启动」；取消瞬间若游戏
+  进程已被 spawn，`cancelled` 信号带回运行结果，主窗用
+  `taskkill /F /T /PID`（非 Windows 走 `proc.kill()`）强杀整棵进程树，
+  不留孤儿游戏进程。
+* **托盘「强制退出（结束游戏）」**：无确认，直接 `kill_game()` →
+  `_abort_all_tasks()` → 关闭；普通「退出启动器」在有任务/游戏时先确认。
+* `src/win_rounded.py` 新增公开 `ask(parent, title, text, buttons, detail,
+  icon)`——复用 `_msgbox` 的主题化多按钮确认框，供取消/退出确认共用。
+
+### 变更
+
+* `ProgressWorker` 新增 `cancelled = Signal(object)`（与 `finished` /
+  `error` 三选一）与自有 `_cancel_requested` 标记；`run()` 建立下载 ctx 后
+  补一次 abort 检查；取消后再抛出的异常**不再**走 `error`（取消 ≠ 失败）。
+* `launch_dialog` 新增 `set_cancelling()`（禁用两个按钮 + 状态「正在取消…」）
+  与 `mark_cancelled()`（只改状态文案、不点亮步骤）。
+* 退出语义三级对齐：系统 × → 托盘隐藏（原行为，`tray_minimize` 且托盘可用）；
+  托盘「退出」→ 有任务/游戏先确认；真关闭（`closeEvent`）→ 有任务先确认，
+  拒绝则 `event.ignore()`，通过则 `_abort_all_tasks()` 后再
+  `drain_workers(4000)` 并 `QApplication.quit()`。
+
+### 保护措施与判断
+
+* **防双写**：新增 `_dl_stopping` 表记录「已取消、线程仍在收尾」的下载
+  worker；线程真正退出前禁止同实例重新下载（最多轮询 18 秒兜底放行），
+  避免两个 worker 同时写同一份游戏目录。
+* **防回滚**：`_on_download_status/_progress/_done/_error` 开头统一 guard
+  `if inst_id not in _dl_workers: return`，取消后的残留信号全部丢弃，
+  UI 不会被「下载中」状态复活，也不留下失败记录。
+* **防重入**：`_play_stopping` 在启动取消收尾期间拦截再次启动并给出提示；
+  `_poll_play_stopping` 校验 worker 是否仍是当前 `_play_worker`，旧任务
+  收尾不会误清新任务状态。
+* **一定能退出**：确认框不可用（无托盘 / headless）时
+  `_confirm_quit_with_tasks()` 返回 True 兜底；`_force_quit` 与 `kill_game`
+  的清理异常不阻断关闭（状态栏提示包 try/except）。
+* **Qt 6 判定修正**：`requestInterruption()` 在线程未运行时被静默忽略，
+  `isInterruptionRequested()` 不可靠 → 取消判据改为
+  `_cancel_requested or isInterruptionRequested()` 两者取或。
+* i18n 新增 16 键 × 2 语言（zh 1532 / en 1532，差异 0）；
+  `launch.dl_busy_toast` 改为「请先取消下载或等完成」。
+
+### 🔍 验证
+
+* 新增 `tests/test_cancel.py`（29 项）：取消发 `cancelled` 不发 `finished`
+  /`error`、`cancelled` 携带结果、未取消正常 `finished`、真失败仍 `error`、
+  取消后异常不发 `error`、`abort()` 置自有标记；TaskCenter `cancel()` 终态
+  且 `update()` 不复活；两种对话框取消按钮与文案区分、
+  `set_cancelling` 禁用、`mark_cancelled` 只改文案；14 个 i18n 键存在。
+* `python regress.py` → **29 / 29 全绿**（i18n 1532/1532 差异 0，
+  `tests/check_copy.py` 全 PASS；原 28 套无回归）。
+* `python -m compileall -q src` → 0 错误。
+* 离屏探针 `_probe_168.py`（不入库）24 项全 PASS：真 `MainWindow` +
+  `FakeWorker`/`FakeProc` 验证下载取消（abort、表清理、任务中心已取消）、
+  启动取消（收尾态、假进程被 taskkill、状态复位）、强制退出、带任务拒绝
+  确认时 `QCloseEvent` 保持未接受且不 abort。
+
+## round-167（2026-10-31）— 模块化启动器：功能页改成可物理删除的扩展包 + 低配模式
+
+> 来源：用户要求「允许玩家深度自定义启动器，剔除功能与性能改进」，并明确
+> 剔除的含义：「直接删掉，相当于模块化启动器，删掉一部分不影响；需要时可以
+> 回 GitHub 下回来，也可以手动写脚本装载到启动器上（类似另类插件）」。
+
+### 新增
+
+* **功能扩展包体系** `src/features.py`（核心骨架不变、功能可整块删）：
+  - 每个功能页 = `data/features/<id>/` 下的 `manifest.json` + `entry.py`；
+  - 首次启动从 `assets/features/<id>/` 复制安装；`registry.json` 的 `known`
+    记录「曾装过」，因此玩家删掉目录后**不会被自动装回**，可用模块页一键恢复；
+  - `install_from_folder` / `install_from_zip` / `install_from_script` /
+    `install_from_url`：支持手写 `.py`、文件夹包、zip、GitHub raw/zip 链接
+    直接装载（URL 仅 http(s)、32 MB 上限；zip 解包 fail-closed 防路径穿越，
+    `entry` 只允许单个 `.py` 文件名）；
+  - 动态 import 走合成模块名 `src._feature_<id>`，包内可继续用 `.theme`
+    / `.i18n` / `.ui_kit` 相对导入；单个坏包只跳过自身，不影响启动器。
+* **首批外置 3 个内置包** `assets/features/{music,achievements,console}/`：
+  原 `src/music_page.py` / `src/achievements_page.py` / `src/pages_console.py`
+  内容整体迁入包内 `entry.py`（`create_page(ctx)` 工厂），原文件删除。
+* **模块页新增「功能扩展」分组**：已装列表（内置徽章）、删除、恢复内置、
+  「从文件安装…」（`.py` 需二次确认）、「从链接安装…」；装/删后即时重建
+  侧栏与页面，无需重启。
+* **低配模式** `src/slim.py`（设置页「性能」组开关 `slim_mode`）：
+  - 运行时压制壁纸（none）、页面切换/流光/成就弹窗、透明与磨砂、启动画面、
+    音效与 BGM、降低窗口透明度动效，图片缓存上限 256 → 64 MB；
+  - 只改「有效值」（`slim.eff` / `slim.effective`），玩家的偏好原样留在配置里，
+    关闭低配即恢复。
+* i18n 新增 27 键 × 2 语言（zh 1516 / en 1516，差异 0；含 2 个安装确认键）。
+
+### 变更
+
+* `STACK_INDEX` 只保留核心 8 页（home…toolbox），扩展页从
+  `FEATURE_BASE_INDEX = 8` 起动态编号；旧 key（music/achievements/console）
+  作为别名保留，包被删后点击提示「该功能扩展已移除」并回首页。
+* `MainWindow`：`_register_feature_pack` / `_feature_nav_items` /
+  `_resolve_page_key` / `_page_index_of_key` / `_reload_feature_packs`；
+  侧栏「扩展」分组、顶部导航「更多」自动出现功能条目；`retranslate_ui`
+  改为遍历已建好的扩展页对象。
+* 壁纸应用统一读 `slim.effective`（`MainWindow._apply_wallpaper` 传原始配置，
+  避免低配副本覆盖玩家偏好）；`async_image` 增加 `set_mem_limit`。
+
+### 保护措施与判断
+
+* **清单校验**：字段必须是字符串且限长（name / version / icon / description），
+  `order` 非整数拒绝、越界夹紧，`icon` 只允许安全字符，`nav_group` 白名单。
+* **命名空间**：扩展 id 不得与核心页面/顶部导航重名（home / instances /
+  settings 等），单脚本文件名同样检查，避免扩展冒充内置入口。
+* **体积上限**：manifest ≤ 256 KB、入口 ≤ 2 MB、整包 ≤ 128 MB / 2000 文件；
+  zip 解压前按清单 `file_size` 预估，防 zip bomb；超大入口包扫描阶段直接跳过。
+* **入口静态检查**：手写脚本必须是 UTF-8、语法正确且含 `create_page`，
+  安装前就拒绝；运行期坏包仍只影响自身，不会拖垮启动器。
+* **链接策略**：只允许 https（http 仅放行本机调试地址），并校验重定向后的
+  最终 URL，防止 https → http 明文降级；下载仍限 32 MB。
+* **权限提示**：`.py` / zip / 链接安装在执行前统一弹出「扩展以启动器权限
+  运行」确认；内置恢复来自安装包，可信不提示。
+* **页面返回值判断**：`create_page` 必须返回 `QWidget`，否则显示错误占位；
+  删包保留栈槽，重载新包时占位登记完整，不会叠出空页。
+
+### 🔍 验证
+
+* 新增 `tests/test_features.py`（46 项断言，临时目录纯逻辑）：清单校验
+  （id 清洗拒绝、entry 路径穿越拒绝）、内置首次安装/不覆盖/删除后不重装、
+  恢复、扫描、文件夹/脚本/zip 安装、重复拒绝、坏包与缺 `create_page` 隔离、
+  zip 路径穿越 fail-closed、保留 id、字段类型/长度、order 夹紧、URL 策略、
+  超大 manifest / 入口 / zip 数量、缺 `create_page` 与语法错误脚本。
+* `python regress.py` → **28 / 28 全绿**（新增本套，原 27 套无回归）。
+* 离屏探针 `_probe_167.py`（不 入库）18 项全 PASS：三包扫描与侧栏入口、
+  `feature:` / 旧别名跳转、删目录后重载（槽位保留、旧入口回首页）、恢复内置、
+  低配压制与关闭后偏好恢复。
+
+## round-166（2026-10-31）— 修改与重构实例
+
+> 来源：用户要求「加入修改与重构实例功能」。此前实例只能在创建时定型：
+> 名称/版本/加载器不可改，记录与磁盘漂移时只能删除重建。
+
+### 新增
+
+* **修改实例**（实例设置对话框顶部新增「基本信息」）：
+  - 名称、游戏版本、加载器、加载器版本均可编辑；
+  - 导入实例（external）的游戏文件属于来源启动器 → 版本/加载器置灰并给出
+    说明，名称仍可改；
+  - 改版本或加载器后自动清空 `version_id`、`needs_convert`，保存即触发
+    后台补全（`install_instance` 幂等，存档与模组保留）。
+* **重构实例**（实例详情「⋯ 更多」新增菜单项）：
+  - 只读扫描 `versions/**/*.json`（含版本隔离的扁平 json），按评分选中最
+    匹配的版本文件，重新推导 `game_version` / `loader` / `loader_version`
+    / `version_id`，并把布局格式清回自适应（交给 round-164 的 `layout_of`）；
+  - 支持 Forge / NeoForge / Fabric / Legacy Fabric / Quilt / Cleanroom /
+    LiteLoader / OptiFine：从版本 id 与 `libraries` 判定加载器与版本号；
+  - 绝不删除或覆盖游戏文件；记录已一致时提示「无需修改」（幂等）。
+* 新增 `src/core/instance_rebuild.py`（Qt-free，`reconstruct` / `infer_loader`
+  / `loader_version_of`）。
+* i18n 新增 15 键 × 2 语言（zh 1489 / en 1489，差异 0）。
+
+### 🔍 验证
+
+* 新增 `tests/test_instance_rebuild.py`（28 项）：原版/Forge/Fabric/NeoForge、
+  无文件、格式残留、隔离扁平原文件、辅助函数。
+* `python regress.py` → **27 / 27 全绿**（原 26 套无回归）。
+
+## round-165（2026-10-31）— 下载实例允许玩家自选布局 / 启动格式
+
+> 来源：用户要求「下载实例允许玩家自选对应格式」。此前新建/下载向导只有
+> AC 独立目录一种写盘位置，玩家无法下载到已有的 .minecraft 或自定义目录。
+
+### 新增
+
+* **新建实例向导第 2 页新增「游戏目录」**（4 选 1）：
+  - `AC 独立目录（推荐）`：原行为，`data/instances/<id>/.minecraft`；
+  - `原版共享 .minecraft`：选已有 .minecraft，下载写入其 `versions/<版本>`；
+  - `版本隔离目录`：选 .minecraft，实例自动定位到 `versions/<版本>`；
+  - `自定义游戏目录`：选任意目录，按标准布局写入 `versions/<版本>`。
+  选择非 AC 时显示目录输入框 + 「浏览…」，并实时预览实际保存路径；
+  未选有效目录点「创建」会直接提示，不会建出半成品实例。
+* **`InstancesManager.add(..., format="", base="")`**：`base` 非空即按
+  external 实例记入（删除实例不动玩家真实文件），`format` 为
+  vanilla / iso / custom，与 `layout_of` 的写盘根/启动根完全一致。
+* `MainWindow._start_instance_download(..., allow_external=True)`：只对
+  向导显式选择已有目录的新实例放开下载；扫描导入的实例仍绝不写入。
+* i18n 新增 17 键 × 2 语言（zh 1474 / en 1474，差异 0）。
+
+### 🔍 验证
+
+* 新增 `tests/test_instance_create_format.py`（17 项）：默认 AC、
+  vanilla 共用目录、iso 上溯 `.minecraft`、custom 目录、落盘重载保留。
+* `python regress.py` → **26 / 26 全绿**（原 25 套无回归）。
+* `python tests/test_format.py` 36 项仍全过（round-164 语义未被破坏）。
+
+## round-164（2026-10-31）— 格式识别 → 布局联动（启动 / 补全 / 体检同口径）
+
+> 来源：用户要求「自动适应对应实例格式加入识别后判断联动其他功能（如补全等
+> 正确识别功能），防止识别错误导致错误补全」。round-163 只修了「怎么识别」，
+> 本轮把识别结果真正接到写盘动作上。
+
+### 修复
+
+* **外来版本隔离实例「补不完」**：`core.install.install_instance` 原先固定按
+  `inst.mc_dir` 安装；iso/flat 布局（`mc_dir` 本身就是 `versions/<id>`）会被
+  mll 写成 `<mc>/versions/<id>/<id>.json` 的嵌套目录，而启动只认
+  `<mc>/<id>.json` —— 体检/启动永远判定缺失。现在按 `layout_of.install_dir`
+  写盘（flat 布局上溯两层），补全产物正好落在启动解析的真实位置。
+* **启动与补全根不一致**：`launch.versions_root` 改为委托 `layout_of`，启动
+  解析根、补全写盘根、体检判定统一由同一函数给出，不再各自一套特征判断。
+
+### 新增
+
+* **`instances.adapt_format(inst)`**：读到实例即纠正结构上确定错标的格式——
+  `_base` 空且非 external（AC 自有布局）如果残留 `vanilla` / `iso` / `multimc`
+  / `curseforge` / `modrinth` / `custom` 标签，自动改回 `ac`（内存生效，下次
+  保存落盘）；外来实例保留玩家手选格式不动。
+* **`instances.layout_of(inst, version="")`**：返回 `format` / `version` /
+  `flat` / `install_dir` / `versions_root`，作为格式识别结果的唯一消费入口。
+  AC 目录内即使出现同名扁平 json 也不切根（保护自有布局）。
+* `tests/test_format.py` 新增第 6 节「识别结果联动补全/启动」（11 项断言）；
+  `regress.py` 接入「格式/布局联动」套件（现 25 套）。
+* 修正 round-163 遗留的旧测试语义：「手动指定优先于 AC 首判」改为
+  「AC 自有布局压过手动格式」，外来实例的手动格式优先断言保留。
+
+### 🔍 验证
+
+* `python tests/test_format.py` → 36 项全过（含 AC 残留格式自愈、iso 补全根
+  上溯两级、`versions_root == install_dir`、AC 扁平 json 不切根）。
+* `python regress.py` → **25 / 25 全绿**（i18n 1457/1457 差异 0；原 24 套无回归）。
+
+## round-163（2026-10-31）— 实例完整性 / 启动格式 / 启动窗口 / 强制 Java
+
+> 来源：用户真机反馈六连——启动窗口无限下坠、体检修复无反馈、两个本地实例
+> 「识别不到完整性」、启动格式识别错误、Cleanroom 1.12.2 报「没有有效 Java」，
+> 并要求新增「强制使用不兼容 Java + 按游戏需求自动选 Java」。
+> 规格：`docs/round163_instance_java_reliability/spec.md`。
+
+### 修复
+
+* **启动窗口无限向下延伸**：`launch_dialog` 删除 `resizeEvent` 覆写；文本高度
+  改为按对话框宽度计算、2~5 行硬钳制、幂等 `setMinimumHeight`，单行标签只设
+  一次静态高度。彻底断开「增高 → resize → 再增高」的布局正反馈。
+* **体检修复无反馈**：`HealthDialog` 新增底部状态行——`apply_fix` 真的改了
+  字段才提示「已应用：…」并重扫；已是目标状态则提示「无需修改」。
+* **两个实例「识别不到完整性」**：体检新增第一层「安装完整性」
+  （`loader_missing` / `client_missing` / `base_missing`），与启动的「已安装」
+  判据共用 `core.install.find_installed_loader`；缺加载器时卡片直接给
+  「一键补装」按钮，后台复用安装器 + 启动进度框，完成后自动保存并重扫。
+* **启动格式识别错误**：`detect_format` 改为「磁盘结构优先」——AC 自有布局
+  （`_is_ac_owned`）直接判 `ac`，遗留的显式 `format` 只对外来实例生效；
+  实例设置页新增「实际识别」与手动格式不一致时的提示。
+* **Cleanroom 报「没有有效 Java」**：安装器 JVM 与目标 JVM 解耦——
+  运行安装器用「有 25 用 25，否则最高且 ≥17 的已装 JDK」，目标 Java 25 交给
+  安装器 `--provision-java` 自行落盘到 `~/.cleanroom/java`，完成后清扫描缓存；
+  状态栏明示「未找到 Java 25，将自动下载」。同时补上 `core/install.py` 缺失的
+  `t` 导入（原先无 25 时会 NameError）并把安装器 javaw 归一为 java.exe 以保留
+  失败输出。
+
+### 新增
+
+* **`Instance.java_force`** + 设置页全局开关 `java_force_incompatible`
+  （双层、默认 False，任一为真即强制）。
+* **`core.java.java_plan(inst, settings)`**：启动 / 体检 / 实例设置共用同一
+  Java 决策（need / path / major / compatible / forced / auto / detected）；
+  `java_major_or_zero(path)` 供任意路径识别版本。
+* **启动前三选一**：不兼容且有替代 →「本次改用 Java X / 仍然使用 Java Y /
+  取消」；无替代 →「仍然使用 / 取消」（默认取消）；已开强制则不弹框。
+  `launch_instance(force_java=True)` 只提示不拦截，无可用 Java 的报错会列出
+  已检测到的运行时。
+* i18n 新增 36 键 × 2 语言（zh 1457 / en 1457，差异 0）。
+
+### 🔍 验证
+
+* `python -m compileall -q src` → 0 错误。
+* `python regress.py` → **24 / 24 全绿**（新增「Java 计划/强制」17 项、
+  「启动对话框高度」4 项；原 22 项无回归）。
+* 新套件覆盖：stale `curseforge` → `ac`；iso 布局识别；Cleanroom / Forge /
+  NeoForge 加载器目录匹配不误吞；`required_java_major_for` 25/17；
+  `java_plan` 自动选 17 / Cleanroom 缺 25 / 实例与全局强制 / 手动 26 不兼容；
+  `set_java_force` 幂等语义；对话框 20 次超长文本后高度 389→397 后恒定，
+  总增高 52px（≤60）。
+* 真机只读诊断（`_diag_instances_java.py`，cwd 指向真实安装目录）：
+  Forge 1.20.1 实例的 `format` 从 `curseforge` 纠正为 `ac`，
+  `find_installed_loader=None` + `loader_missing`（critical）；
+  Cleanroom 1.12.2 实例同样 `loader_missing`，`java_plan` need=25、无 25 时
+  path 为空且 `compatible=False`，安装器 JVM 取到本机 Java 26（≥17，可跑
+  `--provision-java`）。两实例的体检不再「看起来一切正常」。
+* 离屏 UI 冒烟：24 套件中的全页面构造冒烟通过（设置页 / 实例页新控件可构造）。
+
 ## round-162（2026-10-31）— 条款版本化门禁 + 更新后内容弹窗
 
 > 来源：LumilioCL 调研第 9 节「条款要版本化，不要一次性同意」。

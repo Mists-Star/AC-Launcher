@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QDialog, QFormLayout, QLineEdit, QComboBox,
     QSizePolicy, QGridLayout, QCheckBox, QProgressBar,
     QStackedWidget, QButtonGroup, QSplitter, QGraphicsOpacityEffect, QMenu,
+    QFileDialog,
 )
 from PySide6.QtCore import Qt, Signal, QSize, QTimer, QUrl
 from PySide6.QtGui import QIcon, QTransform
@@ -381,6 +382,11 @@ class _InstRow(LightTrailCard):
             self._task_lbl.setText(t("instances.task_downloading", pct=pct))
             self._task_lbl.setStyleSheet(
                 f"font-size: 11px; color: {COLORS['accent']};")
+        elif kind == "paused":
+            # round-170：暂停中的下载既不是「下载中」也不是「就绪」。
+            self._task_lbl.setText(t("instances.task_paused", pct=pct))
+            self._task_lbl.setStyleSheet(
+                f"font-size: 11px; color: {COLORS['warn']};")
         else:  # ready
             self._task_lbl.setText(t("instances.task_ready"))
             self._task_lbl.setStyleSheet(
@@ -897,6 +903,36 @@ class NewInstanceDialog(QDialog):
         self.java_row_w.setVisible(False)
         lay.addWidget(self.java_row_w)
 
+        # round-165：下载实例允许玩家自选布局（写盘位置）。
+        # AC 独立目录 = 原行为；其余选项写入玩家指选的已有游戏目录
+        # （external 实例，删除实例不会动真实文件）。
+        dir_title = ui_kit.group_label(t("new_instance.dir_section"))
+        lay.addWidget(dir_title)
+        self.dir_combo = QComboBox()
+        self.dir_combo.setMinimumHeight(36)
+        for _k in ("ac", "vanilla", "iso", "custom"):
+            self.dir_combo.addItem(t(f"new_instance.dir_{_k}"), _k)
+        self.dir_combo.currentIndexChanged.connect(self._on_dir_changed)
+        lay.addWidget(self.dir_combo)
+        self.dir_hint = QLabel(t("new_instance.dir_hint_ac"))
+        self.dir_hint.setProperty("cls", "sub")
+        self.dir_hint.setWordWrap(True)
+        lay.addWidget(self.dir_hint)
+        self.dir_row = QHBoxLayout()
+        self.dir_edit = QLineEdit()
+        self.dir_edit.setMinimumHeight(36)
+        self.dir_edit.setPlaceholderText(t("new_instance.dir_placeholder"))
+        self.dir_edit.textChanged.connect(lambda _s: self._update_path())
+        self.dir_choose = QPushButton(t("new_instance.dir_pick"))
+        self.dir_choose.setMinimumHeight(36)
+        self.dir_choose.clicked.connect(self._pick_dir)
+        self.dir_row.addWidget(self.dir_edit, 1)
+        self.dir_row.addWidget(self.dir_choose)
+        self.dir_row_w = QWidget()
+        self.dir_row_w.setLayout(self.dir_row)
+        self.dir_row_w.setVisible(False)
+        lay.addWidget(self.dir_row_w)
+
         # name
         name_lbl = ui_kit.group_label(t("new_instance.name"))
         lay.addWidget(name_lbl)
@@ -1240,6 +1276,39 @@ class NewInstanceDialog(QDialog):
             name = f"{ver}-{loader}"
         return name
 
+    # ---------------- round-165：自选下载布局 ----------------
+    def _on_dir_changed(self, *_args):
+        key = self.dir_combo.currentData() or "ac"
+        self.dir_row_w.setVisible(key != "ac")
+        self.dir_hint.setText(t(f"new_instance.dir_hint_{key}"))
+        self._update_path()
+
+    def _pick_dir(self):
+        key = self.dir_combo.currentData() or "ac"
+        start = self.dir_edit.text().strip() or ""
+        path = QFileDialog.getExistingDirectory(
+            self, t(f"new_instance.dir_pick_title_{key}"), start)
+        if path:
+            self.dir_edit.setText(os.path.normpath(path))
+
+    def current_layout(self) -> tuple[str, str]:
+        """当前选择的 (format, base)。base 为空 ⇒ 走 AC 自有布局。
+
+        vanilla = 玩家指选的已有 .minecraft；iso = 指选 .minecraft，实例目录
+        自动定位到 versions/<版本>；custom = 指选的游戏目录本体。
+        """
+        fmt = self.dir_combo.currentData() or "ac"
+        if fmt == "ac":
+            return "ac", ""
+        raw = self.dir_edit.text().strip()
+        if not raw or not os.path.isdir(raw):
+            return fmt, ""
+        root = os.path.normpath(raw)
+        if fmt == "iso":
+            ver = self._selected_version.strip() or "1.20.1"
+            return "iso", os.path.join(root, "versions", ver)
+        return fmt, root
+
     def _update_path(self):
         name = self.name_edit.text().strip()
         auto = self._auto_name()
@@ -1247,6 +1316,11 @@ class NewInstanceDialog(QDialog):
             self.name_edit.setPlaceholderText(auto)
         else:
             self.name_edit.setPlaceholderText(t("new_instance.name_placeholder"))
+        fmt, base = self.current_layout()
+        if fmt != "ac":
+            self.path_lbl.setText(t("new_instance.save_to",
+                                     path=base or t("new_instance.dir_none")))
+            return
         from .paths import get_data_dir
         # round-40 P3 修复：过滤方向反了——应保留安全字符，去掉 Windows 非法字符
         # （之前 c not in "-_. " 删掉连字符/点/空格却保留 \\/:*?\"<>| ）
@@ -1264,17 +1338,22 @@ class NewInstanceDialog(QDialog):
             self.reject()
 
     def _on_create(self):
+        fmt, base = self.current_layout()
+        if fmt != "ac" and not base:
+            warn(self, t("new_instance.dir_title"), t("new_instance.dir_missing"))
+            return
         if self._embedded:
             self.created.emit(*self.result_data())
         else:
             self.accept()
 
-    def result_data(self) -> tuple[str, str, str, str, str]:
+    def result_data(self) -> tuple[str, str, str, str, str, str, str]:
         name = self.name_edit.text().strip()
         if not name:
             name = self._auto_name()
+        fmt, base = self.current_layout()
         return (name, self._selected_version, self._loader, self._java_path,
-                self.selected_loader_version())
+                self.selected_loader_version(), fmt, base)
 
 
 class InstancesPage(QWidget):
@@ -1688,6 +1767,9 @@ class InstancesPage(QWidget):
             (t("instances.apply_pack"), "download", (lambda: self._apply_mrpack_to(inst))),
             # 实例体检（含一键本地修复）：静态扫描性能模组 / JVM / Java / 启动参数
             (t("health.title"), "tools", (lambda: self._health_check(inst))),
+            # round-166：按磁盘现状重构实例定义（版本/加载器/布局重新推导）
+            (t("instances.rebuild"), "refresh",
+             (lambda: self._rebuild_instance(inst))),
             (t("instances.crash_analyze"), "repair", (lambda: self._analyze_crash(inst))),
         ]:
             a = _more_menu.addAction(icon(ico), key)
@@ -1802,6 +1884,13 @@ class InstancesPage(QWidget):
                     lambda: self._open_folder(inst))
         m.addAction(t("instances.crash_analyze"),
                     lambda: self._show_crash(inst))
+        m.addSeparator()
+        m.addAction(t("tool.materials"),
+                    lambda: self._export_materials(inst))
+        m.addAction(t("preview.title"),
+                    lambda: self._open_preview(inst))
+        m.addAction(t("map.menu"),
+                    lambda: self._open_map(inst))
         m.addSeparator()
         m.addAction(t("instances.group_move_to"),
                     lambda: self._edit_group(inst))
@@ -1978,6 +2067,108 @@ class InstancesPage(QWidget):
         os.makedirs(p, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(p))
 
+    # ── round-171 投影材料清单 / 存档地图（右侧菜单入口）──
+    def _export_materials(self, inst: Instance):
+        """选一个 .litematic → 后台解析 → 同目录导出 CSV 材料清单。"""
+        from .win_rounded import pick_files, toast, warn
+        from .core import schematic as sch_mod
+        from .worker import Worker
+
+        path = pick_files(self, t("tool.materials_title"),
+                          filt=t("tool.materials_filter"))
+        if not path:
+            return
+
+        def work():
+            sch = sch_mod.load(path)
+            out = os.path.join(os.path.dirname(path),
+                               sch_mod.default_csv_name(sch))
+            rows = sch_mod.export_materials_csv(sch, out)
+            return rows, out, sch.total_blocks(), sch.meta_blocks, \
+                sch.unknown_blocks()
+
+        w = Worker(work)
+        self._mat_worker = w
+
+        def done(res):
+            rows, out, real, meta, unknown = res
+            if not rows:
+                toast(self, t("tool.materials_title"), t("tool.materials_empty"))
+                return
+            msg = t("tool.materials_done", rows=rows, path=out)
+            if unknown:
+                msg += "\n" + t("tool.materials_unknown", n=unknown)
+            if meta and meta != real:
+                msg += "\n" + t("tool.materials_meta_warn", meta=meta, real=real)
+            toast(self, t("tool.materials_title"), msg, duration=6000)
+
+        w.finished.connect(done)
+        w.error.connect(lambda e: warn(self, t("tool.materials_failed"), str(e)))
+        w.start()
+
+    def _open_preview(self, inst: Instance):
+        """选 .litematic → 后台解析 → 分层预览窗口（可顺手导出材料清单）。"""
+        from .win_rounded import pick_files, warn
+        from .core import schematic as sch_mod
+        from .worker import Worker
+
+        path = pick_files(self, t("preview.title"),
+                          filt=t("tool.materials_filter"))
+        if not path:
+            return
+        w = Worker(sch_mod.load, path)
+        self._preview_worker = w
+
+        def done(sch):
+            from .schematic_dialog import SchematicDialog
+            SchematicDialog(sch, self).exec()
+
+        w.finished.connect(done)
+        w.error.connect(lambda e: warn(self, t("preview.title"), str(e)))
+        w.start()
+
+    def _open_map(self, inst: Instance):
+        """打开当前实例的存档地图（只读 .mca，绝不写存档）。"""
+        from .map_dialog import MapDialog
+        game_dir = inst.game_dir
+        if not game_dir or not os.path.isdir(game_dir):
+            from .win_rounded import warn
+            warn(self, t("map.title"), t("err.launch_missing_dir", path=game_dir or ""))
+            return
+        MapDialog(game_dir, self).exec()
+
+    def _rebuild_instance(self, inst: Instance):
+        """round-166：按磁盘现状重构实例定义（只读扫描，不删游戏文件）。
+
+        适用：手工搬过目录、整合包覆盖、来源启动器升级后，实例记录里的
+        版本 / 加载器 / 启动版本 id / 布局格式与磁盘漂移。用磁盘上的版本
+        json 重新推导这些字段并落盘，不动任何游戏文件。
+        """
+        from .core.instance_rebuild import reconstruct
+        if not confirm(self, t("instances.rebuild_title"),
+                       t("instances.rebuild_confirm", name=inst.name),
+                       detail=t("instances.rebuild_hint")):
+            return
+        try:
+            res = reconstruct(inst)
+        except Exception as e:  # noqa: BLE001 - 扫描失败给出明确错误
+            warn(self, t("instances.rebuild_title"), str(e))
+            return
+        if not res.get("ok"):
+            warn(self, t("instances.rebuild_title"),
+                 t(res.get("reason") or "instances.rebuild_no_files"))
+            return
+        self.mgr.save(inst)
+        self._refresh()
+        n = len(res.get("changed") or [])
+        if n:
+            info(self, t("instances.rebuild_title"),
+                 t("instances.rebuild_done", n=n,
+                   version=res.get("version") or inst.game_version))
+        else:
+            info(self, t("instances.rebuild_title"),
+                 t("instances.rebuild_same"))
+
     def _edit_instance_settings(self, inst: Instance):
         """实例级覆盖设置：内存 / JVM / 渲染器 / GC / 启动高级设置（round-42/53/55）。
 
@@ -2006,6 +2197,43 @@ class InstancesPage(QWidget):
         content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay = QVBoxLayout(content)
         lay.setSpacing(12)
+        # round-166 修改实例：基本信息可编辑（名称 / 游戏版本 / 加载器）。
+        # 导入实例的游戏文件属于来源启动器 → 版本/加载器不可改，避免弄坏
+        # 对方目录；名称仍可改。
+        _editable = not bool(getattr(inst, "external", False))
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel(_t("instances.setting_name")))
+        name_edit = QLineEdit(inst.name or "")
+        name_row.addWidget(name_edit, stretch=1)
+        lay.addLayout(name_row)
+        ver_row = QHBoxLayout()
+        ver_row.addWidget(QLabel(_t("instances.setting_game_version")))
+        ver_edit = QLineEdit(inst.game_version or "")
+        ver_row.addWidget(ver_edit, stretch=1)
+        lay.addLayout(ver_row)
+        ld_row = QHBoxLayout()
+        ld_row.addWidget(QLabel(_t("instances.setting_loader")))
+        loader_combo = QComboBox()
+        for _lid in LOADERS:
+            loader_combo.addItem(loader_name(_lid), _lid)
+        _li = loader_combo.findData((inst.loader or "vanilla"))
+        loader_combo.setCurrentIndex(_li if _li >= 0 else 0)
+        ld_row.addWidget(loader_combo, stretch=1)
+        lay.addLayout(ld_row)
+        ldver_row = QHBoxLayout()
+        ldver_row.addWidget(QLabel(_t("instances.setting_loader_version")))
+        ldver_edit = QLineEdit(inst.loader_version or "")
+        ldver_edit.setPlaceholderText(
+            _t("instances.setting_loader_version_hint"))
+        ldver_row.addWidget(ldver_edit, stretch=1)
+        lay.addLayout(ldver_row)
+        for _w in (ver_edit, loader_combo, ldver_edit):
+            _w.setEnabled(_editable)
+        if not _editable:
+            _ext_hint = QLabel(_t("instances.setting_external_hint"))
+            _ext_hint.setWordWrap(True)
+            _ext_hint.setProperty("cls", "sub")
+            lay.addWidget(_ext_hint)
         # 内存
         mem_row = QHBoxLayout()
         mem_row.addWidget(QLabel(_t("instances.setting_mem")))
@@ -2064,17 +2292,24 @@ class InstancesPage(QWidget):
         _idx = fmt_combo.findData(_cur_fmt if _cur_fmt in INSTANCE_FORMATS else "auto")
         fmt_combo.setCurrentIndex(_idx if _idx >= 0 else 0)
         fmt_hint = QLabel()
+        fmt_hint.setWordWrap(True)
         fmt_hint.setStyleSheet(
             f"color: {COLORS['text_sub']}; font-size: 11px; margin-left: 6px;")
 
         def _update_fmt_hint(data: str) -> None:
             try:
+                _det = detect_format(inst)
                 if (data or "auto") == "auto":
-                    _det = detect_format(inst)
                     fmt_hint.setText(_t("instances.fmt_detected",
                                         name=_t(f"instances.fmt_{_det}")))
                 else:
-                    fmt_hint.setText(_t("instances.fmt_forced", name=_t(f"instances.fmt_{data}")))
+                    _txt = _t("instances.fmt_forced", name=_t(f"instances.fmt_{data}"))
+                    if _det != data:
+                        _txt += "\n" + _t(
+                            "instances.fmt_mismatch_hint",
+                            selected=_t(f"instances.fmt_{data}"),
+                            detected=_t(f"instances.fmt_{_det}"))
+                    fmt_hint.setText(_txt)
             except Exception:  # noqa: BLE001
                 fmt_hint.setText("")
 
@@ -2083,6 +2318,42 @@ class InstancesPage(QWidget):
         fmt_row.addWidget(fmt_combo)
         fmt_row.addWidget(fmt_hint, stretch=1)
         lay.addLayout(fmt_row)
+        # round-163 Java 卡片：展示该实例要求的 Java / 实际将使用的 Java，
+        # 并提供实例级「强制使用所选 Java」开关。改动只在点「确定」后写回。
+        # 计算放后台线程：无可用 Java 时 java_plan 会做一次深扫，避免卡设置页。
+        cfg = load_config()
+        java_need_lbl = QLabel(_t("instances.java_none"))
+        java_need_lbl.setWordWrap(True)
+        java_need_lbl.setProperty("cls", "sub")
+        lay.addWidget(java_need_lbl)
+        java_use_lbl = QLabel(_t("instances.java_none"))
+        java_use_lbl.setWordWrap(True)
+        java_use_lbl.setProperty("cls", "sub")
+        lay.addWidget(java_use_lbl)
+        java_force_chk = QCheckBox(_t("instances.java_force_label"))
+        java_force_chk.setChecked(bool(getattr(inst, "java_force", False)))
+        lay.addWidget(java_force_chk)
+
+        from .core.java import java_plan as _java_plan
+        _jworker = Worker(_java_plan, inst, cfg)
+
+        def _on_java_plan(plan: dict) -> None:
+            try:
+                java_need_lbl.setText(
+                    _t("instances.java_need", need=int(plan.get("need") or 0)))
+                _p = plan.get("path") or ""
+                if _p:
+                    java_use_lbl.setText(_t("instances.java_will_use",
+                                            major=int(plan.get("major") or 0),
+                                            path=_p))
+                else:
+                    java_use_lbl.setText(_t("instances.java_none"))
+            except Exception:  # noqa: BLE001
+                pass
+
+        _jworker.finished.connect(_on_java_plan)
+        dlg._java_plan_worker = _jworker   # 持有引用防回收
+        _jworker.start()
         # round-55 版本隔离（空 = 跟随全局；custom 时填自定义目录）
         iso_row = QHBoxLayout()
         iso_row.addWidget(QLabel(_t("instances.isolation")))
@@ -2141,11 +2412,28 @@ class InstancesPage(QWidget):
         _update_fmt_hint(fmt_combo.currentData())  # 打开即显示当前识别
         if dlg.exec() != 1:
             return
+        _old_ver = inst.game_version
+        _old_loader = inst.loader
+        _old_ldver = inst.loader_version
+        inst.name = name_edit.text().strip() or inst.name
+        if _editable:
+            inst.game_version = ver_edit.text().strip() or _old_ver
+            inst.loader = loader_combo.currentData() or "vanilla"
+            inst.loader_version = ("" if inst.loader == "vanilla"
+                                   else ldver_edit.text().strip())
+        _ver_changed = (inst.game_version != _old_ver
+                        or inst.loader != _old_loader
+                        or inst.loader_version != _old_ldver)
+        if _ver_changed:
+            # 版本/加载器变了 → 旧的启动版本 id 失效，交给 install 重新解析
+            inst.version_id = ""
+            inst.needs_convert = False
         inst.ram_mb = mem.value()
         inst.jvm_args = jvm.text().strip()
         inst.jvm_preset = jvm_preset.currentData() or ""
         inst.renderer = renderer.currentData() or "auto"
         inst.format = fmt_combo.currentData() or ""   # round-82 格式（auto → 存空）
+        inst.java_force = java_force_chk.isChecked()  # round-163 实例级强制 Java
         inst.game_args = game_args.text().strip()
         inst.isolation = iso_combo.currentData() or ""
         inst.game_dir_override = game_dir_edit.text().strip()
@@ -2156,6 +2444,17 @@ class InstancesPage(QWidget):
         inst.group = grp.text().strip()
         self.mgr.save(inst)
         self._refresh()
+        if _ver_changed:
+            # round-166：改版本/加载器后立刻后台补全游戏文件（幂等，保留存档
+            # 与模组）；启动时也会再校验一次，失败不阻塞设置保存。
+            info(self, _t("instances.setting_modified_title"),
+                 _t("instances.version_changed"))
+            mw = self.window()
+            if hasattr(mw, "_start_instance_download"):
+                try:
+                    mw._start_instance_download(inst.id)
+                except Exception:  # noqa: BLE001 - 补全失败不影响已保存的设置
+                    pass
 
     # ── 整合包应用到已有实例（round-38 中轴：二次安装/升级）──
     def _apply_mrpack_to(self, inst: Instance):
@@ -2321,9 +2620,10 @@ class InstancesPage(QWidget):
         self._body_stack.setCurrentIndex(idx)
 
     def _on_new_created(self, name: str, version: str, loader: str,
-                        java_path: str, ldver: str):
+                        java_path: str, ldver: str, fmt: str = "ac",
+                        base: str = ""):
         inst = self.mgr.add(name, version, loader, loader_version=ldver,
-                            java_path=java_path)
+                            java_path=java_path, format=fmt, base=base)
         self._selected_id = inst.id
         self._close_new_panel()
         # round-107 T8：交由 MainWindow 统一发起后台下载（状态栏 + 可召回对话框）。
