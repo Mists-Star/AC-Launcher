@@ -8,6 +8,75 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-176（2026-11-03）— 安装路径断点续传 / 低速判据 / 429
+
+> 横评发现：HMCL、XMCL 全路径 Range 续传，PCL2 有低速判据，Prism 对 429 指数退避；
+> 我们只有自有下载器具备这些能力，**版本安装走 mll 的 `download_file` 时全都没有**。
+> 本轮补齐这三处，全部落在 `src/core/mirror.py` 与 `src/net_api.py`。
+
+### 修复 / 改进
+
+* **mll 安装路径断点续传**：`_wrap_download_file` 不再对非大文件原样转发，改走
+  `_resume_mll_download()`：写 `<path>.part`，下次用 `Range: bytes=N-` 续传；
+  206 追加，200（服务器不认 Range）自动清空重下；sha1 边下边算（省掉 mll 下完
+  再整文件读一遍），完成后 `os.replace` 原子落位。416 时按 `.part` 校验收尾。
+  任何无法接管的异常（含 lzma 目标）退回原实现，行为不变。
+* **低速判据**：已收 ≥256 KB、窗口 ≥8s、平均 <6 KB/s 视为「活着的死链」，
+  断开后从 `.part` 续传重试一次；仍慢则退回原实现。专治读间隔超时抓不到的
+  「几 KB/s 吊着」场景。
+* **429 单独处理**：`_try_source` 解析 `Retry-After`（秒数，缺省 5s，上限 20s），
+  等一次再试；**不计入来源健康失败**——限流说明源是活的，不该被 90s 冷却。
+  超过一次后仍按普通失败切源。
+* **分片只补失败段**：`net_api.parallel_download_file` 第一轮只收集失败段，
+  第二轮单独补跑（每段内部已有 3 次重试），仍失败才清残件回退单流；重跑时
+  回退该段进度，避免进度条越过 100%。
+* 顺带修正 `_try_parallel_mll._cancel()` 把属性当方法调用的问题。
+
+### 🔍 验证
+
+* 新增 `tests/test_mll_resume.py`（第 36 套，24 项断言）：Range 续传 / 200 回退 /
+  已存在跳过并清 `.part` / sha1 不符抛 `InvalidChecksum` / 低速两轮退原实现 /
+  429 只等一次且不计健康失败 / `Retry-After` 解析 / 包装器不误调原实现。
+* `regress.py` **36 / 36** 全绿；`compileall` 通过。
+* 构建 116.4 MB / 4097 文件（round-175 瘦身后不变）；部署
+  `<本机部署目录>`（exe 6,356,104 B），10 秒冒烟 `ALIVE pid=25692`，
+  已杀进程并清理锁与 `.upd_bak`。
+
+## round-175（2026-11-03）— 共享 assets + 打包瘦身 19 MB
+
+> 来源：用户提出「怎样减少启动器大小，是否需要转语言」，并行对照 HMCL / PCL2 /
+> PrismLauncher / Modrinth App / XMCL 后，落地两项：磁盘去重与安装包瘦身。
+> 调研全文见 `docs/launcher_comparison_2026-11.md`。
+
+### 修复 / 改进
+
+* **assets 共享池（磁盘）**：现代版本单实例 assets 约 300–600 MB，此前每个实例
+  各存一份。`src/core/shared_libs.py` 把 round-48 的 libraries 联接机制抽象成通用
+  `_ensure_shared_dir()`，新增 `ensure_shared_assets()`，实例 `<mc_dir>/assets`
+  指向 `data/shared/assets`。内容按 sha1 寻址、indexes 按版本命名，天然可共享；
+  已有实例首次启动时自动把旧 assets 并入池（同卷 rename，不复制）。
+  `instances.py` / `launch.py` 在创建与启动前调用；删除实例前统一摘除
+  libraries/assets 两个联接（`_strip_shared_junctions`），不会顺着链接误删池。
+* **打包瘦身（安装包 19.2 MB）**：spec 新增 `_DROP_BINARY_PATTERNS` 过滤
+  `a.binaries`，剪掉被插件连带收集、项目零使用的 Qt 组件：Qt6Quick / Qt6Qml* /
+  Qt6VirtualKeyboard（由 `platforminputcontexts/qtvirtualkeyboardplugin.dll` 拉入）、
+  Qt6Pdf（由 `imageformats/qpdf.dll` 拉入），以及 tiff/icns/tga/wbmp 图像插件、
+  direct2d 平台插件、qtuiotouch 插件。构建 135.6 → **116.4 MB / 4097 文件**。
+* **分发压缩暂不换 LZMA**：实测 LZMA 可把包压到 46.6 MB（Deflate 58.8 MB），
+  但 Windows 资源管理器内置解压**不支持** LZMA 方法，玩家手动解压会失败；自动
+  更新虽可用 `tar.exe` 解，但首次安装面更广。故保持 Deflate，待改为安装器时再议。
+
+### 🔍 验证
+
+* 新增 `tests/test_shared_assets.py`（第 35 套，19 项断言）：旧 assets 并入池、
+  联接可读、幂等、libraries/assets 两池互不污染、摘联接后池完整、空/不存在
+  game_dir 安全返回 False。
+* `regress.py` **35 / 35** 全绿；`compileall` 通过。
+* 构建产物核对：Qt6Quick/Qml/Pdf/VirtualKeyboard 与 qpdf、platforminputcontexts
+  均已不存在，Qt6Widgets/Qt6Multimedia/opengl32sw 保留。
+* 部署 `<本机部署目录>`（exe 6,351,833 B），10 秒冒烟 `ALIVE pid=22560`，
+  随后杀进程、清理锁与 `.upd_bak`。
+
 ## round-174（2026-11-01）— 来源健康与超时策略（BMCLAPI 不再「一直等响应」）
 
 > 来源：用户现场反馈「部分情况下载慢，还有 bmclapi 总是等待响应」。排查结论：

@@ -193,21 +193,26 @@ class Instance:
     def ensure_dirs(self) -> None:
         os.makedirs(self.mc_dir, exist_ok=True)
         os.makedirs(self.mods_dir, exist_ok=True)
-        # round-48 共享 libraries 去重：AC 自有实例把 <mc_dir>/libraries 指到
-        # 全局共享池（目录联接）。external（链接他人目录）实例绝不改用户真实文件。
-        if not self.external:
-            try:
-                from .core.shared_libs import ensure_shared_libraries
+        # round-48 共享 libraries 去重 / round-175 共享 assets 去重：只把 AC
+        # 自建实例指到全局共享池（审查 P0-4）。外来导入实例自带资源布局，
+        # 改造会污染全局池，且让 round-92 的补库写 jar 穿透联接。
+        try:
+            from .core.shared_libs import (ensure_shared_assets,
+                                           ensure_shared_libraries,
+                                           should_use_shared_pool)
+            if should_use_shared_pool(self):
                 ensure_shared_libraries(self.mc_dir)
-            except Exception:  # noqa: BLE001 - 去重失败只是退回独立目录，不阻塞
-                pass
+                ensure_shared_assets(self.mc_dir)
+        except Exception:  # noqa: BLE001 - 去重失败只是退回独立目录，不阻塞
+            pass
 
     @staticmethod
-    def _strip_library_junction(mc_dir: str) -> None:
-        """删除实例目录里的 libraries 联接 <链接>，避免误删共享池。删除实例前调用。"""
+    def _strip_shared_junctions(mc_dir: str) -> None:
+        """删除实例目录里的 libraries/assets 联接，避免误删共享池。删除实例前调用。"""
         try:
             from .core.shared_libs import _remove_junction
-            _remove_junction(os.path.join(mc_dir, "libraries"))
+            for name in ("libraries", "assets"):
+                _remove_junction(os.path.join(mc_dir, name))
         except Exception:  # noqa: BLE001
             pass
 
@@ -815,11 +820,15 @@ class InstancesManager:
         import shutil
         new_id = _new_id()
         new_root = os.path.join(get_data_dir(), "instances", new_id)
-        # 复制游戏目录（mc_dir → 新实例的 mc_dir）；round-48 跳过 libraries
-        #（它要么是去重池联接、要么会被 ensure_dirs 重建成联接，复制反而把池盖一遍）
+        # 复制游戏目录（mc_dir → 新实例的 mc_dir）。AC 自有实例的 libraries
+        # 与 assets 都是共享池联接（round-48 / round-175），跟随复制会把整个池
+        # 塞进副本；外来实例是真实目录，必须完整复制，否则副本缺库/缺资源。
+        from .core.shared_libs import should_use_shared_pool
+        _ignore = (shutil.ignore_patterns("libraries", "assets")
+                   if should_use_shared_pool(src) else None)
         dst_mc = os.path.join(new_root, ".minecraft")
         shutil.copytree(src.mc_dir, dst_mc, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("libraries"))
+                        ignore=_ignore)
         inst = Instance(
             id=new_id,
             name=(new_name.strip() or self._copy_name(src.name)),
@@ -932,8 +941,10 @@ class InstancesManager:
                 if on_progress is not None:
                     _copied_with_progress(mc_dir, dst_mc, on_progress)
                 else:
-                    shutil.copytree(mc_dir, dst_mc, dirs_exist_ok=True,
-                                    ignore=shutil.ignore_patterns("libraries"))
+                    # 外来实例不再建共享池联接（见 should_use_shared_pool），
+                    # 自带的 libraries/assets 必须完整复制；带进度回调那条路径
+                    # 本来就是全量复制，这里统一，避免两条导入路径产物不一致。
+                    shutil.copytree(mc_dir, dst_mc, dirs_exist_ok=True)
             except (OSError, shutil.Error) as e:  # fall back to in-place link
                 shutil.rmtree(inst.root, ignore_errors=True)
                 raise _CopyFailed(str(e)) from e
@@ -972,9 +983,9 @@ class InstancesManager:
             if not inst.external:
                 import shutil
 
-                # round-48 先摘掉 libraries 联接（链接是跟共享池耦合的，直接 rmtree
-                # 可能顺着 reparse point 误删整个共享池）。去重池本身单独管理。
-                inst._strip_library_junction(inst.mc_dir)
+                # round-48/round-175 先摘掉 libraries/assets 联接（链接跟共享池
+                # 耦合，直接 rmtree 可能顺着 reparse point 误删整个共享池）。
+                inst._strip_shared_junctions(inst.mc_dir)
                 shutil.rmtree(inst.root, ignore_errors=True)
         if self._current == instance_id:
             self._current = next(iter(self._instances), None)

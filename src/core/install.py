@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import json
 
 import minecraft_launcher_lib
 
@@ -479,13 +480,32 @@ def install_liteloader(mc_version: str, mc_dir: str, *,
     if libraries:
         liteloader_libs = libraries
     ver_id = f"{mc_version}-LiteLoader"
+    # P0（横向审计）：mll 的 inherit_json 对标量是「子覆盖父」。此前只写
+    # --tweakClass，父版本的 --username/--uuid/--accessToken/--gameDir/
+    # --assetsDir/--assetIndex 全被覆盖丢失 → 客户端秒退。另外 mll 在没有
+    # "jar" 键时用子 id 拼主 jar（versions/<ver_id>/<ver_id>.jar 并不存在），
+    # classpath 里会缺原版主 jar。标准做法：完整继承父串后追加 tweakClass，
+    # 并显式把主 jar 指回原版版本。
+    parent_json_path = os.path.join(mc_dir, "versions", mc_version,
+                                    f"{mc_version}.json")
+    try:
+        with open(parent_json_path, "r", encoding="utf-8") as _pf:
+            parent_args = str(json.load(_pf).get("minecraftArguments") or "").strip()
+    except (OSError, ValueError):
+        parent_args = ""
+    if not parent_args:
+        raise RuntimeError(
+            "LiteLoader: 读不到原版版本的 minecraftArguments，"
+            "生成的启动参数会让客户端秒退（请先完整安装该版本）"
+        )
+    _tweak = tweak_class or "com.mumfrey.liteloader.launch.LiteLoaderTweaker"
     vjson = {
         "id": ver_id,
         "inheritsFrom": mc_version,
         "type": "release",
+        "jar": mc_version,
         "mainClass": "net.minecraft.launchwrapper.Launch",
-        "minecraftArguments": "--tweakClass "
-        + (tweak_class or "com.mumfrey.liteloader.launch.LiteLoaderTweaker"),
+        "minecraftArguments": parent_args + " --tweakClass " + _tweak,
         "libraries": liteloader_libs,
     }
     with open(os.path.join(ver_dir, f"{ver_id}.json"), "w", encoding="utf-8") as f:

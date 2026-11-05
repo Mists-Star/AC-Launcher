@@ -38,7 +38,7 @@ from .frameless import FramelessHelper
 from .worker import ProgressWorker
 from .launch import launch_instance
 from .settings_dialog import load_config, save_config, SettingsPage
-from .accounts import manager as accounts_manager, type_label
+from .accounts import manager as accounts_manager, type_label, launch_identity
 from .paths import get_data_dir, get_resource_path
 from .skins import manager as skin_manager
 from .skin_render import render_head, render_skin_frames, skin_model
@@ -4464,8 +4464,10 @@ class MainWindow(QMainWindow):
         if skin_manager().active_path(acc["id"]):
             return
         from .worker import Worker
+        # P0（横向审计）：profile 的 UUID 在 "id"，不是 "uuid"。
+        _ident = launch_identity(acc)
         w = Worker(skin_manager().fetch_account_skin,
-                   acc.get("name", ""), acc.get("uuid") or "")
+                   _ident["username"], _ident["uuid"])
         self._startup_skin_worker = w  # 挂引用防 QThread 被回收
         w.finished.connect(
             lambda entry, aid=acc["id"]: self._after_startup_skin(entry, aid))
@@ -5005,8 +5007,9 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
         log_dir = get_data_dir()
-        # round-71 借鉴主流实现：保存本次登录 token，console 展示打码用
-        self._game_token = account.get("token", "")
+        # round-71 借鉴主流实现：保存本次登录 token，console 展示打码用。
+        # P0（横向审计）：token 实际存在 profile 的 "access_token" 键。
+        self._game_token = launch_identity(account)["token"]
 
         # signature launch chime when starting the game
         try:
@@ -5702,18 +5705,24 @@ class MainWindow(QMainWindow):
                         "Java (java.exe javaw.exe);;All files (*)",
                     )
                     if path and os.path.isfile(path):
-                        from .paths import get_data_dir
-                        import json as _json
-                        cfg_path = os.path.join(get_data_dir(), "launcher_config.json")
+                        # 走统一配置入口。旧实现写到 get_data_dir()/launcher_config.json，
+                        # 而启动器读的是 get_config_path()（settings_dialog.CONFIG_FILE）——
+                        # 手选的 Java 永远不生效；且裸写非原子、读失败会清空整份配置。
                         try:
-                            with open(cfg_path, "r", encoding="utf-8") as _f:
-                                cfg = _json.load(_f)
-                        except Exception:
-                            cfg = {}
-                        cfg["java_auto"] = False
-                        cfg["java_path"] = path
-                        with open(cfg_path, "w", encoding="utf-8") as _f:
-                            _json.dump(cfg, _f, ensure_ascii=False, indent=2)
+                            cfg = load_config()
+                            cfg["java_auto"] = False
+                            cfg["java_path"] = path
+                            save_config(cfg)          # tmp + os.replace 原子写
+                            self.cfg = cfg            # 同步进程内快照，防退出时旧 cfg 回写覆盖
+                        except Exception as _e:
+                            QMessageBox.warning(
+                                self,
+                                _t("err.launch_failed", default="启动失败"),
+                                _t("err.config_save_failed",
+                                   default="设置保存失败，所选 Java 未生效：{err}",
+                                   err=str(_e)),
+                            )
+                            return
                         # 重试用玩家选的 java
                         self.statusBar().showMessage(_t("status.retry_with_new_java"))
                         self._handle_play(self._last_inst or self.get_current_instance())

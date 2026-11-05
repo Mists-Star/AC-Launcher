@@ -133,7 +133,7 @@ def restore_backup(inst, snapshot: str) -> dict:
     os.makedirs(mc, exist_ok=True)
 
     # 1) 摘掉共享池联接（清空时不能顺着它删池）
-    inst._strip_library_junction(mc)
+    inst._strip_shared_junctions(mc)
 
     # 2) 清空当前内容（避开符号链接/联接，防止顺链接越出边界）
     for name in os.listdir(mc):

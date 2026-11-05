@@ -50,6 +50,7 @@ round-174 源健康与超时策略：把「bmclapi 总是等待响应」按**源
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib
 import os
 import socket
@@ -823,7 +824,9 @@ class MirrorSession(requests.Session):
         官方仍是 1 次。
         """
         tries = _RETRIES if retries is None else max(0, int(retries))
-        for attempt in range(tries + 1):
+        attempt = 0
+        rate_waits = 0
+        while True:
             ctx = self._ctx
             if ctx is not None and ctx.aborted:
                 raise requests.RequestException("download aborted by user")
@@ -831,12 +834,24 @@ class MirrorSession(requests.Session):
                 resp = super().send(request, **kwargs)
             except requests.RequestException:
                 if attempt < tries:
+                    attempt += 1
                     continue  # 超时 / 连接错误 → 同一源再试一次
                 self._last_status = None
                 if last:
                     raise
                 return None
             self._last_status = resp.status_code
+            # round-176：429 限流单独处理 —— 按 Retry-After 等一次再试，且不计入
+            # 源健康（限流说明源是活的，不该被冷却）。超过一次后按普通失败处理。
+            if resp.status_code == 429 and rate_waits < 1:
+                rate_waits += 1
+                wait = _retry_after_seconds(resp)
+                try:
+                    resp.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(wait)
+                continue
             if resp.status_code >= 400:
                 if not last:
                     try:
@@ -1066,7 +1081,7 @@ def _try_parallel_mll(url, path, sha1, callback, minecraft_directory,
         if ctx is not None:
             return ctx.aborted
         c = active_context()
-        return c is not None and c.aborted()
+        return c is not None and c.aborted
 
     try:
         # round-113 P1-c：chunk_mb 4 → 2，threads 显式给 16。
@@ -1095,19 +1110,197 @@ def _try_parallel_mll(url, path, sha1, callback, minecraft_directory,
     return True
 
 
+# ── round-176：mll 安装路径的断点续传 + 低速判据 ────────────────────────────
+# 自有下载器（net_api.download_file / parallel_download_file）早就有 Range 续传，
+# 但版本安装走的是 mll 的 ``_helper.download_file``：一次中断整文件从 0 重下。
+# 这里接管那条路径：
+#   * 写入 ``<path>.part``，下次从末尾用 ``Range: bytes=N-`` 续传（206 追加，
+#     200 说明服务器不认 Range → 清空重下）；
+#   * sha1 边下边算（省掉 mll 下完再整文件读一遍的开销），完成后再原子替换；
+#   * 低速判据：已收 ≥256KB、窗口 ≥8s 且平均 <6KB/s → 断开重连续传（最多 1 次），
+#     专治「连接活着但只有几 KB/s」的假死链路；
+#   * 任何无法接管的异常都退回 mll 原实现，不改变最终结果。
+_RESUME_MIN_BYTES = 1 << 20
+_SLOW_WINDOW = 8.0
+_SLOW_BPS = 6 * 1024
+_SLOW_MIN_BYTES = 256 * 1024
+
+
+class _ResumeFallback(Exception):
+    """本路径无法安全接管 → 退回 mll 原实现。"""
+
+
+class _SlowDownload(Exception):
+    """低速判据命中：断开后从 .part 续传。"""
+
+
+def _retry_after_seconds(resp, default: float = 5.0) -> float:
+    """解析 ``Retry-After``（秒数形式；HTTP-date 形式忽略并取默认值）。"""
+    raw = resp.headers.get("Retry-After") if resp is not None else None
+    try:
+        return max(0.0, min(float(raw), 20.0))
+    except (TypeError, ValueError):
+        return default
+
+
+def _resume_mll_download(url, path, *, callback, sha1, session,
+                         minecraft_directory, overwrite) -> bool:
+    """mll ``download_file`` 的等价实现：断点续传 + 低速重连 + 单遍 sha1。
+
+    返回 False 表示「文件已存在且无需下载」（与 mll 一致）；True 表示已就位。
+    无法接管时抛 :class:`_ResumeFallback`，由调用方退回原实现。
+    """
+    from minecraft_launcher_lib._helper import (
+        check_path_inside_minecraft_directory,
+        get_sha1_hash,
+    )
+    from minecraft_launcher_lib.exceptions import InvalidChecksum
+
+    if minecraft_directory is not None:
+        check_path_inside_minecraft_directory(minecraft_directory, path)
+
+    part = path + ".part"
+    if os.path.isfile(path) and not overwrite:
+        if sha1 is None or get_sha1_hash(path) == sha1:
+            # 目标已就位：顺手清掉上次残留的半截文件。
+            if os.path.isfile(part):
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+            return False
+
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception:  # noqa: BLE001 - 与 mll 一致：建目录失败不阻断
+        pass
+
+    callback.get("setStatus", lambda *a, **k: None)(
+        "Download " + os.path.basename(path))
+
+    sess = session
+    if sess is None:
+        # mll 各模块的 requests 已被换成 _RequestsShim → 仍走 MirrorSession。
+        from minecraft_launcher_lib import _helper as _mll_helper
+        sess = getattr(_mll_helper, "requests", requests)
+
+    ctx = active_context()
+    for attempt in range(2):
+        start = os.path.getsize(part) if os.path.isfile(part) else 0
+        hdrs = {"Range": "bytes=%d-" % start} if start else {}
+        try:
+            resp = sess.get(url, stream=True, headers=hdrs)
+        except Exception:  # noqa: BLE001 - 连接层失败交给原实现决定
+            raise _ResumeFallback()
+        try:
+            if ctx is not None and ctx.aborted:
+                raise requests.RequestException("download aborted by user")
+
+            if resp.status_code == 416 and start:
+                # .part 已不比远端小：校验通过就收尾，否则丢掉重下。
+                if sha1 is None or get_sha1_hash(part) == sha1:
+                    os.replace(part, path)
+                    return True
+                os.remove(part)
+                raise _ResumeFallback()
+            if resp.status_code not in (200, 206):
+                raise _ResumeFallback()
+
+            total = 0
+            if resp.status_code == 206:
+                cr = resp.headers.get("Content-Range", "")
+                try:
+                    total = int(cr.rsplit("/", 1)[1])
+                except (IndexError, ValueError):
+                    total = 0
+            else:
+                try:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+                start = 0            # 服务器不认 Range → 从头写
+
+            hasher = None
+            if sha1:
+                hasher = hashlib.sha1()
+                if start:
+                    with open(part, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(1 << 20), b""):
+                            hasher.update(chunk)
+
+            got = 0
+            win_start = time.monotonic()
+            win_bytes = 0
+            with open(part, "ab" if start else "wb") as fh:
+                for chunk in resp.iter_content(1 << 16):
+                    if not chunk:
+                        continue
+                    if ctx is not None and ctx.aborted:
+                        raise requests.RequestException(
+                            "download aborted by user")
+                    fh.write(chunk)
+                    got += len(chunk)
+                    if hasher is not None:
+                        hasher.update(chunk)
+                    win_bytes += len(chunk)
+                    now = time.monotonic()
+                    if (win_bytes >= _SLOW_MIN_BYTES and total >= _RESUME_MIN_BYTES
+                            and now - win_start >= _SLOW_WINDOW
+                            and win_bytes / max(1e-6, now - win_start) < _SLOW_BPS):
+                        raise _SlowDownload()
+        except _SlowDownload:
+            try:
+                resp.close()
+            except Exception:  # noqa: BLE001
+                pass
+            if attempt == 0:
+                time.sleep(0.5)
+                continue        # 续传再来一轮
+            raise _ResumeFallback()
+        finally:
+            try:
+                resp.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        if sha1 is not None:
+            checksum = hasher.hexdigest()
+            if checksum != sha1:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                raise InvalidChecksum(url, path, sha1, checksum)
+        os.replace(part, path)
+        return True
+    raise _ResumeFallback()
+
+
 def _wrap_download_file(orig):
     """把 mll 的 ``download_file`` 包一层：大文件走分片并行，其余原样转发。"""
 
     def download_file(url, path, callback={}, sha1=None, lzma_compressed=False,
                       session=None, minecraft_directory=None, overwrite=False):
-        # lzma 内容是变换过的，不能分片；只对「确定是大文件」的目标探测一次。
-        if (not lzma_compressed and _is_big_target(path)
-                and _try_parallel_mll(url, path, sha1, callback,
-                                      minecraft_directory, overwrite,
-                                      ctx=getattr(session, "_ctx", None))):
+        # lzma 内容是变换过的，既不能分片也不能续传 → 原样交给 mll。
+        if lzma_compressed:
+            return orig(url, path, callback, sha1, lzma_compressed, session,
+                        minecraft_directory, overwrite)
+        # 客户端 jar 仍然优先走分片并行（内部自带 .part 与回退）。
+        if _is_big_target(path) and _try_parallel_mll(
+                url, path, sha1, callback, minecraft_directory, overwrite,
+                ctx=getattr(session, "_ctx", None)):
             return True
-        return orig(url, path, callback, sha1, lzma_compressed, session,
-                    minecraft_directory, overwrite)
+        # round-176：其余文件走「.part + Range 续传 + 低速重连 + 单遍 sha1」。
+        try:
+            return _resume_mll_download(
+                url, path, callback=callback, sha1=sha1, session=session,
+                minecraft_directory=minecraft_directory, overwrite=overwrite)
+        except _ResumeFallback:
+            c = active_context()
+            if c is not None and c.aborted:
+                raise requests.RequestException("download aborted by user")
+            return orig(url, path, callback, sha1, lzma_compressed, session,
+                        minecraft_directory, overwrite)
 
     download_file._ac_parallel_wrapped = True  # type: ignore[attr-defined]
     return download_file

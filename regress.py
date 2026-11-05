@@ -67,6 +67,10 @@ SUITES = [
     ("投影/存档地图解析", "test_schematic_tools.py", "script"),
     ("Java 下载阶段/取消", "test_java_download.py", "script"),
     ("来源健康/超时策略", "test_mirror_health.py", "script"),
+    ("共享 assets 去重", "test_shared_assets.py", "script"),
+    ("mll 断点续传/低速/429", "test_mll_resume.py", "script"),
+    ("代码审查 P0 修复回归", "test_p0_review_fixes.py", "script"),
+    ("横向审计 P0 修复回归", "test_interop_p0_fixes.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

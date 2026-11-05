@@ -293,27 +293,49 @@ def main():
     _log.write("5 qss ok\n"); _log.flush()
 
     # ── round-162 条款门禁：首次使用 / 条款改版必须重新同意 ──────────────
-    try:
-        from src.terms import TERMS_VERSION, needs_acceptance
-        # AC_NO_TERMS / AC_LIVE：自动化与 live 截图通道跳过门禁（同 onboarding）。
-        _skip_terms = (os.environ.get("AC_NO_TERMS") == "1"
-                       or os.environ.get("AC_LIVE") == "1")
-        if needs_acceptance(cfg) and not _skip_terms:
-            from src.terms_dialog import TermsDialog
-            _log.write("5.5 terms gate\n"); _log.flush()
-            _dlg = TermsDialog()
-            if not _dlg.exec():
-                _log.write("5.5 terms rejected — exiting\n"); _log.flush()
+    # AC_NO_TERMS / AC_LIVE：自动化与 live 截图通道跳过门禁（同 onboarding）。
+    # fail-closed：门禁判据 / 对话框出任何异常都不许静默放行（旧实现整体包在
+    # try 里、外层只写日志，异常即可「未同意条款直接进启动器」）。
+    from src.i18n import t as _t
+    _skip_terms = (os.environ.get("AC_NO_TERMS") == "1"
+                   or os.environ.get("AC_LIVE") == "1")
+    if not _skip_terms:
+        try:
+            from src.terms import TERMS_VERSION, needs_acceptance
+            _need_terms = needs_acceptance(cfg)
+        except Exception as _e:
+            _log.write("5.5 terms gate check failed: %r\n" % (_e,)); _log.flush()
+            QMessageBox.critical(
+                None, "AC Launcher",
+                _t("err.terms_check_failed",
+                   default="条款检查失败，启动器无法继续启动：{err}", err=str(_e)))
+            return
+        if _need_terms:
+            try:
+                from src.terms_dialog import TermsDialog
+                _log.write("5.5 terms gate\n"); _log.flush()
+                if not TermsDialog().exec():
+                    _log.write("5.5 terms rejected — exiting\n"); _log.flush()
+                    return
+            except Exception as _e:
+                _log.write("5.5 terms dialog failed: %r\n" % (_e,)); _log.flush()
+                QMessageBox.critical(
+                    None, "AC Launcher",
+                    _t("err.terms_dialog_failed",
+                       default="条款对话框无法打开，启动器无法继续启动：{err}", err=str(_e)))
                 return
             cfg["terms_accepted_version"] = TERMS_VERSION
             try:
                 from src.settings_dialog import save_config
                 save_config(cfg)
-            except Exception:
-                pass
+            except Exception as _e:
+                # 同意状态没落盘 → 明确告知，下次启动会重新询问。
+                _log.write("5.5 terms save failed: %r\n" % (_e,)); _log.flush()
+                QMessageBox.warning(
+                    None, "AC Launcher",
+                    _t("err.terms_save_failed",
+                       default="同意状态保存失败，下次启动会再次询问：{err}", err=str(_e)))
             _log.write("5.5 terms accepted\n"); _log.flush()
-    except Exception:
-        _log.write("5.5 terms gate failed (ignored)\n"); _log.flush()
 
     # 更新器落下的更新说明：等主窗口真正显示后再弹，避免压在 splash 上。
     _pending_notes = None

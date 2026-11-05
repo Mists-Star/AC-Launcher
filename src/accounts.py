@@ -30,6 +30,28 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def launch_identity(account: dict | None) -> dict:
+    """Normalize any stored account into the three launch credentials.
+
+    AccountsManager stores Mojang/Microsoft profile-shaped dicts
+    ``{id, name, access_token, type, ...}`` (see ``core.auth``), while
+    minecraft-launcher-lib's MinecraftOptions expects ``username`` / ``uuid`` /
+    ``token``. Reading the latter three directly made every signed-in account
+    launch as ``Player`` with an empty UUID and empty access token; the
+    no-account fallback (``OFFLINE_ACCOUNT``) happens to use the legacy keys,
+    which masked the bug for a long time.
+
+    Accept both shapes so old ``accounts.json`` files keep working. Empty
+    values stay empty (offline accounts legitimately have no token).
+    """
+    acct = account or {}
+    return {
+        "username": str(acct.get("name") or acct.get("username") or "Player"),
+        "uuid": str(acct.get("id") or acct.get("uuid") or ""),
+        "token": str(acct.get("access_token") or acct.get("token") or ""),
+    }
+
+
 class AccountsManager:
     def __init__(self):
         self._path = os.path.join(get_data_dir(), "accounts.json")

@@ -19,6 +19,7 @@ from .core.mirror import InstallCancelled, abort_requested
 from .paths import get_data_dir
 from .brand import APP_NAME
 from .core.authlib import ensure_authlib
+from .accounts import launch_identity
 
 __all__ = ["find_java", "build_options", "get_command", "launch_process", "launch_instance",
            "run_hook_cmd", "run_pre_launch_cmd", "apply_wrapper", "resolve_game_dir",
@@ -632,15 +633,19 @@ def launch_instance(
         )
     # round-52 启动阶段上报：检查启动环境（给启动进度对话框点第 1 步）。
     _emit_step(callback, "check")
-    # round-48 共享 libraries 去重：存量实例的 libraries 还是独立实际目录的话，
-    # 启动前一次性合并进全局共享池并改为目录联接。external（链接他人目录）实例
-    # 绝不改用户真实文件。失败只退回独立目录，不影响启动。
-    if not getattr(inst, "external", False):
-        try:
-            from .core.shared_libs import ensure_shared_libraries
+    # round-48 共享 libraries 去重 / round-175 共享 assets 去重：只作用于
+    # AC 自建实例（审查 P0-4）。旧判定只有 `not external`，会把「复制导入」
+    # 的外来完整客户端也套上池——既违反 round-92「绝不改外来布局」，又让
+    # 下方补库写 jar 穿透联接污染全局池。失败只退回独立目录，不影响启动。
+    try:
+        from .core.shared_libs import (ensure_shared_assets,
+                                       ensure_shared_libraries,
+                                       should_use_shared_pool)
+        if should_use_shared_pool(inst):
             ensure_shared_libraries(inst.mc_dir)
-        except Exception:  # noqa: BLE001
-            pass
+            ensure_shared_assets(inst.mc_dir)
+    except Exception:  # noqa: BLE001
+        pass
     # Per-instance Java (instance.java_path) wins over the global setting; the
     # global setting wins over auto-detect. This lets one instance pin a JDK
     # without disturbing the launcher-wide default.
@@ -862,10 +867,15 @@ def launch_instance(
     # 会第二遍 build_options 且只传全局 ram/jvm，把实例级覆盖丢回全局值
     # （round-42 的 ram_mb/jvm_args/renderer/perf 全部失效）。现在实例级
     # 覆盖一次注入，yggdrasil 只追加 javaagent 参数。
+    # P0（横向审计）：账号存储是 profile 形态 {id, name, access_token}，
+    # mll 的 MinecraftOptions 要 username/uuid/token。此前直接读后者，
+    # 所有已登录账号都以 Player / '' / '' 空凭证启动；未登录时走的
+    # OFFLINE_ACCOUNT 恰好是旧三键，反而正常，把问题掩盖了。
+    _ident = launch_identity(account)
     opts = build_options(
-        account.get("username", "Player"),
-        account.get("uuid", ""),
-        account.get("token", ""),
+        _ident["username"],
+        _ident["uuid"],
+        _ident["token"],
         mc_dir=inst.mc_dir,
         java=java,
         # round-42 实例级覆盖（对齐主流做法）：ram/jvm 优先实例，0/空回退全局

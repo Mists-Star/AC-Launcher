@@ -455,9 +455,11 @@ def parallel_download_file(
 
     lock = _threading.Lock()
     done = [0]
+    seg_done = {seg: 0 for seg in ranges}
 
-    def _tick(nbytes: int) -> None:
+    def _tick(seg, nbytes: int) -> None:
         with lock:
+            seg_done[seg] += nbytes
             done[0] += nbytes
             d = done[0]
         if meter is not None:
@@ -470,6 +472,10 @@ def parallel_download_file(
 
     def _worker(seg: _ParallelChunk) -> None:
         s, e = seg
+        # 重跑该段前把它的进度退回，避免重试时进度条越过 100%。
+        with lock:
+            done[0] -= seg_done[seg]
+            seg_done[seg] = 0
         for attempt in range(3):
             try:
                 h = dict(hdrs)
@@ -488,7 +494,7 @@ def parallel_download_file(
                                 raise NetError(_t_err("err.download_cancel", default="下载已取消"))
                             fh.write(chunk)
                             seg_written += len(chunk)
-                            _tick(len(chunk))
+                            _tick(seg, len(chunk))
                     # 校验本段实际写满（.part 已 truncate 到全长，未写区域是零填充，
                     # 所以必须以「写入字节数」判定，不能用 read 长度）
                     if seg_written >= e - s + 1:
@@ -503,13 +509,29 @@ def parallel_download_file(
                     raise
                 _time.sleep(0.5 * (attempt + 1))
 
-    # 4) 并行执行；任一失败 → 清残件回退单流（保证完成）
+    # 4) 并行执行；round-176：只补跑失败段（每段内部已重试 3 次），
+    #    仍失败才清残件回退单流（保证完成）。
     try:
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        failed = []
         with ThreadPoolExecutor(max_workers=min(n, len(ranges))) as ex:
-            list(ex.map(_worker, ranges))
+            futs = {ex.submit(_worker, seg): seg for seg in ranges}
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception:
+                    failed.append(futs[fut])
+        if failed:
+            with ThreadPoolExecutor(max_workers=min(n, len(failed))) as ex:
+                list(ex.map(_worker, failed))
+            failed = []
     except Exception:
-        os.remove(part) if os.path.exists(part) else None
+        failed = list(ranges)
+    if failed:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
         return download_file(url, dest, resume=False, progress=progress,
                              headers=headers, timeout=timeout, cancel=cancel,
                              _allow_parallel=False)
