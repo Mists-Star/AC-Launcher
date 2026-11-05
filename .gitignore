@@ -79,6 +79,9 @@ ac.lock
 ac.live.lock
 _startup.log
 _*.png
+# 下载中断 / 取消测试的断点残留（回归每次跑都会再生，不是源码）
+# 若将来确需入库某个 .part 文件，用 !xxx.part 单独放行
+*.part
 # 脱敏审计/历史改写模拟脚本（内含真实 PII 字面量，绝不入库）
 _pii_*.py
 _rewrite_*.py
