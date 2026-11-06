@@ -71,6 +71,12 @@ SUITES = [
     ("mll 断点续传/低速/429", "test_mll_resume.py", "script"),
     ("代码审查 P0 修复回归", "test_p0_review_fixes.py", "script"),
     ("横向审计 P0 修复回归", "test_interop_p0_fixes.py", "script"),
+    ("新建实例信号 arity", "test_new_instance_signal.py", "script"),
+    ("启动后窗口行为", "test_post_launch_behavior.py", "script"),
+    ("状态栏信号归属", "test_status_signal_ownership.py", "script"),
+    ("Java 镜像/断点/取消", "test_java_mirror_resume.py", "script"),
+    ("模组链路/启动诊断", "test_round177_mod_diag.py", "script"),
+    ("构建退出码/瘦身降级", "test_build_trim.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

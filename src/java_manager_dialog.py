@@ -317,8 +317,9 @@ class JavaManagerDialog(QDialog):
         self.major_combo.clear()
         try:
             majors = java_install.available_majors()
-        except Exception:
-            majors = [m for m, _ in java_install.JAVA_CHOICES]
+        except Exception:  # noqa: BLE001 - 极端异常也要带上本机已装的 major
+            majors = sorted({m for m, _ in java_install.JAVA_CHOICES}
+                            | set(java_install.installed_majors()))
         for m in majors:
             self.major_combo.addItem(f"Java {m}", m)
         self.major_combo.addItem(t("javamgr.custom_major"), -1)

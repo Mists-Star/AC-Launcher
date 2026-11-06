@@ -397,8 +397,17 @@ class LaunchProgressDialog(QDialog):
         self.status_lbl.setText(
             t("launch.dl_failed_retry", err=err) if err
             else t("launch.dl_failed_retry", err="—"))
+        # round-177：失败必须有醒目终态。此前用灰色小字 + 仍在跑的
+        # indeterminate 进度条 + 残留速度数字，用户误以为还在下载而重复点。
         self.status_lbl.setStyleSheet(
-            f"color: {COLORS['text_sub']}; font-size: 12px;")
+            f"color: {COLORS['danger']}; font-size: 12px; font-weight: 600;")
+        try:
+            self.set_speed("")
+            self.bar.setMaximum(1)
+            self.bar.setValue(0)
+            self.pct_lbl.setText("—")
+        except RuntimeError:  # C++ 对象已删除
+            return
         self._fit_text_heights()
 
     def _on_pause_clicked(self):

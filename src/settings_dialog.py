@@ -134,9 +134,11 @@ _DEFAULTS = {
     "reduce_motion": False,
     # round-167 低配模式：压制壁纸/动效/音效/启动画面等重效果（不改写玩家偏好）
     "slim_mode": False,
-    # ---- 退出释放资源（round-50）----
-    "close_after_launch": True,      # 游戏启动并稳定运行后自动关闭启动器
-    "close_after_launch_delay": 5,   # 检测游戏稳定运行的等待秒数
+    # ---- 启动后窗口行为（round-50 引入，2026-11-06 改语义）----
+    # True = 游戏稳定启动后隐藏到托盘（进程常驻，崩溃检测 / 退出后命令照跑），
+    # 游戏退出时自动恢复窗口；False = 窗口一直保持显示。真退出走托盘右键。
+    "close_after_launch": True,
+    "close_after_launch_delay": 5,   # 判定「游戏稳定运行」的等待秒数
     # round-83 系统托盘（关窗藏托盘）：True = 点关闭按钮只是隐藏到托盘，
     # 游戏进程/下载任务不受影响；False = 恢复「关闭即退出」。
     # round-92 默认改「关闭即退出」：玩家点 X 即退出是主流直觉；想藏托盘可勾选。
@@ -723,7 +725,7 @@ class SettingsPage(QWidget):
         self.close_launch_chk.setChecked(self.cfg.get("close_after_launch", True))
         # round-83 系统托盘：关窗最小化到托盘（无窗口图标全托给托盘常驻）
         self.tray_chk = QCheckBox(t("settings.tray_minimize"))
-        self.tray_chk.setChecked(self.cfg.get("tray_minimize", True))
+        self.tray_chk.setChecked(self.cfg.get("tray_minimize", False))
         self.tray_chk.setToolTip(t("settings.tray_minimize_hint"))
         # round-79b 窗口置顶（B 节补完）：阅读/写关卡时固定在最前
         self.topmost_chk = QCheckBox(t("settings.always_on_top"))
@@ -1582,7 +1584,7 @@ class SettingsPage(QWidget):
     # ── round-169 跨字段冲突提示（只说明优先级，不改任何配置语义）──────
 
     def _sync_behavior_hints(self, *_):
-        """刷新「启动后自动关闭 / 托盘常驻 / 退出后命令」的冲突说明。"""
+        """刷新「启动后自动最小化 / 托盘常驻 / 退出后命令」的行为说明。"""
         lbl = getattr(self, "behavior_note", None)
         if lbl is None:
             return
@@ -1599,7 +1601,9 @@ class SettingsPage(QWidget):
         except RuntimeError:
             cmd = str(self.cfg.get("exit_cmd", "") or "").strip()
         lines = []
-        if close_on and tray_on:
+        # 2026-11-06：自动隐藏不再依赖 tray_chk（托盘图标始终常驻），
+        # 只要开启「启动后自动最小化」就该说明恢复/退出方式。
+        if close_on:
             lines.append(t("settings.behavior_note_tray"))
         if close_on and cmd:
             lines.append(t("settings.behavior_note_exit_cmd"))

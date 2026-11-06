@@ -162,3 +162,123 @@
 **返工顺序**：~~P0 三条~~（已完成）→ 认证链路四条 → 下载完整性 → 渐进项。
 报告里另列了「AC 已做对/领先」的 5 类能力（Forge processors、natives exclude、
 安装期 sha1、共享池、取消链路），修的时候别误伤。
+
+---
+
+## 七、2026-11-06 真机验收（部署版 exe）发现
+
+场景：按 `docs/round163_instance_java_reliability/tasks.md` 重打部署后，用户在真机上
+新建 1.21.10 实例，连点「创建」十几次毫无反应（不弹框、不关向导、无网络等待）。
+证据：`<安装目录>/data/crash.log` 20:27:17–20:30:45 共 **15 条**同一异常。
+
+| 级别 | 位置 | 问题 | 状态 |
+|---|---|---|---|
+| **P0** | `src/pages_instances.py:500` / `:1346` | `created` 信号定义为 5 参，但 `result_data()` 自 `4811b8f` 起返回 7 元组（新增 `format` / `base`）。`emit(*7)` 抛 `TypeError: created(...) only accepts 5 argument(s), 7 given!`；Qt 槽内异常只被 `main.py:149` 的 excepthook 写进 crash.log，**界面静默失败**。版本页弹窗路径（`pages_browse.py:354`）已按 7 元解包，故只炸实例页嵌入式向导 | ✅ 已修：信号扩为 7 参；新增 `tests/test_new_instance_signal.py`（Qt 元对象运行时验签 + 返回值/信号/槽三方一致 + 全仓 63 处 Signal/emit 超参扫描），登记 `regress.py` → **39/39 exit 0** |
+| **P1** | `src/core/java_install.py` | Java 下载裸 GET `api.adoptium.net` → 307 跳 GitHub Releases（55.9 MB，本机 ≈10 KB/s ≈95 min），未接入项目已有的 Range 分片 / 来源健康 / 断点续传 | 待用户授权修（建议「USTC/TUNA 镜像优先 + 官方兜底 + 断点续传」；实测 USTC 同文件 22.8 MB/s、Content-Length 与官方一致、支持 Range） |
+| **P1** | `src/core/java_install.py:175-183` | 取消 / 失败分支 `shutil.rmtree(target)` 删的是**已装好的** `jre-25/` 整个目录，不只是半成品 zip；点「取消」会连带删掉可用运行时 | 待用户授权修（应与上条一起改，同一处代码） |
+
+**结构性教训**：Qt 信号是「定义处 arity 硬约束」，任何 `emit(*tuple)` 的返回值扩字段
+必须同步改 Signal 声明；而 Qt 槽内异常不弹框、不中断进程，只落 crash.log →
+「点了没反应」优先查 `data/crash.log`，不要先怀疑网络。新加的全仓 arity 扫描
+就是为防止同类分叉再次静默溜过回归。
+
+**同场已完成**：重打并部署含修复的 exe（保留 `launcher_config.json` / `data/`），
+`AC_NO_TERMS=1` 10 秒冒烟通过；JRE 25 已由国内镜像补装进 `data/java/jre-25`。
+
+### 七·续 真机连报三现象（20:49–20:53，同一条因果链）
+
+用户口述：① 下载资源文件时「左下角那个进度一直在闪，第一个数字正确、后面都是 9，又弹回正常值，反复跳，像是昨天的状态」；②「下载进度不会关」，于是以为没点上、又启动了一次；③ 再启动直接报「少了 classpath」。用户自己怀疑是「启动了两次」。随后再重启一次，补全跑完，游戏正常启动。
+
+**现场证据**（`<本机部署目录>/data/`）：
+- `Get-CimInstance Win32_Process` 只有 **1 个** `AC_Launcher.exe`（20:46:03 起），`ac.lock` 存在 → 单实例锁有效，**不是两个 exe 进程**；`_handle_play` / `_start_download` 的 `isRunning()` 护栏也确实挡住了并行双 worker。
+- `task_history.json`：**20:46 `cancelled launch 38/113`（正在下载依赖库 38/113）→ 20:47 `done launch 3058/5146`（资源下载完成）**，两次任务、前一次被取消，与用户「又启动一次」吻合。
+- `data/<id>.log`（游戏日志，GBK）：`错误: 找不到或无法加载主类 net.minecraft.client.main.Main / ClassNotFoundException`。但 `versions/26.3/26.3.jar` 41,483,720 B 完整、`net/minecraft/client/main/Main.class` 在包内、`26.3.json` mainClass 正确 / 114 libraries → **不是主 jar 坏，是 38/113 被取消后 classpath 没拼齐**；启动器崩溃分析把这条日志归类为 `exit.classpath`（「缺少游戏运行库(classpath)」）才显示成「少了 classpath」。再启动补全跑完即自愈，用户已确认。
+- `crash.log` 无新增（仍 15 条旧信号异常）→ 全程无 Python 崩溃。
+
+| 级别 | 位置 | 问题 | 状态 |
+|---|---|---|---|
+| **P1** | `src/main_window.py:2714,2720,2721`（下载）/ `:5049,5054,5055`（启动） | `w.status.connect(self.statusBar().showMessage)`、`w.speed.connect(self._set_speed)`、`w.progress.connect(self._set_progress)` 三路信号**直连全局状态栏且无 worker 归属检查**。取消/失败后 `self._dl_workers.pop()` 但**没有 disconnect**，`ProgressWorker` 的 `_speed_loop` 轮询与 `_on_stall` Timer 仍持续发信号；`_set_progress` 还会 `setVisible(True)` 重新点亮进度条。只有 `_on_download_progress` 有 `inst_id not in self._dl_workers` guard，注释声称「残留 status/progress 信号因 worker 已移出表而被丢弃」**是错的** → 旧任务数值（用户看到的 9…）与新任务正确值交替刷 = 闪 | 待授权修 |
+| **P1** | `src/main_window.py:2853-2858` `_on_download_error` | 明确写着「round-170：失败不再自动关框——保留对话框并提供重试下载」，**是设计**；但失败态视觉不够醒目，用户误判为「还在下载」→ 重复点启动，是整条链的触发点 | 待授权修（加醒目失败态 + 「重试」按钮语义） |
+| P2 | `src/worker.py:293-301,319-340` | `abort()` 后 `_speed_loop` / stall Timer 未立即停，是残留信号的上游；即使 UI 加了 guard，也该在 abort 时 `disarm_stall()` + 置 `_speed_stop` | 待授权修 |
+
+**修复方向**：给状态栏三路信号统一走「当前活跃 worker」归属槽（连接时带 worker 引用，槽首判 `self._active_status_worker is worker`），并在完成/失败/取消时清空 + `disconnect`；失败对话框加醒目终态。完成后必须**真机复现「点两次 → 状态栏不再闪」**才算结案（纯静态判据不足以证明运行时闪烁消失）。
+
+⚠ 本条登记时用户游戏正在运行，未改代码、未重打部署，避免打断。
+
+### 七·续 2 启动后行为 + 实例页「启动」按钮 + 模组侧完整性（20:57–21:00）
+
+| 级别 | 位置 | 问题 | 状态 |
+|---|---|---|---|
+| **P1** | `src/main_window.py:5322-5356`（原实现） | `close_after_launch` 默认 `True`（`settings_dialog.py:138`，真机 `launcher_config.json` 亦为 `true`）→ 游戏起来 5s 后 `_tray_auto_quit=True` + `close()` → `QApplication.quit()` **真退出**，强制绕过托盘。随主窗口销毁的还有 `_game_poll_timer`（`QTimer(self)`），导致 `explain_exit()` 退出码分类、崩溃弹窗、`last_session` 崩溃记录、退出后命令、控制台结束标记、托盘「结束全部游戏」全部失效。用户诉求「退出游戏后 AC 还在 + 崩溃检测能看到」 | ✅ 已修：改为 hide 到系统托盘（无托盘时 `showMinimized`），游戏退出时自动恢复窗口；同步中英文案，判据 `tests/test_post_launch_behavior.py` |
+| **P1** | `src/pages_instances.py:1667` / `:2052` | 实例详情卡的「启动」按钮名不副实：`_launch()` 只 `set_current()` + `_refresh()` + `current_changed.emit()`，**不启动游戏也不跳首页**（注释声称 `jumps home & selects`）。用户点着「毫无反应」，实际只是把实例悄悄设为当前 | 待用户选方案（推荐换成「体检 / 启动诊断」，复用 `mod_check_dialog.open_health_dialog` + 补一页启动命令/classpath/缺库视图；或按用户原话直接删掉） |
+| **P1** | `src/crash_analysis.py:328` | 崩溃自动补前置调 `download_mod_to(project_id, inst.mods_dir)` **未传 `mc_version` / `loader`** → `resolve_mod_dependencies` 取项目最新版本，可能装进与当前实例不兼容的 mod | 待授权修（应传 `inst.game_version` / `inst.loader`） |
+| **P1** | `src/store_detail.py:775-785`（CurseForge 分支） | CF 渠道走 `download_curseforge_file` / `download_cfwidget_file` 单文件直下，**无依赖树解析、无版本自适应**；「另存为文件夹」分支也把 `mc_version, loader` 置空 | 待授权修 |
+| P2 | 入口可发现性 | 冲突检测（`core/mod_check.py` + `core/instance_health.py`）、一键修复（体检 `apply_fix` / 崩溃弹窗 `_repair_all` / `diagnostics.repair_all`）三套能力都在，但分散在右键二级菜单与不同弹窗，无统一「模组完整性」入口 | 待授权（建议整合进「体检 / 启动诊断」） |
+| P2 | `src/settings_dialog.py:726` vs `:143` | `tray_minimize` UI 缺省值写 `True`、`_DEFAULTS` 是 `False`；配置缺键时勾选态与实际行为不一致 | ✅ 已修：UI 缺省对齐为 `False`；`_sync_behavior_hints` 的行为说明不再依赖 `tray_chk`（自动隐藏与托盘开关解耦），测试判据已覆盖 |
+
+**已有能力，勿重复造轮子**：Modrinth `required` 依赖递归（`net_api.py:805`，深度 5 / 去重 / 跳过 optional+incompatible）、按 MC 版本+加载器过滤（`net_api.py:707`、`store_detail.py:586`）、重复 modid 与缺前置扫描（`core/mod_check.py`）、OptiFine/Sodium 冲突（`core/instance_health.py:230-247`）、`install.repair_minecraft_dir` 版本文件自愈。
+
+
+---
+
+## 八、模组 / 资源链路复查（2026-11-06 round-177）
+
+> 用户指出「前面那三个缺口只是举例，去找找还有没有别的」。因此对
+> 「版本过滤 → 依赖解析 → 下载落盘 → 崩溃补前置 → Java 选择」重做了一遍
+> 逐行复查。**以下每一条都带实际读到的 file:line；没查实的明确标「待核实」，
+> 不把推测写成结论。**
+>
+> ⚠ 过程说明：先派了一个后台只读审计任务，其结论未通过工具通道稳定返回，
+> 因此本节每条 `file:line` 均由主 agent 逐行复查源码确认，未直接采信转述；
+> 没读透的部分单列「待核实」，不写成结论。
+
+### 本轮已修（✅ 均为真 bug，非功能增强）
+
+| # | 位置 | 问题 / 影响 | 判据 |
+|---|---|---|---|
+| 1 | `src/crash_analysis.py:328` | 崩溃自动补前置 `download_mod_to(target["project_id"], inst.mods_dir)` 不带 MC 版本 / 加载器 → `_modrinth_versions` 不过滤，拉到不兼容最新版，修完照样崩 | `test_round177_mod_diag.py` |
+| 2 | `src/crash_analysis.py:322` | 模糊匹配失败时 `target = hits[0]` 兜底 → 装进一个无关模组，比「没修好」更糟（多一个冲突源） | 同上 |
+| 3 | `src/net_api.py` `parallel_download_file` 预建 `.part` 前 `os.remove(dest)` | 分片失败 + 单流兜底也失败时，**已装 mod / 核心 jar 已被删掉**（数据损坏）。本来就是 `os.replace` 原子收尾，根本不需要预删 | 同上 |
+| 4 | `src/net_api.py:805-855` `resolve_mod_dependencies` | 本体网络错误 / 无匹配版本时静默 `return out` → `download_mod_to` 抛「没有可下载的文件」之前 UI 无差别，且子依赖被吞后显示成功却缺前置 | 同上 |
+| 5 | `src/net_api.py` 6 处 `os.path.join(dest_dir, filename)` | 服务端返回的文件名未 `os.path.basename` 清洗，带 `../` 可写穿目标目录 | 同上（`_safe_filename`） |
+| 6 | `src/net_api.py` Modrinth 两条下载路径 | 全链路无 sha1 校验；Modrinth version 的 `files[].hashes.sha1` 现成就没用 | 同上（`_verify_sha1`） |
+| 7 | `src/core/java_install.py` + `src/java_manager_dialog.py:319` | **Java 下拉候选不含本机已装 major**：`JAVA_CHOICES` 最大 24、`available_majors()` 离线回退静态表、`installed_majors()` 只用于渲染「已安装」卡片 → 玩家装好的 Java 25 路径能选、能启动，但列表里永远看不见 | `test_java_mirror_resume.py` |
+| 8 | `src/core/java_install.py` 整体 | Java 下载裸单流 GET `api.adoptium.net` → 307 到 GitHub（实测 ~10 KB/s，55.9 MB 约 95 分钟），无镜像 / 无 Range 续传；取消时 `shutil.rmtree(target)` 会把已装运行时一起删 | `test_java_mirror_resume.py` |
+| 9 | `src/main_window.py` 状态栏三路信号 | 见七·续：取消/失败只 pop worker、从不 disconnect，旧 worker 残留信号与新任务交替刷 → 左下角闪烁 | `test_status_signal_ownership.py` |
+| 10 | `src/pages_instances.py:1667` / `:2052` | 详情页「启动」按钮名不副实（只 `set_current` + refresh，不启动不跳首页）→ 改成「体检 / 启动诊断」，新增 `src/launch_diagnostics_dialog.py`（启动命令 / classpath / 缺库 / 体检两页，token 恒占位符） | `test_round177_mod_diag.py` |
+
+### 仍未修 — 真缺口（P1，按耦合分组）
+
+| 组 | 位置 | 问题 |
+|---|---|---|
+| A 依赖与版本 | `src/pages_browse.py:879-895` | CurseForge 下载分支（`download_cfwidget_file` / `download_cfwidget_slug` / `download_curseforge_mod`）**完全不解析 required 依赖树**，也不带实例版本/加载器；只有 Modrinth 分支传了。CF 靠 fileID 选版本，但依赖得单独查 |
+| A | `src/net_api.py:805` | `resolve_mod_dependencies` 递归时把 `version_id` 传空、`_seen` 按 `project_id` 去重 → 同一项目多版本依赖会被吞（当前设计取舍，改动前需定语义） |
+| A | `src/net_api.py:2188` `download_modpack_to` | 走 `get_mod_download(project_id)` 无版本参数，只能拿最新整合包版本；详情页「指定版本」走的是另一条路径，两条口径未统一（待核实是否会装错） |
+| B 完整性 | `src/net_api.py:1363/1681/1783` | CurseForge 三条下载路径**仍无 hash 校验**（本轮只补了 Modrinth 两条）；CF 文件侧是否有 hash 字段待核实 |
+| B | `src/net_api.py:328` `download_file` | 只有 Content-Length 长度校验，无期望 hash 参数；建议做成统一可选参数，别每个调用点各写一份 |
+| B | `src/net_api.py` mod 下载 | 失败时 `.part` 保留策略与 Java 侧不一致（Java 本轮做了「取消删、失败留」） |
+| C 检测 | `src/crash_analysis.py:279` | `find_missing_dependencies` 只比 modid 字符串，不解析 Fabric `depends` 版本区间 / Forge 依赖约束 |
+| C | `src/crash_analysis.py:297` | `except Exception: failed.append(dep)` 把网络错、解析错、写盘失败全折叠成一个字符串，UI 无法区分「没搜到」和「装失败」 |
+| C | `src/launch.py:1024` 注释 | 启动前只做轻量预检，缺前置不拦截（PCL2 / HMCL 会显式提示） |
+| D 入口 | 三处 | 「一键修复」分散在右键实例体检 / 崩溃弹窗 / 设置→诊断与修复，语义不一、无统一「模组完整性」入口 |
+| D | `src/pages_instances.py` | 右键菜单仍无「实例体检」「模组完整性」，能力藏在详情页二级 |
+
+### 待核实（本轮没读透，不写成结论）
+
+- `src/core/install.py` 对 `.mrpack` 的 `overrides/` 解压与覆盖策略；
+- `src/core/mod_check.py:_parse_jar` 对 Forge `META-INF/mods.toml` 的覆盖程度
+  （`crash_analysis.py:274` 有 `_toml_attr`，两条链路口径可能不一致）；
+- 资源包 / 光影 / 数据包是否与 mod 共用 `loaders` 过滤而被误筛；
+- CurseForge 缓存键是否包含版本 / 加载器（Modrinth 侧 `_modrinth_versions` 的 key 已含，确认过）；
+- `download_cfwidget_file` 目录口径与整合包 UI 读取路径是否一致。
+
+### 修复分组建议
+
+- **A 组**：CF 依赖树 + 版本口径统一，一次改（分散修容易互相打脸）。
+- **B 组**：把 sha1 / `.part` 策略做成 `download_file` 的通用能力，再让 CF 三条路径接入，别继续按渠道各写一份。
+- **C 组**：崩溃分析的错误分类与启动前拦截，需先定义「缺前置时是拦还是提示」的产品语义。
+- **D 组**：纯 UI 增量，风险最低，可随时插入。
+
+> ⚠ 双轨验收：本节修复全部是代码轨 + 构造判据，**未在真客户端复现**。
+> 按项目铁律，必须真机走一遍「搜模组 → 下载 → 启动 → 体检 / Java 下拉」
+> 才算结案。特别是 #7 Java 25 下拉，要重开一次 Java 管理对话框目检。

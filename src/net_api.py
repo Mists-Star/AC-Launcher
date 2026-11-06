@@ -448,8 +448,9 @@ def parallel_download_file(
 
     # 3) 预建 .part（对齐长度），各线程写自己段
     part = dest + ".part"
-    if os.path.exists(dest):
-        os.remove(dest)
+    # round-177：绝不预删 dest。旧实现先把已存在的 mod / 核心 jar 删掉，
+    # 万一分片失败且单流兜底也失败，玩家原本能用的文件就没了。全程写
+    # .part、最后 os.replace(part, dest) 原子覆盖，本来就不需要先删。
     with open(part, "wb") as f:
         f.truncate(total)
 
@@ -743,6 +744,40 @@ def _modrinth_versions(project_id: str, mc_version: str = "", loader: str = "",
     return versions
 
 
+def _safe_filename(name: str, fallback: str = "download.jar") -> str:
+    """round-177：只取 basename，挡住服务端返回 ``../`` 写穿目标目录。"""
+    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    if not base or base in (".", ".."):
+        return fallback
+    return base
+
+
+def _primary_hashes(version: dict) -> dict:
+    """Modrinth version.primary file 的 hashes（sha1/sha512），供下载后校验。"""
+    files = version.get("files", []) or []
+    primary = next((f for f in files if f.get("primary")),
+                   files[0] if files else {})
+    h = primary.get("hashes") or {}
+    return h if isinstance(h, dict) else {}
+
+
+def _verify_sha1(path: str, expected: str) -> None:
+    """下载完成后校验 sha1；不匹配就删掉坏文件并抛 NetError。"""
+    if not expected:
+        return
+    import hashlib
+    digest = hashlib.sha1()  # noqa: S324 - 校验用，非安全用途
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    if digest.hexdigest().lower() != expected.lower():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise NetError("文件校验失败（sha1 不匹配），已删除损坏文件")
+
+
 def _version_primary_file(version: dict, project_id: str) -> tuple[str, str]:
     """(filename, url) of a version's primary file. Raises NetError if none."""
     files = version.get("files", [])
@@ -827,8 +862,12 @@ def resolve_mod_dependencies(
     try:
         versions = _modrinth_versions(project_id, mc_version, loader)
     except NetError:
-        return out  # 网络错误 / 项目不存在：跳过该节点，不中断整棵依赖树
+        if _depth == 0:
+            raise  # round-177：本体的网络错误不能吞，否则 UI 显示「已下载」却啥也没装
+        return out  # 子依赖失败可降级，主文件照常安装
     if not versions:
+        if _depth == 0:
+            raise NetError("该模组没有匹配当前游戏版本 / 加载器的文件")
         return out
     target = versions[0]
     if version_id:
@@ -843,6 +882,7 @@ def resolve_mod_dependencies(
         "project_id": project_id,
         "filename": filename,
         "url": url,
+        "sha1": _primary_hashes(target).get("sha1", ""),
         "optional": False,
     })
     for dep in target.get("dependencies", []):
@@ -881,10 +921,11 @@ def download_mod_to(
     for item in files:
         if not item["url"]:
             continue
-        dest = os.path.join(dest_dir, item["filename"])
+        dest = os.path.join(dest_dir, _safe_filename(item["filename"]))
         # round-37：统一断点续传下载器（中断后 .part 续传）
         try:
             download_file(item["url"], dest, progress=prog)
+            _verify_sha1(dest, item.get("sha1", ""))
         except NetError as e:
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
         if prog is not None:
@@ -919,9 +960,10 @@ def download_mod_version_to(
     for item in files:
         if not item["url"]:
             continue
-        dest = os.path.join(dest_dir, item["filename"])
+        dest = os.path.join(dest_dir, _safe_filename(item["filename"]))
         try:
             download_file(item["url"], dest, progress=prog)
+            _verify_sha1(dest, item.get("sha1", ""))
         except NetError as e:
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
         if prog is not None:
@@ -1396,7 +1438,7 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
         url = f.get("downloadUrl") or FORGECDN_URL.format(
             a=int(file_id) // 1000, b=int(file_id) % 1000, name=filename)
         os.makedirs(dest_dir, exist_ok=True)
-        return download_file(url, os.path.join(dest_dir, filename),
+        return download_file(url, os.path.join(dest_dir, _safe_filename(filename)),
                              timeout=120, progress=_cb_progress(callback))
     try:
         r = requests.get(
@@ -1417,7 +1459,7 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
     if not url:
         raise NetError("该模组没有直接下载链接")
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, filename)
+    dest = os.path.join(dest_dir, _safe_filename(filename))
     return download_file(url, dest, timeout=120,
                          progress=_cb_progress(callback))
 
@@ -1561,7 +1603,7 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
         filename = os.path.basename(url.split("?")[0]) or f"{project_id}.zip"
     _store(meta_key, [url, filename])
     os.makedirs(dest_dir, exist_ok=True)
-    return download_file(url, os.path.join(dest_dir, filename),
+    return download_file(url, os.path.join(dest_dir, _safe_filename(filename)),
                          timeout=300, progress=_cb_progress(callback))
 
 
@@ -2198,7 +2240,7 @@ def download_modpack_to(project_id: str, dest_dir: str, callback=None) -> str:
     """
     filename, url = get_mod_download(project_id)
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, filename)
+    dest = os.path.join(dest_dir, _safe_filename(filename))
 
     progress_cb = None
     if isinstance(callback, dict):

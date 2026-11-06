@@ -8,6 +8,106 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## 2026-11-06 真机验收修订（WorkBuddy，非 TRAE 迭代批次）
+
+> 按 `docs/round163_instance_java_reliability/tasks.md` 重打部署后真机验收，
+> 用户连报数个现象。随后按用户「按你的来」授权，把真机暴露的问题与模组 /
+> 资源链路复查结果一并修成一批（round-177）。全部 P1/P2 登记见
+> `docs/quality_punchlist.md` 第七章、七·续与第八章。
+
+### 修复 / 行为变更
+
+* **新建 1.21.10 实例点「创建」毫无反应（P0，静默失败）**：`result_data()` 自
+  `4811b8f` 起返回 7 元组（新增 `format` / `base`），版本页弹窗已适配，但实例页
+  嵌入式向导的 `created` 信号仍声明 5 参 → `emit(*7)` 抛 `TypeError`，Qt 槽内
+  异常只被全局钩子写进 `data/crash.log`（15 条同错，不弹框不关窗）。信号扩为
+  7 参；新增 `tests/test_new_instance_signal.py`（Qt 元对象运行时验签 + 返回值/
+  信号/槽三方一致 + 全仓 63 处 Signal/emit 超参扫描）。
+* **启动游戏后启动器真退出（行为变更）**：`close_after_launch` 原实现在 5s 后
+  `_tray_auto_quit=True` + `close()` → `QApplication.quit()`，把 `QTimer(self)`
+  形态的 `_game_poll_timer` 一并销毁 → 退出码分类、崩溃弹窗、`last_session`
+  崩溃记录、退出后命令、控制台结束标记、托盘结束游戏全部失效，玩家退出游戏后
+  也找不到启动器。改为**隐藏到系统托盘（无托盘则最小化到任务栏）、进程常驻**，
+  游戏退出时先恢复窗口再走崩溃诊断。round-57 为「退出后命令」加的常驻守卫随之
+  移除。中英文案、设置页行为说明联动同步更新；新增
+  `tests/test_post_launch_behavior.py`（18 条行为 + 静态防再犯判据）。
+* `tray_minimize` 的 UI 缺省值由 `True` 对齐为 `False`（与 `_DEFAULTS` 一致）；
+  设置页「行为说明」不再依赖托盘开关是否勾选。
+
+### 验证
+
+* `regress.py` **40/40 exit 0**（新增 1 套）；`tests/test_settings_conflicts.py`
+  按新语义重写（原判据锁定已废弃的「自动关闭优先于托盘常驻」文案）。
+* 新 exe 重打部署到 `<本机部署目录>`，保留 `launcher_config.json` / `data/`；
+  `AC_NO_TERMS=1` 10 秒冒烟通过，无残留锁；从部署版 exe 的 PYZ 归档反查
+  bytecode 确认改动确实进了产物。
+
+### round-177 追加（同日 21:00 后，与上一节同一批交付）
+
+用户明确指出「模组那三个缺口只是举例，得自己去找还有没有别的」，因此对
+「版本过滤 → 依赖解析 → 下载落盘 → 崩溃补前置 → Java 选择」做了逐行复查。
+结论与逐条 `file:line` 见 `docs/quality_punchlist.md` 第八章；以下为本轮实际改动：
+
+* **Java 下载链路重写**（`src/core/java_install.py`）：原先裸单流 GET
+  `api.adoptium.net` → 307 到 GitHub Releases，本机实测 ~10 KB/s（55.9 MB
+  约 95 分钟）。改为 **USTC 镜像优先 / 官方兜底 / Range 断点续传**；
+  取消或失败只删半成品 zip，**不再 `rmtree` 掉已装好的 `jre-<major>/`**。
+* **Java 下拉看不见 25**（用户实报：「路径能选、能启动，就是列表里没有」）：
+  `JAVA_CHOICES` 最大 24、`available_majors()` 离线回退静态表、而
+  `installed_majors()` 只用于渲染「已安装」卡片 → 候选表从未并入已装 major。
+  现在 `available_majors()` 合并已装项，`java_manager_dialog._populate_majors`
+  也直接并入，并把 25 加进静态表。
+* **状态栏进度闪烁**：`main_window.py` 的 `status` / `speed` / `progress`
+  三路信号原先直连全局状态栏、无 worker 归属判断，取消/失败只 pop worker
+  不 disconnect，旧任务残留值与新任务交替刷（用户看到的「一串 9」）。改为
+  按活跃 worker 归属过滤 + 终态清空 disconnect；下载失败对话框加醒目终态
+  （`src/launch_dialog.py`）。
+* **实例详情页「启动」按钮**：原先只 `set_current()` + 刷新，不启动也不跳
+  首页（点了像死的）。改为「体检 / 启动诊断」，新增
+  `src/launch_diagnostics_dialog.py`：复用现成体检，并补一页启动命令 /
+  classpath / 缺库 / Java 信息，**账号名、UUID、令牌恒为占位符**。
+  中英 `instances.launch` 与 20 个 `diag.*` 文案同步。
+* **模组下载链路真 bug**（`src/net_api.py` / `src/crash_analysis.py`）：
+  ① 崩溃自动补前置不带 MC 版本/加载器 → 装到不兼容最新版，现传实例参数；
+  ② 模糊匹配失败时 `hits[0]` 兜底会装进无关模组，现直接计入失败；
+  ③ `parallel_download_file` 预删 `dest`，分片与单流兜底双失败会**删掉玩家
+  原本能用的 jar**，现全程写 `.part` + `os.replace` 原子覆盖；
+  ④ `resolve_mod_dependencies` 本体无匹配/网络错被静默吞掉，现顶层抛出；
+  ⑤ 6 处外部返回的 filename 加 `_safe_filename()` 挡路径穿越；
+  ⑥ Modrinth 两条下载路径落盘后校验 `files[].hashes.sha1`。
+* **`build.py` 退出码说真话**：`_trim_dist()` 的 `_rm()` 只 `except OSError`
+  → 批量删除保护抛出的非 OSError 异常穿透后，PyInstaller 明明已经
+  `Build complete`、`build.py` 却返回 1，极易误判为构建失败。现把瘦身与缓存
+  清理都改为 best-effort（异常吞掉 + 打印明确警告，KeyboardInterrupt 仍可
+  穿透），**退出码改由产物完整性决定**（`AC_Launcher.exe` +
+  `_internal/PySide6` 存在才算成功）。新增 `tests/test_build_trim.py`：
+  模拟 `SystemExit` / `RuntimeError` / `OSError` 三种删除失败，并验证
+  「trim 全失败仍返回 0、产物残缺才返回 1」。
+
+### 验证（本批最终状态）
+
+* `regress.py` **44/44 exit 0**；i18n 中英 **1625=1625**、文案门禁
+  （含新增 `diag.*`）/ PII 门禁 / `git diff --check` 全过。
+* `build.py` 修复后**真跑一次完整构建验证**：瘦身阶段被批量删除保护拦下
+  67 次（`SystemExit: 1`），全部降级为警告，`BUILD_PY_EXIT=0`，日志末尾
+  `[build] OK 产物完整` —— 不再出现「Build complete 但 EXIT=1」。
+* 产物补完翻译瘦身（116 个多余 `.qm` 全清）后重打部署到 `<本机部署目录>`，
+  保留 `launcher_config.json` / `data/`（含 JRE 25）；`AC_NO_TERMS=1` 10 秒
+  冒烟通过、无残留锁；从部署版 exe 的 PYZ 归档反查 **15 条判据全 PASS**
+  （诊断模块 / Java 镜像与 25 / 状态栏归属 / sha1 与文件名清洗 /
+  崩溃补前置 / 诊断文案）。
+
+### 仍未修（已登记，非本批范围）
+
+CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash 校验、
+三处「一键修复」语义不统一、`download_modpack_to` 版本口径未统一、
+`crash_analysis` 缺前置只比字符串、右键菜单无「实例体检」入口。
+分组与修复顺序见 punchlist 第八章。**双轨验收提醒**：本批代码轨 + 构造判据
+已过，但「状态栏不再闪」「Java 25 出现在下拉」「诊断页可打开」仍需在真客户端
+各目检一次才算结案。
+
+---
+
 ## round-176（2026-11-03）— 安装路径断点续传 / 低速判据 / 429
 
 > 横评发现：HMCL、XMCL 全路径 Range 续传，PCL2 有低速判据，Prism 对 429 指数退避；

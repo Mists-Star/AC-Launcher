@@ -317,15 +317,21 @@ def search_and_download_missing(inst, missing_ids: list[str],
                     slug.startswith(dep.lower()) or dep.lower() in slug:
                 target = h
                 break
-        if target is None and hits:
-            target = hits[0]  # best-effort: top hit
         if target is None:
+            # round-177：不再用 hits[0] 兜底。模糊命中一个无关模组装进去，
+            # 比「没修好」更糟（多一个冲突源，玩家更难自查）。
             failed.append(dep)
             continue
         if callback:
             callback(f"下载依赖：{target.get('title', dep)} …")
         try:
-            p = download_mod_to(target["project_id"], inst.mods_dir)
+            # round-177：必须带实例的 MC 版本 + 加载器，否则 _modrinth_versions
+            # 不过滤，会拉到不兼容的最新版，修完照样崩。
+            p = download_mod_to(
+                target["project_id"], inst.mods_dir,
+                getattr(inst, "game_version", "") or "",
+                getattr(inst, "loader", "") or "",
+            )
             downloaded.append(os.path.basename(p))
         except Exception:  # noqa: BLE001
             failed.append(dep)

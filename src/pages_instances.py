@@ -497,7 +497,11 @@ class NewInstanceDialog(QDialog):
     choosing loaders that do not exist for the selected Minecraft version.
     """
 
-    created = Signal(str, str, str, str, str)   # name, version, loader, java_path, loader_version
+    # round-165 起 result_data() 返回 7 元组（末尾新增 format / base，用于
+    # 玩家自选已有游戏目录）。信号必须同步扩到 7 参：PySide6 对超参 emit
+    # 直接抛 TypeError，而 Qt 槽里的异常只会被 sys.excepthook 写进 crash.log，
+    # 界面表现为「点创建毫无反应」（2026-11-06 真机复现 15 次）。
+    created = Signal(str, str, str, str, str, str, str)  # name, version, loader, java_path, loader_version, fmt, base
     cancelled = Signal()
 
     _GROUP_ORDER = ["release", "snapshot", "april", "legacy"]
@@ -1659,11 +1663,13 @@ class InstancesPage(QWidget):
             tl.addWidget(tt)
             name_row.addWidget(tag)
         name_row.addStretch(1)
-        # launch button (jumps home & selects)
+        # round-177：原「启动」按钮名不副实（只 set_current，不启动也不跳首页），
+        # 玩家点了像死了一样。保留按钮但换成「体检 / 启动诊断」——复用现成
+        # 实例体检，并补上真机验收需要的启动命令 / classpath / 缺库视图。
         launch_btn = QPushButton(t("instances.launch"))
         launch_btn.setProperty("cls", "accent")
         launch_btn.setMinimumHeight(36)
-        launch_btn.setIcon(on_accent("play"))
+        launch_btn.setIcon(on_accent("check"))
         launch_btn.setIconSize(QSize(16, 16))
         launch_btn.clicked.connect(lambda: self._launch(inst.id))
         name_row.addWidget(launch_btn)
@@ -2046,10 +2052,23 @@ class InstancesPage(QWidget):
 
     # ia[instances]: 点「启动」 | 详情主操作 | 设为当前实例并通知主窗口刷新（首页随即可启动）
     def _launch(self, inst_id: str):
-        """Select in manager and jump to home (the launch button lives there)."""
+        """round-177：设为当前实例 + 打开「体检 / 启动诊断」。
+
+        旧实现注释写着 ``jumps home & selects``，实际连跳转都没接，只做了
+        set_current + refresh，所以按钮点了毫无反应。启动游戏本来就只在首页
+        的「启动游戏」按钮，这里不该再放一个假的。
+        """
         self.mgr.set_current(inst_id)
         self._refresh()
         self.current_changed.emit(inst_id)
+        inst = self.mgr.get(inst_id)
+        if inst is None:
+            return
+        try:
+            from .launch_diagnostics_dialog import open_launch_diagnostics
+            open_launch_diagnostics(self, inst, mgr=self.mgr)
+        except Exception:  # noqa: BLE001 - 诊断框不可用绝不影响实例页
+            pass
 
     # ia[instances]: 点「打开文件夹」 | 详情操作条 | 用系统文件管理器打开实例目录
     def _open_folder(self, inst: Instance):

@@ -46,22 +46,37 @@ def _print_size(label: str, path: str) -> tuple[int, int]:
     return total, count
 
 
-def _trim_dist(root: str) -> None:
-    """构建后裁剪死资源：Qt 翻译只留 zh_CN / en（其余语言全是死重）。"""
+def _trim_dist(root: str) -> tuple[int, int, int]:
+    """构建后裁剪死资源：Qt 翻译只留 zh_CN / en（其余语言全是死重）。
+
+    round-177：这一步是**纯瘦身**，不是构建的一部分。任何删除失败都只警告，
+    绝不能把「PyInstaller 已经 Build complete」的批次判成失败。旧实现只
+    ``except OSError``，兜不住批量删除保护抛出的非 OSError 异常（如
+    ``SystemExit``），异常穿透后 ``build.py`` 退出 1 —— 产物其实完整可用，
+    极易被误判为「构建失败要重跑」。
+
+    返回 ``(removed, failed, saved_bytes)``，由调用方打印明确终态。
+    """
     ps = os.path.join(root, "_internal", "PySide6")
     tr_dir = os.path.join(ps, "translations")
     saved = 0
     removed = 0
+    failed = 0
 
     def _rm(path: str) -> None:
-        nonlocal saved, removed
+        nonlocal saved, removed, failed
         try:
             sz = os.path.getsize(path)
             os.remove(path)
             saved += sz
             removed += 1
-        except OSError:
-            pass
+        except KeyboardInterrupt:
+            raise  # 用户主动中断必须能穿透
+        except BaseException as e:  # noqa: BLE001 - 删除失败绝不否定构建结果
+            failed += 1
+            if failed <= 3:
+                print(f"[trim] WARN 无法删除 {os.path.basename(path)}: "
+                      f"{type(e).__name__}: {e}")
 
     if os.path.isdir(tr_dir):
         for name in os.listdir(tr_dir):
@@ -72,6 +87,11 @@ def _trim_dist(root: str) -> None:
             _rm(os.path.join(tr_dir, name))
 
     print(f"[trim] removed {removed} files, saved {saved / 1024 / 1024:.1f} MB")
+    if failed:
+        print(f"[trim] WARNING: {failed} 个翻译文件未能删除；"
+              f"产物仍完整可用，只是没瘦身（可手工清理 translations/ 下"
+              f"非 zh_CN / en 的 .qm）")
+    return removed, failed, saved
 
 
 def _build(here: str) -> int:
@@ -83,7 +103,13 @@ def _build(here: str) -> int:
     # 此前 os.system('rm -rf ...') 一直静默失败，改用 shutil 跨平台可靠。
     for rel in ("build", "__pycache__", os.path.join("src", "__pycache__"),
                 os.path.join("dist_beta", "_work")):
-        shutil.rmtree(os.path.join(here, rel), ignore_errors=True)
+        try:
+            shutil.rmtree(os.path.join(here, rel), ignore_errors=True)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e:  # noqa: BLE001 - 缓存清理失败不该否掉构建
+            print(f"[build] WARN 清理缓存失败（继续构建）: "
+                  f"{rel}: {type(e).__name__}: {e}")
 
     env = dict(os.environ)
 
@@ -102,8 +128,19 @@ def _build(here: str) -> int:
 
     dist = os.path.join(here, "dist_beta", "AC_Launcher")
     _print_size("before trim", dist)
-    _trim_dist(dist)
+    removed, failed, _saved = _trim_dist(dist)
     _print_size("after trim ", dist)
+
+    # round-177：退出码由「产物完整」决定，不由瘦身结果决定。
+    # PyInstaller 返回 0 但产物残缺时才算真失败。
+    if not os.path.isfile(os.path.join(dist, "AC_Launcher.exe")):
+        print("[build] ERROR: 产物缺少 AC_Launcher.exe")
+        return 1
+    if not os.path.isdir(os.path.join(dist, "_internal", "PySide6")):
+        print("[build] ERROR: 产物缺少 _internal/PySide6")
+        return 1
+    print(f"[build] OK  产物完整；trim removed={removed} failed={failed}"
+          + ("（瘦身未完成，不影响可用性）" if failed else ""))
     return 0
 
 

@@ -1823,12 +1823,20 @@ class MainWindow(QMainWindow):
         # round-154：实例 → TaskCenter 任务 id（统一任务记录 / 持久历史）
         self._dl_task_ids: dict[str, str] = {}
         self._launch_task_id = ""
+        # round-177：状态栏三路信号（status/speed/progress）只允许「当前活跃
+        # worker」写入。此前下载/启动 worker 直连状态栏，取消或失败后仅从
+        # self._dl_workers 里 pop 掉，信号连接从未断开；旧 worker 的速度轮询
+        # 线程 / stall 定时器继续发信号，与新任务交替刷新 → 左下角数字闪烁。
+        self._status_worker = None
+        self._status_links: dict[object, tuple] = {}
         # round-151：任务发起时所在页面 → 点击状态栏召回时先切回该页。
         self._task_page_key = ""
         self._game_proc = None      # round-34：运行中游戏进程
         self._game_procs = {}       # round-92 多开：按实例 id 登记运行中游戏
         self._game_name = ""
         self._game_poll_timer = None
+        # 2026-11-06：窗口是否因「启动后自动隐藏」而藏进托盘；游戏退出时恢复。
+        self._auto_hidden_for_game = False
         self._active_toasts = []
         self.cfg = load_config()
         _boot_trace("5 cfg ok")
@@ -2711,14 +2719,13 @@ class MainWindow(QMainWindow):
             mirror=settings.get("download_mirror", "official"),
             proxy=settings.get("download_proxy", ""),
         )
-        w.status.connect(self.statusBar().showMessage)
+        # round-177：状态栏三路信号改走带归属的槽（旧任务残留信号会被丢弃）。
+        self._bind_status_worker(w)
         w.status.connect(dlg.set_status_text)
         w.status.connect(
             lambda s, iid=inst_id: self._on_download_status(iid, s))
         w.step.connect(dlg.set_step)
         w.speed.connect(dlg.set_speed)
-        w.speed.connect(self._set_speed)
-        w.progress.connect(self._set_progress)
         w.progress.connect(dlg.set_progress)
         w.progress.connect(
             lambda v, m, iid=inst_id: self._on_download_progress(iid, v, m))
@@ -2790,12 +2797,15 @@ class MainWindow(QMainWindow):
         if inst_id not in self._dl_workers:
             return
         # round-155：结束前再推一次来源链（worker 即将从表里移除）。
+        _done_w = self._dl_workers.get(inst_id)
         self._push_sources(self._dl_task_ids.get(inst_id, ""),
-                           self._dl_workers.get(inst_id),
+                           _done_w,
                            self._dl_dlgs.get(inst_id))
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
         self._dl_paused.pop(inst_id, None)
+        # round-177：终态断开状态栏信号，杜绝残留计数继续刷新。
+        self._unbind_status_worker(_done_w)
         try:
             from .core.task_center import get_task_center
             tid = self._dl_task_ids.pop(inst_id, "")
@@ -2840,6 +2850,7 @@ class MainWindow(QMainWindow):
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
         self._dl_paused.pop(inst_id, None)
+        self._unbind_status_worker(_w)  # round-177：失败也是终态
         try:
             from .core.task_center import get_task_center
             tid = self._dl_task_ids.pop(inst_id, "")
@@ -2898,8 +2909,10 @@ class MainWindow(QMainWindow):
                     tid, state="paused", detail=t("launch.dl_paused"))
         except Exception:  # noqa: BLE001
             pass
-        # 残留 status/progress 信号因 worker 已移出表而被丢弃。
+        # round-177：这句旧注释是错的——被挡住的只有带 guard 的
+        # _on_download_progress，直连状态栏的三路信号照样收。现在显式断开。
         self._dl_workers.pop(inst_id, None)
+        self._unbind_status_worker(w)
         try:
             self._progress.setVisible(False)
             self._set_speed("")
@@ -3027,7 +3040,9 @@ class MainWindow(QMainWindow):
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
         self._dl_paused.pop(inst_id, None)
-        # 4) UI 复位（残留 status/progress 已被上游 guard 丢弃）。
+        # 4) UI 复位。round-177：取消后必须先断开该 worker 的状态栏连接，
+        #    否则它的速度轮询/stall 定时器会继续刷「9」把新任务数字盖掉。
+        self._unbind_status_worker(w)
         try:
             self._progress.setVisible(False)
             self._set_speed("")
@@ -3068,6 +3083,67 @@ class MainWindow(QMainWindow):
         """round-168：取消收尾完成 → 允许同实例重新下载。"""
         if self._dl_stopping.get(inst_id) is worker:
             self._dl_stopping.pop(inst_id, None)
+
+    # ── round-177：状态栏信号归属 ────────────────────────────────────────
+    def _bind_status_worker(self, worker) -> None:
+        """把状态栏 status/speed/progress 接到带「worker 归属」的槽上。
+
+        此前两路 worker 直连 ``statusBar().showMessage`` / ``_set_speed`` /
+        ``_set_progress``，取消或失败时只把 worker 从 ``_dl_workers`` 移除、
+        从不 disconnect；而 ``ProgressWorker`` 的速度轮询线程与 stall 定时器
+        仍会发信号，``_set_progress`` 甚至把进度条重新点亮。于是旧任务的
+        残留计数与新任务的正确值交替刷新，就是左下角「正常 → 9 → 正常」。
+        """
+        if worker is None or worker in self._status_links:
+            return
+        f_status = lambda text, ww=worker: self._status_text(ww, text)
+        f_speed = lambda text, ww=worker: self._status_speed(ww, text)
+        f_progress = lambda v, m, ww=worker: self._status_progress(ww, v, m)
+        worker.status.connect(f_status)
+        worker.speed.connect(f_speed)
+        worker.progress.connect(f_progress)
+        self._status_links[worker] = (f_status, f_speed, f_progress)
+
+    def _unbind_status_worker(self, worker) -> None:
+        """任务终态：精确断开该 worker 的三路状态栏连接并清空显示。"""
+        if worker is None:
+            return
+        links = self._status_links.pop(worker, None)
+        if links:
+            for sig, fn in zip((worker.status, worker.speed, worker.progress),
+                               links):
+                try:
+                    sig.disconnect(fn)
+                except (RuntimeError, TypeError):
+                    pass
+        # 只有确实没有其它在册任务时才收起进度条，避免误伤并发下载。
+        if not self._status_links:
+            try:
+                self._progress.setVisible(False)
+                self._set_speed("")
+            except RuntimeError:  # C++ 对象已删除
+                pass
+
+    def _status_worker_alive(self, worker) -> bool:
+        """worker 仍在登记表内才允许写状态栏；已取消/完成/暂停的一律丢弃。"""
+        if worker is None:
+            return False
+        if worker is getattr(self, "_play_worker", None):
+            return True
+        return any(v is worker
+                   for v in getattr(self, "_dl_workers", {}).values())
+
+    def _status_text(self, worker, text: str) -> None:
+        if self._status_worker_alive(worker):
+            self.statusBar().showMessage(text)
+
+    def _status_speed(self, worker, text: str) -> None:
+        if self._status_worker_alive(worker):
+            self._set_speed(text)
+
+    def _status_progress(self, worker, value: int, maximum: int) -> None:
+        if self._status_worker_alive(worker):
+            self._set_progress(value, maximum)
 
     def _set_speed(self, text: str) -> None:
         """round-110 A：状态栏实时速度标签（空串则收起）。"""
@@ -5046,13 +5122,12 @@ class MainWindow(QMainWindow):
             server_override=server, port_override=port,
             java_override=_java_override, force_java=_force_java,
         )
-        self._play_worker.status.connect(self.statusBar().showMessage)
+        # round-177：同上，启动 worker 也走归属槽，取消/失败后不再抢状态栏。
+        self._bind_status_worker(self._play_worker)
         self._play_worker.status.connect(self._on_launch_status)
         self._play_worker.step.connect(self._launch_dlg.set_step)
         self._play_worker.status.connect(self._launch_dlg.set_status_text)
         self._play_worker.speed.connect(self._launch_dlg.set_speed)
-        self._play_worker.speed.connect(self._set_speed)
-        self._play_worker.progress.connect(self._set_progress)
         self._play_worker.progress.connect(self._on_launch_progress)
         self._play_worker.progress.connect(self._launch_dlg.set_progress)
         # launch_instance 返回 (proc, log_path)；round-34 把 proc 交给进程跟踪
@@ -5093,6 +5168,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_launch_done(self, inst: Instance, _proc=None, _log_path=None):
+        self._unbind_status_worker(getattr(self, "_play_worker", None))
         self._progress.setVisible(False)
         self._set_speed("")
         # round-155：启动成功前把来源链一并落进任务记录。
@@ -5217,6 +5293,7 @@ class MainWindow(QMainWindow):
         if worker is not None and getattr(self, "_play_worker", None) is not worker:
             return  # 已开始新的启动任务 → 旧 worker 的收尾不碰当前状态
         self._play_stopping = False
+        self._unbind_status_worker(getattr(self, "_play_worker", None))
         self._play_worker = None
         proc = None
         if isinstance(res, (tuple, list)) and res:
@@ -5320,21 +5397,23 @@ class MainWindow(QMainWindow):
             self._maybe_auto_close_launcher(name)
 
     def _maybe_auto_close_launcher(self, name: str) -> None:
-        """round-50 退出释放资源：对齐主流「Kill on Launch」。
+        """启动后自动隐藏窗口（历史键名 ``close_after_launch``，语义已改）。
 
-        游戏进程稳定存活一段时间（默认 5s，足以跨过 crash-on-start）后自动
-        `close()` 启动器，把 ~100MB 运行时内存全部让给 Minecraft。游戏是独立
-        进程，关闭启动器不会影响它；启动器开的进程轮询也随窗口销毁而停止。
-        配置 `close_after_launch=False` 时保持启动器常驻。
+        2026-11-06 修订：原实现真 `close()` → `QApplication.quit()`，把
+        ``_game_poll_timer``（``QTimer(self)``）连同主窗口一起销毁，于是
+        ``explain_exit()`` 退出码分类、崩溃弹窗、``last_session`` 崩溃记录、
+        退出后命令、控制台结束标记、托盘「结束全部游戏」全部失效，玩家退出
+        游戏后也找不到启动器。round-57 曾为「退出后命令」单独加过常驻守卫，
+        正是这个缺陷的局部补丁。
+
+        现在改为：游戏稳定存活后隐藏到系统托盘（无托盘则最小化到任务栏），
+        **进程常驻**；游戏退出时由 ``_poll_game`` 自动恢复窗口。想真正释放
+        内存可从托盘右键「退出启动器」。配置 ``close_after_launch=False``
+        时连窗口也不隐藏。
         """
         try:
             from .settings_dialog import load_config
             if not load_config().get("close_after_launch", True):
-                return
-            # round-57 冲突修复：配置了「退出后命令」时必须让启动器常驻——
-            # 退出钩子由本窗口的轮询定时器在游戏退出时触发，自动关闭会把
-            # 定时器连同进程一起销毁，钩子永远不执行。
-            if getattr(self, "_game_exit_cmd", ""):
                 return
             delay = max(1, int(load_config().get("close_after_launch_delay", 5)))
             from PySide6.QtCore import QTimer
@@ -5342,17 +5421,23 @@ class MainWindow(QMainWindow):
                 delay * 1000,
                 lambda: self._auto_close_if_game_running(name),
             )
-        except Exception:  # noqa: BLE001 - 自动关闭失败绝不能崩启动器
+        except Exception:  # noqa: BLE001 - 自动隐藏失败绝不能崩启动器
             pass
 
     def _auto_close_if_game_running(self, name: str) -> None:
-        """回调：到点且仍有游戏进程存活 → 关闭启动器释放资源（round-81 任意一个就行）。"""
+        """回调：游戏仍在跑 → 藏进托盘（绝不 quit），保留全部退出检测链路。"""
         try:
-            if getattr(self, "_game_procs", None):
-                self.statusBar().showMessage(
-                    t("status.auto_close", name=name))
-                self._tray_auto_quit = True  # round-83 释放内存 → 真退出，不藏托盘
-                self.close()  # 游戏独立进程，关启动器不影响游戏
+            if not getattr(self, "_game_procs", None):
+                return
+            self.statusBar().showMessage(
+                t("status.auto_minimize", name=name), 6000)
+            self._auto_hidden_for_game = True
+            if getattr(self, "_tray", None) is not None:
+                self.hide()
+                self._tray_notify_hide()
+            else:
+                # 无系统托盘可用时退化为任务栏最小化：同样不退出进程。
+                self.showMinimized()
         except Exception:  # noqa: BLE001
             pass
 
@@ -5371,6 +5456,20 @@ class MainWindow(QMainWindow):
             if code is None:
                 continue  # 仍在运行
             del procs[_iid]
+            # 2026-11-06：若窗口是「启动后自动隐藏」的，游戏一退出就还回来。
+            # 必须放在 _show_crash_dialog 之前——模态弹窗 parent 是隐藏窗口时
+            # 不会显示，玩家会完全看不到崩溃诊断。
+            if getattr(self, "_auto_hidden_for_game", False):
+                self._auto_hidden_for_game = False
+                try:
+                    if getattr(self, "_tray", None) is not None:
+                        self._tray_show()
+                    else:
+                        self.showNormal()
+                        self.raise_()
+                        self.activateWindow()
+                except Exception:  # noqa: BLE001 - 恢复失败不阻断退出诊断
+                    pass
             name = entry.get("name", "") if isinstance(entry, dict) else ""
             log_path = entry.get("log_path", "") if isinstance(entry, dict) else ""
             cwd = entry.get("cwd", "") if isinstance(entry, dict) else ""
@@ -5645,6 +5744,7 @@ class MainWindow(QMainWindow):
         return True if ok else False
 
     def _on_launch_error(self, msg: str):
+        self._unbind_status_worker(getattr(self, "_play_worker", None))
         self._progress.setVisible(False)
         self._set_speed("")
         # round-155：失败前把逐源原因写进任务记录。
