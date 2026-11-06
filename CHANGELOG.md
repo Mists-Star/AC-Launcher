@@ -108,6 +108,38 @@ CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash
 
 ---
 
+## round-181（2026-11-07）— 资源中心秒加载 / 加载器图标复用主流现成集
+
+> 用户反馈「资源中心点一个加载一次，好慢，图标加载慢得要命」，并要求
+> 「加载器看看其他启动器是什么样的，基本上是一样的，可以复用他们的，
+> 不要自己乱找」。本批按可测量证据修，不靠感觉调参。
+
+### 实测到的四个真因（量化，见 `_scratch` 日志）
+
+| 现象 | 证据 |
+|---|---|
+| 点一次加载一次 | `pages_browse.py:133` / `:414` / `store_detail.py:246` 各 `new ImageLoader(self)`，详情面板**每次点都新建** → 3 套 `QNetworkAccessManager` / 内存缓存 / 并发队列，连接池与 TLS 握手重来 |
+| 图标慢得要命 | 真机 `data/cache/icons/` **38 MB / 240 文件**，最大单文件 **18.8 MB**，反查是 `media.forgecdn.net/avatars/*.gif`（CF **作者头像动图**，被 `_cf_map_row` 当项目图标）。curl 实测该图 **25.0 s / 752 KB/s**，一个就占满 6 个并发槽之一 |
+| 缓存越用越大 | 落盘存的是未经缩放的原图；另一次实测 Modrinth 原图冷连 16.4 s |
+| 详情重复请求 | 每次点开都 `_load_first_page()` + `_translate(auto=True)`，前者拉版本列表、后者走在线机翻，均无跨点击缓存 |
+
+### 落地
+
+1. **全局单例** `async_image.get_image_loader()`：三处调用点统一，进程内共享连接池与已解码图标。
+2. **数据层过滤** `net_api._cf_map_row`：`/avatars/` 路径或 `.gif` 一律当无图标，交给卡片首字母占位。
+3. **加载层熔断** `ImageLoader._on_ready_read`：`readyRead` 累计字节 > 512 KB 立即 `abort()`；`_read_orig` 读盘前淘汰旧版超大缓存文件。
+4. **落盘压成缩略图**：成功下载后统一缩到 ≤128 px、以 PNG 原子落盘（列表 48 / 详情 88 都够用），体积从 MB 级降到 KB 级。
+5. **详情 TTL 缓存** `store_detail._VERSION_CACHE` / `_TRANSLATION_CACHE`：按 `(source, project_id)` 缓存 10 分钟，第二次点开本地命中，不再重拉版本列表、不再重机翻；机翻渲染抽成 `_render_translation()` 供两条路径复用。
+6. **加载器图标改复用主流现成集**：按用户要求不再逐个溯源上游官方原图、不再猜 CDN 变体，直接采用 **HMCL `assets/img/*@2x.png`** 的 8 张（Fabric/Forge/NeoForge/Quilt/OptiFine/Cleanroom/LegacyFabric/草方块），补齐了官方未单发 logo 的 Cleanroom；LabyMod / LiteLoader HMCL 未收录，保留上一轮官网 favicon。QRC 与 `icons_rc.py` 重新生成，10 个图标逐个 Qt 渲染实测非 null。来源与 GPL-3.0 署名见 `assets/icons/LOADER_LOGOS.md`。
+
+### 门禁与验收
+
+* `regress.py` **50/50 exit 0**（新增 `tests/test_round181_perf.py` 32 条判据：单例、熔断、淘汰、缩略图、CF 过滤、TTL、图标渲染与许可）。
+* 构建 `EXIT=0`，产物 PYZ 反查 **18/18 PASS**；⚠ 用户 23:56 起一直开着
+  启动器验收，本批**未覆盖安装目录、未冒烟** —— `dist_beta` 产物已备好，
+  等其退出后一条命令即可部署。**双轨验收仍欠真机目检**（滚动图标补全速度、
+  连续点两个项目是否秒开、Cleanroom 图标观感）。
+
 ## round-180（2026-11-06）— 官方图标 / 图标缓存 / 加载器交互 / 排版
 
 > 用户要求：「本来就不要 svg 生成，全部都是复用对应官方给的，包括下载版本

@@ -28,28 +28,30 @@ def read(rel):
         return f.read()
 
 
-# ── 1. 官方图标：全部是上游原文件，无自绘 SVG ──────────────────────
+# ── 1. 加载器图标：round-181 起复用 HMCL 现成集，不再逐个溯源上游原图 ──
 ICONS = os.path.join(ROOT, "assets", "icons")
 from src import icons  # noqa: E402
 
-check("图标管道支持 SVG/PNG/ICO 三种官方原格式",
+check("图标管道支持 SVG/PNG/ICO 三种格式",
       icons._ICON_EXTS == (".svg", ".png", ".ico"))
 check("来源与许可 NOTICE 已落盘",
       os.path.isfile(os.path.join(ICONS, "LOADER_LOGOS.md")))
+# 主理人 round-181 纠正：「加载器基本上是一样的，可以复用他们的，
+# 不要自己乱找」→ 8 张统一取 HMCL assets/img/*@2x.png；
+# HMCL 未收录的 LabyMod / LiteLoader 保留官网 favicon.ico。
 official = {
-    "fabric": ".png", "forge": ".png", "quilt": ".svg", "neoforge": ".svg",
-    "optifine": ".ico", "labymod": ".ico", "legacyfabric": ".ico",
-    "liteloader": ".ico", "vanilla": ".png",
+    "fabric": ".png", "forge": ".png", "quilt": ".png", "neoforge": ".png",
+    "optifine": ".png", "labymod": ".ico", "legacyfabric": ".png",
+    "liteloader": ".ico", "vanilla": ".png", "cleanroom": ".png",
 }
 for lid, ext in official.items():
     p = os.path.join(ICONS, "loader_%s%s" % (lid, ext))
     pm = icons.pixmap("loader_" + lid, 40, dpr=1.0)
-    check("官方图标 %-13s 可渲染" % lid,
+    check("HMCL/官网图标 %-10s 可渲染" % lid,
           os.path.isfile(p) and not pm.isNull())
-check("Cleanroom 官方无 logo → 不保留自绘占位",
-      not any(os.path.isfile(os.path.join(ICONS, "loader_cleanroom" + e))
-              for e in (".svg", ".png", ".ico")))
-check("QRC 收录了官方 PNG/ICO（不只 SVG）",
+check("Cleanroom 用 HMCL 现成图标（不再留空占位）",
+      os.path.isfile(os.path.join(ICONS, "loader_cleanroom.png")))
+check("QRC 收录了 PNG/ICO 资源",
       ".png" in read("icons.qrc") and ".ico" in read("icons.qrc"))
 
 # ── 2. 版本渠道识别：识别不了不假造 ────────────────────────────────

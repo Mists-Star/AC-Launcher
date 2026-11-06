@@ -67,6 +67,11 @@ class ImageLoader(QObject):
 
     _MAX_INFLIGHT = 6
     _FAIL_TTL = 60.0
+    # round-181：单张图标上限。实测 CF 「作者头像 GIF」最大 18.8 MB，
+    # 一个就占满 6 个并发槽之一 25 秒，整页图标全排队。48/88px 的展示
+    # 根本不需要原图，超过上限直接熔断。
+    _MAX_ICON_BYTES = 512 * 1024
+    _THUMB_PX = 128
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -121,6 +126,11 @@ class ImageLoader(QObject):
         if not os.path.isfile(path):
             return None
         try:
+            # 旧版本落的是未经压缩的原图（实测单文件 18.8 MB）。读之前先
+            # 淘汰：既省磁盘，也避免每次进页面都解码一次巨型 GIF。
+            if os.path.getsize(path) > self._MAX_ICON_BYTES:
+                os.remove(path)
+                return None
             with open(path, "rb") as fh:
                 data = fh.read()
             pm = QPixmap()
@@ -222,8 +232,23 @@ class ImageLoader(QObject):
             self._inflight += 1
             reply = self._mgr.get(req)
             reply.setProperty("rid", rid)
+            reply.setProperty("seen", 0)
+            reply.readyRead.connect(self._on_ready_read)
 
     # ------------------------------------------------------------ replies
+    def _on_ready_read(self) -> None:
+        """round-181：边下边数，超过上限立刻中止，不让大图占满并发槽。"""
+        reply = self.sender()
+        if reply is None:
+            return
+        try:
+            seen = int(reply.property("seen") or 0) + reply.bytesAvailable()
+            reply.setProperty("seen", seen)
+            if seen > self._MAX_ICON_BYTES:
+                reply.abort()
+        except RuntimeError:
+            pass
+
     def _on_finished(self, reply: QNetworkReply) -> None:
         import time as _t
         try:
@@ -242,19 +267,25 @@ class ImageLoader(QObject):
             data = reply.readAll() if ok else None
             pm = QPixmap()
             if data and pm.loadFromData(bytes(data)):
-                # 原图原子落盘（只一份，与显示尺寸无关）
+                # round-181：只落 <=128px 的缩略图，不存原图。列表 48px /
+                # 详情 88px 都够用，体积从 MB 级降到 KB 级，二次读盘瞬间完成。
+                thumb = pm
+                if max(pm.width(), pm.height()) > self._THUMB_PX:
+                    thumb = pm.scaled(self._THUMB_PX, self._THUMB_PX,
+                                      Qt.KeepAspectRatio,
+                                      Qt.SmoothTransformation)
                 path = self._orig_path(url)
                 tmp = path + ".tmp"
                 try:
-                    with open(tmp, "wb") as fh:
-                        fh.write(bytes(data))
+                    if not thumb.save(tmp, "PNG"):
+                        raise OSError("pixmap.save returned False")
                     os.replace(tmp, path)
                 except OSError:
                     try:
                         os.remove(tmp)
                     except OSError:
                         pass
-                self._raw_put(url, pm)
+                self._raw_put(url, thumb)
                 self._failed.pop(url, None)
                 self._deliver(url, size, dpr, target)
                 for _u, _s, _d, _tgt, _tok in self._waiting.pop(url, []):
@@ -319,6 +350,24 @@ class ImageLoader(QObject):
         return out
 
 
+# ------------------------------------------------------------ singleton
+_IMAGE_LOADER_SINGLETON = None
+
+
+def get_image_loader() -> ImageLoader:
+    """全局共享的图片加载器（round-181）。
+
+    旧实现在列表页 / 版本页 / **每次新建的详情面板**里各 ``ImageLoader(self)``
+    一份：3 个 ``QNetworkAccessManager``、3 套内存缓存、3 个并发队列。点开
+    一个项目就重建连接池（TLS 握手重来）、丢掉所有已解码图标 → 这正是用户
+    说的「点一个加载一次」。改单例后同一图标全进程只解一次、只下一次。
+    """
+    global _IMAGE_LOADER_SINGLETON
+    if _IMAGE_LOADER_SINGLETON is None:
+        _IMAGE_LOADER_SINGLETON = ImageLoader()
+    return _IMAGE_LOADER_SINGLETON
+
+
 # --------------------------------------------------------- version thumbnails
 # Per-update "cover art" for the version library. Each major.minor gets a
 # signature gradient + an official update name + a vector *motif* (bottom band)
@@ -327,6 +376,7 @@ class ImageLoader(QObject):
 # This is the differentiator: no other launcher themes per-version covers.
 
 _TYPE_THEME: dict[str, tuple[str, str]] = {
+
     "release": ("#4ADE80", "#16A34A"),   # grass green
     "snapshot": ("#A78BFA", "#7C3AED"),  # experimental purple
     "april": ("#F472B6", "#DB2777"),       # joke-version pink

@@ -1292,6 +1292,13 @@ _CF_POOL_PAGES = 3     # round-141：首屏拉 0/50/100 → 150 条相关性池
 def _cf_map_row(m: dict) -> dict:
     """CF API 行 → 统一 hit 形状（与 search_mods 对齐）。"""
     logo = (m.get("logo") or {}).get("url", "")
+    # round-181：CF 有项目把「作者头像 GIF 动图」塞进 logo.url
+    # （media.forgecdn.net/avatars/*.gif，实测 18.8 MB / 4.2 MB）。
+    # 它不是项目图标，拉下来既拖垮整页下载槽又解码成错图。一律当无图标，
+    # 交给卡片的首字母占位。
+    _low = logo.lower().split("?", 1)[0]
+    if "/avatars/" in _low or _low.endswith(".gif"):
+        logo = ""
     return {
         "project_id": str(m.get("id", "")),      # CF mod id
         "slug": m.get("slug", ""),

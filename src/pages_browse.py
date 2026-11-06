@@ -29,7 +29,7 @@ from .net_api import (
     STORE_CATEGORIES,
 )
 from .worker import ProgressWorker, Worker
-from .async_image import ImageLoader, make_version_pixmap
+from .async_image import get_image_loader, make_version_pixmap
 from .store_detail import StoreDetailPanel  # round-66 资源详情；round-132 页内面板
 
 
@@ -130,7 +130,7 @@ class VersionsPage(QWidget):
         super().__init__(parent)
         self.mgr = manager()
         self._versions: list[dict] = []
-        self._img = ImageLoader(self)
+        self._img = get_image_loader()
         self._workers: list = []
 
         root = QVBoxLayout(self)
@@ -411,7 +411,7 @@ class StorePage(QWidget):
         # _has_more = 无限滚动的到底闸门（不足一页 → 停止，杜绝重复加载）。
         self._source = "all"
         self._has_more = True
-        self._img = ImageLoader(self)
+        self._img = get_image_loader()
         # Keep in-flight workers referenced until they finish. Overwriting
         # self._worker used to drop the only strong ref to a still-running
         # QThread, so Python GC deleted it mid-flight →

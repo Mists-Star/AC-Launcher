@@ -19,6 +19,36 @@ from __future__ import annotations
 
 import os
 import re
+import time as _time
+from collections import OrderedDict
+
+# round-181：点开同一个项目不该重复拉版本列表 / 重复机翻。按
+# (source, project_id) 做进程内 TTL 缓存 —— 主流启动器的详情页也是
+# 「列表数据先立刻渲染，详情异步补一次，返回再点就是本地命中」。
+_DETAIL_TTL = 600.0
+_VERSION_CACHE: "OrderedDict[str, tuple]" = OrderedDict()
+_TRANSLATION_CACHE: "OrderedDict[str, tuple]" = OrderedDict()
+
+
+def _cache_read(store, key):
+    rec = store.get(key)
+    if rec is None:
+        return None
+    ts, val = rec
+    if _time.monotonic() - ts > _DETAIL_TTL:
+        store.pop(key, None)
+        return None
+    store.move_to_end(key)
+    return val
+
+
+def _cache_write(store, key, val, cap=48):
+    store[key] = (_time.monotonic(), val)
+    store.move_to_end(key)
+    while len(store) > cap:
+        store.popitem(last=False)
+
+
 
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -32,7 +62,7 @@ from .theme import COLORS, with_alpha
 from . import ui_kit
 from .i18n import t
 from .worker import ProgressWorker, Worker
-from .async_image import ImageLoader
+from .async_image import get_image_loader
 
 PAGE_SIZE = 50
 
@@ -237,13 +267,15 @@ class StoreDetailPanel(QWidget):
                  instances=None):
         super().__init__(parent)
         self._card = card
+        self._ck = "%s:%s" % (card.get("source") or "modrinth",
+                              card.get("project_id") or card.get("slug") or "")
         self._category = category
         self._inst = inst
         self._instances = list(instances) if instances is not None else []
         self._subdir = subdir
         self._versions: list[dict] = []      # 已分页累积的全量版本
         self._workers: list = []
-        self._img = ImageLoader(self)
+        self._img = get_image_loader()
         self._offset = 0                     # 服务端分页游标
         self._has_more = False
 
@@ -605,6 +637,15 @@ class StoreDetailPanel(QWidget):
         self._fetch_page(offset=self._offset, append=True)
 
     def _fetch_page(self, offset: int, append: bool):
+        if offset == 0 and not append:
+            hit = _cache_read(_VERSION_CACHE, self._ck)
+            if hit is not None:
+                self.more_btn.setEnabled(True)
+                self._versions = list(hit)
+                self._has_more = len(self._versions) >= PAGE_SIZE
+                self._offset = len(self._versions)
+                self._on_versions_ready(appending=False)
+                return
         from .net_api import (_curseforge_versions, _curseforge_versions_keyless,
                               _modrinth_versions, curseforge_available)
         if self._card.get("source") == "curseforge":
@@ -632,6 +673,7 @@ class StoreDetailPanel(QWidget):
                 self._versions.extend(v for v in page if v.get("id") not in exist)
             else:
                 self._versions = page
+                _cache_write(_VERSION_CACHE, self._ck, list(page))
             self._on_versions_ready(appending=append)
 
         def _on_err(e):
@@ -841,26 +883,34 @@ class StoreDetailPanel(QWidget):
 
     # ---------- 翻译（打开即自动，按钮可重试） ----------
     def _translate(self, auto: bool = False):
+        hit = _cache_read(_TRANSLATION_CACHE, self._ck)
+        if hit is not None:
+            self._render_translation(hit)
+            return
         self.tr_status.setText(t("store.detail_translating"))
         self.translate_btn.setEnabled(False)
         w = Worker(_fetch_and_translate, self._card)
 
         def _ok(pair):
-            self.translate_btn.setEnabled(True)
-            src, tr = pair
-            if tr is None:
-                # round-128：原文已是中文，没走机翻。
-                self.text.setPlainText(src)
-                self.tr_status.setText(t("store.detail_native_cn"))
-                return
-            disp = tr if len(tr) <= 6000 else tr[:6000] + "…"
-            self.text.setPlainText(
-                f"── {t('store.detail_original')} ──\n{src[:1200] if len(src) > 1200 else src}"
-                f"\n\n── {t('store.detail_translated')} ──\n{disp}"
-            )
-            # 头部短简介也换成中文（默认视图不再让玩家先看到英文）。
-            self.desc.setText(self._short(tr, 240))
-            self.tr_status.setText(t("store.detail_translated_ok"))
+            _cache_write(_TRANSLATION_CACHE, self._ck, pair)
+            self._render_translation(pair)
+
+    def _render_translation(self, pair):
+        self.translate_btn.setEnabled(True)
+        src, tr = pair
+        if tr is None:
+            # round-128：原文已是中文，没走机翻。
+            self.text.setPlainText(src)
+            self.tr_status.setText(t("store.detail_native_cn"))
+            return
+        disp = tr if len(tr) <= 6000 else tr[:6000] + "…"
+        self.text.setPlainText(
+            f"── {t('store.detail_original')} ──\n{src[:1200] if len(src) > 1200 else src}"
+            f"\n\n── {t('store.detail_translated')} ──\n{disp}"
+        )
+        # 头部短简介也换成中文（默认视图不再让玩家先看到英文）。
+        self.desc.setText(self._short(tr, 240))
+        self.tr_status.setText(t("store.detail_translated_ok"))
 
         def _err(e):
             self.translate_btn.setEnabled(True)

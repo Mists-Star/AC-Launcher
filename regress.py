@@ -82,6 +82,7 @@ SUITES = [
     ("实例布局标识/自动查验", "test_round179_instance_marker.py", "script"),
     ("官方图标/交互/排版", "test_round180_ui.py", "script"),
     ("资源图标缓存", "test_round180_icon_cache.py", "script"),
+    ("图标性能/详情缓存/HMCL 图标", "test_round181_perf.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

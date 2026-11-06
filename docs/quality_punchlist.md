@@ -491,3 +491,52 @@ format（「自定义格式没作用」根因）；`core/instance_rebuild.py:146
 判据 `tests/test_round180_ui.py` / `test_round180_icon_cache.py` 已登记
 `regress.py`。⚠ 双轨验收仍欠真机目检（切换不跳、版本号、角标、滚动图标
 补全率、详情页观感）。
+
+
+---
+
+## 十一、加载器复用 / PCL 式实例编辑 / 下载页格式选项（2026-11-07 用户提出）
+
+> 用户原话要点：①「加载器你看看其他启动器是什么样的，基本上是一样的，
+> 可以复用他们的，不要自己乱找」；②「像PCL一样的实例/版本修改功能呢？
+> 就是可以随便加或去除加载器mod等更换」；③「为什么下载时只有选择隔离和
+> 目录？为啥看不到启动方式里的各种格式在下载中选择？」
+
+### ① 加载器复用 ✅ round-181 已实现
+
+不再逐个溯源上游官方原图（round-180 的做法被用户纠正）。直接采用 HMCL
+`assets/img/*@2x.png` 现成集，8 张 + 2 张官网 favicon；Cleanroom 补齐。
+主流做法实证与许可见 `assets/icons/LOADER_LOGOS.md`。
+
+### ② PCL 式实例 / 版本随意编辑 — 现状核实（未授权改动）
+
+| 位置 | 现状 |
+|---|---|
+| `pages_instances.py:2284` 实例设置 | **已有**但分散：可改名称、游戏版本、加载器、加载器版本、内存、JVM 参数/预设、渲染器、游戏附加参数、版本隔离、自定义目录、分组、Java 强制、启动/退出命令、启动格式 |
+| `:2539` 版本变更 | 只置 `version_id=""` + 后台 `_start_instance_download()` 补游戏文件（幂等、保留存档模组），**并没有真正安装/卸载加载器**；`install_loader` 仅存在于 `core/instance_health.py:638` 体检修复 |
+| `:2339` `_editable` | 导入实例禁改版本 / 加载器 / 加载器版本三项 |
+| `modules_page.py` | 模组禁用 / 删除在这里；实例详情的 Mods / 资源包 / 光影 / 存档四个按钮只是跳转页，不是「在同一面板里勾选加载器 + 加删 mod」 |
+| `:1940-1960` 右键 | 有体检、补装依赖、崩溃分析，无「管理加载器」「添加模组」独立项 |
+
+**结论：能力碎片化，且「换加载器」是改字段不是真换**，与 PCL 的整页式编辑差距在
+交互聚合与加载器真实安装/卸载，不在字段数量。属功能增强，等用户拍板范围。
+
+### ③ 下载 / 新建时看不到各种启动格式 — 真缺口（未授权改动）
+
+| 位置 | 现状 |
+|---|---|
+| `pages_instances.py:1352` `current_layout()` | 新建向导的 `dir_combo` 只有 `ac / vanilla / iso / custom` **4 项**，语义是「游戏目录布局」，不是启动格式 |
+| `instances.py:311` `INSTANCE_FORMATS` | 9 种：`ac / vanilla / iso / multimc / curseforge / modrinth / custom / auto …`，**只在已建实例的「实例设置」** `pages_instances.py:2394` `fmt_combo` 里出现 |
+| `pages_instances.py:2466` | 「隔离 / 目录」是另一组控件（isolation + game_dir_override），与格式无关 |
+
+所以用户在下载/新建阶段只看到隔离和目录，是**格式枚举从未接进新建向导**；
+round-179 之前 `instances.py:779 add()` 还会把向导选的 format 直接丢掉（已修）。
+另外枚举里**没有 `pcl` 这一项**，用户说的「PCL 等启动器的不同实例」目前只能
+落到 `vanilla` / `iso` / `multimc` 近似表达。
+
+**建议（等授权）**：新建向导增加「启动格式」下拉，复用 `INSTANCE_FORMATS` +
+`_fmt_keys` 文案，选中结果随 `result_data()` 落到 `add()`；补 `pcl` 枚举与对应
+`detect_format` 特征（PCL2 的版本隔离目录 / `.minecraft` 布局）；与 round-179 的
+`.ac-layout.json` 标识联动，避免选了格式又被自动探测覆盖。
+
+**状态：②③ 仅登记，未改代码。** 涉及新建向导与实例主链路，按项目约定先问再动。
