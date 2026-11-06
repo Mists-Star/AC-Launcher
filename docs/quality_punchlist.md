@@ -362,4 +362,116 @@
    —— 若需要，`layout_of()` 与所有调用点（启动 / 补全 / 体检 / 诊断 / 整合包
    导入目录口径）都要一起改，属于跨模块改动，必须单独一批 + 双轨验收。
 
-**状态：待设计 / 未授权实现。**
+### 用户方案 v2（22:41）与设计评审
+
+> 用户明确方案：① 新建/下载版本时**本来就能选格式**（AC / 原版 / 其它启动器的
+> 不同实例），给这些格式**加标识码**；② 标识码必须**不影响迁移到其它启动器、
+> 不影响正常启动、不被其它启动器误识别，只对 AC 生效**；③ 顺序为
+> **先找识别码 → 找到就按对应格式查漏补缺 → 没找到（或选了「不查验完整性」）
+> 就跳过 → 若压根没识别码，则看一遍实例特征后补写识别码用于区分**；
+> ④ **把启动默认的「AC 格式识别」改成自动查验**，防止其它实例被按 AC 规矩补全；
+> 目标：省掉反复识别错误 → 乱补全 → 再查验完整性的繁琐流程。
+
+**新增硬证据（本轮逐行查实）**
+
+- `src/instances.py:779` `add()`：`format=(format or "").strip() if base else ""`
+  —— **`base` 为空（AC 自有布局）时，向导里选的格式被直接丢弃**。「自定义启动格式
+  没实际作用」是确凿 bug，不是体验问题，且**应该比标识更早修**。
+- `src/instances.py:346` `detect_format()`：第一优先级 `_is_ac_owned()` 直接返回
+  `ac`，跳过手选值与 `_probe_format()`；`adapt_format()`（`:409`）还会把 AC 自有
+  实例上残留的外来标签强行改回 `ac`。`layout_of()`（`:424`）被
+  `launch.py:359`（启动解析根）、`core/install.py:121`（补全写盘根）、
+  `core/instance_rebuild.py:125`（重建根）共用 → 这里判错，三处一起错着补。
+- 向导格式枚举：`pages_instances.py:123` `_fmt_keys` 共 8 个
+  （auto / ac / vanilla / iso / multimc / curseforge / modrinth / custom）；
+  新建向导 `current_layout()`（`:1299`）实际只给 ac / vanilla / iso / custom，
+  即「AC 自有 / 玩家指定 .minecraft / 版本隔离 / 指定游戏目录」。
+  **没有 PCL2 专属格式**——PCL2 实例在这里落到 `iso`（版本隔离）或 `custom`。
+
+**设计评审：方案方向成立，三处建议改**
+
+1. ☠ **标识文件放 AC 元数据侧，不要写进游戏目录**。
+   建议 `data/instances/<id>/ac-layout.json`（与 `<id>.json` 同级），**不碰
+   `.minecraft/`**。理由：写进用户外部实例的真实游戏目录是对外操作，PCL2/HMCL
+   的「清理无效文件」或整合包覆盖可能删掉它，迁移时还会跟着走被别的启动器看见；
+   放元数据侧则「只对我们生效」最彻底、零污染。代价是用户手动复制 `.minecraft`
+   迁移后标识不跟随 → 降级到特征探测，这正是方案里的「没查到就看特征」分支。
+2. ☠ **标识内容不能只是「格式 ID」，得是路径映射表**。
+   一个 `ac|vanilla|iso` 枚举表达不了用户 22:06 举的「游戏拆成多个文件夹混着叠」
+   的极端布局，光存 ID 之后还是靠猜。建议 schema：
+   `{"schema":1,"fmt":"...","confidence":"high|low","paths":{"versions_root":"...",
+   "install_dir":"...","mods_dir":"...","saves_dir":"...","assets_dir":"..."},
+   "fingerprint":"...","created_at":...}`。「查漏补缺」= 按这张表逐项验证路径存在，
+   缺哪个补哪个，不再每次重新探测。
+3. ☠ **「没查到就自动补写标识」必须收窄**：只在探测置信度高时落盘；低置信度
+   写 `confidence:low` 且不参与补全，或直接不写并提示。否则探测本身就不可靠时
+   写死一张错表，之后会一直按错的补 —— 反而放大用户想消灭的「识别错误乱补全」。
+   只读目录（Program Files / 别的启动器目录）写失败要静默降级，不能弹错。
+
+**实施分两批（避免一次改动波及启动主链路）**
+
+- 批次 1（零回归风险，纯增量）：新建 `core/instance_marker.py` 负责标识的
+  读 / 校验 / 原子写 / 指纹 / 置信度 / 降级；补单测。**不接任何现有逻辑**，
+  并且顺手修 `:779` 丢弃 format 的 bug。
+- 批次 2（需确认后动）：把 `detect_format()` 的「AC 无条件优先」降级为
+  「先查标识 → 命中按映射查验 → 未命中按现有 `_probe_format()` 探测 →
+  高置信度才补写标识」；`layout_of()` 消费标识路径表；加「不查验完整性」开关。
+  这批改 `layout_of` 会同时影响启动 / 补全 / 重建 / 体检，**必须真机双轨验收**。
+
+**状态：已按用户拍板实现（round-179，22:41 之后）**
+
+用户选择：① 标识**写进 `.minecraft`**（不是我推荐的元数据侧）；② **一次做到
+自动查验**（批次 1+2 一起）。据此落地：
+
+| 用户方案 | 实现 | 与评审建议的差异 |
+|---|---|---|
+| 给格式加标识码 | `<mc_dir>/.ac-layout.json`，点开头未知 JSON；内容是**逐项路径映射**而非格式 ID | 按用户选择写进游戏目录；用「点开头 + 其它启动器不读」满足「只对我们生效」。⚠ 代价：外部实例的 `.minecraft` 里会多一个文件，整合包覆盖/清理工具可能删掉它 → 删了就自动降级重探，不影响使用 |
+| 先找识别码 → 命中按格式查漏补缺 | `_resolve_layout()` 先 `im.read()`，命中且指纹/身份有效则直接用记录路径；`im.verify()` 返回缺失目录清单（**只读不创建**，真补全仍归 `install_instance`） | 「查漏补缺」实现为可见的完整性报告，不擅自往外部实例建目录 |
+| 没查到（或不查验）就跳过 | 设置 → 行为「查验启动格式完整性」开关，关闭后不读不写不查验 | 关闭开关仍保留 AC 自动查验（防错补核心） |
+| 没识别码就看特征并补写 | 无标识 → 实时特征探测 → **仅高置信度**写标识；身份/指纹校验保证后续变化自动作废 | 低置信度（特征全 miss 兜底 vanilla）**不写**，避免把一次猜错固化成常驻错误 |
+| 默认 AC 识别改自动查验 | `_is_ac_owned()` 不再直接返回 `ac`；目录里出现 mmc-pack.json / minecraftinstance.json / profile.json / instance.cfg 时降级探测 | 保留 round-164「AC 扁平 json 不切根」保护（回归真实抓到过破坏并修回） |
+
+**同批修掉的两个真 bug**：`instances.py:779` `add()` 在 `base` 空时丢弃向导选的
+format（「自定义格式没作用」根因）；`core/instance_rebuild.py:146` 把点开头的
+`.ac-layout.json` 当版本文件（「无版本文件」误判）。
+
+判据 `tests/test_round179_instance_marker.py`（27 条）已登记 `regress.py`。
+**双轨验收仍欠**：真机目检标识生成、外来特征降级、开关关闭、以及把该
+`.minecraft` 交给别的启动器仍能启动 —— 详见 CHANGELOG round-179。
+
+
+---
+
+## 十、加载器选择与版本展示（2026-11-06 23:01 用户提出，待实现）
+
+> 用户原话要点：①「每次选择一个都会导致页面重构？还是什么情况，然后位置就有一些奇怪」；
+> ②「下载加载器，看看其他启动器是怎么做的，我们的可以用，但是和其他启动器比差距很大，
+> 比如说图标不是公共的那种对应加载器官方样式」；③「默认最高版本你不说版本玩家不知道的」；
+> ④「加载器版本你没有区分测试版等」。
+
+### 逐条核实（均已读到代码，非推测）
+
+| # | 位置 | 现状 / 原因 |
+|---|---|---|
+| 1 | `src/pages_instances.py:1092` `_select_loader` | 每次点加载器卡片都会 `ldver_box.setVisible(show_ldver)`（布局高度突变）+ `_load_loader_versions()`（**无条件重新发 Worker 请求**，即使重复点同一个加载器）+ `_update_path()`；异步回来 `_on_loader_versions()` 再 `clear()` 重建整个 combo。三次布局变化叠加 = 用户说的「页面重构 / 位置奇怪」。另外 `card.set_selected(lid == loader_id and card.isVisible())` 依赖 `isVisible()`，刚 show 的卡片可能状态不对 |
+| 2 | `assets/icons/loader_*.svg`（10 个）+ `src/icons.py:62` `_KEEP_COLOR` 白名单 | 图标是**自绘近似 SVG**（如 `loader_fabric.svg` 是手写 path 的绿色方块），不是各加载器官方 logo / 社区通用图标包。`_LoaderCard.__init__` 用 `_pix(f"loader_{lid}", 40)`，缺资源时回退中性色块。smoke 日志出现过 `Cannot open file :/icons/loader_labymod.svg`（QRC 注册与文件清单要一并核） |
+| 3 | `src/pages_instances.py:873` `ldver_combo.addItem(t("new_instance.ldver_latest"))` | 第一项只有「最新版」文案、**不带 data**；`selected_loader_version()` 读 `currentData()` 得到空串 → 安装时取最新。玩家完全不知道会装哪个具体版本，也没法确认/复现 |
+| 4 | `src/pages_instances.py:150` `_fetch_loader_versions` / `:1167` `_on_loader_versions` | 统一返回 `[{title, meta}]`，**没有 stable / beta / snapshot / preview 字段**，UI 也不分组。Forge 的 recommended vs latest、Fabric loader 稳定版、NeoForge beta、OptiFine preview 全混在一个平铺下拉里。`net_api.py:734` 的 `order={release,snapshot,...}` 只用于 **Minecraft 版本**，别误以为加载器版本已分类 |
+
+### 主流启动器做法（待联网调研后补实证，不要凭印象写）
+
+- PCL2 / HMCL / Prism / Modrinth App 的加载器选择页：官方 logo 资源来源、版本列表是否标注
+  `稳定版 / 测试版 / 推荐`、默认项是否显示具体版本号、切换加载器时是否保留滚动位置。
+- 需要确认各加载器上游 API 是否直接给稳定标记：Forge `promos` / `recommended`、
+  Fabric `meta.fabricmc.net/v2/versions/loader`、NeoForge maven、Quilt、OptiFine preview。
+
+### 建议分组（等用户确认后开干）
+
+- **① 位置跳动**：切换时不再 `clear()` 整个 combo、同一加载器重复点直接复用缓存、
+  `ldver_box` 用固定占位高度（隐藏时保留空间）避免布局跳；`_ldver_gen` 已有竞态守卫可复用。
+- **② 图标**：换成官方 / 社区通用 logo 资源，核对 QRC 注册与 `labymod` 缺图告警；
+  别继续手绘近似 path。
+- **③④ 版本展示**：默认项显示解析出的具体版本号（如「最新稳定版 0.16.10」），
+  数据源给每个版本加 `channel`，UI 分组或加角标，并允许玩家显式选择测试版。
+
+**状态：待实现 / 未授权改动。** 本轮先把 round-179 收尾（部署 + c/p），不混批。

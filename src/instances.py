@@ -322,34 +322,132 @@ _KIND_TO_FORMAT = {
 }
 
 
-def detect_format(inst) -> str:
-    """判定实例的启动格式（round-82，round-135 补全）。
+def _marker_enabled() -> bool:
+    """「查验启动格式完整性」开关（round-179）。
 
-    优先级：
-    1. AC 自有布局（``_base`` 为空 ⇒ 实例住在 data/instances/<id>/.minecraft，
-       libraries 走共享池联接）→ ``ac``。这是**结构性事实**，优先于任何
-       遗留的显式 format（round-163：导入时写的 curseforge/multimc 标签
-       会让徽章和格式提示长期错标）；
-    2. 玩家已手动指定（format 非空且非 auto）→ 直接用；
-    3. 自适应（auto / 空）→ ``_probe_format`` 按磁盘特征实时探测：
-       MMC 布局（mmc-pack.json）> 外来版本隔离（导入，
-       mc_dir 内直接躺 <version>.json）> CurseForge（minecraftinstance.json）
-       > Modrinth（profile.json 等）> 兜底原版标准布局；
-    4. 特征全 miss → 按导入时判定的 ``kind`` 兜底（目录改名/移动/元数据
-       缺失时不至于把其它启动器的实例误标成原版）。
-
-    返回始终是 INSTANCE_FORMATS 之一；原版标准布局之外的改装/奇怪目录由
-    versions_root 的 <id>.json 特征兜底自适应（round-78）。
+    关闭时完全不读写标识、不做查漏补缺，退回纯实时探测；但 **AC
+    自动查验仍生效**（那是防止外来实例被按 AC 规矩补全的核心，不能关）。
     """
-    if _is_ac_owned(inst):
-        return "ac"
-    fmt = (getattr(inst, "format", "") or "").strip() or "auto"
-    if fmt != "auto":
-        if fmt in INSTANCE_FORMATS:
-            return fmt
-        # round-135：非法值（老版本遗留 / 手改配置）不该返回 "auto" 字符串——
-        # 那样徽章会显示「自适应（自动识别）」且永远不再探测。改为按自适应探测。
-    return _probe_format(inst)
+    try:
+        from .settings_dialog import load_config
+        return bool(load_config().get("verify_layout_integrity", True))
+    except Exception:  # noqa: BLE001 - 配置不可用按默认开启
+        return True
+
+
+def _ac_layout_looks_valid(inst) -> bool:
+    """round-179：AC 自有布局不再「_base 空就无条件认 ac」，先做自动查验。
+
+    过去 ``detect_format()`` 第一优先级直接 ``return "ac"``，跳过所有特征
+    探测；一旦 AC 实例目录里被放进别的启动器的实例（复制/覆盖/误导入），
+    ``layout_of()`` 给出的根目录就是错的，启动、补全、重建、体检会一起
+    按 AC 规矩乱补。这里只检查**明确的外来特征**，其余一律仍认 AC 自建
+    （新建实例的 mc_dir 里只有 mods/ 等空目录，不能误判成 vanilla）。
+    """
+    mc = (getattr(inst, "mc_dir", "") or "").strip()
+    if not mc or not os.path.isdir(mc):
+        return True  # 还没建目录 → ensure_dirs 会建标准布局
+    for name in ("mmc-pack.json", "minecraftinstance.json", "profile.json",
+                 "modrinth.json", "modrinth.index.json", "instance.cfg",
+                 ".minecraft/mmc-pack.json"):
+        if os.path.isfile(os.path.join(mc, name)):
+            return False
+    # ☠ 不要拿「<mc>/<ver>.json 扁平存在」当外来特征：AC 自有布局里也可能
+    # 有同名文件（round-164 明确保护「AC 扁平 json 不切根」）。外来版本
+    # 隔离由 _is_ac_owned=False（external / _base 非空）区分，不在这里判。
+    return True
+
+
+def _resolve_layout(inst, version: str = "") -> dict:
+    """round-179 唯一解析入口：**找标识 → 命中按映射查验 → 没标识看特征 → 写标识**。
+
+    返回比 ``layout_of`` 多几个内部字段（from_marker / confidence / verify /
+    paths），对外仍由 ``layout_of`` 裁剪成原来 5 个键，四个消费点零改动。
+    """
+    from .core import instance_marker as im
+
+    mc = (getattr(inst, "mc_dir", "") or "").strip()
+    ver = (version or (getattr(inst, "version_id", "") or "")
+           or (getattr(inst, "game_version", "") or ""))
+    enabled = _marker_enabled()
+
+    # ── 1. 先找识别码：命中且指纹有效 → 直接用记录的路径映射 ─────────
+    if enabled:
+        marker = im.read(inst)
+        if marker:
+            ap = marker["abs_paths"]
+            return {
+                "format": marker["fmt"], "version": ver,
+                "flat": bool(marker.get("flat")),
+                "install_dir": ap["install_dir"],
+                "versions_root": ap["versions_root"],
+                "paths": ap, "from_marker": True, "confidence": "high",
+                "verify": im.verify(ap),
+            }
+
+    # ── 2. 没有识别码（或标识已失效）→ 看一遍磁盘特征 ────────────────
+    if _is_ac_owned(inst) and _ac_layout_looks_valid(inst):
+        fmt, confidence = "ac", "high"
+    else:
+        chosen = (getattr(inst, "format", "") or "").strip() or "auto"
+        if chosen != "auto" and chosen in INSTANCE_FORMATS:
+            fmt, confidence = chosen, "high"
+        else:
+            fmt = _probe_format(inst)
+            # 特征全 miss 兜底成 vanilla：这种「猜」不能写成标识，
+            # 否则以后会一直按一张可能错的表补全（用户最想避免的情况）。
+            confidence = "high" if fmt != "vanilla" else "low"
+
+    # flat / root 推导（沿用 round-164 口径，未改语义）
+    flat, root = False, mc
+    if mc:
+        flat_json = os.path.join(mc, f"{ver}.json") if ver else ""
+        if fmt == "iso" or (flat_json and not _is_ac_owned(inst)
+                            and os.path.isfile(flat_json)):
+            flat = True
+            root = os.path.dirname(os.path.dirname(os.path.normpath(mc)))
+
+    game_dir = ""
+    try:
+        game_dir = getattr(inst, "game_dir", "") or ""
+    except Exception:  # noqa: BLE001
+        game_dir = ""
+    game_dir = game_dir or mc
+    paths = {
+        "install_dir": root,
+        "versions_root": root,
+        "mods_dir": os.path.join(game_dir, "mods"),
+        "saves_dir": os.path.join(game_dir, "saves"),
+        "assets_dir": os.path.join(root, "assets"),
+        "libraries_dir": os.path.join(root, "libraries"),
+    }
+
+    # ── 3. 高置信度才把探测结果写成识别码，下次直接命中 ────────────────
+    if enabled and confidence == "high":
+        im.write(inst, fmt, paths, "high", flat=flat)
+
+    return {
+        "format": fmt, "version": ver, "flat": flat,
+        "install_dir": root, "versions_root": root,
+        "paths": paths, "from_marker": False, "confidence": confidence,
+        "verify": im.verify(paths) if enabled else None,
+    }
+
+
+def detect_format(inst) -> str:
+    """判定实例的启动格式（round-82 → round-179）。
+
+    优先级已按用户方案重排：
+    1. **先找 AC 专属标识**（``<mc_dir>/.ac-layout.json``），命中且指纹有效
+       就直接采用，不再重复探测；
+    2. 无标识 → AC 自有布局也要**自动查验**目录特征，不再无条件认 ``ac``；
+    3. 玩家手选值 → 直接用；
+    4. 自适应 → ``_probe_format`` 磁盘特征 → kind 兜底；
+    5. 探测置信度高时把结果（格式 + 逐项路径映射）写回标识。
+
+    「不查验完整性」开关关闭时跳过 1/5，仍走 2~4。
+    """
+    return _resolve_layout(inst)["format"]
 
 
 def _is_ac_owned(inst) -> bool:
@@ -422,37 +520,31 @@ def adapt_format(inst) -> bool:
 
 
 def layout_of(inst, version: str = "") -> dict:
-    """检测后的统一布局（round-164）：启动解析根 / 补全写盘根 / 版本 id。
+    """检测后的统一布局（round-164 口径 / round-179 接入标识）。
 
-    启动（``launch.versions_root``）、补全（``core.install.install_instance``）
-    与体检必须共用同一口径，否则「识别为隔离布局，却把文件补进嵌套
-    versions/」会永远补不完——这正是「识别错误 → 错误补全」的来源。
+    启动（``launch.versions_root``）、补全（``core.install.install_instance``）、
+    重建（``core.instance_rebuild``）与体检必须共用同一口径，否则「识别为
+    隔离布局，却把文件补进嵌套 versions/」会永远补不完。
 
-    返回：
-      * ``format``       — ``detect_format`` 的结果；
-      * ``version``      — 实际版本 id（参数 > version_id > game_version）；
-      * ``flat``         — 版本 json 是否扁平躺在 ``<mc>/<version>.json``
-                           （外来版本隔离/扁平布局）；
-      * ``install_dir``  — mll 安装器应写入的根（flat → mc 的上级两层）；
-      * ``versions_root``— mll 启动时解析 ``versions/<id>/<id>.json`` 的根。
+    返回原有 5 键（``format`` / ``version`` / ``flat`` / ``install_dir`` /
+    ``versions_root``），另加两个**可选**键供体检显示：
+      * ``from_marker`` — 本次是否命中了 AC 专属标识（省掉重复探测）
+      * ``marker_missing`` — 标识映射里当前缺失的目录键（查漏补缺结果）
 
-    AC 自有布局即使目录里出现 ``<mc>/<version>.json`` 也不切换根目录：
-    那是实例自己的文件，不是外来隔离布局。
+    round-179 起优先采用标识里的路径映射；标识失效 / 缺失 / 置信度低时
+    自动降级到实时特征探测，绝不拿旧表硬补。
     """
-    fmt = detect_format(inst)
-    mc = (getattr(inst, "mc_dir", "") or "").strip()
-    ver = (version or (getattr(inst, "version_id", "") or "")
-           or (getattr(inst, "game_version", "") or ""))
-    flat = False
-    root = mc
-    if mc:
-        flat_json = os.path.join(mc, f"{ver}.json") if ver else ""
-        if fmt == "iso" or (flat_json and not _is_ac_owned(inst)
-                            and os.path.isfile(flat_json)):
-            flat = True
-            root = os.path.dirname(os.path.dirname(os.path.normpath(mc)))
-    return {"format": fmt, "version": ver, "flat": flat,
-            "install_dir": root, "versions_root": root}
+    r = _resolve_layout(inst, version)
+    out = {
+        "format": r["format"], "version": r["version"], "flat": r["flat"],
+        "install_dir": r["install_dir"],
+        "versions_root": r["versions_root"],
+        "from_marker": r["from_marker"],
+    }
+    verified = r.get("verify")
+    if verified:
+        out["marker_missing"] = list(verified.get("missing") or [])
+    return out
 
 
 class InstancesManager:
@@ -776,7 +868,10 @@ class InstancesManager:
             loader=loader if loader in LOADERS else "vanilla",
             loader_version=loader_version,
             java_path=java_path or "",
-            format=(format or "").strip() if base else "",
+            # round-179：过去 `if base else ""` 会把 AC 自有布局下向导里
+            # 选的格式直接丢掉 —— 「自定义启动格式没作用」的根因。现在
+            # 无条件保留；ac / auto 由 detect_format 的自动查验兜底。
+            format=(format or "").strip(),
             external=bool(base),
             _base=base,
         )

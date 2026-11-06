@@ -108,6 +108,68 @@ CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash
 
 ---
 
+## round-179（2026-11-06）— 实例布局专属标识 / 启动格式自动查验
+
+> 用户方案：新建/下载版本本来就能选格式（AC 自有 / 原版共享 / 版本隔离 /
+> 其它启动器实例），给这些格式加**只有 AC 识别**的标识码；顺序为
+> 「先找识别码 → 命中就按对应格式查漏补缺 → 没查到（或选了不查验完整性）
+> 才看一遍实例特征并补写识别码」；**把默认 AC 格式识别改成自动查验**，
+> 防止外来实例被按 AC 规矩乱补全。评审记录见 punchlist 第九章。
+> 用户已拍板：标识**写进 `.minecraft`**、**一次做到自动查验**。
+
+### 落地
+
+* 新增 `src/core/instance_marker.py`：`<mc_dir>/.ac-layout.json`（点开头的
+  未知 JSON，Minecraft / PCL2 / HMCL / Prism 都不读不索引，**不影响正常启动、
+  不影响迁移、不影响其它启动器识别**）。内容不是格式枚举，而是**逐项路径
+  映射**（`install_dir` / `versions_root` / `mods_dir` / `saves_dir` /
+  `assets_dir` / `libraries_dir`，相对 `mc_dir`）——格式枚举表达不了「游戏
+  目录被拆成多层、资源分散在不同层」的极端布局。
+* `instances._resolve_layout()` 成为唯一解析入口：
+  **找标识 → 命中且指纹有效就直接用记录的路径 → 没标识才看磁盘特征 →
+  高置信度才把结果写回标识**。`detect_format()` 与 `layout_of()` 都走它；
+  `layout_of()` 返回结构保持原 5 键，启动 / 补全 / 重建 / 体检四个消费点
+  **零改动**，另加可选 `from_marker` / `marker_missing` 供体检显示。
+* ☠ **默认 AC 格式识别改成自动查验**：过去 `detect_format()` 第一优先级
+  `_is_ac_owned()` 直接 `return "ac"`，跳过一切特征；现在 AC 自有目录里
+  若出现 `mmc-pack.json` / `minecraftinstance.json` / `profile.json` /
+  `instance.cfg` 等**权威外来标记**，会降级到实时探测，不再按 AC 规矩补全。
+  同时保留 round-164 的「AC 扁平 json 不切根」保护（这一点在回归里被抓到
+  并修正，见下）。
+* ☠ **修「自定义启动格式没实际作用」的真 bug**：`instances.py:779`
+  `add()` 里 `format=(format or "").strip() if base else ""` —— AC 自有布局
+  （`base` 空）时**向导里选的格式被直接丢弃**。现无条件保留。
+* 标识绑定实例身份（`owner` / `kind` / `launcher` / `game_version` /
+  `declared_format`）+ 目录指纹：实例来源变了、游戏版本换了、玩家在设置里
+  改了手选格式、或目录结构被外部改动 → 标识自动作废重探，**绝不拿旧表硬补**。
+  低置信度（特征全 miss 兜底 vanilla）不写标识。原子写，写失败静默降级。
+* 设置 → 行为新增「查验启动格式完整性」开关（默认开，`_DEFAULTS` /
+  UI / 回写 / 中英文案全接线）。关闭后不读不写标识，每次实时识别；
+  **AC 自动查验仍生效**（那是防错补的核心，不能关）。
+* ☠ `core/instance_rebuild.py:_collect_candidates` 排除点开头的隐藏 json：
+  标识是 `.json`，落在 `mc_dir` 里会被当成版本文件，导致「无版本文件」误判
+  成有、重构出错误实例定义。同类扫描点已排查（元数据目录 / 资源索引 /
+  主题包目录都不受影响）。
+
+### 验证
+
+* `regress.py` **47/47 exit 0**（新增 `test_round179_instance_marker.py`
+  27 条：读写/降级/指纹/身份/路径安全/自动查验/开关/add() 保留格式/
+  标识不被当版本 json）。
+* 回归中真实抓到并修掉两处：`AC 扁平 json 不切根` 保护被破坏、
+  `test_format.py` 同目录多实例导致标识串（改为绑定身份 + 指纹校验）。
+* i18n **1631=1631**、文案门禁 / PII / `git diff --check` 全过。
+* 新 exe 重打部署到 `<本机部署目录>`，保留 `launcher_config.json` / `data/`；
+  `AC_NO_TERMS=1` 10 秒冒烟通过。
+
+> ⚠ 双轨验收欠账：本批仍是代码轨 + 构造判据，**未真机复现**。需要真机看
+> ① 首次启动实例后 `data/instances/<id>/.minecraft/.ac-layout.json` 生成；
+> ② 手动往 AC 实例目录塞一个 `mmc-pack.json` 后，格式徽章/体检不再标 `ac`；
+> ③ 设置里关掉「查验完整性」后不再写标识；④ 把该 `.minecraft` 复制给别的
+> 启动器仍能正常启动。
+
+---
+
 ## round-178（2026-11-06）— 模组 / 资源链路第二批（A/B/C/D 组）
 
 > 承接第八章审计的剩余 P1。用户「先干其他那一组的事情」授权后按

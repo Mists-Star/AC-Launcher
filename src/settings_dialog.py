@@ -181,6 +181,8 @@ _DEFAULTS = {
     "font_family": "",                # round-87 全局字体；空=跟随主题默认
     "nav_layout": "ac",               # ac（侧边导航）/ pcl2（顶部，需 dev_mode）
     "topmost": False,                 # 窗口置顶
+    # round-179：启动格式完整性查验（AC 专属布局标识的读写开关）
+    "verify_layout_integrity": True,
     "warn_non_ascii_path": True,      # 非 ASCII 路径警告
 }
 
@@ -735,8 +737,15 @@ class SettingsPage(QWidget):
         self.reduce_motion_chk = QCheckBox(t("settings.reduce_motion"))
         self.reduce_motion_chk.setChecked(self.cfg.get("reduce_motion", False))
         self.reduce_motion_chk.setToolTip(t("settings.reduce_motion_hint"))
+        # round-179：关闭后不读写 .ac-layout.json，每次实时识别
+        self.verify_layout_chk = QCheckBox(
+            t("settings.verify_layout_integrity"))
+        self.verify_layout_chk.setChecked(
+            self.cfg.get("verify_layout_integrity", True))
+        self.verify_layout_chk.setToolTip(
+            t("settings.verify_layout_integrity_hint"))
         _fx_boxes = [self.close_launch_chk, self.tray_chk, self.topmost_chk,
-                     self.reduce_motion_chk]
+                     self.reduce_motion_chk, self.verify_layout_chk]
         for _i, _cb in enumerate(_fx_boxes):
             fx_grid.addWidget(_cb, _i // 2, _i % 2)
         fx_grid.setColumnStretch(2, 1)
@@ -2774,6 +2783,10 @@ class SettingsPage(QWidget):
         target["reduce_motion"] = self._safe(
             lambda: self.reduce_motion_chk.isChecked(),
             bool(target.get("reduce_motion", False)))
+        # round-179 启动格式完整性查验
+        target["verify_layout_integrity"] = self._safe(
+            lambda: self.verify_layout_chk.isChecked(),
+            bool(target.get("verify_layout_integrity", True)))
         # round-167 低配模式（基础分区懒加载 → 未构建时保留原值）
         target["slim_mode"] = self._safe(
             lambda: self.slim_chk.isChecked(),

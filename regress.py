@@ -79,6 +79,7 @@ SUITES = [
     ("构建退出码/瘦身降级", "test_build_trim.py", "script"),
     ("下载完整性/CF 版本口径", "test_round178_mod_integrity.py", "script"),
     ("模组依赖统一修复", "test_round178_mod_repair.py", "script"),
+    ("实例布局标识/自动查验", "test_round179_instance_marker.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

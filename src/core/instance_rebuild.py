@@ -140,7 +140,10 @@ def _collect_candidates(inst) -> list[tuple[str, str, dict]]:
         except OSError:
             files = []
         for fn in files:
-            if not fn.lower().endswith(".json"):
+            # round-179：点开头的隐藏 json 一律不是版本文件（AC 专属布局
+            # 标识 .ac-layout.json 就落在 mc_dir 里，混进来会让「无版本
+            # 文件」误判成有，重构出完全错误的实例定义）。
+            if not fn.lower().endswith(".json") or fn.startswith("."):
                 continue
             name = fn[:-5]
             if name.lower() in _META_JSON:
