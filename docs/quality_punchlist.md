@@ -540,3 +540,50 @@ round-179 之前 `instances.py:779 add()` 还会把向导选的 format 直接丢
 `.ac-layout.json` 标识联动，避免选了格式又被自动探测覆盖。
 
 **状态：②③ 仅登记，未改代码。** 涉及新建向导与实例主链路，按项目约定先问再动。
+
+---
+
+## 十二、客户端增强包与 Java 25 识别（2026-11-07 round-182）
+
+### ① 「不加 mod 直接在游戏里用鼠标手势」——查证结论
+
+用户问的是 Mouse Tweaks（YaLTeR，BSD-3，Modrinth `mouse-tweaks`）。它 hook 容器
+界面的 `mouseClicked / mouseDragged / mouseScrolled`，必须知道「光标下是哪个
+slot、手里拿着什么、对面是什么容器」。启动器在进程外只有像素，按坐标盲点最坏
+**会把物品丢到地上**。→ **启动器层面做不了，只能装 mod**。
+
+已落地为一键装 / 卸（`src/core/enhance.py` + `src/enhance_dialog.py`，实例右键
+→「客户端增强」）。清单 14 项分 5 组，Modrinth slug 全部逐个实测存在。
+
+**仍未做（等授权）**：启动器级手势（GestureKeys 式：低级鼠标钩子采笔迹 →
+`SendInput` 发按键/命令）。它只能触发按键与命令，不能直接操作 GUI，且要独占
+一个触发键——收益与 Mouse Tweaks 不重叠，属另一条产品线。
+
+### ② 为什么「识别不到启动器自己下的 Java 25」——根因已修
+
+两套口径不一致：
+
+| 入口 | 数据来源 | 能否看到自装 JRE |
+|---|---|---|
+| Java 管理页下拉（round-177 修过） | `java_install.installed_majors()` 读安装记录 | 能 |
+| 自动选择 / 启动判定 / 体检 / Cleanroom 安装器 | `core.java.scan_javas()` | **不能**（扫描根里没有 `<data>/java`） |
+
+所以表现为：管理页里看得见、手选能用，但 `java25_path()` 是 None、
+`select_java(need=25)` 返回 None → 判「没有兼容 Java」；Cleanroom 安装器退回
+「最高的现代 JVM」抓到系统 Java 26。
+
+round-182 已把 `installed_majors()` 并进 `scan_javas()` 且排最前。探针复验：
+`java25_path()` 命中、`cleanroom_installer_java()` = Java 25、
+`select_java(need=25)` 命中。
+
+**遗留（未修）**：`scan_javas` 有 deep/fast 两档缓存，`install_java()` 装完新
+JRE 后**没有主动失效缓存**，最长要等 TTL 过期才出现在自动选择里（管理页下拉
+走 installed_majors 所以是即时可见的）。属体验毛刺，登记待办。
+
+### ③ 仍挂着的待办（本轮未动）
+
+- 设置 → 基础的两项新开关（窗口模式 / Gamma）只在**启动前**写 `options.txt`，
+  实例自定义 `game_dir` 与版本隔离目录的取值已核对一致，但「同一实例换目录后
+  旧 options.txt 残留」未处理。
+- `neoforge` 与 `forge` 的 mod 兼容判断只按加载器精确匹配，未处理同时发布两版
+  的 mod（如部分 ModernFix 构建）在 neoforge 上找不到 forge-only 依赖的情况。
