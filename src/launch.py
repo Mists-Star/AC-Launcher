@@ -367,6 +367,32 @@ def versions_root(inst, version: str = "") -> str:
     return mc
 
 
+def _read_options_file(fpath: str) -> dict[str, str]:
+    """读 options.txt / options_fullscreen.txt（`key:value` 逐行）。"""
+    data: dict[str, str] = {}
+    if not os.path.exists(fpath):
+        return data
+    try:
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if ":" in line:
+                    k, _, v = line.partition(":")
+                    data[k] = v
+    except OSError:
+        return {}
+    return data
+
+
+def _write_options_file(fpath: str, data: dict[str, str]) -> None:
+    try:
+        with open(fpath, "w", encoding="utf-8") as f:
+            for k, v in data.items():
+                f.write(f"{k}:{v}\n")
+    except OSError:
+        pass
+
+
 def _apply_game_window_mode(mc_dir: str, window_mode: str) -> None:
     """Make the launched Minecraft honor the chosen window mode.
 
@@ -379,27 +405,43 @@ def _apply_game_window_mode(mc_dir: str, window_mode: str) -> None:
     if not mc_dir or not os.path.isdir(mc_dir):
         return
     full = window_mode in ("fullscreen", "borderless")
-    target_files = ["options.txt", "options_fullscreen.txt"]
-    for fname in target_files:
+    for fname in ("options.txt", "options_fullscreen.txt"):
         fpath = os.path.join(mc_dir, fname)
-        data: dict[str, str] = {}
-        if os.path.exists(fpath):
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        line = line.rstrip("\n")
-                        if ":" in line:
-                            k, _, v = line.partition(":")
-                            data[k] = v
-            except OSError:
-                data = {}
+        data = _read_options_file(fpath)
         data["fullscreen"] = "true" if full else "false"
-        try:
-            with open(fpath, "w", encoding="utf-8") as f:
-                for k, v in data.items():
-                    f.write(f"{k}:{v}\n")
-        except OSError:
-            pass
+        _write_options_file(fpath, data)
+
+
+# 亮度覆盖的合法区间：0 = 全黑，1 = 默认，>1 = 提亮（1.12.2 的经典全亮写法）。
+GAMMA_MIN = 0.0
+GAMMA_MAX = 10.0
+
+
+def _apply_game_gamma(mc_dir: str, settings: dict) -> None:
+    """把设置里的「亮度（gamma）覆盖」写进 ``options.txt``。
+
+    与窗口模式不同，这里只写 ``options.txt``（fullscreen 那份没有 gamma 键）。
+    只**启动前写入**、退出后**不还原** —— 需求就是「改了就一直生效」；如果在
+    退出时再写一遍，反而会把玩家在游戏里手调的值抹掉。
+
+    注意：老版本（1.12.2 及更早）会把 options.txt 里的 gamma 直接当光源亮度
+    系数用，>1 就是常见的「全亮」；1.19+ 的选项系统把 gamma 夹在 0–1，
+    此时写再大也可能被游戏自己限制（提示里已说明，需光影/资源包才能全亮）。
+    """
+    if not mc_dir or not os.path.isdir(mc_dir):
+        return
+    if not isinstance(settings, dict) or not settings.get("gamma_override", False):
+        return
+    try:
+        val = float(settings.get("gamma_value", 1.0))
+    except (TypeError, ValueError):
+        return
+    val = max(GAMMA_MIN, min(GAMMA_MAX, val))
+    fpath = os.path.join(mc_dir, "options.txt")
+    data = _read_options_file(fpath)
+    data["gamma"] = f"{val:g}"
+    _write_options_file(fpath, data)
+
 
 
 def get_command(version: str, mc_dir: str, options: dict) -> list[str]:
@@ -836,6 +878,8 @@ def launch_instance(
     # the launcher-side counterpart to the "窗口模式" setting — it must run
     # before the process spawns so options.txt is in place at launch.
     _apply_game_window_mode(game_dir, settings.get("window_mode", "windowed"))
+    # round-182 亮度覆盖：写 options.txt 的 gamma，启动前生效、退出不还原。
+    _apply_game_gamma(game_dir, settings)
 
     # External login: route auth through authlib-injector (third-party
     # Yggdrasil server). Jar path comes from settings (default

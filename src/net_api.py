@@ -929,6 +929,64 @@ def get_mod_download(project_id: str,
     return _version_primary_file(target, project_id)
 
 
+def project_supports(project_id: str, mc_version: str = "",
+                     loader: str = "") -> dict:
+    """查 Modrinth 项目声明能否用于「该 MC 版本 + 该加载器」（round-182）。
+
+    返回 ``{"exists": bool, "loaders": [...], "game_versions": [...],
+    "version_ok": bool|None, "loader_ok": bool|None}``。``None`` 表示
+    项目没声明该字段（或列表为空）→ 未知，调用方不应据此判死。
+
+    客户端增强包用它给出「这个 mod 在你这实例上装不了，因为它只支持
+    Forge」这种**有据可依**的拒绝，而不是装了启动即崩。
+    """
+    info = get_project_info(project_id)
+    if not info:
+        return {"exists": False, "loaders": [], "game_versions": [],
+                "version_ok": None, "loader_ok": None}
+    loaders = [str(x).lower() for x in (info.get("loaders") or [])]
+    gv = [str(x) for x in (info.get("game_versions") or [])]
+    mc = str(mc_version or "").strip()
+    ld = str(loader or "").strip().lower()
+    return {
+        "exists": True,
+        "loaders": loaders,
+        "game_versions": gv,
+        "version_ok": (mc in gv) if (mc and gv) else None,
+        "loader_ok": (ld in loaders) if (ld and loaders) else None,
+    }
+
+
+def find_mod_version(project_id: str, mc_version: str = "",
+                     loader: str = "") -> dict | None:
+    """挑一个「该 MC 版本 + 该加载器」下真能用的构建（round-182）。
+
+    ``_modrinth_versions`` 的 game_versions / loaders 是服务端过滤参数，
+    正常情况下第一个就够用；这里再在本地复核一遍——服务端偶尔会忽略
+    过滤（尤其是很老的版本号），拿到的构建装上去就是启动即崩。
+    找不到可用构建返回 ``None``（而不是抛错），由调用方给出人话。
+    """
+    versions = _modrinth_versions(project_id, mc_version, loader, limit=20)
+    mc = str(mc_version or "").strip()
+    ld = str(loader or "").strip().lower()
+    for v in versions or []:
+        if not isinstance(v, dict):
+            continue
+        gv = [str(x) for x in (v.get("game_versions") or [])]
+        lds = [str(x).lower() for x in (v.get("loaders") or [])]
+        if mc and gv and mc not in gv:
+            continue
+        if ld and lds and ld not in lds:
+            continue
+        try:
+            _name, url = _version_primary_file(v, project_id)
+        except NetError:
+            continue
+        if url:
+            return v
+    return None
+
+
 # ── Mod 依赖树解析（round-37 轴心1，对齐主流做法）───────────
 # Modrinth version dict 带 `dependencies: [{project_id, dependency_type}]`。
 # 下载 mod 时递归拉取 required 依赖（本体 + 所有缺的依赖文件），

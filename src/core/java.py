@@ -120,6 +120,19 @@ def scan_javas(deep: bool = True) -> list[dict]:
         out.append({"path": exe, "name": name, "version": ver,
                     "major": major, "is_64bit": is_64})
 
+    # round-182：启动器自己下载的运行时（<data>/java/jre-25 …）必须并进来。
+    # round-177 只把它接进了 Java 管理页的下拉（available_majors），而自动选择
+    # / Cleanroom 安装器 / 体检走的都是 scan_javas —— 于是「明明装了 Java 25」
+    # 却在 select_java(need=25) 时返回 None，Cleanroom 退化成拿系统 Java 26
+    # 去跑安装器（控制台黑窗 + 安装失败）。放在最前面，让精确匹配优先选它。
+    try:
+        from .java_install import installed_majors
+
+        for _major, _exe in sorted(installed_majors().items()):
+            push(_exe, f"AC Java {_major}", str(_major), True)
+    except Exception:  # noqa: BLE001 - 扫描失败绝不拖垮启动
+        pass
+
     try:
         infos = minecraft_launcher_lib.java_utils.find_system_java_versions_information(
             additional_directories=_extra_dirs()

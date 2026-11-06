@@ -126,7 +126,7 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
         # 目标 Java 25 可以由安装器自己下载。之前这里只走
         # select_java(need=25)，机器没有 25 时就退化成 21/裸 java，
         # 无法保证安装器能跑；现在统一由 cleanroom_installer_java() 决策。
-        java = cleanroom_installer_java()
+        java = cleanroom_installer_java(java_path)
         if not java:
             raise RuntimeError(t("err.cleanroom_installer_java"))
     else:
@@ -281,15 +281,34 @@ def find_installed_loader(mc_dir: str, loader: str, game_version: str) -> str | 
     return None
 
 
-def cleanroom_installer_java() -> str | None:
+def _console_java(path: str) -> str:
+    """把 javaw.exe 归一为同目录 java.exe（保留 stdout/stderr）。
+
+    javaw 没有控制台，安装器若用它校验版本 / 打印错误，只会得到「no output」。
+    """
+    p = (path or "").strip()
+    if p.lower().endswith("javaw.exe"):
+        alt = os.path.join(os.path.dirname(p), "java.exe")
+        if os.path.isfile(alt):
+            return alt
+    return p
+
+
+def cleanroom_installer_java(user_path: str = "") -> str | None:
     """运行 Cleanroom 安装器 jar 的 JVM（与游戏实际使用的 Java 25 分离）。
 
-    优先 Java 25；没有则取「最高且 >=17」的已装 JDK——安装器 jar 自身只
-    需要现代 JVM，目标 Java 25 交给安装器的 ``--provision-java`` 下载到
-    ``~/.cleanroom/java``。一个 Java 都没有时返回 None，由调用方给出明确
-    中文错误（round-163）。
+    优先玩家在实例/设置里显式选定的 Java（≥17 即可跑安装器）——否则会出现
+    「明明选了 Java 25，安装器却拿系统里的 Java 26 跑」的错位（round-182 实测：
+    装好的 25 在 scan_javas 里看不见，于是 fallback 到 D:\\…\\java26，
+    弹出一个空白控制台窗口且安装失败）。
+
+    其次 Java 25（含启动器自己下载到 ``<data>/java/jre-25`` 的那份）；再其次
+    「最高且 >=17」；一个都没有返回 None，由调用方给出明确中文错误。
     """
-    from .java import java25_path, scan_javas
+    from .java import java25_path, java_major_or_zero, scan_javas
+    p = (user_path or "").strip()
+    if p and os.path.isfile(p) and java_major_or_zero(p) >= 17:
+        return p
     j25 = java25_path()
     if j25:
         return j25
@@ -582,6 +601,67 @@ def _install_legacyfabric(mc_version, mc_dir, *, loader_version="", callback=Non
     return version_id
 
 
+def _clear_stale_java_part(max_age: float = 3600.0) -> None:
+    """清掉 ``~/.cleanroom/java`` 下超过 1 小时没动静的 .part 残留。
+
+    Cleanroom 安装器用 .part 做断点续传，但卡死的半截包会一直沿用旧偏移，
+    越续越歪。只在「确定没有 Java 25、准备交给 --provision-java」之前调用。
+    """
+    import time
+
+    d = os.path.join(os.path.expanduser("~"), ".cleanroom", "java")
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    now = time.time()
+    for name in names:
+        if not name.lower().endswith(".part"):
+            continue
+        p = os.path.join(d, name)
+        try:
+            if now - os.path.getmtime(p) > max_age:
+                os.remove(p)
+        except OSError:
+            pass
+
+
+def _ensure_java25(callback=None) -> str:
+    """用启动器自己的镜像链路装一个 Java 25（Cleanroom 只有 25 能跑）。
+
+    返回 java.exe 路径；装不上返回 ""，调用方退回安装器的 --provision-java。
+    实测国内 Zulu CDN 会卡在几百 KB 的 .part（900s 超时），而 USTC 镜像的
+    Adoptium 包是 20 MB/s 级别，所以「自己装」比「让安装器装」快两个数量级。
+    """
+    from .java import reset_scan_cache
+    from .java_install import install_java
+
+    def _status(msg: str) -> None:
+        if isinstance(callback, dict):
+            st = callback.get("setStatus")
+            if callable(st):
+                st(msg)
+
+    try:
+        _status(t("launch.cleanroom_fetch_java"))
+        state = {"bucket": -1}
+
+        def _progress(got: int, total: int, phase: str) -> None:
+            if phase != "download" or not total:
+                return
+            bucket = int(got * 100 / total) // 10
+            if bucket != state["bucket"]:
+                state["bucket"] = bucket
+                _status(t("launch.cleanroom_fetch_java_pct",
+                          pct=bucket * 10))
+
+        path = install_java(25, progress=_progress)
+        reset_scan_cache()
+        return path or ""
+    except Exception:  # noqa: BLE001 - 装不上就让安装器自己 provision
+        return ""
+
+
 def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", callback=None):
     """Install Cleanroom by running its official installer jar.
 
@@ -647,18 +727,19 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
         # javaw 也能跑 jar，但 stderr/stdout 为空会让安装失败只剩「no output」。
         # 安装器是控制台程序，统一归一为同目录 java.exe 以保留错误详情。
         from .mirror import run_cancellable
-        if java.lower().endswith("javaw.exe"):
-            _java_exe = os.path.join(os.path.dirname(java), "java.exe")
-            if os.path.isfile(_java_exe):
-                java = _java_exe
+        java = _console_java(java)
         cmd = [java, "-jar", jar_path, "client", "-d", mc_dir, "-y",
                "--json", "--quiet"]
         if build:
             cmd += ["--version", build]
-        j25 = java25_path()
+        # round-182：目标 Java 25 优先用「本地已有 / 我们自己的镜像装」，
+        # 最后才交给安装器的 --provision-java。实测后者的 Zulu 源在国内会卡在
+        # ~800 KB 的 .part 上（900s 超时 → 玩家看到的就是「启动不了」）。
+        j25 = java25_path() or _ensure_java25(callback)
         if j25:
-            cmd += ["--java", j25]
+            cmd += ["--java", _console_java(j25)]
         else:
+            _clear_stale_java_part()
             cmd += ["--provision-java"]
             cleanroom_java = True
             # round-163：让玩家知道「为什么这一步很慢」——安装器会自行下载
@@ -678,9 +759,13 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
                                  timeout=900)
             if r2.returncode != 0:
                 detail = ((r.stderr or "") + (r.stdout or "")).strip()
+                # round-182：把「用的哪个 Java」写进错误里 —— 上一轮
+                # 「启动不了」只能看到一句 failed，无法判断是不是又拿错了 JVM。
+                from .java import java_major_or_zero
                 raise RuntimeError(
                     "Cleanroom installer failed (exit "
-                    f"{r.returncode}): {detail[-400:] or 'no output'}")
+                    f"{r.returncode}) · Java {java_major_or_zero(java) or '?'} "
+                    f"({java}): {detail[-400:] or 'no output'}")
     finally:
         # round-40 P2 泄漏修复：清理临时安装器（10-100MB jar）
         shutil.rmtree(tmp_dir, ignore_errors=True)

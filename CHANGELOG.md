@@ -108,6 +108,86 @@ CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash
 
 ---
 
+## round-182（2026-11-07）— Cleanroom 拿错 Java / 黑窗 / 亮度与窗口模式 / 客户端增强包
+
+> 用户报：「cleanroom 的 1.12.2 我用 java25 他启动不了，而且还拉起我 D 盘
+> java26 的 cmd 空窗口」。先复现再改，四条独立缺陷叠在一起。
+
+### 实测到的根因链
+
+用探针在**部署目录**（`D:\Appdata\AC_Launcher`）跑，输出与用户描述逐字对应：
+
+| 步 | 实测输出 | 含义 |
+|---|---|---|
+| 1 | `installed_majors() = {25: …\data\java\jre-25\…\java.exe}` | Java 25 确实装着（round-177 装的那份） |
+| 2 | `scan_javas(deep=False)` 只有 `Oracle\javapath\javaw.exe`（major 0） | **自动选择看不到启动器自己下的 JRE** → `java25_path() = None` |
+| 3 | `cleanroom_installer_java() = D:\Appdata\java26\bin\javaw.exe` | 于是回退到「最高的现代 JVM」，正是用户看到的 java26 |
+| 4 | `select_java('1.12.2', need=25) = None` | 启动前判据直接判「没有兼容 Java」 |
+
+连带三处：`run_cancellable` 用裸 `Popen`（窗口应用拉起控制台程序 → **全黑 cmd 窗**）；
+`javaw→java.exe` 归一后更明显；找不到 25 就走 `--provision-java`，而 Zulu CDN
+在国内实测卡在 `~/.cleanroom/java/.zulu25.38.107-…zip.part` **822 KB** 不动 → 900 s 超时。
+
+### 落地
+
+* `core/java.py`：`scan_javas` 把 `<data>/java/jre-*`（`installed_majors()`）并入，
+  且排在最前 —— 精确匹配优先选启动器自己的运行时。round-177 只接进了 Java 管理页
+  的下拉，自动选择/体检/Cleanroom 安装器都还是瞎的。
+* `core/install.py`：`cleanroom_installer_java(user_path)` 支持玩家显式选择
+  （≥17 即可跑安装器）；`_console_java()` 把 javaw 归一成同目录 java.exe。
+* `core/install.py`：新增 `_ensure_java25()` —— 缺 25 时用**我们自己的镜像链路**
+  （USTC/Adoptium，实测 20 MB/s 级）装一份，再交给 `--java`；装不上才退回
+  `--provision-java`，并在退回前清掉超过 1 小时的 `.part` 残包。
+* `core/mirror.py`：`run_cancellable` / `kill_process_tree` 一律带
+  `CREATE_NO_WINDOW`，安装器不再弹黑窗。
+* 安装失败信息补上「用的哪个 Java」：`Cleanroom installer failed (exit N) · Java 25 (path): …`。
+* 设置 → 基础：新增**亮度（Gamma）覆盖**（`gamma_override` / `gamma_value`，
+  0–10）。启动前写进 `options.txt`，退出**不还原**（退出时回写反而会抹掉玩家
+  在游戏里手调的值）。
+* 设置 → 基础：新增**游戏窗口模式**（窗口化 / 无边框 / 全屏，`window_mode`）。
+  `launch._apply_game_window_mode()` 启动前写 `options.txt` 的 `fullscreen`；
+  原版没有原生无边框全屏（要 OptiFine/Sodium），`borderless` 按全屏处理。
+
+### 客户端增强包（新功能）
+
+用户问：「有没有能力给 AC 配一些可以便利游戏中的功能，比如 mod 中的鼠标手势
+功能可以不加 mod 直接在游戏中使用？」先查证再动手——
+
+* 查证结论：他指的是 **Mouse Tweaks**（YaLTeR，BSD-3，Modrinth `mouse-tweaks`）。
+  它 hook 容器界面的 `mouseClicked / mouseDragged / mouseScrolled`，必须知道
+  「光标下是哪个 slot、手里拿着什么、对面是什么容器」。启动器在进程外只有像素，
+  硬做等于按坐标盲点，**最坏会把物品丢到地上**。所以这条路只能装 mod。
+* 落地为「一键装 / 卸」：实例右键 → **客户端增强**（`src/enhance_dialog.py`）。
+  14 个条目分 5 组（操作手感 / 性能 / 光影 / 信息与界面 / 前置库），覆盖
+  Mouse Tweaks、Controlling、AppleSkin、Sodium、Lithium、FerriteCore、
+  Entity Culling、ModernFix、Iris、Jade、Mod Menu 与三个常用前置库。
+* ☠ **支持范围走运行时查询**（`net_api.project_supports` 读 Modrinth 声明的
+  loaders / game_versions），不硬编码——上游扩了支持范围这里自动跟上。
+  只在**确认不支持**时禁用，未知一律放行。
+* ☠ **卸载只删自己的主文件**：自动带上的前置库保留（别的 mod 可能也在用），
+  并明确提示「没删，确实不要去 mods 目录手删」。
+* 记录 `<mc_dir>/.ac-enhance.json`（原子写；点开头 JSON，Minecraft 与
+  PCL2 / HMCL / Prism 都不读）。记录失效时靠 jar 里的 mod id 兜底识别，
+  不会把用户从资源中心装的同一 mod 再装一遍成两份。
+* 加载器候选链：quilt → (quilt, fabric)、cleanroom → forge、legacyfabric →
+  (legacyfabric, fabric)；**neoforge 不拿 forge 顶替**（1.20.2 后已分家）；
+  原版 / OptiFine / LiteLoader 明确告知「没有加载器，装不了」。
+
+### 验证
+
+* 探针 before/after：`java25_path()` 由 `None` → 真实路径；`cleanroom_installer_java()`
+  由 `java26` → Java 25；`select_java(need=25)` 由 `None` → 命中。
+* 增强包清单里 14 个 Modrinth slug **逐个实测存在**（不猜），加载器与版本
+  范围从 API 实读（例：`sodium` = fabric / neoforge / quilt，**无 forge**；
+  `mouse-tweaks` = fabric / forge / modloader / neoforge）。
+* 新增 `tests/test_round182_cleanroom_java.py`（扫描合并 / 优先级 / 隐藏控制台 /
+  javaw 归一 / gamma 写入与夹取，19 条）。
+* 新增 `tests/test_round182_enhance.py`（清单完整性 / 加载器链 / 记录读写 /
+  已装三层识别 / 卸载保留前置 / 状态机 / 中英对齐，45 条）。
+* `regress.py` **52/52 exit 0**。
+
+---
+
 ## round-181（2026-11-07）— 资源中心秒加载 / 加载器图标复用主流现成集
 
 > 用户反馈「资源中心点一个加载一次，好慢，图标加载慢得要命」，并要求

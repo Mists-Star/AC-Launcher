@@ -1942,6 +1942,9 @@ class InstancesPage(QWidget):
         # round-178：补装依赖原来只能「先崩溃 → 崩溃弹窗」才摸得到
         m.addAction(t("instances.repair_deps"),
                     lambda: self._repair_mod_deps(inst))
+        # round-182：客户端增强包（鼠标手势类 mod 一键装/卸）
+        m.addAction(t("enhance.title"),
+                    lambda: self._open_enhance(inst))
         m.addSeparator()
         m.addAction(t("instances.open_folder"),
                     lambda: self._open_folder(inst))
@@ -1960,6 +1963,11 @@ class InstancesPage(QWidget):
         m.addAction(t("common.delete"),
                     lambda: self._delete_instance(inst))
         m.exec(pos)
+
+    def _open_enhance(self, inst: Instance):
+        """round-182：右键「客户端增强」→ 一键装 / 卸客户端体验类 mod。"""
+        from .enhance_dialog import EnhanceDialog
+        EnhanceDialog(self, inst).exec()
 
     def _repair_mod_deps(self, inst: Instance):
         """round-178：右键「补装缺失依赖」→ 统一走 core.mod_repair。

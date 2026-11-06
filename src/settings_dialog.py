@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QLineEdit, QSpinBox, QTextEdit, QGroupBox, QCheckBox, QComboBox,
+    QDoubleSpinBox,
     QWidget, QRadioButton, QButtonGroup,
     QSlider, QProgressBar,
     QScrollArea, QListWidget, QListWidgetItem, QStackedWidget, QFrame,
@@ -51,6 +52,10 @@ _DEFAULTS = {
     # 自相矛盾 → is_dirty() 恒为真 → 每次进设置页再离开都弹「有未保存的更改」。
     "jvm_aikars": False,
     "window_mode": "windowed",       # windowed / borderless / fullscreen
+    # round-182 亮度（gamma）覆盖：写进游戏 options.txt，启动前生效，
+    # 退出不还原（玩家要的就是「改了就一直亮」）。
+    "gamma_override": False,
+    "gamma_value": 1.0,
     "language": "zh-CN",
     "accent_color": "#7C3AED",        # hex
     "wallpaper_mode": "none",      # none / solid / image / version / gif / video
@@ -621,6 +626,29 @@ class SettingsPage(QWidget):
             mode_row.addWidget(btn)
         ml.addLayout(mode_row)
         lay.addWidget(mode_grp)
+
+        # ── 亮度（gamma）覆盖 ──
+        gamma_grp = QGroupBox(t("settings.gamma_group"))
+        gl = QVBoxLayout(gamma_grp)
+        g_row = QHBoxLayout()
+        self.gamma_chk = QCheckBox(t("settings.gamma_enable"))
+        self.gamma_chk.setChecked(bool(self.cfg.get("gamma_override", False)))
+        g_row.addWidget(self.gamma_chk)
+        self.gamma_spin = QDoubleSpinBox()
+        self.gamma_spin.setRange(0.0, 10.0)
+        self.gamma_spin.setSingleStep(0.5)
+        self.gamma_spin.setDecimals(1)
+        try:
+            self.gamma_spin.setValue(float(self.cfg.get("gamma_value", 1.0)))
+        except (TypeError, ValueError):
+            self.gamma_spin.setValue(1.0)
+        self.gamma_spin.setEnabled(self.gamma_chk.isChecked())
+        self.gamma_chk.toggled.connect(self.gamma_spin.setEnabled)
+        g_row.addWidget(self.gamma_spin)
+        g_row.addStretch(1)
+        gl.addLayout(g_row)
+        gl.addWidget(self._wrap_hint(t("settings.gamma_hint")))
+        lay.addWidget(gamma_grp)
 
         # ── round-167 性能：低配模式（压制重效果，配置偏好原样保留）──
         perf_grp = QGroupBox(t("settings.performance"))
@@ -2637,6 +2665,13 @@ class SettingsPage(QWidget):
         checked_mode = self._safe(lambda: self.mode_btns.checkedButton(), None)
         if checked_mode:
             target["window_mode"] = getattr(checked_mode, "mode_key", target["window_mode"])
+        # round-182 亮度（gamma）覆盖
+        target["gamma_override"] = self._safe(
+            lambda: self.gamma_chk.isChecked(),
+            bool(target.get("gamma_override", False)))
+        target["gamma_value"] = self._safe(
+            lambda: round(float(self.gamma_spin.value()), 2),
+            float(target.get("gamma_value", 1.0)))
         # round-105 分辨率预设已删除：不再向游戏下发分辨率，由玩家在游戏内
         # 自由缩放窗口。旧配置里可能残留 res_w/res_h，这里一并清除。
         target.pop("res_w", None)

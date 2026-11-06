@@ -83,6 +83,8 @@ SUITES = [
     ("官方图标/交互/排版", "test_round180_ui.py", "script"),
     ("资源图标缓存", "test_round180_icon_cache.py", "script"),
     ("图标性能/详情缓存/HMCL 图标", "test_round181_perf.py", "script"),
+    ("Cleanroom Java/亮度覆盖", "test_round182_cleanroom_java.py", "script"),
+    ("客户端增强包装/卸", "test_round182_enhance.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

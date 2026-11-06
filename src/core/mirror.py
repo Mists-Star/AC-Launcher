@@ -539,7 +539,9 @@ def kill_process_tree(proc) -> None:
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=10)
+                           capture_output=True, timeout=10,
+                           creationflags=getattr(subprocess,
+                                                  "CREATE_NO_WINDOW", 0))
         else:
             proc.kill()
     except Exception:  # noqa: BLE001 - 杀不掉就让进程自己结束
@@ -569,6 +571,13 @@ def run_cancellable(command, *, cwd=None, timeout=None, check=False, **kwargs):
     allowed = ("stdout", "stderr", "stdin", "startupinfo", "env", "text",
                "encoding", "errors", "shell")
     popen_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
+    # round-182：安装器（Forge / NeoForge / Cleanroom / OptiFine 的 jar）都是
+    # 控制台程序。启动器是窗口应用，Popen 不带 CREATE_NO_WINDOW 就会弹出一个
+    # 全黑的 cmd 窗口（用户实测：「拉起 D 盘 java26 的 cmd 空窗口」）。
+    # 我们要的是 stdout/stderr 管道，不需要那个窗口。
+    if os.name == "nt":
+        popen_kwargs.setdefault(
+            "creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0))
     data = kwargs.get("input")
     if data is not None:
         # Popen 没有 input（那是 run() 的糖）：转成本进程 stdin 管道
