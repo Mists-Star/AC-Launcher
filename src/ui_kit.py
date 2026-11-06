@@ -157,6 +157,21 @@ def badge(text: str, color: str, font_size: int = 11) -> QLabel:
     return lb
 
 
+def format_count(value) -> str:
+    """下载量人读格式：1234567 → 123.5万。无数据用破折号，不编造数字。"""
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if n <= 0:
+        return "—"
+    if n >= 100000000:
+        return "%.1f亿" % (n / 100000000)
+    if n >= 10000:
+        return "%.1f万" % (n / 10000)
+    return str(n)
+
+
 def tag(text: str, bg: str, fg: str = None, font_size: int = 11,
         radius: int = 10, pad: str = "4px 12px") -> QLabel:
     """Generic solid-ish tag (e.g. the green "✓ 当前" mark)."""

@@ -108,6 +108,86 @@ CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash
 
 ---
 
+## round-180（2026-11-06）— 官方图标 / 图标缓存 / 加载器交互 / 排版
+
+> 用户要求：「本来就不要 svg 生成，全部都是复用对应官方给的，包括下载版本
+> 也是」；「资源中心有缓存有些还是没图片，其他启动器怎么搞的」；「顺便美化
+> 页面排版和点击进入后的详情页表现，契合其他启动器」。
+
+### 官方加载器图标（零自绘）
+
+* 9 个 `assets/icons/loader_*` 全部替换为**上游官方原文件**：
+  Fabric / Forge 官方站 PNG，Quilt / NeoForge 官方 SVG，OptiFine / LabyMod /
+  LegacyFabric / LiteLoader 官网 favicon.ico，**Vanilla 用随包官方 MC
+  `grass_block` 贴图**（与版本卡片同一套资源）。删掉全部手绘 SVG。
+* `icons.py` 新增 `_ICON_EXTS = (.svg, .png, .ico)`，`_icon_path` /
+  `_svg_bytes` / `_plain_icon` 与 `tools/generate_qrc.py` 全部按扩展名解析，
+  `icons.qrc` / `icons_rc.py` 重新生成；Qt `qico` / `qsvg` 插件承载原格式。
+* **Cleanroom 官方仓库与官网均未发布品牌图** → 不硬造，删掉自绘占位，
+  走中性色块 + 卡片名称。OptiFine 官方 favicon 只有 16×16，放大略糊但不重绘。
+* `assets/icons/LOADER_LOGOS.md` 记录每个文件的来源、许可、署名、GitHub
+  多源获取方式，以及**主流启动器实证对比**：Prism 用 FreeDesktop 图标主题
+  （`index.theme` + 11 个尺寸目录 + scalable），HMCL 用 48 个 `*.png` /
+  `@2x`（含 `cleanroom.png`、无 liteloader），PCL2 用 WPF 内置 PNG。
+  这三家都是各自维护的图标集，不是嵌官方原图；本仓按用户要求走官方原文件。
+* GitHub 直连不通时换通路：DevHub `gh_proxy_health` / `gh_proxy_fastest`
+  选节点 + 联网抓取直接读仓库页定位**真实路径**（`static/img/logo.svg` 不在
+  根目录）+ `gh-proxy.org` / `github.cnxiaobai.com` / `gh.monlor.com` 三节点
+  代理 raw（对 NeoForge logo 均 200 / 12434 B）。
+
+### 资源中心图标缓存（「有缓存还是没图」的真因）
+
+`async_image.ImageLoader` 重写。真机 `data/cache/icons/` 80 个文件 =
+40 URL × 2 尺寸、最小 848 B、**零坏文件**，所以不是缓存损坏，而是：
+
+1. 旧实现按 `(url, size, dpr)` 各存一份、各发一次网络请求，一次搜索 N 个
+   结果就是 2N 个并发（48px 卡片 + 72px 预取），QNAM 同主机默认 6 连接；
+2. 失败时**不重试、不记负缓存、不检查 HTTP 状态码**（403/429 返回 HTML
+   会当成功但不写盘）→ 失败的 URL 永远没有缓存；
+3. 部分 CF 卡片 `logo.url` 为空 → 显示首字母占位，看着像「没图片」；
+4. `bump()` 让在途回复即使成功写盘也不回写已重建的卡片。
+
+现在：**原图按 URL 只缓存一份**（`<md5>.img`），各尺寸内存派生；同 URL
+在途请求去重并挂等待表；检查 `HttpStatusCodeAttribute`；失败负缓存 + 指数
+退避（60s 上限）；最多 6 个在途、其余排队；坏缓存文件删除重下；`bump()`
+只让旧 widget 失效，同 URL 的新卡片照样能拿到图。`net_api._cf_map_row`
+补 `logo.thumbnailUrl` / `screenshots[0]` 回退。
+
+### 加载器选择与版本展示（punchlist 第十章 ①③）
+
+* `_select_loader`：重复点同一张卡不再重发 Worker；版本下拉结果按
+  `(mc, loader)` 缓存；`ldver_box` 改用高度占位隐藏（不再 `setVisible`
+  造成布局跳动）；选中态不再依赖 `card.isVisible()`；
+  `selected_loader_version()` 改用显式标志，避免占位隐藏时误取值。
+* 默认项从「最新稳定版（推荐）」改为**显示具体版本号**（`最新版本
+  0.16.10（推荐）`），玩家知道会装哪个、可复现。
+* `version_channel()` 从上游标题识别 `beta/preview/snapshot/recommended`，
+  UI 加「测试版 / 稳定版」角标；**纯版本号一律 `unknown` 不加角标**，
+  不假造稳定性。各数据源统一补 `channel` 字段。
+
+### 排版（按设计系统 token，只改结构真问题）
+
+* 列表卡片：描述改单行 `QFontMetrics.elidedText`（旧 `wordWrap(True)` 会把
+  84px 卡撑成两三行、整列节奏忽松忽紧），全文放 tooltip；标题加字重；
+  meta 行加来源标签 + `ui_kit.format_count()` 人读下载量，次信息降到
+  `text_disabled` token，拉开三级层级。
+* 详情页：封面 72 → 88px、主标题改用全站 `big` 类、meta 加来源标签与
+  格式化下载量。**未引入新色值 / 渐变 / 卡中卡**，全部走现有
+  `COLORS` / `RADII` / `ui_kit` 组件。
+
+### 验证
+
+* `regress.py` **49/49 exit 0**（新增 `test_round180_ui.py` /
+  `test_round180_icon_cache.py`）；i18n **1634=1634**、文案门禁 / PII /
+  `git diff --check` 全过；9 个官方图标逐个 Qt 渲染实测非 null。
+* 新 exe 重打部署到 `<本机部署目录>`，保留 `launcher_config.json` / `data/`；
+  `AC_NO_TERMS=1` 10 秒冒烟通过。
+
+> ⚠ 双轨验收仍欠真机：切换加载器不再跳、默认版本号显示、渠道角标、
+> 资源中心滚动时图标补全率、详情页观感；以及此前累计的所有真机项。
+
+---
+
 ## round-179（2026-11-06）— 实例布局专属标识 / 启动格式自动查验
 
 > 用户方案：新建/下载版本本来就能选格式（AC 自有 / 原版共享 / 版本隔离 /

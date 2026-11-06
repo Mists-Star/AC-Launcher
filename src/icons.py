@@ -41,6 +41,9 @@ try:
 except Exception:
     icons_rc = None
 
+# round-180：官方加载器 logo 的原始格式（顺序即优先级），一律原样复用
+_ICON_EXTS = (".svg", ".png", ".ico")
+
 _CACHE: dict = {}
 _PLAIN_CACHE: dict = {}
 _SIZE = 24
@@ -73,29 +76,38 @@ _MAX_CACHE = 512
 
 
 def _icon_path(name: str) -> str:
-    """Resolve ``<name>.svg`` on disk (bundled assets or project tree)."""
-    rel = os.path.join("assets", "icons", f"{name}.svg")
-    p = get_resource_path(rel)
-    if p and os.path.isfile(p):
-        return p
-    # Dev fallback: walk up from this file to the project root.
+    """Resolve an icon on disk (bundled assets or project tree).
+
+    round-180：官方加载器 logo 有 SVG / PNG / ICO 三种**原始格式**，
+    原样复用、不再手绘。按扩展名优先级找第一个存在的文件。
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     proj = os.path.dirname(here)  # src/ -> project root
-    cand = os.path.join(proj, "assets", "icons", f"{name}.svg")
-    if os.path.isfile(cand):
-        return cand
+    for ext in _ICON_EXTS:
+        rel = os.path.join("assets", "icons", f"{name}{ext}")
+        p = get_resource_path(rel)
+        if p and os.path.isfile(p):
+            return p
+        cand = os.path.join(proj, "assets", "icons", f"{name}{ext}")
+        if os.path.isfile(cand):
+            return cand
     return ""
 
 
 def _svg_bytes(name: str) -> bytes | None:
     """Raw SVG document for ``name`` — QRC first, then the filesystem."""
     if icons_rc is not None:
-        f = QFile(f":/icons/{name}.svg")
-        if f.open(QIODevice.OpenModeFlag.ReadOnly):
-            data = bytes(f.readAll())
-            f.close()
-            if data:
-                return data
+        for ext in _ICON_EXTS:
+            f = QFile(f":/icons/{name}{ext}")
+            # 先判存在：直接 open 会让 QtSvg 对不存在的 .svg 打
+            # "Cannot open file" 警告，污染日志（资源本身能正常回退）。
+            if not f.exists():
+                continue
+            if f.open(QIODevice.OpenModeFlag.ReadOnly):
+                data = bytes(f.readAll())
+                f.close()
+                if data:
+                    return data
     p = _icon_path(name)
     if p:
         try:
@@ -163,9 +175,14 @@ def _plain_icon(name: str) -> QIcon:
         return _PLAIN_CACHE[name]
     ic = QIcon()
     if icons_rc is not None:
-        q = QIcon(f":/icons/{name}.svg")
-        if not q.isNull():
-            ic = q
+        for ext in _ICON_EXTS:
+            _res = f":/icons/{name}{ext}"
+            if not QFile(_res).exists():
+                continue
+            q = QIcon(_res)
+            if not q.isNull():
+                ic = q
+                break
     if ic.isNull():
         p = _icon_path(name)
         if p:

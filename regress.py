@@ -80,6 +80,8 @@ SUITES = [
     ("下载完整性/CF 版本口径", "test_round178_mod_integrity.py", "script"),
     ("模组依赖统一修复", "test_round178_mod_repair.py", "script"),
     ("实例布局标识/自动查验", "test_round179_instance_marker.py", "script"),
+    ("官方图标/交互/排版", "test_round180_ui.py", "script"),
+    ("资源图标缓存", "test_round180_icon_cache.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

@@ -46,7 +46,27 @@ def _dpr_tag(dpr: float) -> int:
 
 
 class ImageLoader(QObject):
-    """Download + cache remote images, render them rounded into a QLabel."""
+    """Download + cache remote images, render them rounded into a QLabel.
+
+    round-180 重构（修「明明有缓存却还是没图」）：
+
+    * **原图只缓存一份**（``<md5(url)>.img``），各显示尺寸在内存里派生 ——
+      旧实现按 ``(url, size, dpr)`` 各存一份、各发一次网络请求，一次搜索
+      N 个结果就是 2N 个并发（48px 卡片 + 72px 预取），QNAM 同主机默认
+      只有 6 条连接，后面全排队超时。
+    * **同 URL 请求去重**：在途 URL 的后续 load/prefetch 挂到等待表，
+      回来后一次渲染给所有目标，不再重复发请求。
+    * **检查 HTTP 状态码**：403/429 返回 HTML 时 Qt 的 ``error()`` 可能是
+      NoError，旧实现会静默丢弃且不写缓存 → 那些图永远出不来。
+    * **失败负缓存 + 退避**：60s 内不重复打失败 URL，避免每次搜索重试
+      一遍无效请求；同时删掉损坏的缓存文件。
+    * **限并发**：最多 6 个在途请求，其余排队。
+    * **token 过期不再吞图**：``bump()`` 只让旧 widget 失效；同 URL 的新
+      卡片挂在等待表里，旧回复成功时照样能拿到图。
+    """
+
+    _MAX_INFLIGHT = 6
+    _FAIL_TTL = 60.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,27 +74,22 @@ class ImageLoader(QObject):
         self._mgr.finished.connect(self._on_finished)
         self._cache_dir = os.path.join(get_data_dir(), "cache", "icons")
         os.makedirs(self._cache_dir, exist_ok=True)
-        # Bumped on every UI teardown (e.g. store category switch / new search)
-        # so in-flight replies know their target widget may already be dead.
         self._token = 0
-        # In-memory cache: (url, size, dpr) -> rounded QPixmap. Makes revisiting a
-        # page or rebuilding a list with the same icons effectively instant.
-        # round-40 P2-7：LRU 上限 256——OrderedDict 访问即置顶，超限丢最老。
+        # (url, size, dpr_tag) -> 已裁圆的 QPixmap
         self._mem: "OrderedDict[tuple[str, int, int], QPixmap]" = OrderedDict()
-        # 读取模块级上限：后创建的 loader 自动继承低配模式的值
         self._mem_max = _MEM_MAX
-        # Pending request registry: request-id -> (target QLabel, size).
-        # CRITICAL: never store the target widget pointer as a QNetworkReply
-        # dynamic property — PySide6 round-trips it through QVariant as a raw
-        # void*, and reading it back in _on_finished can dereference a dangling
-        # pointer → hard segfault (access violation), no crash.log. Keep the
-        # Python wrapper in a plain dict instead; isValid() then safely detects
-        # widgets deleted between request and reply.
+        # url -> 原始图 QPixmap（内存，避免重复读盘）
+        self._raw: "OrderedDict[str, QPixmap]" = OrderedDict()
         self._rid = 0
         self._pending: dict[int, tuple] = {}
+        self._queue: list = []
+        self._inflight = 0
+        self._inflight_urls: set = set()
+        self._waiting: dict[str, list] = {}
+        self._failed: dict[str, tuple] = {}
 
+    # ------------------------------------------------------------ helpers
     def _mem_get(self, key):
-        """LRU get：命中即置顶。"""
         pm = self._mem.get(key)
         if pm is not None:
             self._mem.move_to_end(key)
@@ -84,135 +99,179 @@ class ImageLoader(QObject):
         self._mem[key] = pm
         self._mem.move_to_end(key)
         while len(self._mem) > self._mem_max:
-            self._mem.popitem(last=False)  # 丢最老
+            self._mem.popitem(last=False)
 
+    def _raw_put(self, url: str, pm) -> None:
+        self._raw[url] = pm
+        self._raw.move_to_end(url)
+        while len(self._raw) > 128:
+            self._raw.popitem(last=False)
+
+    def _orig_path(self, url: str) -> str:
+        key = hashlib.md5(url.encode("utf-8")).hexdigest()  # noqa: S324 - 缓存键
+        return os.path.join(self._cache_dir, key + ".img")
+
+    def _read_orig(self, url: str):
+        """读原始图（内存 → 磁盘）；坏文件直接删掉，返回 None 触发重下。"""
+        pm = self._raw.get(url)
+        if pm is not None and not pm.isNull():
+            self._raw.move_to_end(url)
+            return pm
+        path = self._orig_path(url)
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+            pm = QPixmap()
+            if data and pm.loadFromData(data):
+                self._raw_put(url, pm)
+                return pm
+        except OSError:
+            pass
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
+
+    def _deliver(self, url: str, size: int, dpr: float, target) -> None:
+        """把原图渲染成目标尺寸并交给 widget（缓存渲染结果）。"""
+        raw = self._read_orig(url)
+        if raw is None:
+            return
+        key = (url, size, _dpr_tag(dpr))
+        pm = self._mem_get(key)
+        if pm is None:
+            pm = self._round(raw, size, dpr)
+            self._mem_put(key, pm)
+        if target is not None and isValid(target):
+            try:
+                target.setPixmap(pm)
+            except RuntimeError:
+                pass
+
+    def _cooled_down(self, url: str) -> bool:
+        rec = self._failed.get(url)
+        if not rec:
+            return True
+        import time as _t
+        if _t.monotonic() - rec[0] < min(self._FAIL_TTL, 5.0 * (2 ** min(rec[1], 4))):
+            return False
+        return True
+
+    # -------------------------------------------------------------- public
     def bump(self) -> None:
-        """Invalidate all in-flight image loads. Call before tearing down any
-        widgets that currently hold pending image targets."""
+        """Mark in-flight replies as targeting widgets that may be gone.
+
+        不清 ``_pending``：同 URL 的新卡片已挂进 ``_waiting``，旧回复
+        成功时仍会把图交给它们（这正是旧实现「有缓存却没图」的原因之一）。
+        """
         self._token += 1
 
     def load(self, url: str, size: int, target, fallback: QPixmap | None = None) -> None:
-        """Fetch ``url`` and drop a rounded ``size×size`` pixmap into ``target``
-        (a QLabel). On empty url or failure, show ``fallback`` if provided.
-
-        Lookup order: memory cache → disk cache (pre-rounded) → network.
-        """
         dpr = self._dpr_for(target)
-        tag = _dpr_tag(dpr)
         if not url:
             if fallback is not None and isValid(target):
                 target.setPixmap(self._round(fallback, size, dpr))
             return
-
-        cache_key = (url, size, tag)
-        # 1) Memory cache: instant, no disk I/O / no rounding.
-        if cache_key in self._mem:
-            pm = self._mem_get(cache_key)
-            if not pm.isNull() and isValid(target):
-                target.setPixmap(pm)
-                return
-
-        # Show fallback immediately while we read disk or fetch network.
+        key = (url, size, _dpr_tag(dpr))
+        hit = self._mem_get(key)
+        if hit is not None and not hit.isNull() and isValid(target):
+            target.setPixmap(hit)
+            return
         if fallback is not None and isValid(target):
             target.setPixmap(self._round(fallback, size, dpr))
-
-        key = hashlib.md5(url.encode("utf-8")).hexdigest()
-        # 缓存文件按「逻辑尺寸 @ DPR」保存已经 round 好的 PNG，下次加载直接
-        # setPixmap，不需要再缩放/裁圆角，比存原图快得多。
-        path = os.path.join(self._cache_dir, f"{key}_{size}@{tag}.png")
-        if os.path.exists(path):
-            pm = QPixmap(path)
-            if not pm.isNull():
-                pm.setDevicePixelRatio(dpr)
-                self._mem_put(cache_key, pm)
-                if isValid(target):
-                    target.setPixmap(pm)
-                return
-
-        req = QNetworkRequest(QUrl(url))
-        req.setHeader(QNetworkRequest.UserAgentHeader, "MC-Launcher/0.1")
-        # Register the target in the Python-side dict; only plain int/str go
-        # into QVariant properties (safe to read back). See __init__ note.
-        self._rid += 1
-        rid = self._rid
-        self._pending[rid] = (target, size, dpr)
-        reply = self._mgr.get(req)
-        reply.setProperty("rid", rid)
-        reply.setProperty("url", url)
-        reply.setProperty("path", path)
-        reply.setProperty("token", self._token)
+        if self._read_orig(url) is not None:
+            self._deliver(url, size, dpr, target)
+            return
+        self._enqueue(url, size, dpr, target)
 
     def prefetch(self, url: str, size: int) -> None:
-        """Warm disk + memory caches for ``url`` without a target widget.
-
-        Used by the store list: the moment results arrive, every card's cover
-        is also fetched for the detail-dialog size — opening a detail view then
-        hits memory/disk instead of starting a fresh network fetch (the old
-        behaviour was "cache only after the user clicks in"). Replies reuse
-        ``_on_finished``: the rounded PNG is saved to disk and put into the
-        memory LRU; pixmap delivery is skipped because the target is None.
-        Failures stay silent — the regular ``load()`` path retries on demand.
-        """
-        if not url:
+        """只把原图拉下来；不负责渲染，也不额外发一次「按尺寸」的请求。"""
+        if not url or self._read_orig(url) is not None:
             return
-        dpr = self._screen_dpr()
-        tag = _dpr_tag(dpr)
-        cache_key = (url, size, tag)
-        if cache_key in self._mem:
-            self._mem_get(cache_key)  # touch for LRU freshness
-            return
-        key = hashlib.md5(url.encode("utf-8")).hexdigest()
-        path = os.path.join(self._cache_dir, f"{key}_{size}@{tag}.png")
-        if os.path.exists(path):
-            return  # already on disk — the later load() reads it straight in
-        req = QNetworkRequest(QUrl(url))
-        req.setHeader(QNetworkRequest.UserAgentHeader, "MC-Launcher/0.1")
-        self._rid += 1
-        rid = self._rid
-        self._pending[rid] = (None, size, dpr)
-        reply = self._mgr.get(req)
-        reply.setProperty("rid", rid)
-        reply.setProperty("url", url)
-        reply.setProperty("path", path)
-        reply.setProperty("token", self._token)
+        self._enqueue(url, size, self._screen_dpr(), None)
 
+    def _enqueue(self, url, size, dpr, target) -> None:
+        item = (url, size, dpr, target, self._token)
+        # 同 URL 已在途 → 挂等待表，回来后统一派发，不重复请求
+        if url in self._inflight_urls:
+            self._waiting.setdefault(url, []).append(item)
+            return
+        if not self._cooled_down(url):
+            return  # 负缓存：失败 URL 退避期内不再打网络
+        self._queue.append(item)
+        self._pump()
+
+    def _pump(self) -> None:
+        import time as _t
+        while self._queue and self._inflight < self._MAX_INFLIGHT:
+            url, size, dpr, target, token = self._queue.pop(0)
+            if url in self._inflight_urls or not self._cooled_down(url):
+                continue
+            if self._read_orig(url) is not None:
+                self._deliver(url, size, dpr, target)
+                continue
+            req = QNetworkRequest(QUrl(url))
+            req.setHeader(QNetworkRequest.UserAgentHeader, "MC-Launcher/0.1")
+            self._rid += 1
+            rid = self._rid
+            self._pending[rid] = (url, size, dpr, target, token)
+            self._inflight_urls.add(url)
+            self._inflight += 1
+            reply = self._mgr.get(req)
+            reply.setProperty("rid", rid)
+
+    # ------------------------------------------------------------ replies
     def _on_finished(self, reply: QNetworkReply) -> None:
-        # Cache the result regardless of whether the original target widget is
-        # still alive; stale replies still warm the disk+memory cache. Only set
-        # the pixmap when the token matches and the widget is valid.
+        import time as _t
         try:
             rid = reply.property("rid")
-            url = reply.property("url")
-            path = reply.property("path")
-            token = reply.property("token")
-            # Look up the target wrapper in the Python dict (never via a
-            # QVariant property — that path segfaults on dangling pointers).
-            target, size, dpr = self._pending.pop(rid, (None, None, 1.0))
-            if reply.error() == QNetworkReply.NoError:
-                data = reply.readAll()
-                pm = QPixmap()
-                if pm.loadFromData(data):
-                    rounded = self._round(pm, size, dpr)
+            url, size, dpr, target, token = self._pending.pop(
+                rid, (None, 0, 1.0, None, -1))
+            if url is None:
+                reply.deleteLater()
+                return
+            self._inflight = max(0, self._inflight - 1)
+            self._inflight_urls.discard(url)
+
+            status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+            ok = (reply.error() == QNetworkReply.NoError
+                  and (status is None or 200 <= int(status) < 300))
+            data = reply.readAll() if ok else None
+            pm = QPixmap()
+            if data and pm.loadFromData(bytes(data)):
+                # 原图原子落盘（只一份，与显示尺寸无关）
+                path = self._orig_path(url)
+                tmp = path + ".tmp"
+                try:
+                    with open(tmp, "wb") as fh:
+                        fh.write(bytes(data))
+                    os.replace(tmp, path)
+                except OSError:
                     try:
-                        rounded.save(path, "PNG")
+                        os.remove(tmp)
                     except OSError:
                         pass
-                    if url:
-                        self._mem_put((url, size, _dpr_tag(dpr)), rounded)
-                    if token == self._token and target is not None and isValid(target):
-                        try:
-                            target.setPixmap(rounded)
-                        except RuntimeError:
-                            # Widget was deleted between the isValid check and here.
-                            pass
+                self._raw_put(url, pm)
+                self._failed.pop(url, None)
+                self._deliver(url, size, dpr, target)
+                for _u, _s, _d, _tgt, _tok in self._waiting.pop(url, []):
+                    self._deliver(_u, _s, _d, _tgt)
+            else:
+                cnt = self._failed.get(url, (0, 0))[1] + 1
+                self._failed[url] = (_t.monotonic(), cnt)
+                try:
+                    os.remove(self._orig_path(url))
+                except OSError:
+                    pass
             reply.deleteLater()
         except Exception:
-            # Swallow and log: this Qt slot must never take the whole app down.
             try:
                 import traceback as _tb
-                from .paths import get_data_dir
-                _p = os.path.join(get_data_dir(), "crash.log")
-                with open(_p, "a", encoding="utf-8") as f:
+                with open(os.path.join(get_data_dir(), "crash.log"),
+                          "a", encoding="utf-8") as f:
                     f.write("\n--- ImageLoader._on_finished exception ---\n")
                     _tb.print_exc(file=f)
             except Exception:
@@ -221,7 +280,10 @@ class ImageLoader(QObject):
                 reply.deleteLater()
             except Exception:
                 pass
+        finally:
+            self._pump()
 
+    # ------------------------------------------------------------ static
     @staticmethod
     def _screen_dpr() -> float:
         try:
@@ -233,22 +295,15 @@ class ImageLoader(QObject):
 
     @classmethod
     def _dpr_for(cls, target) -> float:
-        """Device pixel ratio of the widget that will show the pixmap.
-
-        A QPixmap carrying DPR 1.0 gets upscaled by Qt on a 1.25×/1.5× display,
-        which is exactly what made card covers look low-res (round-126).
-        """
         try:
             if target is not None and isValid(target):
                 return max(1.0, float(target.devicePixelRatioF() or 1.0))
-        except Exception:  # noqa: BLE001 - widget may be gone
+        except Exception:  # noqa: BLE001
             pass
         return cls._screen_dpr()
 
     @staticmethod
     def _round(pm: QPixmap, size: int, dpr: float = 1.0) -> QPixmap:
-        # Render at physical pixels and tag the DPR so a fractional-scaling
-        # display draws it 1:1 instead of blurring a Qt upscale.
         px = max(4, int(round(size * max(1.0, dpr))))
         scaled = pm.scaled(px, px, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         out = QPixmap(px, px)
@@ -256,8 +311,7 @@ class ImageLoader(QObject):
         p = QPainter(out)
         p.setRenderHint(QPainter.Antialiasing)
         path = QPainterPath()
-        r = px * 0.18
-        path.addRoundedRect(0, 0, px, px, r, r)
+        path.addRoundedRect(0, 0, px, px, px * 0.18, px * 0.18)
         p.setClipPath(path)
         p.drawPixmap(0, 0, scaled)
         p.end()

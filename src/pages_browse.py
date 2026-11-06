@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QLineEdit, QComboBox, QDialog, QProgressBar, QStackedWidget,
 )
 from PySide6.QtCore import Signal, QSize, QTimer, Qt
-from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
+from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QFontMetrics
 
 from .theme import COLORS, with_alpha
 from .effects import LightTrailCard, fade_in_widget  # round-50 商店卡流光；round-100 列表淡入
@@ -779,17 +779,43 @@ class StorePage(QWidget):
         lay.addWidget(thumb)
 
         info = QVBoxLayout()
-        info.setSpacing(3)
+        info.setSpacing(4)
         title = QLabel(m["title"])
         title.setProperty("cls", "title")
-        desc = QLabel(m["description"] or "")
-        desc.setProperty("cls", "sub")
-        desc.setWordWrap(True)
-        meta = QLabel(t("store.meta", downloads=m["downloads"], author=m["author"]))
-        meta.setProperty("cls", "sub")
+        _f = title.font()
+        _f.setBold(True)          # 只加字重，颜色仍走 QSS token
+        title.setFont(_f)
         info.addWidget(title)
+
+        # round-180：描述单行省略。旧代码 wordWrap(True) 让长描述把
+        # 84px 的卡片撑成两三行高，整列节奏忽松忽紧（主流启动器都是
+        # 固定行高 + 省略号）。完整描述放到 tooltip，不丢信息。
+        raw_desc = " ".join((m["description"] or "").split())
+        _short = QFontMetrics(title.font()).elidedText(
+            raw_desc, Qt.ElideRight, 460)
+        desc = QLabel(_short)
+        desc.setProperty("cls", "sub")
+        if raw_desc:
+            desc.setToolTip(raw_desc[:400])
         info.addWidget(desc)
-        info.addWidget(meta)
+
+        # meta 行：来源标签 + 下载量/作者。次信息用最淡的 token，
+        # 与标题/描述拉开层级（旧的三行全用 sub，看着一样重）。
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(8)
+        _src = ("CurseForge" if m.get("source") == "curseforge"
+                else "Modrinth")
+        meta_row.addWidget(ui_kit.tag(
+            _src, COLORS["bg_hover"], COLORS["text_sub"],
+            font_size=10, radius=6, pad="2px 8px"))
+        meta = QLabel(t("store.meta",
+                        downloads=ui_kit.format_count(m["downloads"]),
+                        author=m["author"]))
+        meta.setProperty("cls", "sub")
+        meta.setStyleSheet(f"color: {COLORS['text_disabled']};")
+        meta_row.addWidget(meta)
+        meta_row.addStretch(1)
+        info.addLayout(meta_row)
         lay.addLayout(info, stretch=1)
 
         if self._category == "modpack":

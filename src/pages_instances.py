@@ -147,6 +147,21 @@ def _fmt_badge(inst) -> "QLabel":
     return b
 
 
+def version_channel(title: str) -> str:
+    """round-180：从上游版本标题识别渠道，识别不了返回 ``unknown``。
+
+    ☠ 不假造：上游 API 大多只给版本字符串（Forge / Fabric / Quilt 都是纯
+    版本号），这时一律 ``unknown``、不加角标，绝不把「没标记」当成稳定版。
+    """
+    low = str(title or "").lower()
+    if any(k in low for k in ("beta", "preview", "snapshot", "alpha",
+                              "pre-release", "prerelease", "-rc", "测试", "预览")):
+        return "beta"
+    if any(k in low for k in ("stable", "release", "recommended", "推荐", "稳定")):
+        return "stable"
+    return "unknown"
+
+
 def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
     """Return [{title, meta}] for the loader, or [] on any error.
 
@@ -158,7 +173,8 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
         from .net_api import fetch_legacy_fabric_loaders
         try:
             return [
-                {"title": h["title"], "meta": h.get("_loader_version", "")}
+                {"title": h["title"], "meta": h.get("_loader_version", ""),
+                 "channel": version_channel(h["title"])}
                 for h in fetch_legacy_fabric_loaders(mc_version)
             ]
         except Exception:
@@ -170,7 +186,8 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
         from .net_api import fetch_liteloader_builds
         try:
             return [
-                {"title": b["title"], "meta": b.get("_version", "")}
+                {"title": b["title"], "meta": b.get("_version", ""),
+                 "channel": version_channel(b["title"])}
                 for b in fetch_liteloader_builds(mc_version)
             ]
         except Exception:
@@ -181,7 +198,8 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
             # round-34 修复：字段是 _installer_url（之前误读 _build 恒空 →
             # loader_version 空 → install.py 缺 installer URL 直接抛异常）
             return [
-                {"title": b["title"], "meta": b.get("_installer_url", "")}
+                {"title": b["title"], "meta": b.get("_installer_url", ""),
+                 "channel": version_channel(b["title"])}
                 for b in fetch_cleanroom_builds()
             ]
         except Exception:
@@ -190,7 +208,8 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
         from .net_api import fetch_optifine_versions
         try:
             return [
-                {"title": v["title"], "meta": v.get("_filename", "")}
+                {"title": v["title"], "meta": v.get("_filename", ""),
+                 "channel": version_channel(v["title"])}
                 for v in fetch_optifine_versions(mc_version)
             ]
         except Exception:
@@ -200,12 +219,14 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
         from minecraft_launcher_lib.mod_loader import Forge, Neoforge
         if loader == "forge":
             return [
-                {"title": v["version"], "meta": v["version"]}
+                {"title": v["version"], "meta": v["version"],
+                 "channel": version_channel(v["version"])}
                 for v in Forge.forge_versions(mc_version)
             ]
         if loader == "neoforge":
             return [
-                {"title": v["version"], "meta": v["version"]}
+                {"title": v["version"], "meta": v["version"],
+                 "channel": version_channel(v["version"])}
                 for v in Neoforge.get_loader_versions()
             ]
     except Exception:
@@ -215,7 +236,7 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
         from minecraft_launcher_lib.mod_loader import Quilt
         if loader == "quilt":
             return [
-                {"title": v, "meta": v}
+                {"title": v, "meta": v, "channel": version_channel(v)}
                 for v in Quilt().get_loader_versions(mc_version, True)
             ]
     except Exception:
@@ -1093,11 +1114,21 @@ class NewInstanceDialog(QDialog):
         if loader_id == "labymod":
             self._open_labymod()
             return
-        self._loader = loader_id
-        for lid, card in self._loader_cards.items():
-            card.set_selected(lid == loader_id and card.isVisible())
         show_ldver = loader_id not in ("vanilla", "optifine", "labymod")
-        self.ldver_box.setVisible(show_ldver)
+        # round-180：重复点同一张卡不该再发一次网络请求、再重建一次下拉
+        if (getattr(self, "_loader", "") == loader_id
+                and getattr(self, "_ldver_visible", False) == show_ldver
+                and (not show_ldver
+                     or getattr(self, "_ldver_loaded_for", "") == loader_id)):
+            return
+        self._loader = loader_id
+        self._ldver_visible = show_ldver
+        for lid, card in self._loader_cards.items():
+            # 旧代码 `and card.isVisible()` 会让刚 show 的卡片漏掉选中态
+            card.set_selected(lid == loader_id)
+        # 用高度占位代替 setVisible：隐藏时保留同样的布局槽位，
+        # 切换加载器不再整页跳动（用户反馈「页面重构 / 位置奇怪」）。
+        self.ldver_box.setMaximumHeight(0 if not show_ldver else 16777215)
         if show_ldver:
             self._load_loader_versions()
         self._update_path()
@@ -1143,8 +1174,17 @@ class NewInstanceDialog(QDialog):
     def _load_loader_versions(self):
         mc = self._selected_version
         loader = self._loader
+        cache = getattr(self, "_ldver_cache", None)
+        if cache is None:
+            cache = self._ldver_cache = {}
+        key = (mc, loader)
         self.ldver_combo.blockSignals(True)
         self.ldver_combo.clear()
+        if key in cache:
+            self._on_loader_versions(cache[key])  # 内部会填默认项 + 列表
+            self._ldver_loaded_for = loader
+            self.ldver_combo.blockSignals(False)
+            return
         self.ldver_combo.addItem(t("new_instance.ldver_latest"))
         self.ldver_combo.blockSignals(False)
         gen = getattr(self, "_ldver_gen", 0) + 1
@@ -1154,6 +1194,8 @@ class NewInstanceDialog(QDialog):
         def _done(versions: list[dict], g=gen):
             if getattr(self, "_ldver_gen", 0) != g:
                 return
+            cache[key] = versions or []
+            self._ldver_loaded_for = loader
             self._on_loader_versions(versions)
 
         def _err(_e, g=gen):
@@ -1165,18 +1207,30 @@ class NewInstanceDialog(QDialog):
         self._ldver_worker.start()
 
     def _on_loader_versions(self, versions: list[dict]):
+        rows = [v for v in (versions or []) if isinstance(v, dict)]
         self.ldver_combo.blockSignals(True)
         self.ldver_combo.clear()
-        self.ldver_combo.addItem(t("new_instance.ldver_latest"), "")
-        for v in versions or []:
-            if isinstance(v, dict):
-                title = v.get("title") or ""
-                meta = v.get("meta") or ""
-                self.ldver_combo.addItem(title, meta)
+        # round-180：默认项把「会装哪个版本」写清楚，不再只有一句
+        # 「最新稳定版（推荐）」让玩家盲选。
+        first = (rows[0].get("title") if rows else "") or ""
+        label = (t("new_instance.ldver_latest_ver", ver=first)
+                 if first else t("new_instance.ldver_latest"))
+        self.ldver_combo.addItem(label, "")
+        for v in rows:
+            title = v.get("title") or ""
+            ch = v.get("channel") or version_channel(title)
+            if ch == "beta":
+                title = title + "  ·  " + t("new_instance.ldver_beta")
+            elif ch == "stable":
+                title = title + "  ·  " + t("new_instance.ldver_stable")
+            # ch == "unknown" 时不加任何角标：不假造稳定性
+            self.ldver_combo.addItem(title, v.get("meta") or "")
         self.ldver_combo.blockSignals(False)
 
     def selected_loader_version(self) -> str:
-        if not self.ldver_box.isVisible():
+        # round-180：ldver_box 现在用高度占位隐藏（isVisible 仍为 True），
+        # 必须改用显式标志，否则 vanilla/optifine 会误选到加载器版本。
+        if not getattr(self, "_ldver_visible", False):
             return ""
         return self.ldver_combo.currentData() or ""
 

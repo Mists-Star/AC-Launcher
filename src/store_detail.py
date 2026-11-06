@@ -29,6 +29,7 @@ from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 
 from .theme import COLORS, with_alpha
+from . import ui_kit
 from .i18n import t
 from .worker import ProgressWorker, Worker
 from .async_image import ImageLoader
@@ -405,17 +406,19 @@ class StoreDetailPanel(QWidget):
         hl.setSpacing(14)
 
         self.thumb = QLabel()
-        self.thumb.setFixedSize(72, 72)
+        # round-180：详情页封面比列表大一号，建立清晰的层级差
+        self.thumb.setFixedSize(88, 88)
         hl.addWidget(self.thumb, 0, Qt.AlignTop)
         if self._img and card.get("icon_url"):
-            fb = QPixmap(72, 72)
+            fb = QPixmap(88, 88)
             fb.fill(Qt.transparent)
-            self._img.load(card.get("icon_url", ""), 72, self.thumb, fb)
+            self._img.load(card.get("icon_url", ""), 88, self.thumb, fb)
 
         ti = QVBoxLayout()
         ti.setSpacing(5)
         self.title = QLabel(card.get("title", ""))
-        self.title.setProperty("cls", "title")
+        # 详情页主标题用全站 big 类，不再和列表卡片同权重
+        self.title.setProperty("cls", "big")
         self.title.setWordWrap(True)
         ti.addWidget(self.title)
 
@@ -426,8 +429,13 @@ class StoreDetailPanel(QWidget):
         # accent 变绿时不可读）
         cat_b.setProperty("cls", "badge")
         meta.addWidget(cat_b)
+        _src = ("CurseForge" if card.get("source") == "curseforge"
+                else "Modrinth")
+        meta.addWidget(ui_kit.tag(
+            _src, COLORS["bg_hover"], COLORS["text_sub"],
+            font_size=10, radius=6, pad="2px 8px"))
         self.meta = QLabel(t("store.meta",
-                             downloads=card.get("downloads", 0),
+                             downloads=ui_kit.format_count(card.get("downloads", 0)),
                              author=card.get("author", "")))
         self.meta.setProperty("cls", "sub")
         meta.addWidget(self.meta)

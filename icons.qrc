@@ -1,6 +1,8 @@
 <RCC>
   <qresource prefix="/icons">
+    <file alias="ac_launcher_icon.png">assets/icons/ac_launcher_icon.png</file>
     <file alias="ac_launcher_icon.svg">assets/icons/ac_launcher_icon.svg</file>
+    <file alias="ac_launcher_icon_white.png">assets/icons/ac_launcher_icon_white.png</file>
     <file alias="ac_launcher_icon_white.svg">assets/icons/ac_launcher_icon_white.svg</file>
     <file alias="account.svg">assets/icons/account.svg</file>
     <file alias="achievements.svg">assets/icons/achievements.svg</file>
@@ -22,14 +24,26 @@
     <file alias="instances.svg">assets/icons/instances.svg</file>
     <file alias="java.svg">assets/icons/java.svg</file>
     <file alias="language.svg">assets/icons/language.svg</file>
+    <file alias="loader_fabric.png">assets/icons/loader_fabric.png</file>
+    <file alias="loader_forge.png">assets/icons/loader_forge.png</file>
+    <file alias="loader_labymod.ico">assets/icons/loader_labymod.ico</file>
+    <file alias="loader_legacyfabric.ico">assets/icons/loader_legacyfabric.ico</file>
+    <file alias="loader_liteloader.ico">assets/icons/loader_liteloader.ico</file>
+    <file alias="loader_neoforge.svg">assets/icons/loader_neoforge.svg</file>
+    <file alias="loader_optifine.ico">assets/icons/loader_optifine.ico</file>
+    <file alias="loader_quilt.svg">assets/icons/loader_quilt.svg</file>
+    <file alias="loader_vanilla.png">assets/icons/loader_vanilla.png</file>
     <file alias="lobby.svg">assets/icons/lobby.svg</file>
     <file alias="login.svg">assets/icons/login.svg</file>
+    <file alias="logo.ico">assets/icons/logo.ico</file>
+    <file alias="logo.png">assets/icons/logo.png</file>
     <file alias="logo.svg">assets/icons/logo.svg</file>
     <file alias="microsoft.svg">assets/icons/microsoft.svg</file>
     <file alias="modpack.svg">assets/icons/modpack.svg</file>
     <file alias="mods.svg">assets/icons/mods.svg</file>
     <file alias="moon.svg">assets/icons/moon.svg</file>
     <file alias="music.svg">assets/icons/music.svg</file>
+    <file alias="pause.svg">assets/icons/pause.svg</file>
     <file alias="play.svg">assets/icons/play.svg</file>
     <file alias="refresh.svg">assets/icons/refresh.svg</file>
     <file alias="repair.svg">assets/icons/repair.svg</file>
@@ -39,6 +53,8 @@
     <file alias="settings.svg">assets/icons/settings.svg</file>
     <file alias="shader.svg">assets/icons/shader.svg</file>
     <file alias="skin.svg">assets/icons/skin.svg</file>
+    <file alias="skip_next.svg">assets/icons/skip_next.svg</file>
+    <file alias="skip_prev.svg">assets/icons/skip_prev.svg</file>
     <file alias="store.svg">assets/icons/store.svg</file>
     <file alias="sun.svg">assets/icons/sun.svg</file>
     <file alias="tools.svg">assets/icons/tools.svg</file>

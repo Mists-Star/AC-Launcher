@@ -474,4 +474,20 @@ format（「自定义格式没作用」根因）；`core/instance_rebuild.py:146
 - **③④ 版本展示**：默认项显示解析出的具体版本号（如「最新稳定版 0.16.10」），
   数据源给每个版本加 `channel`，UI 分组或加角标，并允许玩家显式选择测试版。
 
-**状态：待实现 / 未授权改动。** 本轮先把 round-179 收尾（部署 + c/p），不混批。
+**状态：✅ 已在 round-180 实现（2026-11-06 23:40）**
+
+| 项 | 实现 |
+|---|---|
+| ① 页面重构 / 位置跳 | `_select_loader` 加重复点守卫 + 版本结果缓存 + `ldver_box` 高度占位；`selected_loader_version` 改显式标志；选中态去掉 `isVisible()` 依赖 |
+| ② 官方图标 | 9 个 `loader_*` 全换上游官方原文件（PNG/SVG/ICO），`icons.py` 支持三种扩展名、QRC 重新生成；Cleanroom 官方无 logo → 删自绘占位；来源/许可见 `assets/icons/LOADER_LOGOS.md`。**主流启动器做法**（Prism 图标主题 / HMCL PNG@2x / PCL2 WPF PNG）已实证写入该文档 |
+| ③ 默认最高版本不显示号 | 默认项改为「最新版本 {ver}（推荐）」，data 仍为空（安装取最新） |
+| ④ 不区分测试版 | `version_channel()` 从标题识别 beta/preview/snapshot/recommended 并加角标；**纯版本号标 unknown 不加角标**，不假造稳定性 |
+
+**同批额外修**：`async_image.ImageLoader` 重写（原图单缓存 / 去重 / HTTP
+状态码检查 / 失败负缓存+退避 / 限并发 / 坏缓存删除 / bump 不吞图），解决
+「资源中心有缓存却没图片」；列表描述单行省略、来源标签、下载量人读格式，
+详情页封面 88px + `big` 标题类，全部走现有 token 与 `ui_kit` 组件。
+
+判据 `tests/test_round180_ui.py` / `test_round180_icon_cache.py` 已登记
+`regress.py`。⚠ 双轨验收仍欠真机目检（切换不跳、版本号、角标、滚动图标
+补全率、详情页观感）。
