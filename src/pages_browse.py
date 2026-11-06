@@ -875,18 +875,27 @@ class StorePage(QWidget):
             from .net_api import (download_cfwidget_file, download_curseforge_mod,
                                   download_cfwidget_slug, curseforge_available,
                                   curseforge_keyless_enabled)
+            # round-178：卡片「直接下载」没有选版本环节，必须带实例的
+            # MC 版本 / 加载器过滤，否则会装进最新版不兼容的 jar。
+            # ⚠ ProgressWorker 用 keyword 注入 callback，新增参数一律走
+            #   kwargs，别占位置参数位（会撞 multiple values）。
+            mc = getattr(inst, "game_version", "") or ""
+            ld = getattr(inst, "loader", "") or ""
             if cf_file:
                 # 免 key 通道解析出的文件（含 id/name）→ forgecdn 直链
-                self._dworker = ProgressWorker(download_cfwidget_file,
-                                               cf_file, dest)
+                self._dworker = ProgressWorker(
+                    download_cfwidget_file, cf_file, dest,
+                    mc_version=mc, loader=ld)
             elif not curseforge_available() and curseforge_keyless_enabled():
                 # 免 key 镜像搜索的命中只有 slug → slug → cfwidget → forgecdn
-                self._dworker = ProgressWorker(download_cfwidget_slug,
-                                               slug, dest)
+                self._dworker = ProgressWorker(
+                    download_cfwidget_slug, slug, dest,
+                    mc_version=mc, loader=ld)
             else:
                 # 官方 API 搜索命中只有 project_id → 走官方下载接口
-                self._dworker = ProgressWorker(download_curseforge_mod,
-                                               project_id, dest)
+                self._dworker = ProgressWorker(
+                    download_curseforge_mod, project_id, dest,
+                    mc_version=mc, loader=ld)
         else:
             # round-37：传入实例的 MC 版本 + 加载器，让 Modrinth 过滤兼容版本
             # 并自动拉取 required 依赖树（download_mod_to 已支持依赖解析）

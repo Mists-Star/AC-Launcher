@@ -1885,6 +1885,9 @@ class InstancesPage(QWidget):
         m.addSeparator()
         m.addAction(t("health.title"),
                     lambda: self._health_check(inst))
+        # round-178：补装依赖原来只能「先崩溃 → 崩溃弹窗」才摸得到
+        m.addAction(t("instances.repair_deps"),
+                    lambda: self._repair_mod_deps(inst))
         m.addSeparator()
         m.addAction(t("instances.open_folder"),
                     lambda: self._open_folder(inst))
@@ -1903,6 +1906,39 @@ class InstancesPage(QWidget):
         m.addAction(t("common.delete"),
                     lambda: self._delete_instance(inst))
         m.exec(pos)
+
+    def _repair_mod_deps(self, inst: Instance):
+        """round-178：右键「补装缺失依赖」→ 统一走 core.mod_repair。
+
+        网络动作放 Worker，避免卡 UI；结果是结构化终态（成功 / 失败阶段 /
+        jar 过多跳过），不再误报「依赖齐全」。
+        """
+        from .win_rounded import info, warn
+        from .worker import Worker
+        from .core import mod_repair
+
+        scan = mod_repair.scan_missing(inst)
+        if scan["skipped"]:
+            warn(self, t("health.title"),
+                 t("crash.deps_skipped", n=scan["jar_count"]))
+            return
+        if not scan["missing"]:
+            info(self, t("health.title"), t("crash.deps_ok"))
+            return
+
+        def _done(result):
+            info(self, t("health.title"),
+                 t("instances.repair_deps_result",
+                   msg=result.get("message", "")))
+            if result.get("failed"):
+                warn(self, t("health.title"),
+                     "\n".join(mod_repair.failed_lines(result)))
+
+        self._repair_worker = Worker(mod_repair.repair_missing, inst)
+        self._repair_worker.finished.connect(_done)
+        self._repair_worker.error.connect(
+            lambda e: warn(self, t("health.title"), str(e)))
+        self._repair_worker.start()
 
     def _duplicate(self, inst: Instance):
         """克隆实例（Worker 复制目录，防大实例卡 UI）。"""

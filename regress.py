@@ -77,6 +77,8 @@ SUITES = [
     ("Java 镜像/断点/取消", "test_java_mirror_resume.py", "script"),
     ("模组链路/启动诊断", "test_round177_mod_diag.py", "script"),
     ("构建退出码/瘦身降级", "test_build_trim.py", "script"),
+    ("下载完整性/CF 版本口径", "test_round178_mod_integrity.py", "script"),
+    ("模组依赖统一修复", "test_round178_mod_repair.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

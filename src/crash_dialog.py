@@ -256,11 +256,22 @@ class CrashAnalyzerDialog(QDialog):
 
     # ------------------------------------------------------------- repairs
     def _repair_deps(self, _finding=None):
-        """Scan mods dir for missing deps, then download them (Modrinth)."""
+        """Scan mods dir for missing deps, then download them (Modrinth).
+
+        round-178：改走 ``core.mod_repair`` 的唯一实现。旧路径把
+        「jar 过多导致深扫被跳过」当成「依赖齐全」，且失败原因全折叠成
+        一个 modid，玩家分不清「搜不到」还是「下载失败」。
+        """
         if self.inst is None:
             warn(self, t("crash.title"), t("crash.no_instance"))
             return
-        missing = crash.find_missing_dependencies(self.inst)
+        from .core import mod_repair
+        scan = mod_repair.scan_missing(self.inst)
+        if scan["skipped"]:
+            warn(self, t("crash.title"),
+                 t("crash.deps_skipped", n=scan["jar_count"]))
+            return
+        missing = scan["missing"]
         if not missing:
             info(self, t("crash.title"), t("crash.deps_ok"))
             return
@@ -280,10 +291,12 @@ class CrashAnalyzerDialog(QDialog):
         self._worker.start()
 
     def _fix_deps_worker(self, missing: list[str]):
-        return crash.search_and_download_missing(self.inst, missing)
+        from .core import mod_repair
+        return mod_repair.repair_missing(self.inst, missing)
 
     def _on_deps_done(self, result):
-        downloaded, failed = result
+        downloaded = result.get("downloaded", [])
+        failed = result.get("failed", [])
         self.bar.setVisible(False)
         self.status.setText(
             t("crash.deps_done", n=len(downloaded)) if downloaded else
@@ -296,9 +309,10 @@ class CrashAnalyzerDialog(QDialog):
                    instance=inst_name)
             _ach.unlock("first_repair")
         if failed:
+            from .core.mod_repair import failed_lines
             warn(self, t("crash.title"),
                  t("crash.deps_failed_detail", n=len(failed)),
-                 detail="\n".join(f"• {d}" for d in failed))
+                 detail="\n".join(failed_lines(result)))
 
     def _fix_java(self):
         from .java_manager_dialog import JavaManagerDialog
@@ -309,4 +323,16 @@ class CrashAnalyzerDialog(QDialog):
         info(self, t("crash.title"), t("crash.ram_hint"))
 
     def _repair_all(self):
+        """round-178：一键修复要有**汇总终态**。
+
+        旧实现只调 ``_repair_deps()``，对 java_version / out_of_memory /
+        loader_mismatch 什么都不做、也不说，玩家以为全修好了。这里明确
+        区分「已自动联网补装」与「需点卡片单独处理」，不擅自把弹 Java
+        管理器 / 改内存这类交互动作塞进异步流程。
+        """
         self._repair_deps()
+        kinds = {f.kind for f in (getattr(self, "_findings", None) or [])}
+        manual = [k for k in ("java_version", "out_of_memory",
+                              "loader_mismatch") if k in kinds]
+        if manual:
+            self.status.setText(t("crash.repair_all_note", n=len(manual)))

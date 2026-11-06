@@ -775,9 +775,12 @@ class StoreDetailPanel(QWidget):
             fid = f0.get("id") or v.get("id")
             fname = f0.get("filename", "")
             if curseforge_available():
+                # round-178：CF 文件元数据带 sha1 时落盘前校验；详情页是
+                # 玩家**显式选了版本**，不再用实例版本二次过滤（会误拒）。
                 w = ProgressWorker(download_curseforge_file,
                                    self._card.get("project_id", ""), fid, dest,
-                                   fname, f0.get("url", ""))
+                                   fname, f0.get("url", ""),
+                                   sha1=f0.get("sha1", ""))
             else:
                 # keyless channel: forgecdn resolves any file id directly
                 w = ProgressWorker(download_cfwidget_file,

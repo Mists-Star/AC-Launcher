@@ -234,7 +234,7 @@ def _remote_size(url: str, headers: dict | None, timeout: int) -> int:
 
 
 def _try_parallel(url: str, dest: str, *, timeout: int, progress, headers,
-                  cancel) -> bool:
+                  cancel, expected_sha1: str = "") -> bool:
     """大文件 → 分片多线程；小文件 / 拿不到长度 / 分片失败 → 返回 False。
 
     返回 False 时调用方继续走单流 ``download_file`` —— 只做加速，不改变语义
@@ -245,7 +245,8 @@ def _try_parallel(url: str, dest: str, *, timeout: int, progress, headers,
         return False
     try:
         parallel_download_file(url, dest, progress=progress, headers=headers,
-                               timeout=timeout, cancel=cancel)
+                               timeout=timeout, cancel=cancel,
+                               expected_sha1=expected_sha1)
         return True
     except Exception:  # noqa: BLE001 - 加速路径失败，退回单流
         return False
@@ -266,8 +267,12 @@ def _download_once(
     headers: dict | None = None,
     timeout: int = 60,
     cancel=None,
+    expected_sha1: str = "",
 ) -> str:
-    """单次下载尝试：写 <dest>.part → 校验 size → os.replace 原子收尾。
+    """单次下载尝试：写 <dest>.part → 校验 size/hash → os.replace 原子收尾。
+
+    round-178：`expected_sha1` 非空时在 **.part 阶段**校验，坏字节永远不
+    会 `os.replace` 成正式文件；不匹配就丢掉 .part 抛瞬时错误让上层重下。
 
     返回 dest。确定性错误（4xx）抛 NetError 并清掉可能被污染的 .part；
     瞬时错误（网络/5xx/超时/内容不完整）抛 ``_TransientDownloadError`` 保留
@@ -285,7 +290,9 @@ def _download_once(
         r = requests.get(
             url, headers=hdrs, timeout=timeout, stream=True, proxies=_proxies())
         if start and r.status_code == 416:
-            # Range 不满足 = 本地 .part 已等于完整大小 → 直接收尾
+            # Range 不满足 = 本地 .part 已等于完整大小 → 验完再收尾
+            if expected_sha1:
+                _verify_sha1(dest_tmp, expected_sha1)
             os.replace(dest_tmp, dest)
             return dest
         r.raise_for_status()
@@ -321,6 +328,18 @@ def _download_once(
     if total and sofar != total:
         # Content-Length 已知但没写满 = 连接被掐断，内容不完整 → 当瞬时错误重试
         raise _TransientDownloadError(f"下载不完整：{sofar}/{total}")
+    if expected_sha1:
+        try:
+            _verify_sha1(dest_tmp, expected_sha1)
+        except NetError:
+            # hash 不符 = 内容已损坏；留着 .part 续传只会把坏字节拼进去，
+            # 必须丢掉从头重下（_verify_sha1 已删文件，这里再兜一次）。
+            try:
+                os.remove(dest_tmp)
+            except OSError:
+                pass
+            raise _TransientDownloadError(
+                "文件校验失败（sha1 不匹配），已丢弃重下") from None
     os.replace(dest_tmp, dest)
     return dest
 
@@ -335,10 +354,12 @@ def download_file(
     timeout: int = 60,
     cancel=None,
     _allow_parallel: bool = True,
+    expected_sha1: str = "",
 ) -> str:
     """下载 ``url`` 到 ``dest``，支持断点续传 + 进度回调 + 有限退避重试。
 
     Args:
+        expected_sha1: 可选；非空时落盘前校验 sha1，不符则丢弃重下（round-178）
         resume:    True 时若有 <dest>.part 残留则从断点续传（默认）
         progress:  callable(sofar, total)——total 未知时为 0
         cancel:    callable() -> bool；返回 True 时中断（round-40 P2-10：
@@ -355,7 +376,8 @@ def download_file(
     # 有 .part 残留时优先保住断点续传（分片路径会重建 .part，不继承已有进度）。
     if (_allow_parallel and not (resume and os.path.exists(dest + ".part"))
             and _try_parallel(url, dest, timeout=timeout, progress=progress,
-                              headers=headers, cancel=cancel)):
+                              headers=headers, cancel=cancel,
+                              expected_sha1=expected_sha1)):
         return dest
     dest_tmp = dest + ".part"
     last: Exception | None = None
@@ -368,7 +390,8 @@ def download_file(
                 url, dest, dest_tmp,
                 resume=(attempt > 0 or resume),   # 重试一律走续传，启用即可
                 progress=progress, headers=headers,
-                timeout=timeout, cancel=cancel)
+                timeout=timeout, cancel=cancel,
+                expected_sha1=expected_sha1)
         except _TransientDownloadError as e:
             last = e
     raise last if isinstance(last, NetError) else NetError(f"下载失败，已重试 {_MAX_DOWNLOAD_RETRIES} 次")
@@ -387,6 +410,7 @@ def parallel_download_file(
     timeout: int = 30,
     chunk_mb: int = 16,
     cancel=None,
+    expected_sha1: str = "",
 ) -> str:
     """分块多线程下载单文件（HTTP Range），失败自动回退到单流 ``download_file``。
 
@@ -535,7 +559,21 @@ def parallel_download_file(
             pass
         return download_file(url, dest, resume=False, progress=progress,
                              headers=headers, timeout=timeout, cancel=cancel,
-                             _allow_parallel=False)
+                             _allow_parallel=False,
+                             expected_sha1=expected_sha1)
+    if expected_sha1:
+        try:
+            _verify_sha1(part, expected_sha1)
+        except NetError:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+            # 分片拼出来的内容坏了 → 回退单流从头下，别把坏文件交出去
+            return download_file(url, dest, resume=False, progress=progress,
+                                 headers=headers, timeout=timeout,
+                                 cancel=cancel, _allow_parallel=False,
+                                 expected_sha1=expected_sha1)
     os.replace(part, dest)
     return dest
 
@@ -752,6 +790,58 @@ def _safe_filename(name: str, fallback: str = "download.jar") -> str:
     return base
 
 
+def _cf_sha1(f: dict) -> str:
+    """round-178：从 CurseForge / 镜像 / cfwidget 的文件元数据取 sha1。
+
+    CF 官方 ``hashes`` 是 ``[{"algo": 1, "value": "..."}]``（1=SHA1、2=MD5）；
+    镜像同契约；cfwidget 偶尔给 ``{"sha1": "..."}`` 或直接 ``sha1`` 字段。
+    取不到返回空串 → 退化为只校验长度（绝不拿 MD5 / fingerprint 冒充 sha1）。
+    """
+    if not isinstance(f, dict):
+        return ""
+    h = f.get("hashes")
+    if isinstance(h, list):
+        for item in h:
+            if not isinstance(item, dict):
+                continue
+            algo = item.get("algo", item.get("algorithm", ""))
+            if algo in (1, "1", "sha1", "SHA1") and item.get("value"):
+                return str(item["value"])
+    elif isinstance(h, dict) and h.get("sha1"):
+        return str(h["sha1"])
+    return str(f.get("sha1") or "")
+
+
+_CF_LOADER_TAGS = {"forge", "fabric", "quilt", "neoforge",
+                   "liteloader", "rift", "bukkit", "spigot", "paper"}
+
+
+def _cf_filter_files(rows: list[dict], mc_version: str = "",
+                     loader: str = "") -> list[dict]:
+    """round-178：按实例 MC 版本 / 加载器筛 CurseForge 候选文件。
+
+    CF 官方 ``gameVersions`` 形如 ``["1.20.1", "Forge", "Java 17"]``；
+    cfwidget 用 ``versions``。规则保守：字段缺失时**不因未知而误杀**
+    （资源包 / 光影常不标加载器），只有明确声明了不兼容值时才排除。
+    """
+    out = []
+    mc = str(mc_version or "").strip().lower()
+    ld = str(loader or "").strip().lower()
+    for f in rows or []:
+        if not isinstance(f, dict):
+            continue
+        raw = f.get("gameVersions") or f.get("versions") or []
+        gv = [str(x).strip().lower() for x in raw if x]
+        if mc and gv and mc not in gv:
+            continue
+        if ld and gv:
+            declared = [g for g in gv if g in _CF_LOADER_TAGS]
+            if declared and ld not in declared:
+                continue
+        out.append(f)
+    return out
+
+
 def _primary_hashes(version: dict) -> dict:
     """Modrinth version.primary file 的 hashes（sha1/sha512），供下载后校验。"""
     files = version.get("files", []) or []
@@ -821,12 +911,22 @@ def get_project_info(slug_or_id: str) -> dict | None:
     return info
 
 
-def get_mod_download(project_id: str) -> tuple[str, str]:
-    """Resolve the latest version's primary file (filename, download url)."""
+def get_mod_download(project_id: str,
+                     version_id: str = "") -> tuple[str, str]:
+    """Resolve a version's primary file (filename, download url).
+
+    round-178：允许指定 version_id —— 资源中心「选版本装整合包」与
+    「一键装最新版」原先走两条口径，前者没法复用本函数。
+    """
     versions = _modrinth_versions(project_id)
     if not versions:
         raise NetError("该模组没有可下载的文件")
-    return _version_primary_file(versions[0], project_id)
+    target = versions[0]
+    if version_id:
+        target = next((v for v in versions if v.get("id") == version_id), None)
+        if target is None:
+            raise NetError("指定的整合包版本不存在或已下架")
+    return _version_primary_file(target, project_id)
 
 
 # ── Mod 依赖树解析（round-37 轴心1，对齐主流做法）───────────
@@ -873,7 +973,10 @@ def resolve_mod_dependencies(
     if version_id:
         target = next((v for v in versions if v.get("id") == version_id), None)
         if target is None:
-            return out
+            if _depth == 0:
+                raise NetError(
+                    "指定的版本不存在，或不在当前游戏版本 / 加载器的匹配结果中")
+            return out  # 子依赖的精确版本取不到 → 宁可不装，也不装错版本
     try:
         filename, url = _version_primary_file(target, project_id)
     except NetError:
@@ -888,12 +991,18 @@ def resolve_mod_dependencies(
     for dep in target.get("dependencies", []):
         dtype = dep.get("dependency_type", "")
         dpid = dep.get("project_id", "")
-        if not dpid or dtype in ("optional", "incompatible"):
+        # round-178：embedded 是已打包进本体的库，再单独下 jar 会造成
+        # duplicate modid；incompatible/optional 同理不装。
+        if not dpid or dtype in ("optional", "incompatible", "embedded"):
             continue
         if dpid in _seen:
             continue
+        # 依赖声明带 version_id 时必须精确解析，否则会拉到与本体要求不符
+        # 的最新版（Modrinth dependencies 支持指定 version）。
         out.extend(
-            resolve_mod_dependencies(dpid, mc_version, loader, "", _seen, _depth + 1))
+            resolve_mod_dependencies(dpid, mc_version, loader,
+                                     dep.get("version_id", "") or "",
+                                     _seen, _depth + 1))
     return out
 
 
@@ -924,8 +1033,8 @@ def download_mod_to(
         dest = os.path.join(dest_dir, _safe_filename(item["filename"]))
         # round-37：统一断点续传下载器（中断后 .part 续传）
         try:
-            download_file(item["url"], dest, progress=prog)
-            _verify_sha1(dest, item.get("sha1", ""))
+            download_file(item["url"], dest, progress=prog,
+                          expected_sha1=item.get("sha1", ""))
         except NetError as e:
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
         if prog is not None:
@@ -962,8 +1071,8 @@ def download_mod_version_to(
             continue
         dest = os.path.join(dest_dir, _safe_filename(item["filename"]))
         try:
-            download_file(item["url"], dest, progress=prog)
-            _verify_sha1(dest, item.get("sha1", ""))
+            download_file(item["url"], dest, progress=prog,
+                          expected_sha1=item.get("sha1", ""))
         except NetError as e:
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
         if prog is not None:
@@ -1404,12 +1513,18 @@ def search_all(query: str = "", offset: int = 0, limit: int = 20,
 
 def download_curseforge_mod(project_id: str, dest_dir: str,
                             file_id: int | str | None = None,
-                            callback=None) -> str:
+                            callback=None, mc_version: str = "",
+                            loader: str = "") -> str:
     """Download a CurseForge mod file into dest_dir.
 
     round-111：新增 ``callback``（mll 风格，ProgressWorker 注入）→ 进度/速度。
     round-142（CF 整合包一键安装）：``file_id`` 支持按 manifest 指定的文件
     版本精确下载；无 key 时不再直接报错，改走 cfwidget→forgecdn 免 key 通道。
+
+    round-178：``file_id`` 为空（资源中心卡片直接下载）时必须带实例
+    ``mc_version`` / ``loader`` 过滤候选文件，**不能取最新一条**——那会给
+    1.20.1 的实例装上只支持 1.21 的 jar。整合包 manifest 指定 file_id 时
+    是精确版本，不做过滤。
     """
     key = _curseforge_key()
     if not key:
@@ -1418,7 +1533,8 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
                 "store.cf_no_key",
                 default="CurseForge 暂不可用。请到「设置 → 网络 → 第三方服务」"
                         "开启免密钥选项，或填入自己的 CurseForge API Key。"))
-        return _download_cf_keyless(project_id, file_id, dest_dir, callback)
+        return _download_cf_keyless(project_id, file_id, dest_dir, callback,
+                                    mc_version, loader)
     if file_id:
         # 整合包 manifest 指定版本 → 官方精确文件端点（不再退回最新版，
         # 否则整合包装出来的模组版本和作者声明的不一致）。
@@ -1439,11 +1555,12 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
             a=int(file_id) // 1000, b=int(file_id) % 1000, name=filename)
         os.makedirs(dest_dir, exist_ok=True)
         return download_file(url, os.path.join(dest_dir, _safe_filename(filename)),
-                             timeout=120, progress=_cb_progress(callback))
+                             timeout=120, progress=_cb_progress(callback),
+                             expected_sha1=_cf_sha1(f))
     try:
         r = requests.get(
             f"{CURSEFORGE_API}/mods/{project_id}/files",
-            params={"pageSize": 1, "sortField": 2, "sortOrder": "desc"},
+            params={"pageSize": 50, "sortField": 2, "sortOrder": "desc"},
             headers={**_HEADERS, "x-api-key": key, "Accept": "application/json"},
             timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
         )
@@ -1453,6 +1570,11 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
         raise NetError(f"无法获取 CurseForge 文件：{e}") from e
     if not files:
         raise NetError("该模组没有可下载的文件")
+    files = _cf_filter_files(files, mc_version, loader)
+    if not files:
+        raise NetError(
+            "该模组没有匹配当前游戏版本 / 加载器的文件（已放弃取最新版，"
+            "避免装进不兼容的模组）")
     f = files[0]
     url = f.get("downloadUrl", "")
     filename = f.get("fileName", f"{project_id}.jar")
@@ -1461,7 +1583,8 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, _safe_filename(filename))
     return download_file(url, dest, timeout=120,
-                         progress=_cb_progress(callback))
+                         progress=_cb_progress(callback),
+                         expected_sha1=_cf_sha1(f))
 
 
 def _cfwidget_info(proj: str) -> dict:
@@ -1518,7 +1641,8 @@ def _cf_direct_url(u: str) -> bool:
 
 
 def _download_cf_keyless(project_id: str, file_id: int | str | None,
-                         dest_dir: str, callback=None) -> str:
+                         dest_dir: str, callback=None, mc_version: str = "",
+                         loader: str = "") -> str:
     """免 key 下载：镜像拿元数据（1 次）→ forgecdn 直链下载（1 次）。
 
     round-142 初版每个文件最多要问 4 个地方（精确端点/文件列表/cfwidget/下载），
@@ -1526,14 +1650,17 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
     * 元数据结果缓存（``cfx:{pid}:{fid}``），重复导入同一包秒回；
     * 精确端点拿到 fileName 即可拼 forgecdn（downloadUrl 为 null 不再往下问）；
     * 文件列表同理：有 id+fileName 直接拼；cfwidget 只在镜像整体故障时才用。
-    整合包 manifest 只有 projectID+fileID，必须按文件版本精确下载；
-    找不到指定 fileID 时退回最新文件，让安装至少能继续。
+    整合包 manifest 只有 projectID+fileID，必须按文件版本精确下载。
+    round-178：指定 fileID 找不到时**不再静默退回最新文件**——整合包装出
+    来的模组版本会与作者声明不一致且玩家无感知；改为明确报错。
     """
     meta_key = f"cfx:{project_id}:{file_id or 'latest'}"
     cached = _cached(meta_key)
-    url, filename = ("", "")
-    if isinstance(cached, (list, tuple)) and len(cached) == 2:
+    url, filename, sha1 = ("", "", "")
+    if isinstance(cached, (list, tuple)) and len(cached) >= 2:
         url, filename = cached[0] or "", cached[1] or ""
+        if len(cached) >= 3:
+            sha1 = cached[2] or ""
 
     def _forge(fid, name) -> str:
         return FORGECDN_URL.format(a=int(fid) // 1000, b=int(fid) % 1000,
@@ -1550,10 +1677,12 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
                 fname = f.get("fileName") or ""
                 if _cf_direct_url(f.get("downloadUrl") or ""):
                     url, filename = f["downloadUrl"], fname
+                    sha1 = _cf_sha1(f)
                 elif fname:
                     # downloadUrl 为 null：id+fileName 已足够拼 forgecdn，
                     # 不再往下问文件列表 / cfwidget（省 2 次往返）。
                     url, filename = _forge(file_id, fname), fname
+                    sha1 = _cf_sha1(f)
         except requests.RequestException:
             pass
     # 2) 文件列表（精确端点没给 fileName 时按 id 匹配；找不到取最新）
@@ -1566,8 +1695,10 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
                     if str(cand.get("id")) == str(file_id):
                         hit = cand
                         break
-            if hit is None and rows:
-                hit = rows[0]
+            if hit is None and rows and not file_id:
+                # 卡片下载（无精确 fileID）→ 按实例版本 / 加载器过滤
+                rows = _cf_filter_files(rows, mc_version, loader)
+                hit = rows[0] if rows else None
         except NetError:
             hit = None
         if hit:
@@ -1576,6 +1707,7 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
                 url, filename = hit["downloadUrl"], fname
             elif hit.get("id") and fname:
                 url, filename = _forge(hit["id"], fname), fname
+            sha1 = _cf_sha1(hit)
     # 3) cfwidget 兜底（镜像整体故障才走；注意其 file.url 是网页链接，403，
     #    只能用 id+name 拼 forgecdn）。
     if not url:
@@ -1591,20 +1723,27 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
                 if str(cand.get("id")) == str(file_id):
                     hit = cand
                     break
-        if hit is None and rows:
-            hit = rows[0]
+        if hit is None and rows and not file_id:
+            rows = _cf_filter_files(rows, mc_version, loader)
+            hit = rows[0] if rows else None
         if hit and hit.get("id"):
             filename = hit.get("name") or f"{project_id}.zip"
             url = _forge(hit["id"], filename)
+            sha1 = _cf_sha1(hit)
     if not url:
+        if file_id:
+            raise NetError(
+                f"找不到整合包指定的文件 {file_id}（不会退回最新版，"
+                f"避免装进与作者声明不一致的模组）")
         raise NetError(_t_err("err.curseforge_no_file",
-                              default="该 mod 没有可下载的文件"))
+                              default="该 mod 没有匹配当前版本的可下载文件"))
     if not filename:
         filename = os.path.basename(url.split("?")[0]) or f"{project_id}.zip"
-    _store(meta_key, [url, filename])
+    _store(meta_key, [url, filename, sha1])
     os.makedirs(dest_dir, exist_ok=True)
     return download_file(url, os.path.join(dest_dir, _safe_filename(filename)),
-                         timeout=300, progress=_cb_progress(callback))
+                         timeout=300, progress=_cb_progress(callback),
+                         expected_sha1=sha1)
 
 
 # ---- CurseForge 版本列表 / 指定文件下载（round-120）----
@@ -1722,7 +1861,7 @@ def _curseforge_versions_keyless(proj: str, limit: int | None = None,
 
 def download_curseforge_file(project_id: str, file_id, dest_dir: str,
                              filename: str = "", url: str = "",
-                             callback=None) -> str:
+                             callback=None, sha1: str = "") -> str:
     """Download one specific CurseForge file into ``dest_dir``.
 
     Uses the official ``download-url`` endpoint when a key is configured
@@ -1747,8 +1886,9 @@ def download_curseforge_file(project_id: str, file_id, dest_dir: str,
         raise NetError("该文件没有可用的下载链接")
     name = filename or f"{project_id}-{file_id}.jar"
     os.makedirs(dest_dir, exist_ok=True)
-    return download_file(link, os.path.join(dest_dir, name), timeout=120,
-                         progress=_cb_progress(callback))
+    return download_file(link, os.path.join(dest_dir, _safe_filename(name)),
+                         timeout=120, progress=_cb_progress(callback),
+                         expected_sha1=sha1)
 
 
 # ---- CurseForge 免 key 通道（cfwidget 详情 + forgecdn 直链）----
@@ -1822,33 +1962,52 @@ def curseforge_link_search(query: str, limit: int = 8) -> list[dict]:
     return hits
 
 
-def download_cfwidget_file(cf_file: dict, dest_dir: str, callback=None) -> str:
-    """下载 cfwidget 解析出的最新文件（forgecdn 直链，无需 key）。
+def download_cfwidget_file(cf_file: dict, dest_dir: str, callback=None,
+                            mc_version: str = "", loader: str = "") -> str:
+    """下载 cfwidget 解析出的文件（forgecdn 直链，无需 key）。
 
     round-111：新增 ``callback``（mll 风格，ProgressWorker 注入）→ 进度/速度。
+    round-178：带实例版本 / 加载器时先校验候选文件，明确声明不兼容就拒绝，
+    不再把「只支持 1.21 的最新 jar」静默装进 1.20.1 实例。
     """
+    if (mc_version or loader) and not _cf_filter_files(
+            [cf_file], mc_version, loader):
+        raise NetError(
+            "该文件声明的游戏版本 / 加载器与当前实例不匹配（已放弃下载）")
     fid = cf_file.get("id")
     name = cf_file.get("name", "mod.jar")
     if not fid:
         raise NetError("缺少文件 ID")
+    try:
+        fid = int(fid)  # cfwidget 有时给字符串，直接 // 会 TypeError
+    except (TypeError, ValueError):
+        raise NetError(f"无效的文件 ID：{fid!r}") from None
     url = FORGECDN_URL.format(a=fid // 1000, b=fid % 1000, name=name)
     os.makedirs(dest_dir, exist_ok=True)
-    return download_file(url, os.path.join(dest_dir, name), timeout=120,
-                         progress=_cb_progress(callback))
+    return download_file(url, os.path.join(dest_dir, _safe_filename(name)),
+                         timeout=120, progress=_cb_progress(callback),
+                         expected_sha1=_cf_sha1(cf_file))
 
 
-def download_cfwidget_slug(slug: str, dest_dir: str, callback=None) -> str:
+def download_cfwidget_slug(slug: str, dest_dir: str, callback=None,
+                            mc_version: str = "", loader: str = "") -> str:
     """免 key 下载：slug → cfwidget 最新文件 → forgecdn 直链（round-140）。
 
     供免 key 镜像搜索命中的卡片使用——命中只有 slug / project_id，没有
     官方 download-url 端点可用，走公开直链通道。
     """
     hits = curseforge_link_search(slug)
-    cf_file = (hits[0] or {}).get("_cf_file") if hits else None
+    candidates = [h.get("_cf_file") for h in (hits or [])
+                  if isinstance(h, dict) and h.get("_cf_file")]
+    if mc_version or loader:
+        candidates = [c for c in candidates
+                      if _cf_filter_files([c], mc_version, loader)]
+    cf_file = candidates[0] if candidates else None
     if not cf_file:
         raise NetError(_t_err("err.curseforge_no_file",
-                              default="该 mod 没有可下载的文件"))
-    return download_cfwidget_file(cf_file, dest_dir, callback=callback)
+                              default="该 mod 没有匹配当前版本的可下载文件"))
+    return download_cfwidget_file(cf_file, dest_dir, callback=callback,
+                                  mc_version="", loader="")
 
 
 def fetch_liteloader_builds(mc_version: str) -> list[dict]:
@@ -2227,7 +2386,8 @@ def _cb_progress(callback, nfiles: int = 1):
     return None
 
 
-def download_modpack_to(project_id: str, dest_dir: str, callback=None) -> str:
+def download_modpack_to(project_id: str, dest_dir: str, callback=None,
+                        version_id: str = "") -> str:
     """Download a Modrinth modpack's primary file (a .mrpack) into dest_dir.
 
     Returns the local .mrpack path — the caller then installs it as a new
@@ -2238,7 +2398,10 @@ def download_modpack_to(project_id: str, dest_dir: str, callback=None) -> str:
     ``progress(sofar, total)``，整合包下载从此有字节级进度与实时速度
     （之前走裸 ``Worker``，只有提速没有可观测性）。
     """
-    filename, url = get_mod_download(project_id)
+    # round-178：默认路径保持「单参调用」不变（老调用点 / mock 都兼容），
+    # 只有显式指定版本时才传 version_id。
+    filename, url = (get_mod_download(project_id, version_id) if version_id
+                     else get_mod_download(project_id))
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, _safe_filename(filename))
 

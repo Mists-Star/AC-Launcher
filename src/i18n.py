@@ -812,6 +812,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "crash.no_crash": "未发现崩溃记录 — 该实例最近一次运行看起来正常。",
         "crash.found": "发现 {n} 个问题",
         "crash.repair_all": "一键修复",
+        "crash.deps_skipped": "模组共 {n} 个，超过深扫上限，已跳过依赖扫描（不代表依赖齐全）。",
+        "crash.repair_all_note": "已自动补装缺失依赖；另有 {n} 项请点上方卡片分别处理。",
         "crash.btn_repair_deps": "自动修复缺失依赖",
         "crash.btn_fix_java": "切换 Java",
         "crash.btn_fix_ram": "调整内存",
@@ -913,6 +915,8 @@ _STRINGS: dict[str, dict[str, str]] = {
 
         # ---- 实例体检（在冲突预检之上扩展：性能模组 / JVM 与内存 / Java / 启动参数 + 本地一键修复）----
         "health.title": "实例体检",
+        "instances.repair_deps": "补装缺失依赖",
+        "instances.repair_deps_result": "补装结果：{msg}",
         "health.dialog_title": "实例体检",
         "health.ok_title": "这个实例状态不错",
         "health.ok_desc": "没有发现会拖慢或阻断启动的问题。",
@@ -2560,6 +2564,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "crash.no_crash": "No crash records found — the last run looks healthy.",
         "crash.found": "{n} issue(s) found",
         "crash.repair_all": "Repair All",
+        "crash.deps_skipped": "With {n} mods the deep scan was skipped (this does NOT mean all dependencies are present).",
+        "crash.repair_all_note": "Missing dependencies are being installed; {n} other item(s) need the matching card above.",
         "crash.btn_repair_deps": "Auto-fix missing dependencies",
         "crash.btn_fix_java": "Switch Java",
         "crash.btn_fix_ram": "Adjust memory",
@@ -2661,6 +2667,8 @@ _STRINGS: dict[str, dict[str, str]] = {
 
         # ---- Instance health check (extends the conflict scan: perf mods / JVM & memory / Java / launch args + local one-click fixes) ----
         "health.title": "Instance health check",
+        "instances.repair_deps": "Install missing dependencies",
+        "instances.repair_deps_result": "Repair result: {msg}",
         "health.dialog_title": "Instance health check",
         "health.ok_title": "This instance looks fine",
         "health.ok_desc": "No issues that would slow down or block launch were found.",

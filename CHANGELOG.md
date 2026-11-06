@@ -108,6 +108,73 @@ CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash
 
 ---
 
+## round-178（2026-11-06）— 模组 / 资源链路第二批（A/B/C/D 组）
+
+> 承接第八章审计的剩余 P1。用户「先干其他那一组的事情」授权后按
+> B（底层通用能力）→ A（依赖与版本）→ C（检测）→ D（入口）顺序落地。
+> 逐条状态（含**明确未修**项）见 `docs/quality_punchlist.md` 八章「round-178
+> 收尾状态」。本批同样**未联网 / 未真机复现**。
+
+### B 组：下载完整性做成通用能力
+
+* `download_file` / `parallel_download_file` 新增 `expected_sha1`：在 `.part`
+  **阶段**校验，坏字节永远不会被 `os.replace` 成正式文件；不匹配就丢弃
+  `.part` 按瞬时错误重下（分片路径同样回退单流从头下）。
+* 新增 `_cf_sha1()` 兼容 CF 官方 `hashes[algo=1]`、cfwidget 字典与顶层字段，
+  **MD5 / fileFingerprint 绝不冒充 sha1**；`download_curseforge_mod`、
+  `_download_cf_keyless`（缓存里一并存 hash）、`download_curseforge_file`、
+  `download_cfwidget_file` 全部接入；Modrinth 两条路径改走通用参数，删掉
+  「先落盘再验、验不过删 dest」的下游补丁。
+* 顺带修 `download_cfwidget_file` 对字符串 fileID 直接 `// 1000` 的
+  `TypeError`，并给 3 处文件名拼接补 `_safe_filename`。
+
+### A 组：依赖树与 CF 版本口径
+
+* `resolve_mod_dependencies` 跳过 `embedded`（已打包进本体的库，多下一个
+  jar 会 duplicate modid）、递归传依赖声明里的 `version_id`、顶层指定版本
+  不存在时明确抛错。
+* **CF 资源中心卡片下载不再取最新一条**：新增 `mc_version` / `loader` 参数与
+  `_cf_filter_files()`，按 `gameVersions`（cfwidget 用 `versions`）过滤，
+  无匹配直接拒绝并说明原因；三路 UI（官方 API / keyless slug / cfwidget
+  文件）全部传实例版本。整合包 manifest 指定 `file_id` 时是精确版本，不过滤。
+* `_download_cf_keyless` 指定 fileID 找不到时**不再静默退回最新文件**（会装出
+  与作者声明不一致的整合包且玩家无感知），改为明确报错。
+* `get_mod_download` / `download_modpack_to` 支持 `version_id`（默认路径保持
+  单参调用，老调用点 / mock 全兼容）；`get_mod_download` 指定版本不存在报错。
+* 详情页是玩家**显式选了版本**，只接 sha1，不做实例版本二次过滤（会误拒）。
+
+### C/D 组：模组依赖统一为一套能力
+
+* 新建 `src/core/mod_repair.py`：`scan_missing()` 显式区分「没有缺失」与
+  「jar > 60 深扫被跳过」（旧行为误报「依赖齐全」）；`match_project()` 只接受
+  规范化后完全相等（`Fabric API` ↔ `fabric-api` 认，**不做 `startswith`
+  宽松匹配**，`fabric-api` 不再误命中 `fabric-api-base`）；
+  `repair_missing()` 返回结构化结果与 `search` / `match` / `download`
+  三阶段失败原因。
+* `crash_analysis.search_and_download_missing` 改为兼容薄封装，旧签名不变。
+* 崩溃弹窗「一键修复」补汇总终态（不再只调依赖补装却什么都不说）、
+  结构化失败明细、跳过扫描提示；实例右键新增「补装缺失依赖」，走同一模块。
+  中英 4 组新文案对齐。
+* **纠错**：右键菜单本来就有「实例体检」和「崩溃分析」，八章原登记「无入口」
+  不准确，已在 punchlist 里更正。
+
+### 仍未修（非遗漏，有意排期）
+
+CF `required` 依赖树递归（keyless 通道能否稳定返回 dependencies 未核实）、
+`find_missing_dependencies` 不解析版本区间、启动前缺前置是否拦截（产品语义
+待定）、体检对话框 `missing_dep` 仍 `fix=None`、三处「一键修复」中
+`diagnostics.repair_all` 刻意不并入模组域（职责不同）。
+
+### 验证
+
+* `regress.py` **46/46 exit 0**（新增 `test_round178_mod_integrity.py` 30 条、
+  `test_round178_mod_repair.py` 22 条）；i18n **1629=1629**、文案门禁 /
+  PII 门禁 / `git diff --check` 全过。
+* 新 exe 重打部署到 `<本机部署目录>`，保留 `launcher_config.json` / `data/`；
+  `AC_NO_TERMS=1` 10 秒冒烟通过、无残留锁。
+
+---
+
 ## round-176（2026-11-03）— 安装路径断点续传 / 低速判据 / 429
 
 > 横评发现：HMCL、XMCL 全路径 Range 续传，PCL2 有低速判据，Prism 对 429 指数退避；

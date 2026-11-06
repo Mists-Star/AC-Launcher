@@ -272,7 +272,24 @@
 - CurseForge 缓存键是否包含版本 / 加载器（Modrinth 侧 `_modrinth_versions` 的 key 已含，确认过）；
 - `download_cfwidget_file` 目录口径与整合包 UI 读取路径是否一致。
 
-### 修复分组建议
+### round-178 收尾状态（2026-11-06 22:30，A/B/C/D 组按序落地）
+
+| 组 | 已修（✅） | 明确未修 / 有意不动（⚠） |
+|---|---|---|
+| **A 依赖与版本** | `resolve_mod_dependencies` 跳过 `embedded`、递归传依赖声明的 `version_id`、顶层指定版本不存在时抛错；CF 官方卡片下载按实例 MC 版本 / 加载器过滤（资源中心三路 UI 全部传参），无匹配**拒绝下载而不是取最新**；cfwidget 文件版本校验 + 字符串 fileID 容错；整合包 `get_mod_download` / `download_modpack_to` 支持 `version_id`；keyless 指定 manifest fileID 找不到时不再静默退回最新 | ⚠ **CF `required` 依赖树递归仍未做**：keyless 通道（cfwidget / 镜像）能否稳定返回 `dependencies` 未核实，贸然递归会多出 N 次网络请求且可能装错；下一批先定 API 契约再动。⚠ `_seen` 仍按 `project_id` 去重（同项目多版本依赖只装一个），**刻意保留**——全放开会往 mods 目录塞同名 modid 的两个版本，直接 duplicate 崩溃 |
+| **B 完整性** | `download_file` / `parallel_download_file` 统一 `expected_sha1`（在 `.part` 阶段校验，坏字节永不 `os.replace` 成正式文件；不符就丢 part 重下）；CF 三条下载路径 + keyless 通道接 `_cf_sha1`（兼容 CF `hashes[algo=1]` / cfwidget 字典 / 顶层字段，MD5 与 fingerprint 绝不冒充）；Modrinth 两条路径改走通用参数 | ⚠ `.part` 的取消策略**刻意不统一**：通用下载器保留 `.part` 供断点续传，Java 侧删半成品是用户明确要求，两者语义不同、不是 bug |
+| **C 检测** | 新建 `src/core/mod_repair.py` 收敛「扫描 → 精确匹配 → 补装」；`scan_missing` 显式区分「没有缺失」与「jar > 60 深扫被跳过」（旧行为会误报「依赖齐全」）；失败按 `search` / `match` / `download` 三阶段带原因；`crash_analysis.search_and_download_missing` 改为兼容薄封装；匹配只接受规范化后完全相等（`fabric-api` 不再误命中 `fabric-api-base`，也不做 `startswith` 宽松匹配） | ⚠ 启动前预检**维持「只提示不拦截」**：缺前置要不要拦启动是产品语义，等用户定；`find_missing_dependencies` 仍只比 modid 字符串，不解析 Fabric `depends` 版本区间 / Forge 约束 |
+| **D 入口** | 崩溃弹窗「一键修复」补汇总终态（不再只调 deps 却什么都不说）+ 结构化失败明细；实例右键新增「补装缺失依赖」，走同一 `mod_repair`；`crash_dialog` 与右键都显示「jar 过多已跳过」 | ⚠ 体检对话框 `scan_conflicts` 的 `missing_dep` finding 仍 `fix=None`（其「补装」按钮是重装游戏版本，不是补 mod）；`diagnostics.repair_all` **刻意不并入**模组域——它管配置 / 账户 / 游戏文件，与模组依赖不是一回事，硬合并反而让「一键修复」语义更乱 |
+
+**登记纠错**：八章原写「右键菜单仍无『实例体检』」不准确 —— `pages_instances.py` 右键本来就有
+`t("health.title")`（实例体检）与 `t("instances.crash_analyze")`（崩溃分析），本轮新增的是
+「补装缺失依赖」这一项，不是补体检入口。
+
+> ⚠ 双轨验收：本批全部是代码轨 + 构造判据，**未联网 / 未在真客户端复现**。
+> 真机要验：① 资源中心 CF 卡片下载装到的是匹配当前实例版本的文件；② 下载损坏 hash 时会重下而不是落坏 jar；
+> ③ 崩溃弹窗 / 右键「补装缺失依赖」的终态与失败明细；④ 模组 > 60 个时提示「已跳过」而不是「依赖齐全」。
+
+### 修复分组建议（历史记录，实际执行见上一节）
 
 - **A 组**：CF 依赖树 + 版本口径统一，一次改（分散修容易互相打脸）。
 - **B 组**：把 sha1 / `.part` 策略做成 `download_file` 的通用能力，再让 CF 三条路径接入，别继续按渠道各写一份。
@@ -282,3 +299,67 @@
 > ⚠ 双轨验收：本节修复全部是代码轨 + 构造判据，**未在真客户端复现**。
 > 按项目铁律，必须真机走一遍「搜模组 → 下载 → 启动 → 体检 / Java 下拉」
 > 才算结案。特别是 #7 Java 25 下拉，要重开一次 Java 管理对话框目检。
+
+---
+
+## 九、启动格式与「AC 专属标识」（待设计，用户 22:06 提出，本轮不实现）
+
+> 用户原话要点：① 「我们启动游戏不是有个特殊格式吗？但是好像没有合理区分，
+> 自定义启动格式这个功能好像没有什么实际作用」；举例「一个目录实例层层叠进、
+> 把游戏拆成一个个文件夹混着叠在一起」这种极端布局该怎么搞；② 「搞一个专属标识
+> 只有我们能识别的，识别对应启动格式和实际格式对应，然后就可以直接自动选中
+> 对应选项启动，就不用判断这么多东西了」。
+> **排期**：用户明确「先干其他那一组的事情」→ 本节先登记，等第八章 A/B/C/D
+> 组收尾后再回来做设计评审，不要顺手改代码。
+
+### 现状（2026-11-06 逐行核实，勿凭印象改）
+
+- `src/instances.py:100` `Instance.format`（`""` / `auto` / `ac` / `vanilla` /
+  `iso` / `multimc` / `curseforge` / `modrinth` / `custom` 等 `INSTANCE_FORMATS`），
+  `:106` `_base` = **游戏目录本身**（不是实例根）；`:124` `mc_dir`、
+  `:139` `game_dir`、`:180` `mods_dir` 由它派生。
+- `detect_format()` `:325` 优先级：`_is_ac_owned()`（`:356`，`_base` 空且非
+  external ⇒ 结构性事实 `ac`）> 玩家手选（非空非 auto）> `_probe_format()`
+  （`:366`，只读扫 `mmc-pack.json` / `<ver>.json` / `minecraftinstance.json` /
+  `profile.json` …）> `kind` 兜底。`adapt_format()` `:409` 把 AC 自有布局上
+  残留的外来标签纠正为 `ac`。
+- `layout_of()` `:424` 是启动 / 补全 / 体检共用的**唯一口径**，返回
+  `format` / `version` / `flat` / `install_dir` / `versions_root`。
+  `src/launch.py:359`、`src/core/install.py:121`、`src/core/instance_rebuild.py:125`
+  都走它。
+- `src/pages_instances.py:2310/2454` 实例设置可手选格式；新建向导
+  `result_data()`（`:500`）返回 7 元组带 `format` / `base`。
+- i18n `instances.fmt_mismatch_hint` 只是「手选与实测不符」的**提示文字**，
+  不自动纠正、不落盘任何标识。
+- `src/scan.py:744` 已有「按 marker 文件猜别的启动器」的逻辑，但那是**扫描外部
+  实例时猜归属**，与 AC 自有实例的启动格式是两回事，别混用。
+
+### 为什么用户觉得「没实际作用」
+
+`format` 现在只是**一个粗粒度枚举标签**，不是「目录结构描述」：只够区分
+「AC 自有 / 官版共享 / 版本隔离 / 某启动器」，表达不了「游戏目录被拆成多层
+子目录、版本 json / mods / saves / assets 分散在不同层」这类布局。每次启动
+都靠 `_probe_format()` 按 marker 猜，目录一变就可能与手选不一致；而手选值
+又会被 `adapt_format()` 在 AC 自有布局上强行改回 `ac`。所以「自定义格式」
+既不能描述结构，也不能稳定生效。
+
+### 用户提的方案（待评审）
+
+在实例目录里放一个 **AC 专属标识文件**（只有 AC 识别），记录「声明的启动格式
++ 实际目录结构映射」，启动时直接读它自动选中对应选项，不再每次探测。
+
+### 设计时必须回答的问题（一条都不能跳）
+
+1. 文件名 / schema 版本 / 字段（是否含 `versions_root` `mods_dir` `saves_dir`
+   `assets_dir` 的**逐项路径**，而非一个枚举）、编码与原子写。
+2. 写入时机：新建 / 导入 / 复制 / 重建 / 手动改目录后；谁负责校验与更新。
+3. 与 `_base` / `format` / `layout_of()` 的关系：标识是**真理源**还是缓存？
+   冲突时以谁为准（建议：实际文件存在性优先，标识只作加速与声明）。
+4. 外来实例无标识 → 降级到现有 `_probe_format()`，不能因此启动失败。
+5. 存量实例迁移：一次性补全还是懒生成；老版本 AC 读到新文件会不会忽略。
+6. 标识被其它启动器 / 清理工具删掉时的兜底；目录被整体移动后路径失效检测。
+7. 极端嵌套布局是否需要「路径映射表」而不是扩展 `INSTANCE_FORMATS` 枚举
+   —— 若需要，`layout_of()` 与所有调用点（启动 / 补全 / 体检 / 诊断 / 整合包
+   导入目录口径）都要一起改，属于跨模块改动，必须单独一批 + 双轨验收。
+
+**状态：待设计 / 未授权实现。**

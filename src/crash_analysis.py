@@ -296,43 +296,13 @@ def find_missing_dependencies(inst) -> list[str]:
 
 def search_and_download_missing(inst, missing_ids: list[str],
                                 callback=None) -> tuple[list[str], list[str]]:
-    """Try to auto-fix missing deps: search Modrinth by mod id, download the
-    first hit into the mods folder. Returns (downloaded, failed)."""
-    from .net_api import search_mods, download_mod_to
+    """兼容旧入口：委托 ``core.mod_repair``（round-178 统一实现）。
 
-    downloaded, failed = [], []
-    for dep in missing_ids:
-        if callback:
-            callback(f"正在查找依赖：{dep} …")
-        try:
-            hits = search_mods(dep, 0, 5, project_type="mod")
-        except Exception:  # noqa: BLE001
-            failed.append(dep)
-            continue
-        target = None
-        for h in hits:
-            slug = h.get("slug", "").lower()
-            title = h.get("title", "").lower()
-            if slug == dep.lower() or title == dep.lower() or \
-                    slug.startswith(dep.lower()) or dep.lower() in slug:
-                target = h
-                break
-        if target is None:
-            # round-177：不再用 hits[0] 兜底。模糊命中一个无关模组装进去，
-            # 比「没修好」更糟（多一个冲突源，玩家更难自查）。
-            failed.append(dep)
-            continue
-        if callback:
-            callback(f"下载依赖：{target.get('title', dep)} …")
-        try:
-            # round-177：必须带实例的 MC 版本 + 加载器，否则 _modrinth_versions
-            # 不过滤，会拉到不兼容的最新版，修完照样崩。
-            p = download_mod_to(
-                target["project_id"], inst.mods_dir,
-                getattr(inst, "game_version", "") or "",
-                getattr(inst, "loader", "") or "",
-            )
-            downloaded.append(os.path.basename(p))
-        except Exception:  # noqa: BLE001
-            failed.append(dep)
-    return downloaded, failed
+    round-177 在这里加了「带 MC 版本 / 加载器」「不用 hits[0] 兜底」；
+    round-178 把扫描、精确匹配、分阶段失败原因收敛到 ``mod_repair``，
+    避免崩溃弹窗 / 实例右键 / 体检对话框各写一套。旧签名保持不变。
+    """
+    from .core.mod_repair import repair_missing
+
+    result = repair_missing(inst, missing_ids, callback)
+    return result["downloaded"], [f["id"] for f in result["failed"]]

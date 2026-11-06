@@ -84,12 +84,15 @@ net_api._modrinth_versions = orig_versions
 
 # ── B. 崩溃补前置 ──────────────────────────────────────────────────
 ca = read("src/crash_analysis.py")
+# round-178：实现已收敛到 core/mod_repair.py，判据跟着挪过去
+mr = read("src/core/mod_repair.py")
 check("自动补前置带 MC 版本 + 加载器",
-      'getattr(inst, "game_version", "")' in ca
-      and 'getattr(inst, "loader", "")' in ca
-      and "download_mod_to(" in ca)
+      'getattr(inst, "game_version", "")' in mr
+      and 'getattr(inst, "loader", "")' in mr
+      and "download_mod_to(" in mr)
 check("不再用 hits[0] 模糊兜底装无关模组",
-      "target = hits[0]" not in ca)
+      "target = hits[0]" not in ca
+      and "hits[0]" not in mr)
 
 calls = []
 
