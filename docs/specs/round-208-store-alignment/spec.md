@@ -4,7 +4,9 @@
 > 「注意是 99% 的代码参考学习」。
 > **本文件性质**：Task #353 的交付物。逐条写清「上游怎么做（含 `repo:path:line` 与代码片段）→
 > AC 落到哪个文件/函数 → 用哪条回归断言证明落地」。
-> **状态**：2026-11-07 主理人已拍板 3 个 IA 分歧（§4），阶段二按拍板结果实施；规格已按拍板修订，**拍板结果与推荐项不一致处以拍板为准**。
+> **状态**：2026-11-07 主理人拍板 3 个 IA 分歧（§4）；**2026-11-08 阶段二已按拍板落地**
+> （数据层 + 整页重做 + IA 护栏，回归 77/77），落地清单与新增偏离见 §4.1。
+> **拍板结果与推荐项不一致处以拍板为准**。
 > **日期**：2026-11-07 ｜ 关联：`docs/quality_punchlist.md` §十四、`CHANGELOG.md` round-207。
 
 ---
@@ -398,6 +400,33 @@ await _cacheService.SetAsync(cacheKey, body, new CachePolicy{ AbsoluteExpiration
 
 > 拍板后 §2.1 / §2.6 / §2.10 / §3 / §5 / §6 / §7 已全部按结果修订。
 > 规格与推荐项冲突处一律以本表为准；阶段二（Task #354）直接按此实现，不再二次确认。
+
+### 4.1 阶段二落地结果（2026-11-08）
+
+| 规格条目 | 落地文件 | 回归断言 |
+|---|---|---|
+| §2.1 两栏骨架 | `src/pages_browse.py` `StorePage.splitter` | 对齐测试 [1][6] |
+| §2.2 筛选侧栏 | `src/store_filter.py`（新增，上游真实 27 tag / 12 版本 / loader 枚举） | 对齐测试 [3][6] |
+| §2.3 服务端过滤 | `src/store_search.py`（新增，不动 `net_api.py`） | 数据层测试 [2][3][4] |
+| §2.4 排序映射 | `src/store_search.py` `_CF_SORT_FIELD` / `_MR_SORT_INDEX` | 数据层测试 [1][2] |
+| §2.5 双源游标 | `src/store_search.py` `new_store_cursors` / `store_can_continue` | 数据层测试 [6][7] |
+| §2.6 真页码器 | `src/pages_browse.py` `_build_pager` / `_goto_page` / `_update_pager` | 对齐测试 [2][6] |
+| §2.7 防抖去重 | `src/pages_browse.py` 350ms + `_request_key` + `gen` | 对齐测试 [4][6] |
+| §2.8 占位 / 懒加载 | `src/pages_browse.py` `_make_card` + `_pump_icons` | 对齐测试 [4][6] |
+| §2.9 SWR | `store_search.cache_lookup` + UI `_swr_cache` | 数据层测试 [5] / 对齐测试 [4][6] |
+| §2.10 详情整页切换 | `self._stack` 保留，不新开窗口 | 对齐测试 [1][6] |
+| §2.11 徽章 | `_make_card` 复用 `_is_installed` / `_compat_of_card` | 对齐测试 [4] |
+| §2.12 中文 / 部分结果 | 保持 round-206/207 语义 | 对齐测试 [4] |
+| §3-11 IA 假护栏 | `tools/gen_paths.py` + `docs/ia/paths.md`（4 页 / 29 条） | 对齐测试 [5] |
+
+**1% 偏离增补（阶段二实测后登记）**：
+
+- 上游 `prism:ModFilterWidget.ui:226-296` 的发布渠道 / 运行环境 / 仅开源三项，
+  AC 数据层无对应字段（MR search hits 无 channel / open_source）→ **不渲染摆设控件**，
+  登记在 `docs/quality_punchlist.md` §十四。
+- 「详情页预取版本列表」与「搜索 / 详情共用一份项目缓存」未做，属 §十四 P1。
+- 视口懒加载用「视口 ±120/240px 泵」实现，未移植 Qt `dataChanged` 机制
+  （沿用 AC 既有 `ImageLoader`，属 §0.3 第 4 类偏离）。
 
 ## 5. 落地映射表（Task #354 用）
 

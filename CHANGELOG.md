@@ -8,6 +8,61 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-208（2026-11-08）— 阶段二：整套对齐落地（数据层 + 整页重做 + IA 护栏）
+
+**执行拍板**：真页码器（PCL-CE）/ 详情保留 `_stack` 整页切换 / 默认「全部」双源不变
+→ 骨架是**两栏** `QSplitter`（筛选侧栏 + 结果区），不是 Prism 三栏。
+
+**数据层（独立新模块，不动 round-206/207 已验证的 `net_api.py`）**
+
+- 新增 `src/store_search.py`：CF `gameVersion` / `modLoaderType` / `categoryId` /
+  `sortField` / `index` / `pageSize`，MR `facets`（`versions` / `categories` /
+  `project_type`）+ `offset` / `limit`；双源各自 `{offset,total}` 游标；
+  `PageSize=40` 真分页 + `targetResultCount=(page+1)*PageSize`；SWR 三态
+  （`fresh` / `stale` / `miss`）；排序五档映射（默认值仍是 round-207 实测
+  `sortField=1`，不照抄官方 API 的 `4`）。
+- 补上游双段 tag：`406/worldgen` 这类 `Tag="<CF categoryId>/<MR slug>"` 由
+  `_category_pair()` 拆开，**一套控件同时喂两个源**（PCL-CE
+  `PageDownloadMod.xaml:10-53`）；旧单值 `category_id` 口径保持兼容。
+
+**整页重做（`src/pages_browse.py`）**
+
+- 两栏 `QSplitter` + 新增 `src/store_filter.py`（来源 / 排序 / 版本 / 加载器 /
+  分类 / 隐藏已装 6 组；取值直接取上游真实 27 条双段 tag、12 个 MC 版本、
+  `Forge=1 / NeoForge=6 / Fabric=4 / Quilt=5` 枚举），可折叠；详情仍整页栈切换。
+- 真页码器替代无限滚动：删除 `_more()` / `_has_more` / 滚动翻页；页码 / 上一页 /
+  下一页 / 回到首页由双源 `offset<total` 推导，累积结果已够时翻页零请求。
+- 350ms 防抖（Prism 口径）+ `_request_key()` 去重 + `gen` 守卫；目标实例版本 /
+  加载器作为隐式筛选下推服务端。
+- 占位图立即上屏 + 视口内才 `ImageLoader.load()`（回来只换图标不重建卡片）；
+  SWR 过期缓存先画旧数据并标「正在更新」，刷新失败保留旧列表。
+
+**i18n / IA**
+
+- 新增 57 组文案（中英对称 `1993=1993`）；修正 `store.fetching` 旧文案
+  「正在从 Modrinth 获取…」→ 双源中性表述。
+- IA 路径表 `3 页 / 21 条` → **`4 页 / 29 条`**；`tools/gen_paths.py` 补三类真校验
+  （必需页存在 / 每页 ≥3 条 / 备注引用的源码文件真实存在），修掉「只查文档过期」
+  的假护栏；已用注入 `ghost_page` 证明护栏真会 FAIL。
+
+**验证**：`test_round208_store_search.py` 37 项 +
+`test_round208_store_alignment.py` 54 项（静态契约 + 离屏运行时构造 / 翻页 /
+筛选 / 详情栈 / SWR）；**全量回归 77/77**，文案门禁、i18n 对称、PII zero、
+IA `--check` 全过。离屏冒烟：两栏 `count()==2`、40 张卡、翻到第 2 页、
+筛选回第 1 页、详情栈 2→1、中英切换无异常。round-207 的 3 条旧静态断言按新链路
+重写为等价行为判据（旧断言固化实现会造「变差了」的假信号）。
+
+**修掉的两个真实 bug**（编译查不出，运行时才暴露）：
+
+1. `self._filters` 字段覆盖了同名方法 `_filters()` → 构造即 `TypeError`；方法改名 `_collect_filters()`。
+2. SWR stale 首帧的「正在更新」被随后的 `store.fetching` 覆盖 → 玩家看不见
+   「先画旧数据」；改为 stale 分支不写 fetching。
+
+**1% 偏离登记**：上游 `ModFilterWidget.ui` 的「发布渠道 / 运行环境 / 仅开源」
+三项，AC 数据层无对应字段（MR search hits 无 channel / open_source），
+**不渲染成点了没反应的摆设控件**，登记为 P2 差距；「详情页预取版本列表」与
+「搜索 / 详情共用一份项目缓存」同属 §十四 P1 未做，留待下一轮。
+
 ## round-208（2026-11-07）— 阶段一：资源中心「99% 代码级对齐」对照规格（待拍板）
 
 **主理人要求**：「直接仿照其他启动器学一遍」+「注意是 99% 的代码参考学习」

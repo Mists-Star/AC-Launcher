@@ -90,8 +90,27 @@ def filters_key(filters: dict | None) -> str:
     f = filters or {}
     return ":".join(
         "%s=%s" % (k, str(f.get(k) or ""))
-        for k in ("game_version", "loader", "category_id", "sort")
+        for k in ("game_version", "loader", "category_id",
+                  "category_tag", "sort")
     )
+
+
+def _category_pair(filters: dict | None) -> tuple[str, str]:
+    """Split the PCL-CE dual-segment tag into (CF categoryId, MR slug).
+
+    pclce:.../PageDownloadMod.xaml:10-53 uses ``Tag="406/worldgen"`` — the
+    left half is the CurseForge ``categoryId``, the right half the Modrinth
+    category slug. Either half may be empty (``"407/"`` / ``"/game-mechanics"``).
+    A bare ``category_id`` keeps the round-208 single-value contract working:
+    digits are treated as a CF id, anything else as a Modrinth slug.
+    """
+    f = filters or {}
+    tag = str(f.get("category_tag") or "")
+    if "/" in tag:
+        cf, mr = tag.split("/", 1)
+        return cf.strip(), mr.strip()
+    v = str(f.get("category_id") or "")
+    return (v, "") if v.isdigit() else ("", v)
 
 
 def _mr_facets(project_type: str, filters: dict | None) -> str:
@@ -102,8 +121,9 @@ def _mr_facets(project_type: str, filters: dict | None) -> str:
         facets.append(["versions:%s" % f["game_version"]])
     if f.get("loader"):
         facets.append(["categories:%s" % str(f["loader"]).lower()])
-    if f.get("category_id"):
-        facets.append(["categories:%s" % f["category_id"]])
+    _, mr_cat = _category_pair(f)
+    if mr_cat:
+        facets.append(["categories:%s" % mr_cat])
     return json.dumps(facets, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -138,8 +158,9 @@ def _cf_page_ex(base: str, headers: dict, query: str, category: str,
     }
     if f.get("game_version"):
         params["gameVersion"] = f["game_version"]
-    if f.get("category_id"):
-        params["categoryId"] = f["category_id"]
+    cf_cat, _ = _category_pair(f)
+    if cf_cat:
+        params["categoryId"] = cf_cat
     if f.get("loader") in _CF_LOADER_TYPE:
         params["modLoaderType"] = _CF_LOADER_TYPE[f["loader"]]
     r = requests.get(

@@ -12,6 +12,7 @@ import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QScrollArea, QLineEdit, QComboBox, QDialog, QProgressBar, QStackedWidget,
+    QSplitter,
 )
 from PySide6.QtCore import Signal, QSize, QTimer, Qt
 from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QFontMetrics
@@ -31,6 +32,11 @@ from .net_api import (
 from .worker import ProgressWorker, Worker
 from .async_image import get_image_loader, make_version_pixmap
 from .store_detail import StoreDetailPanel  # round-66 资源详情；round-132 页内面板
+from . import net_api as _na
+from .store_filter import StoreFilterPanel  # round-208 筛选侧栏
+from .store_search import (  # round-208 服务端过滤 / 双源游标 / 真分页
+    STORE_PAGE_SIZE, cache_lookup, filters_key, search_store_page,
+)
 
 
 # ── 首帧骨架屏（round-124）─────────────────────────────────────────────
@@ -407,50 +413,53 @@ class StorePage(QWidget):
         # 用户看到的就是「导入一直没动静」。
         self.mgr = manager()
         self._mods: list[dict] = []
-        self._offset = 0
         self._query = ""
         self._category = "mod"
-        # round-140：默认源 = 「全部」（Modrinth + CurseForge 合并）；
-        # _has_more = 无限滚动的到底闸门（不足一页 → 停止，杜绝重复加载）。
+        # round-140：默认源 = 「全部」双源合并；对齐上游时**不**偷偷改这个决策。
         self._source = "all"
-        self._has_more = True
         self._img = get_image_loader()
         # Keep in-flight workers referenced until they finish. Overwriting
         # self._worker used to drop the only strong ref to a still-running
-        # QThread, so Python GC deleted it mid-flight →
-        # "QThread destroyed while still running" crash on fast category
-        # switching (resource center). See _track().
+        # QThread, so Python GC deleted it mid-flight (see _track()).
         self._workers: list = []
-        # Debounce: rapid category/source clicks collapse into one fetch.
+        # round-208 §2.7：防抖 350ms，对齐 prism ResourcePage.cpp:95-105
+        # （原 180ms 太急，中文输入法每敲一个字都会触发一次重搜）。
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(180)
+        self._search_timer.setInterval(350)
         self._search_timer.timeout.connect(self._search)
         self.sourcePartial.connect(self._on_source_partial)
         self._partial_enabled = False
         self._partial_done_gen = -1
 
+        # round-208 §2.5/§2.6：PCL-CE 真分页状态（ProjectStorage.cs:5-22）。
+        self._store_page = 0
+        self._store_cursors = None
+        self._store_results: list[dict] = []
+        self._store_meta: dict = {}
+        self._filters: dict = {}
+        self._search_meta: dict = {}
+        self._last_request_key = ""
+        self._can_next = False
+        # §2.8 视口懒加载队列 / §2.9 SWR 页面级快照（只存内存，不落大对象）
+        self._icon_pending: list = []
+        self._swr_cache: dict = {}
+        self._swr = "miss"
+
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
 
-        # round-132：列表与详情在同一页内用栈切换（详情不再是独立弹窗）
+        # 主理人 2026-11-07 拍板：列表 ↔ 详情继续用 _stack 整页切换，
+        # 不改成 Prism 式第三栏，也不新开窗口 / QDialog。
         self._list_view = QWidget()
         lv = QVBoxLayout(self._list_view)
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(16)
         self._detail_panel = None
 
-        # 第一行：标题 + 目标实例 + 源切换（round-104：目标实例上移到页头，
-        # 搜索行只留搜索框——「搜索」按钮被搜索框吃掉）
-        self.source_combo = QComboBox()
-        self.source_combo.setMinimumHeight(36)
-        self.source_combo.setMinimumWidth(120)
-        self.source_combo.addItem(t("store.source_all"), "all")
-        self.source_combo.addItem(t("store.source_modrinth"), "modrinth")
-        self.source_combo.addItem(t("store.source_curseforge"), "curseforge")
-        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
-
+        # 页头：目标实例 / 筛选折叠 / 版本库。来源下拉已移到筛选侧栏
+        # （§2.2：来源提升为侧栏一级控件）。
         target_w = QWidget()
         tw = QHBoxLayout(target_w)
         tw.setContentsMargins(0, 0, 0, 0)
@@ -464,18 +473,39 @@ class StorePage(QWidget):
         self.inst_combo.currentIndexChanged.connect(self._on_target_changed)
         tw.addWidget(self.inst_combo)
 
+        self.filter_toggle_btn = QPushButton(t("store.filter_collapse"))
+        self.filter_toggle_btn.setMinimumHeight(34)
+        self.filter_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.filter_toggle_btn.clicked.connect(self._toggle_filter)
+
         ver_btn = QPushButton(t("nav.versions"))
         ver_btn.setMinimumHeight(34)
         ver_btn.setCursor(Qt.PointingHandCursor)
         ver_btn.setToolTip(t("versions.title"))
         ver_btn.clicked.connect(lambda: self.open_versions_requested.emit())
         self._header = ui_kit.page_header(
-            t("store.title"), action=[target_w, self.source_combo, ver_btn], icon_key="store")
+            t("store.title"),
+            action=[target_w, self.filter_toggle_btn, ver_btn], icon_key="store")
         self.title_lbl = self._header.title_lbl
         lv.addWidget(self._header)
 
-        # 第二行：分类标签栏（像主流下载页一样横向排开，一眼看到所有类型）
-        # 复用 ui_kit.ChipGroup，激活态纯 QSS 驱动。
+        # round-208 §2.1：QSplitter 两栏 = 筛选侧栏 / 结果区。
+        # 依据 prism:ResourcePage.ui:29-62（三栏）与 ModPage.cpp:103-128
+        # （replaceWidget 注入 + 可折叠 filterWidget）；拍板后第三格详情
+        # 不在 splitter 内，故 count()==2。
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.filter_panel = StoreFilterPanel()
+        self.filter_panel.filterChanged.connect(self._on_filters_changed)
+        # 兼容 _update_search_placeholder / retranslate_ui 里对来源的既有引用
+        self.source_combo = self.filter_panel.source_combo
+        self.splitter.addWidget(self.filter_panel)
+
+        results_host = QWidget()
+        rv = QVBoxLayout(results_host)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(12)
+
         self.category_chips = ui_kit.ChipGroup(
             [(pt, t(key)) for pt, key in STORE_CATEGORIES],
             on_change=self._set_category, spacing=8, min_h=34)
@@ -485,63 +515,64 @@ class StorePage(QWidget):
         self._cat_row.addStretch(1)
         self._cat_row.addWidget(self.category_chips)
         self._cat_row.addStretch(1)
-        lv.addLayout(self._cat_row)
+        rv.addLayout(self._cat_row)
 
-        # 第三行：搜索框（无独立按钮——输入即防抖搜索，Enter 立即搜索）
         self.search = QLineEdit()
         self.search.setPlaceholderText(t("store.search_placeholder"))
         self.search.setMinimumHeight(34)
         self.search.textChanged.connect(lambda _=None: self._search_timer.start())
         self.search.returnPressed.connect(self._search_timer.start)
-        lv.addWidget(self.search)
+        rv.addWidget(self.search)
 
         self.status = QLabel(t("store.loading"))
         self.status.setProperty("cls", "sub")
-        lv.addWidget(self.status)
+        rv.addWidget(self.status)
 
-        # round-111：整合包下载的字节级进度 + 实时速度（与启动/下载对话框同一
-        # slim 进度条范式）。平时隐藏，只在下载整合包时出现。
         self._dl_bar = QProgressBar()
         self._dl_bar.setProperty("cls", "slim")
         self._dl_bar.setTextVisible(False)
         self._dl_bar.setFixedHeight(8)
         self._dl_bar.setVisible(False)
-        lv.addWidget(self._dl_bar)
+        rv.addWidget(self._dl_bar)
         self._dl_speed = QLabel("")
         self._dl_speed.setProperty("cls", "sub")
         self._dl_speed.setVisible(False)
-        lv.addWidget(self._dl_speed)
+        rv.addWidget(self._dl_speed)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self._load_gen = 0  # guards against stale search results
-        self._loading_more = False  # 防止滚动到底部时连续触发多次
         self._content = QWidget()
         self._vbox = QVBoxLayout(self._content)
         self._vbox.setContentsMargins(0, 0, 0, 0)
         self._vbox.setSpacing(10)
         self.scroll.setWidget(self._content)
-        lv.addWidget(self.scroll, stretch=1)
+        # round-208：滚动只驱动「视口内图标懒加载」，不再触发无限翻页。
+        self.scroll.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        rv.addWidget(self.scroll, stretch=1)
+
+        self._pager = self._build_pager()
+        rv.addWidget(self._pager)
+
+        self.splitter.addWidget(results_host)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        lv.addWidget(self.splitter, stretch=1)
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._list_view)
         root.addWidget(self._stack, stretch=1)
 
-        # round-124：首帧骨架屏（首次检索 1.2s 内不再是一片空白）
         for _ in range(6):
             self._vbox.addWidget(_skeleton_row(64))
 
-        # 滚动到底自动加载下一页（round-107：移除手动「加载更多」按钮——
-        # 之前那个按钮被 setVisible(False) 隐藏却仍留着，属冗余 UI）
-        self.scroll.verticalScrollBar().valueChanged.connect(self._on_scroll)
-
-        # 默认选中第一个分类
         self._set_category("mod", initial=True)
-        QTimer.singleShot(0, self._sync_target)
+        self._sync_target()
         self._search()
 
     # ---- category selection ----
+    # ia[store]: 点分类胶囊 | 资源中心分类栏 | 切换资源类型并回到第 1 页重新搜索
     def _set_category(self, category: str, initial: bool = False):
         """Switch the visible resource category. Active pill is painted by the
         ``chip:checked`` QSS via ChipGroup, so no manual styling here."""
@@ -566,35 +597,6 @@ class StorePage(QWidget):
                 return
         self.search.setPlaceholderText(t("store.search_ph_" + self._category))
 
-    def _on_source_changed(self, _index: int):
-        """切换源时同步搜索框提示与状态栏文案。
-
-        CurseForge 有三态：配置了 key → 官方 API 关键词搜索；没 key 但开了
-        免 key 通道 → MCIM 镜像关键词搜索（round-140）；两者都没有 → 提示
-        去设置里填 key。
-        """
-        self._source = self.source_combo.currentData()
-        if self._source == "curseforge":
-            from .net_api import curseforge_available, curseforge_keyless_enabled
-            self._update_search_placeholder()
-            if curseforge_available():
-                self.status.setText(t("store.cf_hint_key"))
-            elif curseforge_keyless_enabled():
-                self.status.setText(t("store.cf_hint_mirror"))
-            else:
-                self.status.setText(t("store.cf_no_key"))
-        elif self._source == "all":
-            # round-140：合并源提示（CF 通道全关时退回「只搜 Modrinth」语义）
-            from .net_api import curseforge_available, curseforge_keyless_enabled
-            self._update_search_placeholder()
-            self.status.setText(
-                t("store.source_all_hint")
-                if (curseforge_available() or curseforge_keyless_enabled())
-                else t("store.source_all_hint_mr"))
-        else:
-            self._update_search_placeholder()
-        self._search_timer.start()
-
     # ---- target instance selection ----
     def _target(self) -> object | None:
         inst_id = self.inst_combo.currentData() if hasattr(self, "inst_combo") else None
@@ -606,7 +608,9 @@ class StorePage(QWidget):
         return None
 
     def _on_target_changed(self, _index: int):
-        self.status.setText(t("store.target_changed", name=self._target().name) if self._target() else t("store.no_target"))
+        """目标实例变了 → 版本/加载器隐含筛选也变，防抖后重搜（§2.3）。"""
+        self.filter_panel.set_target(self._target())
+        self._search_timer.start()
 
     def _sync_target(self):
         """Populate the target-instance combo (defaults to current instance)."""
@@ -625,21 +629,84 @@ class StorePage(QWidget):
         if idx >= 0:
             self.inst_combo.setCurrentIndex(idx)
         self.inst_combo.blockSignals(False)
+        self.filter_panel.set_target(self._target())
 
+    # ---- round-208：筛选 / 防抖去重 / 真分页 / SWR ----
+    def _collect_filters(self) -> dict:
+        """侧栏显式筛选 + 目标实例隐式版本/加载器回退（§2.3）。
+
+        玩家在侧栏选了值就优先；没选才用目标实例的 MC 版本与加载器
+        下推服务端，vanilla 视为「不加加载器过滤」。
+        """
+        f = dict(self.filter_panel.get_filter())
+        inst = self._target()
+        if inst is not None:
+            if not f.get("game_version"):
+                f["game_version"] = str(getattr(inst, "game_version", "") or "")
+            if not f.get("loader"):
+                ld = str(getattr(inst, "loader", "") or "vanilla").lower()
+                f["loader"] = "" if ld == "vanilla" else ld
+        self._filters = f
+        return f
+
+    # ia[store]: 改筛选侧栏（来源/排序/版本/加载器/分类/隐藏已装） | 筛选侧栏 | 350ms 防抖后按服务端参数重搜
+    def _on_filters_changed(self):
+        self._store_page = 0
+        self._store_cursors = None
+        self._store_results = []
+        self._search_timer.start()
+
+    # ia[store]: 点「显示/收起筛选」 | 资源中心页头 | 折叠或展开筛选侧栏，不重建结果
+    def _toggle_filter(self):
+        visible = not self.filter_panel.isVisible()
+        self.filter_panel.setVisible(visible)
+        self.filter_toggle_btn.setText(
+            t("store.filter_collapse") if visible else t("store.filter_expand"))
+
+    def _swr_key(self) -> str:
+        return "r208-page:%s:%s:%s:%d" % (
+            self._query, self._category, filters_key(self._filters),
+            self._store_page)
+
+    def _swr_snapshot(self):
+        """§2.9 stale-while-revalidate：三态由 net_api TTL 判定，页面数据
+        只留内存快照（不把 40 条结果写进磁盘缓存）。"""
+        state, _sig = cache_lookup(self._swr_key())
+        return state, self._swr_cache.get(self._swr_key())
+
+    def _store_swr(self, data: dict):
+        key = self._swr_key()
+        self._swr_cache[key] = data
+        try:
+            _na._store(key, {"n": len(data.get("results") or [])})
+        except Exception:  # noqa: BLE001 - 缓存失败不影响展示
+            pass
+
+    def _request_key(self) -> str:
+        """§2.7 请求去重：关键词 / 分类 / 页码 / 全部筛选 / 隐藏已装都进 key。"""
+        f = self._filters
+        return "%s|%s|%d|%s|%s" % (
+            self._query, self._category, self._store_page,
+            filters_key(f), "1" if f.get("hide_installed") else "0")
+
+    # ia[store]: 输入关键词并回车 | 资源中心搜索框 | 350ms 防抖后重搜，页码归零、旧结果不回灌
     def _search(self):
+        """新关键词 / 新筛选 / 换目标实例 → 回到第 1 页并重新武装。"""
         self._query = self.search.text().strip()
-        self._offset = 0
-        self._loading_more = False
-        self._has_more = True  # round-140：新搜索重新武装到底闸门
-        # Invalidate any in-flight icon loads — the list is about to be wiped,
-        # so stale replies must not touch widgets that are being deleted.
+        self._store_page = 0
+        self._store_cursors = None
+        self._store_results = []
+        self._filters = self._collect_filters()
+        self._source = self._filters.get("source", "all")
+        self._update_search_placeholder()
         self._img.bump()
+        self._icon_pending = []
+        self._last_request_key = ""
         self._load(reset=True)
 
     def _track(self, worker, gen, reset):
         """Start `worker`, keeping the previously-running worker referenced until
-        it finishes so Python GC cannot delete a still-running QThread (which
-        used to crash the app on fast category switching)."""
+        it finishes so Python GC cannot delete a still-running QThread."""
         old = getattr(self, "_worker", None)
         if old is not None and old is not worker and old.isRunning():
             self._workers.append(old)
@@ -655,8 +722,11 @@ class StorePage(QWidget):
             if gen == self._load_gen:
                 if reset:
                     _clear_skeleton(self._vbox)
-                self.status.setText(t("store.error", e=e))
-                self._loading_more = False
+                # §2.9：刷新失败但已有旧数据 → 保留列表，只提示。
+                if self._swr == "stale" and self._mods:
+                    self.status.setText(t("store.swr_keep_old"))
+                else:
+                    self.status.setText(t("store.error", e=e))
 
         worker.finished.connect(_on_fin)
         worker.error.connect(_on_err)
@@ -668,134 +738,208 @@ class StorePage(QWidget):
         except ValueError:
             pass
 
-    def _on_scroll(self, value: int):
-        """Auto-load next page when the user scrolls near the bottom."""
-        if self._loading_more:
-            return
-        vbar = self.scroll.verticalScrollBar()
-        if vbar.maximum() <= 0:
-            return
-        # 提前 120px 触发，避免到底才加载的顿挫感
-        if value >= vbar.maximum() - 120:
-            self._more()
+    def _on_scroll(self, _value: int):
+        """§2.8：滚动只泵「进入视口的图标」，不再自动翻页。"""
+        self._pump_icons()
 
-    def _more(self):
-        if self._loading_more or not self._has_more:
+    # ia[store]: 滚动结果列表 | 资源中心结果区 | 只加载进入视口的图标，占位图先上屏
+    def _pump_icons(self):
+        if not self._icon_pending:
             return
-        self._loading_more = True
-        self._offset += 20
-        self._load(reset=False)
+        vh = self.scroll.viewport().height()
+        rest = []
+        for url, size, target, fallback in self._icon_pending:
+            try:
+                y = target.mapTo(self.scroll.viewport(),
+                                 target.rect().topLeft()).y()
+            except RuntimeError:
+                continue  # 卡片已被 deleteLater
+            if -120 <= y <= vh + 240:
+                self._img.load(url, size, target, fallback)
+                if url:
+                    self._img.prefetch(url, 72)  # 详情页 72px 封面共用原图
+            else:
+                rest.append((url, size, target, fallback))
+        self._icon_pending = rest
 
-    def _load(self, reset: bool):
-        # round-206：每次装载重置「部分结果」元信息，别让上一次搜索的超时
-        # 提示串到这一次的单源结果里。
-        self._search_meta = {}
+    def _build_pager(self) -> QWidget:
+        """§2.6：PCL-CE 真页码器（PageComp.xaml:160 / ViewModel.cs:55-69）。"""
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        self.page_first_btn = QPushButton(t("store.page_first"))
+        self.page_prev_btn = QPushButton(t("store.page_prev"))
+        self.page_label = QLabel(t("store.page_label", page=1))
+        self.page_label.setProperty("cls", "sub")
+        self.page_next_btn = QPushButton(t("store.page_next"))
+        for b in (self.page_first_btn, self.page_prev_btn, self.page_next_btn):
+            b.setMinimumHeight(32)
+            b.setCursor(Qt.PointingHandCursor)
+        self.page_first_btn.clicked.connect(self._goto_first)
+        self.page_prev_btn.clicked.connect(lambda: self._goto_page(-1))
+        self.page_next_btn.clicked.connect(lambda: self._goto_page(1))
+        h.addStretch(1)
+        for wdg in (self.page_first_btn, self.page_prev_btn,
+                    self.page_label, self.page_next_btn):
+            h.addWidget(wdg)
+        h.addStretch(1)
+        self.page_prev_btn.setEnabled(False)
+        self.page_first_btn.setEnabled(False)
+        self.page_next_btn.setEnabled(False)
+        return w
+
+    # ia[store]: 点「上一页 / 下一页 / 回到首页」 | 资源中心页码器 | 按双源 offset/total 游标切片，结果已缓存则零请求
+    def _goto_page(self, delta: int):
+        page = self._store_page + delta
+        if page < 0 or (delta > 0 and not self._can_next):
+            return
+        self._store_page = page
+        self.scroll.verticalScrollBar().setValue(0)
+        self._img.bump()
+        self._icon_pending = []
+        self._load(reset=True)
+
+    def _goto_first(self):
+        if self._store_page == 0:
+            return
+        self._store_page = 0
+        self._img.bump()
+        self._icon_pending = []
+        self._load(reset=True)
+
+    def _update_pager(self, data: dict):
+        self.page_label.setText(t("store.page_label", page=data["page"] + 1))
+        self._can_next = bool(data["can_next"])
+        self.page_prev_btn.setEnabled(bool(data["can_prev"]))
+        self.page_first_btn.setEnabled(bool(data["can_prev"]))
+        self.page_next_btn.setEnabled(self._can_next)
+
+    def _load(self, reset: bool, force: bool = False):
+        """一次搜索 = 一次分页请求；相同条件不重复发（§2.7）。"""
+        f = self._collect_filters()
+        self._source = f.get("source", "all")
+        self._update_search_placeholder()
+        key = self._request_key()
+        if not force and key == self._last_request_key:
+            return
+        self._last_request_key = key
+
+        # round-140 既有能力不能丢：CF 三态提示 + 粘贴链接的 slug 解析。
         if self._source == "curseforge":
-            self._load_curseforge(reset)
+            from .net_api import (curseforge_available, curseforge_keyless_enabled,
+                                  curseforge_link_search)
+            has_key = curseforge_available()
+            if not has_key and not curseforge_keyless_enabled():
+                self._on_loaded([], reset, empty_hint="cf_no_key")
+                return
+            if "/" in self._query and not has_key:
+                self._load_gen += 1
+                gen = self._load_gen
+                self._track(Worker(curseforge_link_search, self._query),
+                            gen, reset)
+                return
+
+        # §2.9 SWR：新鲜直接复用；过期先画旧数据再后台刷新。
+        state, snap = self._swr_snapshot()
+        if state == "fresh" and isinstance(snap, dict) and not force:
+            self._swr = "fresh"
+            self._on_loaded(snap, reset)
             return
-        self.status.setText(t("store.fetching"))
+        if state == "stale" and isinstance(snap, dict):
+            self._swr = "stale"
+            self._on_loaded(snap, reset, swr=True)
+
+        # stale 首帧已经写了「正在更新结果…」，这一行不能再把它覆盖成
+        # 「正在获取资源…」——否则先画旧数据的行为玩家完全看不见。
+        if self._swr != "stale":
+            self.status.setText(t("store.fetching"))
         self._load_gen += 1
         gen = self._load_gen
-        # round-207：整页重置且「全部」源才启用按源渐进渲染。翻页
-        # (reset=False) 本身就是增量追加，启用会把同轮结果插两遍。
-        self._partial_enabled = bool(reset and self._source == "all")
+        meta = {}
+        self._search_meta = meta
+        # §2.6 拍板：按源渐进渲染保留，只负责「同一页内两源先后到达」的首帧。
+        self._partial_enabled = bool(reset and self._source == "all"
+                                     and self._store_page == 0)
         self._partial_done_gen = -1
-        if self._source == "all":
-            # round-140：「全部」源 = 两源并行合并（net_api.search_all）
-            from .net_api import search_all
-            self._search_meta = {}
-            on_source = None
-            if self._partial_enabled:
-                on_source = (lambda label, hits, g=gen:
-                             self.sourcePartial.emit(label, hits, g))
-            worker = Worker(search_all, self._query, self._offset, 20,
-                            self._category, self._search_meta, on_source)
-        else:
-            worker = Worker(search_mods, self._query, self._offset,
-                            project_type=self._category)
+        on_source = None
+        if self._partial_enabled:
+            on_source = (lambda label, hits, g=gen:
+                         self.sourcePartial.emit(label, hits, g))
+        worker = Worker(
+            search_store_page, self._query, self._store_page,
+            STORE_PAGE_SIZE, self._category, self._source, f,
+            self._store_cursors, self._store_results, meta, on_source)
         self._track(worker, gen, reset)
 
-    def _load_curseforge(self, reset: bool):
-        """CurseForge 源：有 key → 官方 API；无 key 且开免 key 通道 → MCIM 镜像
-        关键词搜索（round-140，输入里带链接时仍走 slug/链接解析）。
-
-        两者都没有时明确提示去设置里填 key —— 关掉免 key 通道即回到
-        仅官方 API 的保守模式。
-        """
-        from .net_api import (curseforge_available, curseforge_keyless_enabled,
-                              search_curseforge, curseforge_link_search)
-        has_key = curseforge_available()
-        if not has_key and not curseforge_keyless_enabled():
-            self._on_loaded([], reset)
-            self.status.setText(t("store.cf_no_key"))
-            return
-        # 粘贴完整链接 → 免 key 的 slug 解析；关键词 → 镜像/官方搜索
-        # （带 category=CF classId + 翻页 offset —— 此前写死模组类且
-        # offset 恒 0，导致分类不生效 + 无限滚动重复拉同一页）。
-        if not has_key and "/" in self._query:
-            worker_fn, args = curseforge_link_search, (self._query,)
+    def _on_loaded(self, result, reset: bool, partial: bool = False,
+                   swr: bool = False, empty_hint: str | None = None):
+        """渲染入口：dict = 完整分页结果；list = 渐进首帧 / CF 链接结果。"""
+        if isinstance(result, dict) and not partial:
+            data = result
+            self._store_cursors = data["cursors"]
+            self._store_results = data["results"]
+            self._store_meta = data.get("meta") or {}
+            self._store_page = data["page"]
+            mods = list(data["hits"])
+            self._update_pager(data)
+            if not swr:
+                self._store_swr(data)
         else:
-            worker_fn = search_curseforge
-            args = (self._query, self._offset, 20, self._category)
-        self._load_gen += 1
-        gen = self._load_gen
-        worker = Worker(worker_fn, *args)
-        self._track(worker, gen, reset)
+            mods = list(result)
+            if not partial:
+                # CF 链接解析 / 无 key：没有分页信息，页码器全部禁用。
+                for b in (self.page_first_btn, self.page_prev_btn,
+                          self.page_next_btn):
+                    b.setEnabled(False)
+                self._can_next = False
 
-    def _on_loaded(self, mods: list[dict], reset: bool,
-                   partial: bool = False):
-        # round-207：partial=True 是「第一个源到了先画出来」，此时不能动
-        # _has_more / _loading_more —— 真正的到底判定等完整合并结果。
-        if not partial:
-            self._loading_more = False
-            # round-140：不足一页 = 已到底 → 关闸（此前 CF 源 offset 恒 0，
-            # 无限滚动会把第一页无限重复塞进列表）。
-            if len(mods) < 20:
-                self._has_more = False
+        # §2.11：隐藏已装是客户端过滤（服务端无此字段），口径与详情页一致。
+        if self._filters.get("hide_installed"):
+            mods = [m for m in mods if not self._is_installed(m)]
+
+        if not partial and not swr:
+            self._swr = "fresh"
         self._mods = mods if reset else self._mods + mods
         if reset:
             while self._vbox.count():
                 item = self._vbox.takeAt(0)
-                w = item.widget()
-                if w is not None:
-                    w.deleteLater()
-        # round-128：中文查询走本地名库反查，名库没收录时是「搜不到」而不是
-        # 「没有这个资源」——状态栏要说清楚，别让用户以为功能坏了。
+                wdg = item.widget()
+                if wdg is not None:
+                    wdg.deleteLater()
         try:
             from .net_api import has_cjk
             _zh = has_cjk(self._query)
         except Exception:  # noqa: BLE001
             _zh = False
+        n_total = len(self._store_results) if self._store_results else len(self._mods)
         if partial:
             self.status.setText(t("store.partial_loading", n=len(self._mods)))
+        elif empty_hint == "cf_no_key":
+            self.status.setText(t("store.cf_no_key"))
+        elif swr:
+            self.status.setText(t("store.swr_refreshing"))
         elif not self._mods and _zh:
             self.status.setText(t("store.zh_no_hit"))
+        elif not self._mods:
+            self.status.setText(t("store.no_results"))
         else:
-            self.status.setText(t("store.results", n=len(self._mods)))
-        # round-206：慢源超时时明确说「只显示部分结果」，别让玩家误判
-        # 「这个源里没有这个资源」。渐进阶段 meta 还没写完，跳过。
-        meta = getattr(self, "_search_meta", None) or {}
-        if not partial and meta.get("partial"):
+            self.status.setText(t("store.results", n=n_total))
+        meta = self._search_meta or self._store_meta
+        if not partial and not swr and meta.get("partial"):
             self.status.setText(t(
                 "store.partial",
                 sources="、".join(meta.get("timed_out") or [])))
         for m in mods:
             card = self._make_card(m)
             self._vbox.addWidget(card)
-            # round-107：加载更多时新卡片逐条淡入（整页重置仍走 viewport 整体淡入）
             if not reset:
                 fade_in_widget(card)
-        # round-100 列表淡入（克制）：只在整页重置时淡入，加载更多不闪整屏；
-        # round-207：渐进首帧不淡入，避免随后完整结果再闪一次。
         if reset and mods and not partial:
             fade_in_widget(self.scroll.viewport())
-        # 策略变更：结果一到就把每个资源的「详情页 72px 封面」预取进缓存，
-        # 不必等用户点进详情才开始下载（页内详情面板用的正是 72 尺寸）。
-        # 失败静默——详情页仍会按需加载，不会因此空白。
-        for m in mods:
-            self._img.prefetch(m.get("icon_url", ""), 72)
+        QTimer.singleShot(0, self._pump_icons)
         if not partial:
-            # 最终结果已上屏：之后迟到的源回调走增量补卡，不再整页覆盖。
+            # 完整结果已上屏：之后迟到的源回调走去重增量补卡，不整页覆盖。
             self._partial_done_gen = self._load_gen
 
     def _on_source_partial(self, label: str, hits, gen: int):
@@ -832,8 +976,9 @@ class StorePage(QWidget):
         self._mods = self._mods + added
         for m in added:
             self._vbox.addWidget(self._make_card(m))
-            self._img.prefetch(m.get("icon_url", ""), 72)
-        self.status.setText(t("store.results", n=len(self._mods)))
+        QTimer.singleShot(0, self._pump_icons)
+        # 迟到慢源是「补充」，别把状态栏覆盖成最终总数而抹掉部分结果提示。
+        self.status.setText(t("store.partial_loading", n=len(self._mods)))
 
     def _make_card(self, m: dict) -> QFrame:
         # round-50 商店卡流光：低强度慢速，视觉整洁
@@ -845,9 +990,12 @@ class StorePage(QWidget):
 
         thumb = QLabel()
         thumb.setFixedSize(48, 48)
-        # 使用首字母彩色图标作为 fallback（主流风格），比通用 store 图标更有辨识度
+        # round-208 §2.8：占位图立即上屏（断网也不空白），真实图标只在
+        # 卡片进入视口后才交给 ImageLoader，回来只换该卡图标不重建卡片。
+        # 依据 prism:.../ModrinthModel.cpp:111-119 / ResourceModel.cpp:385-431。
         fallback = _letter_fallback(m["title"], 48)
-        self._img.load(m.get("icon_url", ""), 48, thumb, fallback)
+        thumb.setPixmap(fallback)
+        self._icon_pending.append((m.get("icon_url", ""), 48, thumb, fallback))
         lay.addWidget(thumb)
 
         info = QVBoxLayout()
@@ -981,6 +1129,7 @@ class StorePage(QWidget):
             return False, reason
         return True, ""
 
+    # ia[store]: 点资源卡片 | 资源中心结果卡片 | 页内栈切到详情（全部版本 / 前置 / 下载），不新开窗口
     def _open_detail(self, m: dict):
         """在页内打开资源详情（round-132：不再弹独立 QDialog）。
 
@@ -1012,6 +1161,7 @@ class StorePage(QWidget):
         panel.hide()
         panel.deleteLater()
 
+    # ia[store]: 点「下载 / 安装」 | 资源中心卡片按钮 | 按目标实例下载，缺前置时先询问补齐
     def _download(self, project_id: str, slug: str, cf_file: dict | None = None,
                   card: dict | None = None):
         inst = self._target()
@@ -1297,25 +1447,22 @@ class StorePage(QWidget):
         self.status.setText(t("store.download_fail", e=e))
 
     def retranslate_ui(self):
-        # round-132：详情面板是页内组件，切换语言时先退回列表（避免英文界面
-        # 里残留中文详情文案），下次再点开即按新语言重建。
+        # 详情面板是页内组件，切语言时先退回列表，避免残留旧语言文案。
         self._close_detail()
         self.title_lbl.setText(t("store.title"))
         self.target_lbl.setText(t("store.target_label"))
         self.search.setPlaceholderText(t("store.search_placeholder"))
-        # rebuild source combo, keep selection
-        keep = self.source_combo.currentData()
-        self.source_combo.blockSignals(True)
-        self.source_combo.clear()
-        self.source_combo.addItem(t("store.source_all"), "all")
-        self.source_combo.addItem(t("store.source_modrinth"), "modrinth")
-        self.source_combo.addItem(t("store.source_curseforge"), "curseforge")
-        idx = self.source_combo.findData(keep)
-        if idx >= 0:
-            self.source_combo.setCurrentIndex(idx)
-        self.source_combo.blockSignals(False)
-        # rebuild category tab labels
+        self.filter_panel.retranslate_ui()
+        self.filter_toggle_btn.setText(
+            t("store.filter_collapse") if self.filter_panel.isVisible()
+            else t("store.filter_expand"))
+        self.page_first_btn.setText(t("store.page_first"))
+        self.page_prev_btn.setText(t("store.page_prev"))
+        self.page_next_btn.setText(t("store.page_next"))
+        self.page_label.setText(t("store.page_label", page=self._store_page + 1))
         for pt, key in STORE_CATEGORIES:
             if pt in self._cat_btns:
                 self._cat_btns[pt].setText(t(key))
         self._sync_target()
+        self._last_request_key = ""
+        self._search_timer.start()

@@ -28,7 +28,15 @@ PAGE_TITLES = {
     "instances": "实例",
     "settings": "设置",
     "diagnostics": "诊断",
+    "store": "资源中心",
 }
+
+# round-208 §3-11：以前 --check 只比「文档有没有过期」，即使某页一条路径
+# 都不写也能全绿 —— 典型的假护栏。这里补三类真校验：
+#   1) 关键页面必须存在；2) 每页至少 N 条路径；
+#   3) 备注里手写的 `src/xxx.py` 引用必须真实存在（防指向已删文件）。
+REQUIRED_PAGES = ("home", "instances", "settings", "store")
+MIN_PATHS_PER_PAGE = 3
 
 
 def collect() -> tuple[dict[str, list[tuple[str, int, list[str]]]], list[str]]:
@@ -63,6 +71,23 @@ def collect() -> tuple[dict[str, list[tuple[str, int, list[str]]]], list[str]]:
                     )
                     continue
                 pages.setdefault(m.group(1), []).append((rel, lineno, cols))
+
+    # round-208：覆盖率与内容真伪（见 REQUIRED_PAGES 注释）
+    for page in REQUIRED_PAGES:
+        if page not in pages:
+            errors.append(f"缺少必需页面 ia[{page}] 的路径标记")
+        elif len(pages[page]) < MIN_PATHS_PER_PAGE:
+            errors.append(
+                f"ia[{page}] 只有 {len(pages[page])} 条路径"
+                f"（至少 {MIN_PATHS_PER_PAGE} 条）")
+    for rows in pages.values():
+        for rel, lineno, cols in rows:
+            if len(cols) <= 3:
+                continue
+            for ref in re.findall(r"`(src/[^`]+\.py)`", cols[3]):
+                if not os.path.isfile(os.path.join(HERE, ref)):
+                    errors.append(
+                        f"{rel}:{lineno}: 备注引用的源码文件不存在：{ref}")
     return pages, errors
 
 

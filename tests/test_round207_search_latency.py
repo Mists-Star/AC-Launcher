@@ -203,12 +203,18 @@ if len(calls) == 2:
 check("StorePage 定义按源信号",
       "sourcePartial = Signal(str, object, int)" in ui)
 check("信号连到槽", "sourcePartial.connect(self._on_source_partial)" in ui)
-check("_load 只在整页重置时启用渐进（翻页不重复插入）",
-      "bool(reset and self._source == \"all\")" in ui)
-check("on_source 传进 Worker",
-      "self._search_meta, on_source)" in ui)
-check("_on_loaded 有 partial 参数",
-      "def _on_loaded(self, mods: list[dict], reset: bool," in ui
+# round-208 整页重做后 _load 改走 search_store_page，但 round-207 的三条
+# 行为契约必须继续成立：渐进渲染只在「整页重置 + 首页」启用、按源回调仍
+# 传进 Worker、_on_loaded 仍支持 partial 首帧。按新链路写等价判据，
+# 不把旧函数名当成行为本身（旧断言固化实现会造「变差了」的假信号）。
+check("_load 只在整页重置且首页时启用渐进（翻页不重复插入）",
+      "bool(reset and self._source == \"all\"" in ui
+      and "self._store_page == 0" in ui)
+check("on_source 传进 Worker（按源渐进渲染仍在）",
+      "on_source)" in ui
+      and "self.sourcePartial.emit(label, hits, g)" in ui)
+check("_on_loaded 有 partial 参数（渐进首帧）",
+      "def _on_loaded(self, result, reset: bool" in ui
       and "partial: bool = False" in ui)
 check("渐进首帧不动到底闸门",
       "if not partial:" in ui and "partial=True" in ui)
