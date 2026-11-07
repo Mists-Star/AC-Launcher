@@ -97,3 +97,6 @@ assets/mc_textures/
 
 dist_components/
 _full_stage/
+
+# round-208 源码调研临时快照（不入库）
+_scratch/

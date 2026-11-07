@@ -8,6 +8,29 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-208（2026-11-07）— 阶段一：资源中心「99% 代码级对齐」对照规格（待拍板）
+
+**主理人要求**：「直接仿照其他启动器学一遍」+「注意是 99% 的代码参考学习」
+→ 不凭截图/印象设计，直读上游源码，形成每条都带 `repo:path:line` 与代码片段的可追溯规格。
+
+**实读上游**（57 个源码文件快照存 `_scratch/upstream/src/`，已 ignore，不入库）
+
+| 上游 | 分支 / tree | 读到什么 |
+|---|---|---|
+| `PrismLauncher/PrismLauncher` | `develop` / `899d2f3…` | 三栏 `QSplitter`、350ms 防抖、`fetchMore` 增量追加、占位图先行 + `QPixmapCache`、CF/MR 服务端过滤参数 |
+| `HMCL-dev/HMCL` | `main` / `3e17260…` | CF `gameVersion/sortField/index=pageOffset*pageSize`、MR `facets`、`min(totalCount,10000)/pageSize` 总页数 |
+| `PCL-Community/PCL-CE`（PCL2 系同源） | `dev` / `2585c14…` | 顶部筛选卡 / 真页码器 `PageSize=40`、双源各自 `offset/total` 游标、ETag+304+TTL 缓存、CF/MR 排序映射 |
+
+- 顺带核实仓库迁移：`Hex-Dragon/PCL2` → `Meloong-Git/PCL`；`PCL2-CE/PCL2-CE` → `PCL-Community/PCL-CE`。
+- 抓取通道：GitHub API 直连超时、共享代理 IP 触发 403 限流 → 改走 `gh-proxy.com` / `v6.gh-proxy.org` 转发，
+  文件树走 API、源码正文走 `raw.githubusercontent.com`。
+
+**交付**：`docs/specs/round-208-store-alignment/spec.md`（435 行）——
+12 条逐行对照规格、11 项现状差距（`file:line` 精度）、16 条回归断言、3 个待拍板 IA 分歧。
+
+**本轮不改源码**：规格纪律写明「拍板前不动 UI 源码」；合规上只复刻行为/参数/IA，
+不复制 GPL / 自定义许可的源码文本。P2 外部授权项（官方 CF key、国内聚合 API）不动。
+
 ## round-207（2026-11-07）— 资源中心「秒获取」：服务端排序 + 按源渐进渲染
 
 **根因**：不是网速。round-141 为修「搜 sodium 搜不到本体」把排序搬到客户端 ——
