@@ -8,6 +8,41 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-206（2026-11-07）— P0 两条假死修复 + 占位页不漏英文裸键
+
+> 来源：`docs/quality_punchlist.md` §十三 全项目只读诊断。本轮只修 P0 两条与
+> 占位页红线；P1 弹窗收敛 / IA 覆盖率、P2 毛刺仍留在 §十三 排队。
+
+### 修复
+
+1. **结束游戏不再冻住界面**（新增 `src/core/proc_kill.py`）
+   - 旧：UI 主线程逐个 `taskkill(timeout=10)`，多开 N 个最坏阻塞 10N 秒，
+     `except Exception: pass` 把失败全吞 → 玩家「点了没反应」。
+   - 新：Windows 用**一条** taskkill 带全部 `/PID`（单次命令、3s 超时），
+     非 Windows 走 `Popen.kill()`；首页 `kill_game` 与「取消启动」共用同一入口。
+   - 执行前先刷「正在结束游戏…」并 `processEvents()` 保证状态栏真的可见；
+     失败逐项回报 `status.game_kill_partial`，不再静默。
+2. **搜索慢源不再拖住退出**（`src/net_api.py`）
+   - round-205 的线程池 worker 是**非 daemon** 线程，解释器退出时会被
+     `threading._shutdown()` join，慢 CF 源最坏拖 15s —— 与「8s 预算」自相矛盾。
+   - 改用 daemon 线程 + 单调时钟扣减的**严格 8s 总预算**（逐个 join 不累加）。
+   - 新增 `meta` 出参（`partial` / `timed_out` / `errors` / `budget`）；资源中心
+     状态栏显示「部分结果：{源} 响应超时」，玩家不会误判「这个源没这个资源」。
+3. **占位页不再漏英文裸键**（用户红线）
+   - 补齐 launch / download / default 共 5 组中英键；body 不再误用 title 键，
+     未映射 key 走通用占位文案，不再把内部 key 原样 `setText`。
+   - 「联机大厅排班中——主线程写完就会自己开台」改成玩家可读文案。
+
+### 🔍 验证（实测）
+
+- 新增 `tests/test_round206_no_freeze.py` 并注册进 `regress.py`：批量命令只发
+  1 次 / 失败逐项回报 / daemon 线程 / 严格预算（两源都慢实测 **0.156s**，
+  逐个 join 会是 0.30s）/ 快源结果保留 / partial 只列慢源 / 中英键齐全 /
+  不再回显内部 key。
+- 同步更新 `tests/test_round205_store_polish.py` 的搜索预算契约断言。
+- `python regress.py` → **74/74 全绿**（i18n `1935=1935`、PII zero、文案门禁过、
+  IA 路径表 3 页 / 21 条 / 0 错误）。
+
 ## round-205（2026-11-07）— 资源中心四件套（搜索 / 版本列表 / 翻译 / 百科）
 
 > 用户反馈：「搜索 mod 速度慢」「出 mod 版本选择卡顿灾难」「翻译半天没动静」

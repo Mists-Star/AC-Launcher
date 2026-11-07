@@ -106,6 +106,7 @@ SUITES = [
     ("启动不关壁纸/下载解耦", "test_round203_no_shed.py", "script"),
     ("崩溃分析（类别/可疑模组/证据）", "test_round204_crash_diag.py", "script"),
     ("资源中心（搜索/版本列表/翻译/百科）", "test_round205_store_polish.py", "script"),
+    ("假死修复/占位页（round-206）", "test_round206_no_freeze.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

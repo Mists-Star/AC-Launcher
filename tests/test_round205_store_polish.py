@@ -121,7 +121,16 @@ snip_s = _src_slice_mod(os.path.join(HERE, "src", "net_api.py"),
                         "def search_all")
 check("search_all 已找到", bool(snip_s))
 check("不再 join 等慢源", "f.result()" not in snip_s)
-check("有总预算（wait timeout）", "wait(futs" in snip_s and "timeout=" in snip_s)
+# round-206：预算机制从 ThreadPoolExecutor 换成 daemon 线程（非 daemon
+# worker 会在解释器退出时被 join，反而把「关启动器」拖住）。
+check("退出不 join（daemon 线程）",
+      "daemon=True" in snip_s
+      and "from concurrent.futures" not in snip_s
+      and "ex = ThreadPoolExecutor" not in snip_s
+      and "ex.shutdown" not in snip_s)
+check("严格总预算（单调时钟扣减）",
+      "time.monotonic()" in snip_s and "th.join(" in snip_s)
+check("慢源超时写出参", 'meta["partial"]' in snip_s)
 
 # ── 5. MC百科候选顺序 ──
 calls = []

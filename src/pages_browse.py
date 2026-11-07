@@ -681,6 +681,9 @@ class StorePage(QWidget):
         self._load(reset=False)
 
     def _load(self, reset: bool):
+        # round-206：每次装载重置「部分结果」元信息，别让上一次搜索的超时
+        # 提示串到这一次的单源结果里。
+        self._search_meta = {}
         if self._source == "curseforge":
             self._load_curseforge(reset)
             return
@@ -690,8 +693,9 @@ class StorePage(QWidget):
         if self._source == "all":
             # round-140：「全部」源 = 两源并行合并（net_api.search_all）
             from .net_api import search_all
+            self._search_meta = {}
             worker = Worker(search_all, self._query, self._offset, 20,
-                            self._category)
+                            self._category, self._search_meta)
         else:
             worker = Worker(search_mods, self._query, self._offset,
                             project_type=self._category)
@@ -748,6 +752,13 @@ class StorePage(QWidget):
             self.status.setText(t("store.zh_no_hit"))
         else:
             self.status.setText(t("store.results", n=len(self._mods)))
+        # round-206：慢源超时时明确说「只显示部分结果」，别让玩家误判
+        # 「这个源里没有这个资源」。
+        meta = getattr(self, "_search_meta", None) or {}
+        if meta.get("partial"):
+            self.status.setText(t(
+                "store.partial",
+                sources="、".join(meta.get("timed_out") or [])))
         for m in mods:
             card = self._make_card(m)
             self._vbox.addWidget(card)

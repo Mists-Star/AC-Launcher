@@ -1688,45 +1688,64 @@ def search_curseforge(query: str = "", offset: int = 0, limit: int = 20,
     return hits
 
 
+_SEARCH_BUDGET = 8.0
+_SEARCH_LABELS = {"mr": "Modrinth", "cf": "CurseForge"}
+
+
 def search_all(query: str = "", offset: int = 0, limit: int = 20,
-               category: str = "mod") -> list[dict]:
+               category: str = "mod", meta: dict | None = None) -> list[dict]:
     """「全部」源（round-140 用户要求）：Modrinth + CurseForge 并行搜索合并返回。
 
     两源各自走自己的缓存/分页；一边失败不拖死另一边（只有两边都失败且
     结果为空才 raise）。命中 dict 自带 ``source`` 字段，卡片/详情/下载
     据此分流。
+
+    round-206：改用 **daemon 线程** + 严格总预算。旧 round-205 实现用
+    ``ThreadPoolExecutor``，它的 worker 是**非 daemon** 线程，Python 退出时
+    ``threading._shutdown()`` 会无条件 join —— 慢源最坏把「关启动器」拖住
+    15s，与「搜索 8s 预算」自相矛盾。daemon 线程不参与退出 join。
+    逐个 ``join`` 时用单调时钟扣剩余预算，保证两个源合计不超过 8s。
+
+    ``meta`` 是可选出参，写入 ``partial`` / ``timed_out`` / ``errors`` /
+    ``budget``，UI 据此提示「某源超时，只显示部分结果」，避免玩家误判
+    「这个源没有这个资源」。
     """
-    from concurrent.futures import ThreadPoolExecutor, wait
+    import threading
+    import time
+
     box: dict[str, list[dict] | None] = {"mr": None, "cf": None}
     errs: list[Exception] = []
 
-    def _mr():
+    def _run(key, fn):
         try:
-            box["mr"] = search_mods(query, offset, limit, project_type=category)
+            box[key] = fn()
         except Exception as e:  # noqa: BLE001 - 单源失败不拖死合并视图
             errs.append(e)
 
     def _cf():
         if not (curseforge_available() or curseforge_keyless_enabled()):
-            return
-        try:
-            box["cf"] = search_curseforge(query, offset, limit, category)
-        except Exception as e:  # noqa: BLE001
-            errs.append(e)
+            return None
+        return search_curseforge(query, offset, limit, category)
 
-    # round-205：给「慢源」设总预算。旧实现 `with ThreadPoolExecutor` 退出时
-    # 无条件 join 两个源 —— CF 免 key 镜像一旦挂住（最坏要等 30s 请求超时），
-    # 已经拿到的 Modrinth 结果也一起被拖着，用户感受就是「搜索 mod 特别慢」。
-    # 现在 8 秒还没回来的源直接放弃（请求线程会在自身超时后自然结束）。
-    ex = ThreadPoolExecutor(max_workers=2)
-    futs = [ex.submit(_mr), ex.submit(_cf)]
-    try:
-        wait(futs, timeout=8.0)
-    finally:
-        try:
-            ex.shutdown(wait=False, cancel_futures=True)
-        except TypeError:  # Python < 3.9 没有 cancel_futures
-            ex.shutdown(wait=False)
+    jobs = (
+        ("mr", lambda: search_mods(query, offset, limit, project_type=category)),
+        ("cf", _cf),
+    )
+    threads = []
+    for key, fn in jobs:
+        th = threading.Thread(target=_run, args=(key, fn), daemon=True,
+                              name="ac-search-%s" % key)
+        th.start()
+        threads.append((key, th))
+    deadline = time.monotonic() + _SEARCH_BUDGET
+    for _, th in threads:
+        th.join(max(0.0, deadline - time.monotonic()))
+    timed_out = [_SEARCH_LABELS[key] for key, th in threads if th.is_alive()]
+    if meta is not None:
+        meta["partial"] = bool(timed_out)
+        meta["timed_out"] = timed_out
+        meta["errors"] = [str(e) for e in errs]
+        meta["budget"] = _SEARCH_BUDGET
     mr = box["mr"] or []
     cf = box["cf"] or []
     if not mr and not cf and errs:

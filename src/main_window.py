@@ -4014,20 +4014,23 @@ class MainWindow(QMainWindow):
             self._pcl2_placeholder_widget = w
             self.stack.addWidget(w)  # appended at the end
         # Map top-pill keys to readable titles via i18n.
+        # round-206：四个占位键中英补齐，body 不再误用 title 键；未映射的
+        # key 走通用占位文案，绝不把内部 key 原样 setText（旧实现缺键时
+        # t(default=key) 会把 launch / download 这种英文裸键显示给玩家）。
         title_key = {
             "online": "pcl2.ph_online_title",
             "more": "pcl2.ph_more_title",
             "launch": "pcl2.ph_launch_title",
             "download": "pcl2.ph_download_title",
-        }.get(key)
+        }.get(key, "pcl2.ph_default_title")
         body_key = {
             "online": "pcl2.ph_online_body",
             "more": "pcl2.ph_more_body",
-            "launch": "pcl2.ph_launch_title",
-            "download": "pcl2.ph_download_title",
-        }.get(key)
-        self._pcl2_ph_title.setText(t(title_key, default=key) if title_key else key)
-        self._pcl2_ph_body.setText(t(body_key, default=t("pcl2.ph_default_body")) if body_key else t("pcl2.ph_default_body"))
+            "launch": "pcl2.ph_launch_body",
+            "download": "pcl2.ph_download_body",
+        }.get(key, "pcl2.ph_default_body")
+        self._pcl2_ph_title.setText(t(title_key))
+        self._pcl2_ph_body.setText(t(body_key))
         self.stack.setCurrentWidget(self._pcl2_placeholder_widget)
 
     def _pcl2_goto(self, key: str):
@@ -5350,22 +5353,20 @@ class MainWindow(QMainWindow):
         if isinstance(res, (tuple, list)) and res:
             proc = res[0]
         if proc is not None:
+            # round-206：与首页「结束游戏」共用批量强杀入口，不再另写一份
+            # 串行 taskkill，也不再把失败静默吞掉。
+            from .core.proc_kill import terminate_all
+            killed = terminate_all([proc])
             try:
-                if proc.poll() is None:
-                    import subprocess
-                    import sys
-                    if sys.platform == "win32":
-                        subprocess.run(
-                            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                            capture_output=True, timeout=10)
-                    else:
-                        proc.kill()
-            except Exception:  # noqa: BLE001 - 强杀失败也不崩 UI
-                pass
-            try:
-                self.statusBar().showMessage(
-                    t("status.launch_cancelled",
-                      name=getattr(inst, "name", "") or "Minecraft"), 6000)
+                if killed.get("failed"):
+                    detail = "；".join(
+                        str(x) for x in (killed.get("errors") or []))[:160]
+                    self.statusBar().showMessage(
+                        t("status.game_kill_partial", detail=detail), 8000)
+                else:
+                    self.statusBar().showMessage(
+                        t("status.launch_cancelled",
+                          name=getattr(inst, "name", "") or "Minecraft"), 6000)
             except Exception:  # noqa: BLE001
                 pass
         dlg = getattr(self, "_launch_dlg", None)
@@ -5791,27 +5792,27 @@ class MainWindow(QMainWindow):
                 pass
 
     def kill_game(self) -> bool:
-        """强制结束全部游戏进程（多实例并行）。返回是否成功。"""
+        """强制结束全部游戏进程（多实例并行）。返回是否真的处理了进程。
+
+        round-206：旧实现在 UI 主线程里逐个 ``taskkill(timeout=10)`` 串行执行，
+        多开 N 个最坏阻塞 10N 秒，且异常全吞 —— 就是「点了没反应」的根因。
+        现在统一走 ``core.proc_kill.terminate_all``（Windows 单次批量命令、
+        3s 超时），执行前先把「正在结束」刷到状态栏，失败逐项回报。
+        """
+        from .core.proc_kill import terminate_all
         procs = getattr(self, "_game_procs", None) or {}
-        alive = [e for e in procs.values() if isinstance(e, dict) and e.get("proc")]
-        if not alive:
+        entries = [e for e in procs.values()
+                   if isinstance(e, dict) and e.get("proc")]
+        if not entries:
             return False
-        ok = False
-        import subprocess
-        import sys  # 顶部未 import sys，局部补上（否则 sys.platform 抛 NameError 被吞）
-        for entry in alive:
-            p = entry["proc"]
-            try:
-                if p.poll() is None:
-                    if sys.platform == "win32":
-                        subprocess.run(
-                            ["taskkill", "/F", "/T", "/PID", str(p.pid)],
-                            capture_output=True, timeout=10)
-                    else:
-                        p.kill()
-                    ok = True
-            except Exception:
-                pass
+        # 先给可见反馈；同步命令期间若不让 Qt 处理一次事件，状态栏不会重绘。
+        try:
+            from PySide6.QtWidgets import QApplication
+            self.statusBar().showMessage(t("status.game_killing"))
+            QApplication.processEvents()
+        except Exception:  # noqa: BLE001 - 强退期间窗口可能已不可用
+            pass
+        result = terminate_all([e["proc"] for e in entries])
         try:
             self._game_poll_timer.stop()
         except Exception:
@@ -5819,13 +5820,20 @@ class MainWindow(QMainWindow):
         self._game_procs.clear()
         self._game_proc = None
         self._set_game_running_ui(False)
+        failed = result.get("failed") or []
+        errors = result.get("errors") or []
         try:
-            self.statusBar().showMessage(
-                t("status.game_killed",
-                  name=", ".join(e.get("name", "") for e in alive)))
+            if failed:
+                detail = "；".join(str(x) for x in (errors or failed))[:160]
+                self.statusBar().showMessage(
+                    t("status.game_kill_partial", detail=detail), 8000)
+            else:
+                self.statusBar().showMessage(
+                    t("status.game_killed",
+                      name=", ".join(e.get("name", "") for e in entries)))
         except Exception:  # noqa: BLE001 - 强制退出期间窗口可能已不可用
             pass
-        return True if ok else False
+        return result.get("attempted", 0) > 0
 
     def _on_launch_error(self, msg: str):
         self._unbind_status_worker(getattr(self, "_play_worker", None))
