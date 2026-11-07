@@ -41,6 +41,9 @@ launch_logs/
 # 临时调试脚本（_smoke* / _probe* / _dbg* / _repro* 等，不进仓库）
 _smoke*
 _probe*
+_patch*
+_restore_*.txt
+_head_editor.py
 _dbg*
 _repro*
 _t_*
