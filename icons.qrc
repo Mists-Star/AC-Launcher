@@ -43,6 +43,7 @@
     <file alias="modpack.svg">assets/icons/modpack.svg</file>
     <file alias="mods.svg">assets/icons/mods.svg</file>
     <file alias="moon.svg">assets/icons/moon.svg</file>
+    <file alias="more.svg">assets/icons/more.svg</file>
     <file alias="music.svg">assets/icons/music.svg</file>
     <file alias="pause.svg">assets/icons/pause.svg</file>
     <file alias="play.svg">assets/icons/play.svg</file>

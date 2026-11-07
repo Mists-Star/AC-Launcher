@@ -108,6 +108,59 @@ CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash
 
 ---
 
+## round-184（2026-11-07）— 「修改」页对齐 PCL / 导出 .mrpack / 更多按钮
+
+### 用户报的两件事
+
+1. **「这里为什么有一个下拉还有 3 个点的省略？」** —— 实例卡的「更多操作」钮。
+   `QPushButton("⋯")` + `setMenu()` 时 Qt 会在文字旁**再画一个 ⌄**
+   （`menu-indicator`），30px 方钮里挤成「⋯⌄」；而且「⋯」是 U+22EF，
+   常用中文字体没这个字形，缺字时是豆腐块。
+   * 新增 `assets/icons/more.svg`（三点图标），按钮改纯图标；
+   * 全局 QSS 加 `QPushButton::menu-indicator { image:none; width:0 }`
+     （文字已表达「更多」，不需要第二个箭头）；
+   * `icons_rc.py` 重新生成（61 个图标）。
+
+2. **「去看看 PCL 的修改版本到底是什么再来改」** —— 查了 PCL2 源码
+   （`Pages/PageInstance/PageInstanceLeft.xaml`）。版本设置左侧其实是
+   **概览 / 设置 / 修改 / Mod 管理 / 导出**；「修改」= `PageDownloadModify`，
+   职责是**装 / 换 Mod 加载器**，不是字段表单。设置页里才有内存、Java、
+   JVM、窗口标题那些，且每个设置项旁有「初始化」重置该版本的独立设置。
+
+### 变更：新增「修改」页
+
+* 第 3 项导航「修改」，把**游戏版本 / 加载器 / 加载器版本 / 安装·更新 /
+  退回原版**从「启动」页整体搬过来；「启动」页只剩内存、JVM、渲染器与
+  性能开关。
+* 为什么值得单独一页：换加载器是「真下文件、真删目录」的重操作，和调内存
+  这种改个数就生效的设置混在一起，玩家分不清哪一下会动磁盘。页面顶部直接
+  写明「只影响本实例；mods、存档、libraries 都不动」。
+
+### 新增：导出 .mrpack（此前只能导入）
+
+* `src/core/mrpack_export.py`：写 `modrinth.index.json` + 把内容放进
+  `overrides/`；依赖映射 fabric→`fabric-loader`、quilt→`quilt-loader`、
+  forge→`forge`、neoforge→`neoforge`，原版不写加载器键。
+* **为什么 files 全空、内容走 overrides**：`files` 每项都必须带可直链下载
+  地址与 sha1/sha512，而本地 jar 无从反查它来自哪个 CDN —— 硬编假 URL 会让
+  对方的导入直接失败。规范本身允许「无法从 CDN 获取的内容」整体塞进
+  `overrides/`（随包附带），保真优先，代价只是没有 CDN 去重。
+* `src/export_pack_dialog.py`：包名 / 版本号 / 简介 / 六个内容块勾选
+  （mods、config、options.txt 默认勾；资源包、光影、存档默认不勾）/ 保存位置 /
+  后台打包进度。入口两个：实例卡「⋯」菜单、编辑面板「高级」页。
+* 单块超过 512 MB（存档很容易爆）直接跳过并在结果里列出来，不把磁盘写满。
+
+### 验证
+
+* `tests/test_round184_export.py`（33 条）：索引结构 / 依赖映射 / 勾选控制 /
+  边界（无版本、无内容、非法字符）/ 进度回调，以及**用
+  `minecraft_launcher_lib.mrpack` 读回自己写的包**（第三方解析往返 ——
+  只靠自己读自己会掩盖格式错误）。实测 `get_mrpack_launch_version` 推出
+  `fabric-loader-0.15.11-1.20.1`。
+* `tests/test_round183_editor.py` 扩到 8 页断言，并加「修改页含加载器控件 /
+  启动页不再放加载器」两条结构判据。
+* `regress.py` **54/54**；i18n **1807 = 1807**；文案门禁与 PII 门禁全过。
+
 ## round-183（2026-11-07）— PCL 式整页编辑面板 / 加载器真装真卸 / pcl 格式
 
 > 用户拍板（2026-11-07 00:56）：「新建整页编辑面板，左侧分组导航，加载器

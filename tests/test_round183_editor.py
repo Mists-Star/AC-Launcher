@@ -50,14 +50,25 @@ swap_src = read("src/core/loader_swap.py")
 
 check("instance_editor.py 定义 InstanceEditorDialog",
       "class InstanceEditorDialog(QDialog)" in editor_src)
-for key in ("basic", "launch", "java", "dir", "mods", "content", "adv"):
+for key in ("basic", "launch", "modify", "java", "dir", "mods", "content",
+            "adv"):
     check("有 %-8s 页构建函数" % key, "def _page_%s(" % key in editor_src)
 
 nav_keys = re.findall(r'\("(\w+)", "inst\.tab_(\w+)", "(\w+)"\)', editor_src)
-check("导航项 7 个", len(nav_keys) == 7, str(len(nav_keys)))
+check("导航项 8 个", len(nav_keys) == 8, str(len(nav_keys)))
 check("导航项与页函数一一对应",
-      {k for k, _t, _i in nav_keys} == {"basic", "launch", "java", "dir",
-                                        "mods", "content", "adv"})
+      {k for k, _t, _i in nav_keys} == {"basic", "launch", "modify", "java",
+                                        "dir", "mods", "content", "adv"})
+# PCL 的「修改」页是**换加载器**的操作页，不是字段表单：
+# 加载器下拉与装卸按钮必须落在这个页里，不能再混在「启动」页。
+_mod_body = editor_src.split("def _page_modify(", 1)[-1].split(
+    "def _page_java(", 1)[0]
+check("修改页含加载器下拉", "self.loader_combo" in _mod_body)
+check("修改页含安装按钮", "self.install_btn" in _mod_body)
+check("修改页含卸载按钮", "self.uninstall_btn" in _mod_body)
+_launch_body = editor_src.split("def _page_launch(", 1)[-1].split(
+    "def _page_modify(", 1)[0]
+check("启动页不再放加载器下拉", "loader_combo" not in _launch_body)
 
 check("旧 480x620 长条已退役（不再 resize(480, 620)）",
       "resize(480, 620)" not in pages_src)
@@ -228,8 +239,8 @@ live = Instance(id="t5", name="原名称", game_version="1.20.1",
                 ram_mb=2048, jvm_args="-Xmx2G", _base=mc)
 dlg = InstanceEditorDialog(None, live)
 check("面板能实例化", dlg is not None)
-check("七个页都建出来了", dlg.stack.count() == 7, str(dlg.stack.count()))
-check("导航行数 = 7", dlg.nav.count() == 7, str(dlg.nav.count()))
+check("八个页都建出来了", dlg.stack.count() == 8, str(dlg.stack.count()))
+check("导航行数 = 8", dlg.nav.count() == 8, str(dlg.nav.count()))
 check("标题带实例名", "原名称" in dlg.windowTitle(), dlg.windowTitle())
 
 # 改字段 → 保存

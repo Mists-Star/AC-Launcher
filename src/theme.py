@@ -638,6 +638,13 @@ QPushButton:disabled {
     background: $bg_input;
     border-color: $border;
 }
+/* ☠ 带菜单的 QPushButton 默认会在文字旁再画一个小箭头（Qt 的 menu-indicator）。
+   我们的「⋯」本身就是「更多」语义，再叠一个 ⌄ 就变成「⋯⌄」两个符号挤在
+   30px 的小方钮里（用户实拍指出）。文字已经表达了语义 → 一律不画箭头。 */
+QPushButton::menu-indicator {
+    image: none;
+    width: 0px;
+}
 /* primary accent button */
 QPushButton[cls="accent"] {
     background: $accent;

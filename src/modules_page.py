@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QGroupBox, QCheckBox, QFrame, QMenu,
@@ -45,11 +45,17 @@ def _type_label(mtype: str) -> str:
 
 
 def _more_btn(entries) -> QPushButton:
-    """行尾「⋯」菜单（round-104）：把导出/卸载等次要操作收进一个下拉按钮，
-    避免每行堆一排图标钮。``entries``: [(label, icon_key, callback), ...]。"""
-    btn = QPushButton("⋯")
+    """行尾「更多」菜单（round-104）：把导出/卸载等次要操作收进一个下拉按钮，
+    避免每行堆一排图标钮。``entries``: [(label, icon_key, callback), ...]。
+
+    ☠ 图标而不是文字「⋯」：U+22EF 不在常用中文字体里，缺字会显示豆腐块；
+    而且 QPushButton 带菜单时 Qt 会另画一个 ⌄，30px 的钮里两个符号挤一起。
+    """
+    btn = QPushButton()
     btn.setToolTip(t("common.more"))
     btn.setFixedSize(30, 30)
+    btn.setIcon(icon("more"))
+    btn.setIconSize(QSize(16, 16))
     btn.setCursor(Qt.PointingHandCursor)
     btn.setProperty("cls", "surface")
     menu = QMenu(btn)

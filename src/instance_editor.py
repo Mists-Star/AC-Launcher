@@ -39,6 +39,7 @@ from .worker import Worker
 _NAV = (
     ("basic", "inst.tab_basic", "instances"),
     ("launch", "inst.tab_launch", "play"),
+    ("modify", "inst.tab_modify", "repair"),
     ("java", "inst.tab_java", "java"),
     ("dir", "inst.tab_dir", "folder"),
     ("mods", "inst.tab_mods", "mods"),
@@ -208,6 +209,7 @@ class InstanceEditorDialog(QDialog):
         builders = {
             "basic": self._page_basic,
             "launch": self._page_launch,
+            "modify": self._page_modify,
             "java": self._page_java,
             "dir": self._page_dir,
             "mods": self._page_mods,
@@ -305,55 +307,6 @@ class InstanceEditorDialog(QDialog):
     def _page_launch(self) -> _Page:
         p = _Page(self)
         inst = self._inst
-        p.section(t("inst.launch_section"))
-
-        self.ver_edit = p.field(t("instances.setting_game_version"))
-        self.ver_edit.setText(inst.game_version or "")
-
-        self.loader_combo = QComboBox()
-        for lid in LOADERS:
-            self.loader_combo.addItem(loader_name(lid), lid)
-        idx = self.loader_combo.findData(inst.loader or "vanilla")
-        self.loader_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        p.row(t("instances.setting_loader"), self.loader_combo)
-
-        self.ldver_combo = QComboBox()
-        self.ldver_combo.setEditable(True)
-        self.ldver_combo.addItem(inst.loader_version or "")
-        self.ldver_combo.setCurrentText(inst.loader_version or "")
-        self.ldver_combo.setPlaceholderText(
-            t("instances.setting_loader_version_hint"))
-        self.ldver_combo.lineEdit().setPlaceholderText(
-            t("instances.setting_loader_version_hint"))
-        p.row(t("instances.setting_loader_version"), self.ldver_combo)
-
-        self.ldver_hint = p.hint(t("inst.loader_ver_hint"))
-
-        for w in (self.ver_edit, self.loader_combo, self.ldver_combo):
-            w.setEnabled(self._ver_editable)
-        if not self._ver_editable:
-            p.hint(t("instances.setting_external_hint"))
-
-        # 加载器真装 / 真卸
-        act = QHBoxLayout()
-        act.setSpacing(8)
-        self.install_btn = ui_kit.make_button(
-            t("inst.loader_install"), kind="accent", icon_key="download",
-            on_click=self._install_loader, min_h=34)
-        self.uninstall_btn = ui_kit.make_button(
-            t("inst.loader_uninstall"), kind="secondary", icon_key="delete",
-            on_click=self._uninstall_loader, min_h=34)
-        act.addWidget(self.install_btn)
-        act.addWidget(self.uninstall_btn)
-        act.addStretch(1)
-        p.add_layout(act)
-        self.ld_state = p.hint(t("inst.loader_state_unknown"))
-        self.loader_combo.currentIndexChanged.connect(
-            lambda _i: self._load_loader_versions())
-        if not self._ver_editable:
-            self.install_btn.setEnabled(False)
-            self.uninstall_btn.setEnabled(False)
-
         p.section(t("inst.performance_section"))
         self.mem_spin = QSpinBox()
         # ☠ 全局 QSS 给 QSpinBox 定了 border/padding 但没定义 ::up-button，
@@ -407,7 +360,78 @@ class InstanceEditorDialog(QDialog):
         p.stretch()
         return p
 
-    # ── ③ Java ──────────────────────────────────────────────
+    # ── ③ 修改（PCL 同名页：只管加载器装卸） ────────────────
+    def _page_modify(self) -> _Page:
+        """对齐 PCL 的「修改」页 —— 它不是一个字段表单，而是**换加载器**的
+        操作入口（PCL 里叫「修改」，对应 PageDownloadModify）。
+
+        为什么单独一页：换加载器是「会真下文件、真删目录」的重操作，和调内存
+        那种改个数就生效的设置混在一起，玩家分不清哪一下会动磁盘。
+        """
+        p = _Page(self)
+        inst = self._inst
+
+        p.hint(t("inst.modify_hint"))
+        p.section(t("inst.modify_current"))
+        self.ld_state = p.hint(t("inst.loader_state_unknown"))
+
+        p.section(t("inst.modify_section"))
+        self.ver_edit = p.field(t("instances.setting_game_version"))
+        self.ver_edit.setText(inst.game_version or "")
+        self.ver_edit.setToolTip(t("inst.modify_version_hint"))
+
+        self.loader_combo = QComboBox()
+        for lid in LOADERS:
+            self.loader_combo.addItem(loader_name(lid), lid)
+        idx = self.loader_combo.findData(inst.loader or "vanilla")
+        self.loader_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        p.row(t("instances.setting_loader"), self.loader_combo)
+
+        self.ldver_combo = QComboBox()
+        self.ldver_combo.setEditable(True)
+        self.ldver_combo.addItem(inst.loader_version or "")
+        self.ldver_combo.setCurrentText(inst.loader_version or "")
+        self.ldver_combo.setPlaceholderText(
+            t("instances.setting_loader_version_hint"))
+        self.ldver_combo.lineEdit().setPlaceholderText(
+            t("instances.setting_loader_version_hint"))
+        p.row(t("instances.setting_loader_version"), self.ldver_combo)
+
+        self.ldver_hint = p.hint(t("inst.loader_ver_hint"))
+
+        for w in (self.ver_edit, self.loader_combo, self.ldver_combo):
+            w.setEnabled(self._ver_editable)
+
+        self.install_btn = ui_kit.make_button(
+            t("inst.loader_install"), kind="accent", icon_key="download",
+            on_click=self._install_loader, min_h=34)
+        act = QHBoxLayout()
+        act.setSpacing(8)
+        act.addWidget(self.install_btn)
+        act.addStretch(1)
+        p.add_layout(act)
+        self.loader_combo.currentIndexChanged.connect(
+            lambda _i: self._load_loader_versions())
+
+        p.section(t("inst.modify_danger"))
+        p.hint(t("inst.modify_uninstall_hint"))
+        self.uninstall_btn = ui_kit.make_button(
+            t("inst.loader_uninstall"), kind="secondary", icon_key="delete",
+            on_click=self._uninstall_loader, min_h=34)
+        drow = QHBoxLayout()
+        drow.addWidget(self.uninstall_btn)
+        drow.addStretch(1)
+        p.add_layout(drow)
+
+        if not self._ver_editable:
+            p.hint(t("instances.setting_external_hint"))
+            for b in (self.install_btn, self.uninstall_btn):
+                b.setEnabled(False)
+
+        p.stretch()
+        return p
+
+    # ── ④ Java ──────────────────────────────────────────────
     def _page_java(self) -> _Page:
         p = _Page(self)
         inst = self._inst
@@ -865,8 +889,25 @@ class InstanceEditorDialog(QDialog):
             on_click=lambda: _open_path(self, inst.mc_dir), min_h=30))
         p.hint(t("inst.meta_ro_hint"))
 
+        # round-184：导出整合包（.mrpack）—— 对应 PCL 概览页的「高级管理」区
+        p.section(t("export.title"))
+        p.hint(t("export.overrides_hint"))
+        ex_row = QHBoxLayout()
+        ex_row.setSpacing(8)
+        ex_row.addWidget(ui_kit.make_button(
+            t("instances.export_pack"), kind="secondary", icon_key="export",
+            on_click=self._export_pack, min_h=32))
+        ex_row.addStretch(1)
+        p.add_layout(ex_row)
+
         p.stretch()
         return p
+
+    def _export_pack(self) -> None:
+        from .export_pack_dialog import ExportPackDialog
+        # 先落字段：导出读的是实例对象，玩家刚改的版本号/加载器要用上
+        self._collect(trigger=False)
+        ExportPackDialog(self, self._inst).exec()
 
     # ── 加载器版本列表 ──────────────────────────────────────
     def _current_loader(self) -> str:

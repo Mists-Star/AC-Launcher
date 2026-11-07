@@ -86,6 +86,7 @@ SUITES = [
     ("Cleanroom Java/亮度覆盖", "test_round182_cleanroom_java.py", "script"),
     ("客户端增强包装/卸", "test_round182_enhance.py", "script"),
     ("PCL 式编辑面板/加载器真装真卸/pcl 格式", "test_round183_editor.py", "script"),
+    ("导出 .mrpack / 修改页", "test_round184_export.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

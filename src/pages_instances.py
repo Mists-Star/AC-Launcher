@@ -1827,11 +1827,15 @@ class InstancesPage(QWidget):
 
         actions.addStretch(1)
 
-        # ── 更多操作（⋯）──
-        more_btn = QPushButton("⋯")
+        # ── 更多操作 ──
+        # ☠ 别再用文字「⋯」：① 它依赖字体回退（U+22EF 不在雅黑里，缺字时是豆腐块）；
+        # ② QPushButton 带菜单时 Qt 还会在文字旁再画一个 ⌄，30px 的小方钮里挤成
+        # 「⋯⌄」两个符号（用户实拍指出）。改用 SVG 图标 + 隐藏 menu-indicator。
+        more_btn = QPushButton()
         more_btn.setToolTip(t("instances.more_actions"))
-        more_btn.setMinimumHeight(34)
-        more_btn.setMinimumWidth(34)
+        more_btn.setFixedSize(34, 34)
+        more_btn.setIcon(icon("more"))
+        more_btn.setIconSize(QSize(18, 18))
         more_btn.setCursor(Qt.PointingHandCursor)
         more_btn.setProperty("cls", "surface")
         _more_menu = QMenu(more_btn)
@@ -1845,6 +1849,9 @@ class InstancesPage(QWidget):
             # round-166：按磁盘现状重构实例定义（版本/加载器/布局重新推导）
             (t("instances.rebuild"), "refresh",
              (lambda: self._rebuild_instance(inst))),
+            # round-184：导出成 Modrinth 整合包（.mrpack）
+            (t("instances.export_pack"), "export",
+             (lambda: self._export_pack(inst))),
             (t("instances.crash_analyze"), "repair", (lambda: self._analyze_crash(inst))),
         ]:
             a = _more_menu.addAction(icon(ico), key)
@@ -2271,6 +2278,12 @@ class InstancesPage(QWidget):
             warn(self, t("map.title"), t("err.launch_missing_dir", path=game_dir or ""))
             return
         MapDialog(game_dir, self).exec()
+
+    def _export_pack(self, inst: Instance):
+        """round-184：把实例导出成 Modrinth 整合包（.mrpack）。"""
+        from .export_pack_dialog import ExportPackDialog
+        dlg = ExportPackDialog(self, inst)
+        dlg.exec()
 
     def _rebuild_instance(self, inst: Instance):
         """round-166：按磁盘现状重构实例定义（只读扫描，不删游戏文件）。
