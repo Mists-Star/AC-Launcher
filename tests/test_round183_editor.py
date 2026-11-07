@@ -324,6 +324,60 @@ check("内存落盘", disk.get("ram_mb") == 3072, str(disk.get("ram_mb")))
 check("分组落盘", disk.get("group") == "G1", str(disk.get("group")))
 dlg3.deleteLater()
 
+print("⑩ 大尺寸字形描边必须收细（否则四宫格粘成一块）")
+# 判据不是「有没有画出来」，而是**描边与间隙的比例**：24px 设计的字形
+# 直接放大到 56px 时描边涨到 ~4.7px、间隙只剩 4px，四宫格会粘成一团，
+# 看起来像「被相邻方块遮挡」（用户实拍指出）。这里量 56px 渲染的中缝。
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+_app = QApplication.instance() or QApplication([])
+from src.icons import pixmap as _pm, pixmap_large as _pml  # noqa: E402
+
+
+def _runs(pix, y):
+    img = pix.toImage()
+    out, cur, n = [], None, 0
+    for x in range(img.width()):
+        v = img.pixelColor(x, y).alpha() > 60
+        if v == cur:
+            n += 1
+        else:
+            if cur is not None:
+                out.append((cur, n))
+            cur, n = v, 1
+    out.append((cur, n))
+    return out
+
+
+def _gap_vs_stroke(pix):
+    """中缝宽度 / 描边宽度。>1.2 才分得开；旧实现约 0.67。"""
+    r = _runs(pix, pix.height() // 4)
+    # 期望形状：透明(边距) 实(左描边) 透明(孔) 实(右描边) 透明(中缝) 实(左描边)...
+    strokes = [n for v, n in r if v]
+    gaps = [n for v, n in r if not v]
+    if len(strokes) < 2 or len(gaps) < 3:
+        return 0.0, r
+    mid_gap = gaps[len(gaps) // 2]
+    stroke = max(strokes[:2]) if len(strokes) >= 2 else 0
+    return (mid_gap / float(stroke) if stroke else 0.0), r
+
+
+big_old = _pm("mods", 56)
+big_new = _pml("mods", 56)
+ratio_old, _ = _gap_vs_stroke(big_old)
+ratio_new, _runs_new = _gap_vs_stroke(big_new)
+check("旧渲染确实是挤的（判据自身有效）", ratio_old < 1.0, "gap/stroke=%.2f" % ratio_old)
+check("大尺寸渲染中缝/描边 >= 1.2", ratio_new >= 1.2, "gap/stroke=%.2f" % ratio_new)
+check("收细后描边不超过 4.2px",
+      max(n for v, n in _runs_new if v) <= 4,
+      "max stroke=%d" % max(n for v, n in _runs_new if v))
+# 小图标不能被这条路径改动（24px 是设计尺寸，原样最准）
+check("24px 仍走原渲染", _pm("mods", 24).width() == 24)
+# 品牌/状态图必须原样：收细逻辑不能把加载器 logo 也重着色
+from src.icons import _KEEP_COLOR  # noqa: E402
+check("keep-color 图标未参与收细", "check" in _KEEP_COLOR)
+check("keep-color 渲染仍有内容", not _pml("check", 56).toImage().isNull())
+
 shutil.rmtree(tmp, ignore_errors=True)
 
 print()

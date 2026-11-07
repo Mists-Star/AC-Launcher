@@ -23,6 +23,7 @@ Brand marks and status colours keep their original artwork (see
 check would destroy their meaning.
 """
 import os
+import re
 
 from PySide6.QtCore import (
     QByteArray, QFile, QIODevice, QPointF, QRectF, QSize, QSizeF, Qt,
@@ -260,5 +261,65 @@ def pixmap(name: str, size: int = _SIZE, color: str | None = None,
     # ``QIcon.pixmap(size, dpr)`` 会让引擎按 ``size × dpr`` 的**物理**像素
     # 渲染，并打上 dpr 标记（``pixmap(size)`` 也会自动套用屏幕 DPR）。
     pm = icon(name, color).pixmap(QSize(size, size), dpr)
+    pm.setDevicePixelRatio(dpr)
+    return pm
+
+
+# 大尺寸渲染时描边该有多粗（**物理像素**，不是 SVG 单位）。
+# 3.4 是实拍对比出来的：2.8 偏单薄、4.2 又回到「四块粘连」的老问题。
+_LARGE_GLYPH_PX = 3.4
+_LARGE_GLYPH_MIN = 34
+
+_STROKE_RE = re.compile(rb'(stroke-width\s*=\s*")([\d.]+)(")')
+
+
+def pixmap_large(name: str, size: int = 56, color: str | None = None,
+                 stroke_px: float = _LARGE_GLYPH_PX,
+                 dpr: float | None = None) -> QPixmap:
+    """大尺寸字形（空态图标等）：**把描边按绝对像素收细**再渲染。
+
+    ☠ 24px 设计的字形（lucide 系，``stroke-width="2"``）直接放大到 56px 时，
+    描边同比涨到 4.7px，而字形内部间隙只有 4 个单位 → 「四宫格」这类多块
+    拼接的字形会粘连成一团深色块，看起来像**被相邻方块遮挡**（round-183
+    实测：用户在编辑面板模组页一眼看出来，我先前只检查了有没有裁切、
+    没看描边配重，所以漏了）。
+
+    做法：按目标物理像素反推 SVG 单位描边 ``stroke_px / scale``，且**只减不增**
+    （原本就细的字形保持原样）。颜色/缓存不走 ``icon()``，避免污染小图标缓存。
+    """
+    from PySide6.QtSvg import QSvgRenderer  # 局部导入：保持启动轻量
+
+    # 品牌/状态图（加载器 logo、绿色勾、警告三角…）自带配色，重着色会把
+    # 含义弄丢 —— 交回普通渲染，别在这里也套一层 tint。
+    if name in _KEEP_COLOR:
+        return pixmap(name, size, color=color, dpr=dpr)
+
+    dpr = screen_dpr() if dpr is None else max(1.0, float(dpr or 1.0))
+    data = _svg_bytes(name)
+    tint = QColor(color or _default_tint(name))
+    px = max(1, int(round(size * dpr)))
+    pm = QPixmap(px, px)
+    pm.fill(Qt.GlobalColor.transparent)
+
+    if data:
+        r = QSvgRenderer(QByteArray(data))
+        vb = r.viewBox()
+        scale = px / max(1.0, vb.width() or float(_SIZE))
+        want = stroke_px * dpr / max(1e-6, scale)
+        if want > 0:
+            data = _STROKE_RE.sub(
+                lambda m: m.group(1) + (b"%.3f" % min(float(m.group(2)), want)) + m.group(3),
+                data)
+            r = QSvgRenderer(QByteArray(data))
+        if r.isValid():
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            r.render(p, QRectF(QPointF(0, 0), QSizeF(px, px)))
+            p.end()
+    if tint.isValid():
+        p2 = QPainter(pm)
+        p2.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        p2.fillRect(pm.rect(), tint)
+        p2.end()
     pm.setDevicePixelRatio(dpr)
     return pm

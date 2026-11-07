@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
 from .theme import COLORS, RoundedCard, R_CARD, F_SM, F_LG, with_alpha
 # ``screen_dpr`` 从 icons 转出：所有「按物理像素渲染」的自绘图标共用同一处
 # DPR 判定，避免各处各写一份（round-148）。
-from .icons import icon, on_accent, pixmap as icon_pixmap, screen_dpr
+from .icons import icon, on_accent, pixmap as icon_pixmap, \
+    pixmap_large as icon_pixmap_large, screen_dpr
 
 
 # ── 全局滚轮防误触（round-86）───────────────────────────────────────────
@@ -334,7 +335,9 @@ def empty_state(icon_key: str, title: str, hint: str = "",
     v.setAlignment(Qt.AlignCenter)
     v.setSpacing(12)
     ic = QLabel()
-    ic.setPixmap(icon_pixmap(icon_key, icon_size))
+    # ☠ 大尺寸字形必须收细描边：24px 设计的图标放大到 56px 时描边同比涨到
+    # 4.7px、间隙只有 4 个单位 → 四宫格一类字形粘连成块，看着像「被遮挡」。
+    ic.setPixmap(icon_pixmap_large(icon_key, icon_size))
     ic.setStyleSheet(f"color: {COLORS['text_sub']}; opacity: 0.7;")
     v.addWidget(ic, alignment=Qt.AlignCenter)
     tt = QLabel(title)

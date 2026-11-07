@@ -20,7 +20,8 @@ import webbrowser
 from PySide6.QtGui import QPixmap  # round-100：QColor/QLinearGradient 已随 hero 中性化移除
 
 from .theme import COLORS, RoundedCard
-from .icons import icon, pixmap as icon_pixmap
+from .icons import icon, pixmap as icon_pixmap, \
+    pixmap_large as icon_pixmap_large
 from .i18n import t
 from .worker import Worker
 from .core import auth
@@ -369,7 +370,7 @@ class LoginDialog(QDialog):
         path = skin_manager().active_path(acc.get("id"))
         if path and os.path.exists(path):
             return render_head(path, 56)
-        return icon_pixmap("account", 56)
+        return icon_pixmap_large("account", 56)
 
     def _open_skins(self):
         acc = accounts_manager().current()
