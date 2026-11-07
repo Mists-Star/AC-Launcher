@@ -1285,6 +1285,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "store.error": "错误：{e}",
         "store.results": "找到 {n} 个结果",
         "store.partial": "部分结果：{sources} 响应超时",
+        "store.partial_loading": "已显示 {n} 个结果，正在补充其他来源…",
         "store.zh_no_hit": "没搜到：中文名库未收录，机器翻译也没匹配。换英文名更准（如「小地图」→ minimap）",
         # round-193：资源中心重做（版本随实例 / 前置可见 / 下载可见）
         "store.incompat_mc": "需要 MC {mc}",
@@ -3366,6 +3367,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "store.error": "Error: {e}",
         "store.results": "{n} results found",
         "store.partial": "Partial results: {sources} timed out",
+        "store.partial_loading": "Showing {n} results, fetching other sources…",
         "store.zh_no_hit": "No match — not in the local name table and machine translation missed. Try the English name (e.g. minimap)",
         # round-193: store rework
         "store.incompat_mc": "needs MC {mc}",

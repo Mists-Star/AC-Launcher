@@ -394,6 +394,9 @@ _TYPE_SUBDIR = {
 class StorePage(QWidget):
     # round-107 版本库入口已从侧栏移除 → 资源中心页头提供「版本库」按钮跳转。
     open_versions_requested = Signal()
+    # round-207：搜索按源回调。search_all 的 daemon 线程直接 emit，Qt 自动
+    # queued 到主线程 → 快源一到就渲染，不必等另一源 / 等满 8s 预算。
+    sourcePartial = Signal(str, object, int)
 
     def __init__(self, list_instances, get_current_instance, parent=None):
         super().__init__(parent)
@@ -423,6 +426,9 @@ class StorePage(QWidget):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(180)
         self._search_timer.timeout.connect(self._search)
+        self.sourcePartial.connect(self._on_source_partial)
+        self._partial_enabled = False
+        self._partial_done_gen = -1
 
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 32, 40, 32)
@@ -690,12 +696,20 @@ class StorePage(QWidget):
         self.status.setText(t("store.fetching"))
         self._load_gen += 1
         gen = self._load_gen
+        # round-207：整页重置且「全部」源才启用按源渐进渲染。翻页
+        # (reset=False) 本身就是增量追加，启用会把同轮结果插两遍。
+        self._partial_enabled = bool(reset and self._source == "all")
+        self._partial_done_gen = -1
         if self._source == "all":
             # round-140：「全部」源 = 两源并行合并（net_api.search_all）
             from .net_api import search_all
             self._search_meta = {}
+            on_source = None
+            if self._partial_enabled:
+                on_source = (lambda label, hits, g=gen:
+                             self.sourcePartial.emit(label, hits, g))
             worker = Worker(search_all, self._query, self._offset, 20,
-                            self._category, self._search_meta)
+                            self._category, self._search_meta, on_source)
         else:
             worker = Worker(search_mods, self._query, self._offset,
                             project_type=self._category)
@@ -728,12 +742,16 @@ class StorePage(QWidget):
         worker = Worker(worker_fn, *args)
         self._track(worker, gen, reset)
 
-    def _on_loaded(self, mods: list[dict], reset: bool):
-        self._loading_more = False
-        # round-140：不足一页 = 已到底 → 关闸（此前 CF 源 offset 恒 0，
-        # 无限滚动会把第一页无限重复塞进列表）。
-        if len(mods) < 20:
-            self._has_more = False
+    def _on_loaded(self, mods: list[dict], reset: bool,
+                   partial: bool = False):
+        # round-207：partial=True 是「第一个源到了先画出来」，此时不能动
+        # _has_more / _loading_more —— 真正的到底判定等完整合并结果。
+        if not partial:
+            self._loading_more = False
+            # round-140：不足一页 = 已到底 → 关闸（此前 CF 源 offset 恒 0，
+            # 无限滚动会把第一页无限重复塞进列表）。
+            if len(mods) < 20:
+                self._has_more = False
         self._mods = mods if reset else self._mods + mods
         if reset:
             while self._vbox.count():
@@ -748,14 +766,16 @@ class StorePage(QWidget):
             _zh = has_cjk(self._query)
         except Exception:  # noqa: BLE001
             _zh = False
-        if not self._mods and _zh:
+        if partial:
+            self.status.setText(t("store.partial_loading", n=len(self._mods)))
+        elif not self._mods and _zh:
             self.status.setText(t("store.zh_no_hit"))
         else:
             self.status.setText(t("store.results", n=len(self._mods)))
         # round-206：慢源超时时明确说「只显示部分结果」，别让玩家误判
-        # 「这个源里没有这个资源」。
+        # 「这个源里没有这个资源」。渐进阶段 meta 还没写完，跳过。
         meta = getattr(self, "_search_meta", None) or {}
-        if meta.get("partial"):
+        if not partial and meta.get("partial"):
             self.status.setText(t(
                 "store.partial",
                 sources="、".join(meta.get("timed_out") or [])))
@@ -765,14 +785,55 @@ class StorePage(QWidget):
             # round-107：加载更多时新卡片逐条淡入（整页重置仍走 viewport 整体淡入）
             if not reset:
                 fade_in_widget(card)
-        # round-100 列表淡入（克制）：只在整页重置时淡入，加载更多不闪整屏
-        if reset and mods:
+        # round-100 列表淡入（克制）：只在整页重置时淡入，加载更多不闪整屏；
+        # round-207：渐进首帧不淡入，避免随后完整结果再闪一次。
+        if reset and mods and not partial:
             fade_in_widget(self.scroll.viewport())
         # 策略变更：结果一到就把每个资源的「详情页 72px 封面」预取进缓存，
         # 不必等用户点进详情才开始下载（页内详情面板用的正是 72 尺寸）。
         # 失败静默——详情页仍会按需加载，不会因此空白。
         for m in mods:
             self._img.prefetch(m.get("icon_url", ""), 72)
+        if not partial:
+            # 最终结果已上屏：之后迟到的源回调走增量补卡，不再整页覆盖。
+            self._partial_done_gen = self._load_gen
+
+    def _on_source_partial(self, label: str, hits, gen: int):
+        """某个源一返回就渲染（round-207）。
+
+        信号由 search_all 的 daemon 线程 emit，Qt 自动 queued 到主线程；
+        gen 守卫挡住「换了关键词之后，旧 worker 的迟到结果」污染新列表。
+        """
+        if not self._partial_enabled or gen != self._load_gen or not hits:
+            return
+        if self._partial_done_gen == gen:
+            # 最终结果（或另一个源）已上屏 → 只做去重增量补卡。这样即使
+            # 慢源在 8s 预算之后才回来，结果也不会被静默丢弃。
+            self._append_source_rows(hits)
+            return
+        self._partial_done_gen = gen
+        self._on_loaded(list(hits), True, partial=True)
+
+    def _append_source_rows(self, hits: list[dict]):
+        """去重后把迟到 / 后到的源结果追加到当前列表。"""
+        known = {
+            str(m.get("project_id") or m.get("slug") or "").lower()
+            for m in self._mods
+        }
+        added = []
+        for m in hits:
+            key = str(m.get("project_id") or m.get("slug") or "").lower()
+            if not key or key in known:
+                continue
+            known.add(key)
+            added.append(m)
+        if not added:
+            return
+        self._mods = self._mods + added
+        for m in added:
+            self._vbox.addWidget(self._make_card(m))
+            self._img.prefetch(m.get("icon_url", ""), 72)
+        self.status.setText(t("store.results", n=len(self._mods)))
 
     def _make_card(self, m: dict) -> QFrame:
         # round-50 商店卡流光：低强度慢速，视觉整洁

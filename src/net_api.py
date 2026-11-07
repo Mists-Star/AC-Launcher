@@ -43,6 +43,9 @@ except Exception:  # noqa: BLE001 - mirror is optional infra
     MANIFEST_BMCLAPI = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json"
 
 _REQUEST_TIMEOUT = 15
+# round-207：搜索请求单独收紧到与 search_all 总预算一致。下载 / 文件清单仍用
+# 15s（大文件、慢网需要），但搜索挂满 15s 会让慢源在后台多跑近一倍预算。
+_SEARCH_TIMEOUT = 8.0
 _HEADERS = {"User-Agent": "MC-Launcher/0.1 (local dev)"}
 
 # Known Mojang April Fools (joke) versions. Their manifest "type" is unreliable
@@ -1440,8 +1443,9 @@ def curseforge_keyless_enabled() -> bool:
         return True
 
 
-_CF_POOL_STEP = 50     # CF 单页上限 50（镜像同）
-_CF_POOL_PAGES = 3     # round-141：首屏拉 0/50/100 → 150 条相关性池
+# round-207：相关性池已废弃。CF 服务端排序可用（同一镜像对照实验：
+# 不带排序 sodium 不在前 20，sortField=1&desc 直接排第 1），
+# 首屏改成一次 pageSize=20 请求，不再拉 3×50 条回本地重排。
 
 
 def _cf_search_zh(base: str, headers: dict, query: str, category: str,
@@ -1465,11 +1469,13 @@ def _cf_search_zh(base: str, headers: dict, query: str, category: str,
             "slug": slug,
             "pageSize": limit,
             "index": offset,
+            "sortField": 1,
+            "sortOrder": "desc",
         }
         try:
             r = requests.get(
                 f"{base}/mods/search", params=params, headers=headers,
-                timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+                timeout=_SEARCH_TIMEOUT, proxies=_proxies())
             r.raise_for_status()
             data = r.json().get("data", [])
         except requests.RequestException:
@@ -1497,6 +1503,8 @@ def _cf_search_zh(base: str, headers: dict, query: str, category: str,
         "searchFilter": en,
         "pageSize": limit,
         "index": offset,
+        "sortField": 1,
+        "sortOrder": "desc",
     }
     try:
         r = requests.get(
@@ -1538,91 +1546,35 @@ def _cf_map_row(m: dict) -> dict:
     }
 
 
-def _cf_relevance(hit: dict, q_norm: str, q_low: str) -> int:
-    """本地相关性分级（round-141 搜索质量）。
+def _cf_page(base: str, headers: dict, query: str, category: str,
+             limit: int, offset: int) -> list[dict]:
+    """CF 关键词搜索：一次请求，排序交给服务端（round-207）。
 
-    实测 CF v1 / MCIM 镜像引擎把「名字精确匹配」的项目埋到 100+ 位
-    （搜 sodium，本体排在第 100 页位；sortField 不起作用），我们只取前
-    20 永远看不到本体 —— 用户报「搜 sodium 搜不到」的根因。
-    分级：0 = 名字/slug 精确 → 1 = 名字包含全部词 → 2 = slug 含关键词
-    → 3 = 名字含关键词 → 4 = 其它（保留引擎原始顺序，稳定排序）。
+    round-141 曾判定「sortField 不起作用」，于是拉 3×50 页共 150 条回本地
+    分级重排（4 个并发请求 + 一个非 daemon 线程池）。2026-11-07 对同一
+    MCIM 镜像做对照实验，结论已过期：
+
+        不带排序                  → sodium 不在前 20，top4 全是不相关项目
+        sortField=1&sortOrder=desc → sodium 排第 1
+
+    CurseForge 官方 API 文档同样原生支持 ``sortField`` / ``sortOrder`` /
+    ``pageSize`` / ``index``。与主流启动器一致：一次 pageSize=limit 请求，
+    服务端排好直接用；深翻页也走服务端 index，不再本地切片。
     """
-    slug = (hit.get("slug") or "").lower()
-    name = (hit.get("title") or "").lower()
-    if q_norm and (slug == q_norm or name == q_low):
-        return 0
-    toks = q_low.split()
-    if toks and all(t in name for t in toks):
-        return 1
-    if q_norm and q_norm in slug:
-        return 2
-    if q_low and q_low in name:
-        return 3
-    return 4
-
-
-def _cf_pool(base: str, headers: dict, query: str, category: str) -> list[dict]:
-    """首屏相关性池：3×50 页并行拉取 + slug 精确钉顶 → 去重 → 本地分级重排。
-
-    后续分页从池里切片（0 成本），池整体带缓存。全部失败才 raise，
-    部分页失败用已取回的部分兜底。
-    """
-    key = f"cfpool:{category}:{query}"
-    cached = _cached(key)
-    if cached is not None:
-        return cached
-    class_id = CURSEFORGE_CLASS_OF.get(category, CURSEFORGE_MOD_CLASS)
-
-    def _page(idx: int) -> list[dict]:
-        params = {"gameId": CURSEFORGE_GAME_ID, "classId": class_id,
-                  "searchFilter": query, "pageSize": _CF_POOL_STEP, "index": idx}
-        r = requests.get(f"{base}/mods/search", params=params, headers=headers,
-                         timeout=_REQUEST_TIMEOUT, proxies=_proxies())
-        r.raise_for_status()
-        return r.json().get("data", [])
-
-    def _slug_probe() -> list[dict]:
-        # slug 精确钉顶：用户输入 ≈ 完整名时，无论引擎把本体埋多深都救回来
-        norm = query.strip().lower().replace(" ", "-")
-        if not norm or "/" in norm or has_cjk(norm):
-            return []
-        params = {"gameId": CURSEFORGE_GAME_ID, "slug": norm, "pageSize": 1}
-        try:
-            r = requests.get(f"{base}/mods/search", params=params, headers=headers,
-                             timeout=_REQUEST_TIMEOUT, proxies=_proxies())
-            r.raise_for_status()
-            return r.json().get("data", [])
-        except requests.RequestException:
-            return []
-
-    rows: list[dict] = []
-    errs: list[Exception] = []
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        futs = [ex.submit(_slug_probe)] + [
-            ex.submit(_page, i * _CF_POOL_STEP) for i in range(_CF_POOL_PAGES)]
-        for f in futs:
-            try:
-                rows.extend(f.result())
-            except Exception as e:  # noqa: BLE001 - 单页失败用其余页兜底
-                errs.append(e)
-    if not rows and errs:
-        raise NetError(f"无法搜索 CurseForge：{errs[0]}")
-    # 按 slug 去重（钉顶行在最前，先到先得）
-    seen: set = set()
-    merged: list[dict] = []
-    for m in rows:
-        s = m.get("slug") or m.get("id")
-        if s in seen:
-            continue
-        seen.add(s)
-        merged.append(m)
-    hits = [_cf_map_row(m) for m in merged]
-    q_low = query.strip().lower()
-    q_norm = q_low.replace(" ", "-")
-    hits.sort(key=lambda h: _cf_relevance(h, q_norm, q_low))  # 稳定排序
-    _store(key, hits)
-    return hits
+    params = {
+        "gameId": CURSEFORGE_GAME_ID,
+        "classId": CURSEFORGE_CLASS_OF.get(category, CURSEFORGE_MOD_CLASS),
+        "searchFilter": query,
+        "pageSize": limit,
+        "index": offset,
+        "sortField": 1,
+        "sortOrder": "desc",
+    }
+    r = requests.get(
+        f"{base}/mods/search", params=params, headers=headers,
+        timeout=_SEARCH_TIMEOUT, proxies=_proxies())
+    r.raise_for_status()
+    return [_cf_map_row(m) for m in r.json().get("data", [])]
 
 
 def search_curseforge(query: str = "", offset: int = 0, limit: int = 20,
@@ -1633,8 +1585,9 @@ def search_curseforge(query: str = "", offset: int = 0, limit: int = 20,
     免 x-api-key），关键词 / 中文名库反查 / 分页语义与官方路径一致。
     round-140 修：``category`` → CF classId，分类胶囊在 CF 源下生效
     （此前写死模组类，搜整合包返回的是模组）。
-    round-141：offset < 150 走 ``_cf_pool`` 相关性池（3×50 页 + slug 钉顶 +
-    本地分级重排），修「搜 sodium 搜不到本体」；更深页走引擎原生顺序。
+    round-207：废弃 ``_cf_pool`` 相关性池，统一走 ``_cf_page`` 一次请求 +
+    服务端 ``sortField=1`` 排序分页（实测该参数有效，round-141 记下的
+    「sortField 不起作用」结论已过期）。
     Returns the same hit-shaped dicts as :func:`search_mods` so the store page
     renders both sources with identical cards.
     """
@@ -1648,52 +1601,29 @@ def search_curseforge(query: str = "", offset: int = 0, limit: int = 20,
     else:
         raise NetError("未配置 CurseForge API Key（设置 → 第三方服务）")
     cache_key = f"cf:{category}:{query}:{offset}:{limit}"
-    # round-128：CF 的 searchFilter 同样不认中文，先用本地名库反查 slug，
-    # 再走 CF 的 slug 精确查询（单次请求，保持原有分页语义）。
-    if has_cjk(query):
-        cached = _cached(cache_key)
-        if cached is not None:
-            return cached
-        hits = _cf_search_zh(base, headers, query, category, limit, offset)
-        _store(cache_key, hits)
-        return hits
-    # 首屏 → 相关性池切片。注意：池是唯一权威 —— 不能先查切片缓存，
-    # 否则修复前存下的旧排名数据（sodium 埋 100+ 位那版）会一直短路新池。
-    if offset < _CF_POOL_STEP * _CF_POOL_PAGES:
-        return _cf_pool(base, headers, query, category)[offset:offset + limit]
-    # 深页兜底（>150）：引擎原生顺序
     cached = _cached(cache_key)
     if cached is not None:
         return cached
-    params = {
-        "gameId": CURSEFORGE_GAME_ID,
-        "classId": CURSEFORGE_CLASS_OF.get(category, CURSEFORGE_MOD_CLASS),
-        "searchFilter": query,
-        "pageSize": limit,
-        "index": offset,
-    }
+    # round-128：CF 的 searchFilter 不认中文 → 名库反查 slug 精确查询；
+    # 其余关键词一律单次服务端排序分页（round-207 废弃相关性池）。
     try:
-        r = requests.get(
-            f"{base}/mods/search",
-            params=params,
-            headers=headers,
-            timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
-        )
-        r.raise_for_status()
-        data = r.json().get("data", [])
+        if has_cjk(query):
+            hits = _cf_search_zh(base, headers, query, category, limit, offset)
+        else:
+            hits = _cf_page(base, headers, query, category, limit, offset)
     except requests.RequestException as e:
         raise NetError(f"无法搜索 CurseForge：{e}") from e
-    hits = [_cf_map_row(m) for m in data]
     _store(cache_key, hits)
     return hits
 
 
-_SEARCH_BUDGET = 8.0
+_SEARCH_BUDGET = _SEARCH_TIMEOUT
 _SEARCH_LABELS = {"mr": "Modrinth", "cf": "CurseForge"}
 
 
 def search_all(query: str = "", offset: int = 0, limit: int = 20,
-               category: str = "mod", meta: dict | None = None) -> list[dict]:
+               category: str = "mod", meta: dict | None = None,
+               on_source=None) -> list[dict]:
     """「全部」源（round-140 用户要求）：Modrinth + CurseForge 并行搜索合并返回。
 
     两源各自走自己的缓存/分页；一边失败不拖死另一边（只有两边都失败且
@@ -1709,6 +1639,12 @@ def search_all(query: str = "", offset: int = 0, limit: int = 20,
     ``meta`` 是可选出参，写入 ``partial`` / ``timed_out`` / ``errors`` /
     ``budget``，UI 据此提示「某源超时，只显示部分结果」，避免玩家误判
     「这个源没有这个资源」。
+
+    round-207：``on_source(label, hits)`` 是可选的**按源回调**。每个源一
+    返回就立刻调用（不等另一源、也不等 8s 预算），UI 用 Qt 信号把它排队
+    到主线程做首屏渲染 —— 快源约 1.2s 就能出结果。回调在 daemon 线程里
+    执行；即使本函数已因预算超时返回，迟到的慢源仍会回调一次，UI 增量
+    补卡，不再把慢源结果静默丢弃。
     """
     import threading
     import time
@@ -1718,7 +1654,13 @@ def search_all(query: str = "", offset: int = 0, limit: int = 20,
 
     def _run(key, fn):
         try:
-            box[key] = fn()
+            hits = fn()
+            box[key] = hits
+            if on_source is not None:
+                try:
+                    on_source(_SEARCH_LABELS[key], hits or [])
+                except Exception:  # noqa: BLE001 - 回调失败不影响数据
+                    pass
         except Exception as e:  # noqa: BLE001 - 单源失败不拖死合并视图
             errs.append(e)
 
@@ -2665,7 +2607,7 @@ def search_mods(query: str = "", offset: int = 0, limit: int = 20,
     try:
         r = requests.get(
             MODRINTH_SEARCH_URL, params=params, headers=_HEADERS,
-            timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
+            timeout=_SEARCH_TIMEOUT, proxies=_proxies(),
         )
         r.raise_for_status()
         data = r.json()
