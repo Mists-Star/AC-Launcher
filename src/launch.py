@@ -214,6 +214,9 @@ def build_options(
     game_dir: str | None = None,   # 运行时游戏目录（版本隔离/自定义目录以 mll 的
                                    # gameDirectory 下发）；None = 默认 mc_dir
     jvm_preset: str = "default",   # default/aikar/custom 三档（custom 只看 jvm_args）
+    # round-188 内存管理（GC）模式：""/follow 跟随全局、zgc、zgc_gen、g1、
+    # g1_tuned、none（不指定）。显式指定时不再注入 G1GC 参数组，避免冲突。
+    gc_mode: str = "",
     server: str | None = None,     # --server 直连服务器 IP
     port: str | None = None,       # --port 直连端口
 ) -> dict:
@@ -267,12 +270,36 @@ def build_options(
         opts["jvmArguments"].append("-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true")
     elif renderer == "legacy":
         opts["jvmArguments"].append("-Dorg.lwjgl.opengl.Display.enableSharedContext=false")
+    # round-188 内存管理（GC）下拉（对齐 PCL「内存分配 → 内存管理」）：
+    #   zgc      = -XX:+UseZGC（低延迟，吞吐略低）
+    #   zgc_gen  = -XX:+UseZGC -XX:+ZGenerational（Java 21+ 分代 ZGC）
+    #   g1       = 标准 G1GC
+    #   g1_tuned = 调优 G1GC（G1NewSizePercent/G1ReservePercent/短暂停）
+    #   none     = 不指定 GC（自己写 jvm_args）
+    # 显式选了 GC 时**必须**跳过下面的 G1GC 参数组：ZGC 与 G1GC 互斥，
+    # 同时下发 JVM 直接起不来。
+    _gc = (gc_mode or "").strip().lower()
+    if _gc == "zgc":
+        opts["jvmArguments"] += ["-XX:+UseZGC"]
+    elif _gc == "zgc_gen":
+        opts["jvmArguments"] += ["-XX:+UseZGC", "-XX:+ZGenerational"]
+    elif _gc == "g1":
+        opts["jvmArguments"] += ["-XX:+UseG1GC"]
+    elif _gc == "g1_tuned":
+        opts["jvmArguments"] += [
+            "-XX:+UseG1GC",
+            "-XX:G1NewSizePercent=20",
+            "-XX:G1ReservePercent=20",
+            "-XX:MaxGCPauseMillis=40",
+        ]
+    _gc_explicit = _gc in ("zgc", "zgc_gen", "g1", "g1_tuned", "none")
     # round-53 实例级实验性 GC（对齐主流「性能」高级设置）：
     # 默认开 G1GC 参数组（多数整合包作者推荐），关显式 GC 可减少突发停顿。
     # round-56 修重：preset=aikar 时该组 G1GC 参数已在 _AIKAR_FLAGS 注入，
     # 再注入会整组重复（JVM 后者覆盖前者、不崩，但命令冗余且易误导调参）。
     # 此时仅补 Aikar 组缺失的 UseStringDeduplication，语义等价不丢功能。
-    if perf_g1gc and jvm_preset not in ("aikar", "auto"):
+    if perf_g1gc and not _gc_explicit \
+            and jvm_preset not in ("aikar", "auto"):
         opts["jvmArguments"] += [
             "-XX:+UseG1GC",
             "-XX:+UnlockExperimentalVMOptions",
@@ -281,7 +308,7 @@ def build_options(
             "-XX:G1ReservePercent=20",
             "-XX:MaxGCPauseMillis=40",
         ]
-    elif perf_g1gc and jvm_preset == "aikar":
+    elif perf_g1gc and not _gc_explicit and jvm_preset == "aikar":
         opts["jvmArguments"].append("-XX:+UseStringDeduplication")
     # round-56 修重：_AIKAR_FLAGS 已含 -XX:+DisableExplicitGC，aikar 预设下跳过。
     if perf_disable_explicit_gc and jvm_preset not in ("aikar", "auto"):
@@ -945,6 +972,8 @@ def launch_instance(
         # round-55 启动高级设置：运行时游戏目录 / JVM 预设 / 服务器直连
         game_dir=game_dir,
         jvm_preset=jvm_preset,
+        gc_mode=((getattr(inst, "gc_mode", "") or "").strip()
+                 or (settings.get("gc_mode", "") or "")),
         server=_server,
         port=_port,
         **authlib_args,
@@ -1116,6 +1145,19 @@ def launch_instance(
     _wrap = (settings.get("wrapper_cmd") or "").strip()
     if _wrap:
         cmd = apply_wrapper(cmd, _wrap)
+
+    # round-188 启动前内存优化（PCL 同名开关）：把启动器自己占的内存还给系统，
+    # 让游戏拿到更多物理内存。失败一律静默 —— 优化失败绝不能挡住启动。
+    try:
+        from .core.memopt import optimize_memory, should_optimize
+        if should_optimize(inst, settings):
+            _freed = optimize_memory()
+            _st = callback.get("setStatus") if callback and hasattr(callback, "get") else None
+            if callable(_st) and _freed > (32 << 20):
+                from .i18n import t as _t4
+                _st(_t4("launch.mem_optimized", mb="%.0f" % (_freed / 1048576.0)))
+    except Exception:  # noqa: BLE001 - 优化是锦上添花
+        pass
 
     # round-52 阶段上报：即将拉起游戏进程（点第 5 步）。
     _emit_step(callback, "start")

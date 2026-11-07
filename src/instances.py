@@ -90,6 +90,11 @@ class Instance:
     # round-187 实例级「自动进入服务器」：形如 "ip:端口"。启动时自动追加
     # --server/--port（PCL 同名能力）。留空 = 不自动进。
     auto_server: str = ""
+    # round-188 内存管理（GC）模式："" 跟随全局 / zgc / zgc_gen / g1 / g1_tuned
+    # / none（不指定）。对应 PCL 设置页「内存分配 → 内存管理」下拉。
+    gc_mode: str = ""
+    # round-188 启动前内存优化："" 跟随全局 / on / off。
+    mem_optimize: str = ""
     post_launch_cmd: str = ""    # 游戏进程启动后执行的命令，空 = 跟随全局
     exit_cmd: str = ""           # 游戏进程退出后执行的命令，空 = 跟随全局
     # round-42 实例分组（对齐主流分组/筛选）：空 = 未分组
@@ -751,6 +756,8 @@ class InstancesManager:
             isolation=raw.get("isolation", "") or "",
             game_dir_override=raw.get("game_dir_override", "") or "",
             auto_server=raw.get("auto_server", "") or "",
+            gc_mode=raw.get("gc_mode", "") or "",
+            mem_optimize=raw.get("mem_optimize", "") or "",
             post_launch_cmd=raw.get("post_launch_cmd", "") or "",
             exit_cmd=raw.get("exit_cmd", "") or "",
             group=raw.get("group", "") or "",

@@ -89,6 +89,7 @@ SUITES = [
     ("导出 .mrpack / 修改页", "test_round184_export.py", "script"),
     ("模组元数据/模组列表", "test_round185_mods.py", "script"),
     ("加载器可用性/Fabric API", "test_round186_loader.py", "script"),
+    ("GC 模式/启动前内存优化", "test_round188_memory.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

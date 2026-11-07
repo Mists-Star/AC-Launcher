@@ -52,6 +52,10 @@ _DEFAULTS = {
     # 自相矛盾 → is_dirty() 恒为真 → 每次进设置页再离开都弹「有未保存的更改」。
     "jvm_aikars": False,
     "window_mode": "windowed",       # windowed / borderless / fullscreen
+    # round-188：启动前内存优化（全局默认关）+ 内存管理（GC）全局档。
+    # gc_mode: "" 不额外指定 / zgc / zgc_gen / g1 / g1_tuned / none
+    "mem_optimize": False,
+    "gc_mode": "",
     # round-182 亮度（gamma）覆盖：写进游戏 options.txt，启动前生效，
     # 退出不还原（玩家要的就是「改了就一直亮」）。
     "gamma_override": False,

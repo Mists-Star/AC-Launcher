@@ -557,6 +557,35 @@ class InstanceEditorDialog(QDialog):
         self.noexgc_chk.setToolTip(t("instances.perf_disable_explicit_gc_hint"))
         p.add(self.noexgc_chk)
 
+        # 内存管理（GC）—— 对齐 PCL「内存分配 → 内存管理」下拉。
+        # 显式选 GC 时不再叠加上面那组 G1GC 参数（ZGC 与 G1GC 互斥，
+        # 同时下发 JVM 起不来），所以要在两个控件之间联动。
+        self.gc_combo = QComboBox()
+        self.gc_combo.addItem(t("inst.gc_follow"), "follow")
+        self.gc_combo.addItem(t("inst.gc_zgc"), "zgc")
+        self.gc_combo.addItem(t("inst.gc_zgc_gen"), "zgc_gen")
+        self.gc_combo.addItem(t("inst.gc_g1"), "g1")
+        self.gc_combo.addItem(t("inst.gc_g1_tuned"), "g1_tuned")
+        self.gc_combo.addItem(t("inst.gc_none"), "none")
+        _gc = (inst.gc_mode or "").strip().lower()
+        idx = self.gc_combo.findData(_gc if _gc else "follow")
+        self.gc_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.gc_combo.setToolTip(t("inst.gc_hint"))
+        p.row(t("inst.gc_label"), self.gc_combo)
+
+        # 启动前内存优化（PCL 同名开关）：把启动器自己的内存还给系统
+        self.memopt_combo = QComboBox()
+        self.memopt_combo.addItem(t("inst.memopt_follow"), "")
+        self.memopt_combo.addItem(t("inst.memopt_on"), "on")
+        self.memopt_combo.addItem(t("inst.memopt_off"), "off")
+        _mo = (inst.mem_optimize or "").strip().lower()
+        idx = self.memopt_combo.findData(_mo if _mo else "")
+        self.memopt_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.memopt_combo.setToolTip(t("inst.memopt_hint"))
+        p.row(t("inst.memopt_label"), self.memopt_combo)
+        self.gc_combo.currentIndexChanged.connect(self._sync_gc_related)
+        self._sync_gc_related()
+
         # ── JVM 与游戏参数 ──
         p.section(t("inst.game_section"))
         self.preset_combo = QComboBox()
@@ -933,6 +962,14 @@ class InstanceEditorDialog(QDialog):
         self._reload_content()
 
     # ── ⑦ 高级 ──────────────────────────────────────────────
+    def _sync_gc_related(self) -> None:
+        """选了具体 GC 就别再叠 G1GC 参数组（ZGC 与 G1GC 互斥）。"""
+        explicit = (self.gc_combo.currentData() or "follow") != "follow"
+        self.g1gc_chk.setEnabled(not explicit)
+        self.g1gc_chk.setToolTip(
+            t("instances.perf_g1gc_hint_conflict") if explicit
+            else t("instances.perf_g1gc_hint"))
+
     def _on_mem_changed(self, value: int) -> None:
         self.mem_bar.set_values(int(value))
         self._refresh_mem_info()
@@ -1286,6 +1323,9 @@ class InstanceEditorDialog(QDialog):
         inst.renderer = self.renderer_combo.currentData() or "auto"
         inst.perf_g1gc = self.g1gc_chk.isChecked()
         inst.perf_disable_explicit_gc = self.noexgc_chk.isChecked()
+        _gc = self.gc_combo.currentData() or "follow"
+        inst.gc_mode = "" if _gc == "follow" else _gc
+        inst.mem_optimize = self.memopt_combo.currentData() or ""
         inst.game_args = self.game_args_edit.text().strip()
         inst.java_path = self.java_combo.currentData() or ""
         inst.java_force = self.java_force_chk.isChecked()
