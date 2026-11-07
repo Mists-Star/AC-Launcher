@@ -1,4799 +1,771 @@
-# AC Launcher 更新日志
+# 质量开放项清单（punch list）
 
-> **版本策略（2026-09-02 起）**：正式发布前不再使用 `v1.x` 前缀，改为纯
-> `round-NN` 内部迭代号。对外版本号只有在按《RELEASE\_1.0.0\_CHECKLIST.md》
-> 全部完工、完成首个 release 时才一次性打上 `v1.0.0`。
-> **补记说明（2026-09-16）**：下列 round-78 ~ round-91 为 09-03 ~ 09-12 期间
-> TRAE 迭代完成、但当时未同步 CHANGELOG 的批次（代码随 `57825e6` 一并入库）。
-> 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
-> 非逐条精确记录。
-
-## 2026-11-06 真机验收修订（WorkBuddy，非 TRAE 迭代批次）
-
-> 按 `docs/round163_instance_java_reliability/tasks.md` 重打部署后真机验收，
-> 用户连报数个现象。随后按用户「按你的来」授权，把真机暴露的问题与模组 /
-> 资源链路复查结果一并修成一批（round-177）。全部 P1/P2 登记见
-> `docs/quality_punchlist.md` 第七章、七·续与第八章。
-
-### 修复 / 行为变更
-
-* **新建 1.21.10 实例点「创建」毫无反应（P0，静默失败）**：`result_data()` 自
-  `4811b8f` 起返回 7 元组（新增 `format` / `base`），版本页弹窗已适配，但实例页
-  嵌入式向导的 `created` 信号仍声明 5 参 → `emit(*7)` 抛 `TypeError`，Qt 槽内
-  异常只被全局钩子写进 `data/crash.log`（15 条同错，不弹框不关窗）。信号扩为
-  7 参；新增 `tests/test_new_instance_signal.py`（Qt 元对象运行时验签 + 返回值/
-  信号/槽三方一致 + 全仓 63 处 Signal/emit 超参扫描）。
-* **启动游戏后启动器真退出（行为变更）**：`close_after_launch` 原实现在 5s 后
-  `_tray_auto_quit=True` + `close()` → `QApplication.quit()`，把 `QTimer(self)`
-  形态的 `_game_poll_timer` 一并销毁 → 退出码分类、崩溃弹窗、`last_session`
-  崩溃记录、退出后命令、控制台结束标记、托盘结束游戏全部失效，玩家退出游戏后
-  也找不到启动器。改为**隐藏到系统托盘（无托盘则最小化到任务栏）、进程常驻**，
-  游戏退出时先恢复窗口再走崩溃诊断。round-57 为「退出后命令」加的常驻守卫随之
-  移除。中英文案、设置页行为说明联动同步更新；新增
-  `tests/test_post_launch_behavior.py`（18 条行为 + 静态防再犯判据）。
-* `tray_minimize` 的 UI 缺省值由 `True` 对齐为 `False`（与 `_DEFAULTS` 一致）；
-  设置页「行为说明」不再依赖托盘开关是否勾选。
-
-### 验证
-
-* `regress.py` **40/40 exit 0**（新增 1 套）；`tests/test_settings_conflicts.py`
-  按新语义重写（原判据锁定已废弃的「自动关闭优先于托盘常驻」文案）。
-* 新 exe 重打部署到 `<本机部署目录>`，保留 `launcher_config.json` / `data/`；
-  `AC_NO_TERMS=1` 10 秒冒烟通过，无残留锁；从部署版 exe 的 PYZ 归档反查
-  bytecode 确认改动确实进了产物。
-
-### round-177 追加（同日 21:00 后，与上一节同一批交付）
-
-用户明确指出「模组那三个缺口只是举例，得自己去找还有没有别的」，因此对
-「版本过滤 → 依赖解析 → 下载落盘 → 崩溃补前置 → Java 选择」做了逐行复查。
-结论与逐条 `file:line` 见 `docs/quality_punchlist.md` 第八章；以下为本轮实际改动：
-
-* **Java 下载链路重写**（`src/core/java_install.py`）：原先裸单流 GET
-  `api.adoptium.net` → 307 到 GitHub Releases，本机实测 ~10 KB/s（55.9 MB
-  约 95 分钟）。改为 **USTC 镜像优先 / 官方兜底 / Range 断点续传**；
-  取消或失败只删半成品 zip，**不再 `rmtree` 掉已装好的 `jre-<major>/`**。
-* **Java 下拉看不见 25**（用户实报：「路径能选、能启动，就是列表里没有」）：
-  `JAVA_CHOICES` 最大 24、`available_majors()` 离线回退静态表、而
-  `installed_majors()` 只用于渲染「已安装」卡片 → 候选表从未并入已装 major。
-  现在 `available_majors()` 合并已装项，`java_manager_dialog._populate_majors`
-  也直接并入，并把 25 加进静态表。
-* **状态栏进度闪烁**：`main_window.py` 的 `status` / `speed` / `progress`
-  三路信号原先直连全局状态栏、无 worker 归属判断，取消/失败只 pop worker
-  不 disconnect，旧任务残留值与新任务交替刷（用户看到的「一串 9」）。改为
-  按活跃 worker 归属过滤 + 终态清空 disconnect；下载失败对话框加醒目终态
-  （`src/launch_dialog.py`）。
-* **实例详情页「启动」按钮**：原先只 `set_current()` + 刷新，不启动也不跳
-  首页（点了像死的）。改为「体检 / 启动诊断」，新增
-  `src/launch_diagnostics_dialog.py`：复用现成体检，并补一页启动命令 /
-  classpath / 缺库 / Java 信息，**账号名、UUID、令牌恒为占位符**。
-  中英 `instances.launch` 与 20 个 `diag.*` 文案同步。
-* **模组下载链路真 bug**（`src/net_api.py` / `src/crash_analysis.py`）：
-  ① 崩溃自动补前置不带 MC 版本/加载器 → 装到不兼容最新版，现传实例参数；
-  ② 模糊匹配失败时 `hits[0]` 兜底会装进无关模组，现直接计入失败；
-  ③ `parallel_download_file` 预删 `dest`，分片与单流兜底双失败会**删掉玩家
-  原本能用的 jar**，现全程写 `.part` + `os.replace` 原子覆盖；
-  ④ `resolve_mod_dependencies` 本体无匹配/网络错被静默吞掉，现顶层抛出；
-  ⑤ 6 处外部返回的 filename 加 `_safe_filename()` 挡路径穿越；
-  ⑥ Modrinth 两条下载路径落盘后校验 `files[].hashes.sha1`。
-* **`build.py` 退出码说真话**：`_trim_dist()` 的 `_rm()` 只 `except OSError`
-  → 批量删除保护抛出的非 OSError 异常穿透后，PyInstaller 明明已经
-  `Build complete`、`build.py` 却返回 1，极易误判为构建失败。现把瘦身与缓存
-  清理都改为 best-effort（异常吞掉 + 打印明确警告，KeyboardInterrupt 仍可
-  穿透），**退出码改由产物完整性决定**（`AC_Launcher.exe` +
-  `_internal/PySide6` 存在才算成功）。新增 `tests/test_build_trim.py`：
-  模拟 `SystemExit` / `RuntimeError` / `OSError` 三种删除失败，并验证
-  「trim 全失败仍返回 0、产物残缺才返回 1」。
-
-### 验证（本批最终状态）
-
-* `regress.py` **44/44 exit 0**；i18n 中英 **1625=1625**、文案门禁
-  （含新增 `diag.*`）/ PII 门禁 / `git diff --check` 全过。
-* `build.py` 修复后**真跑一次完整构建验证**：瘦身阶段被批量删除保护拦下
-  67 次（`SystemExit: 1`），全部降级为警告，`BUILD_PY_EXIT=0`，日志末尾
-  `[build] OK 产物完整` —— 不再出现「Build complete 但 EXIT=1」。
-* 产物补完翻译瘦身（116 个多余 `.qm` 全清）后重打部署到 `<本机部署目录>`，
-  保留 `launcher_config.json` / `data/`（含 JRE 25）；`AC_NO_TERMS=1` 10 秒
-  冒烟通过、无残留锁；从部署版 exe 的 PYZ 归档反查 **15 条判据全 PASS**
-  （诊断模块 / Java 镜像与 25 / 状态栏归属 / sha1 与文件名清洗 /
-  崩溃补前置 / 诊断文案）。
-
-### 仍未修（已登记，非本批范围）
-
-CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash 校验、
-三处「一键修复」语义不统一、`download_modpack_to` 版本口径未统一、
-`crash_analysis` 缺前置只比字符串、右键菜单无「实例体检」入口。
-分组与修复顺序见 punchlist 第八章。**双轨验收提醒**：本批代码轨 + 构造判据
-已过，但「状态栏不再闪」「Java 25 出现在下拉」「诊断页可打开」仍需在真客户端
-各目检一次才算结案。
-
----
-
-## round-189（2026-11-07）— 修改页重做：加载器卡片选择器 / 版本下拉 / 危险区
-
-用户实拍真机界面：「我们整个修改太简陋了，而且内容和细节完善度不全面」。
-对着 PCL/HMCL 的做法逐项看，差距不是配色而是**信息形态**：
-
-* 加载器是一个**光秃秃的下拉** —— logo、名字、说明全藏起来了，点开才知道
-  选了啥，选错了更看不出；
-* 游戏版本是一个**自由文本框** —— 可以打进根本不存在的版本号；
-* 危险区只有一句 hint，看不出到底会删什么、会留下什么。
-
-### 改动
-
-1. **加载器卡片选择器**（新 `src/loader_picker.py`）：每个加载器一张卡
-   （logo + 名称 + 一句说明，如「Fabric：轻量、性能好，模组最多」）。
-   logo 复用 `assets/icons/loader_*.png`（HMCL 已整理好的现成图标集，
-   见 `assets/icons/LOADER_LOGOS.md`）。选中态是 accent 描边 + 名称变色。
-   按 MC 版本过滤后**重新按 3 列重排** —— 只隐藏会留空洞。
-2. **游戏版本改成可编辑下拉** + 「选版本」按钮：点按钮后台拉官方版本列表
-   （`net_api.fetch_versions`，走磁盘缓存）填进去；仍可手输。
-   改版本有去抖，避免每敲一个字发一次网络请求。
-3. **加载器版本列表标注「最新」**：各 meta API 都按新→旧返回，第一条加角标。
-4. **危险区说清楚后果**：红字「会删除：本实例 versions 下的加载器版本目录」+
-   灰字「会保留：模组、存档、libraries 与游戏文件」，卸载按钮改成 danger 样式。
-5. **当前加载器卡**加了 loader logo 与更醒目的状态字。
-
-### 顺带修掉的一个真 bug
-
-`LoaderPicker.current()` 原来返回「第一个可用的卡」而不是「选中的卡」——
-玩家点了 Quilt，程序却以为还是原版。新判据直接钉死「点哪张 current 就是哪张」
-（这个 bug 是新测试当场抓出来的）。
-
-### 验证
-
-* `tests/test_round189_modify.py`（20 条）：卡片 logo 有像素、点哪张 current 就是
-  哪张、过滤后网格无空洞、版本框是可编辑下拉、danger/accent 样式、
-  「最新」标记唯一且落在拉回来的第一条。
-* `regress.py` **58/58**；i18n **1880 = 1880**；文案门禁 0 命中。
-
-## round-188（2026-11-07）— 内存管理（GC）下拉 + 启动前内存优化
-
-用户补刀：「启动前内存优化呢」—— PCL「内存分配」卡里还有这一项，上一轮只补了
-内存可视化条，漏了。
-
-### 内存管理（GC）—— 对齐 PCL「内存分配 → 内存管理」
-
-实例字段 `gc_mode`：跟随全局设置 / 尽量使用 ZGC / 尽量使用分代 ZGC / 标准 G1GC /
-调优 G1GC / 不指定。对应 JVM 参数：
-
-| 模式 | 注入 |
-|---|---|
-| ZGC | `-XX:+UseZGC` |
-| 分代 ZGC | `-XX:+UseZGC -XX:+ZGenerational`（Java 21+） |
-| 标准 G1GC | `-XX:+UseG1GC` |
-| 调优 G1GC | `+G1NewSizePercent=20 / G1ReservePercent=20 / MaxGCPauseMillis=40` |
-| 不指定 | 不加任何 GC 参数 |
-
-**关键护栏**：显式选了 GC 就**不再叠加**原来那组 G1GC 参数 —— ZGC 与 G1GC 互斥，
-同时下发 JVM 直接起不来（这是会炸游戏的组合）。面板上选了具体 GC 时，
-「G1GC 优化参数」复选框自动置灰并换提示文案。
-
-### 启动前内存优化
-
-实例字段 `mem_optimize`：跟随全局设置 / 开启 / 关闭（新增全局项 `mem_optimize`）。
-
-启动游戏前把**启动器自己**占的内存还给系统：`EmptyWorkingSet(GetCurrentProcess())`
-裁工作集 + `gc.collect()` 回收 Python 堆，释放超过 32 MB 时在启动状态行提示
-「已释放 XX MB 内存给游戏」。
-
-**做不到**的写在模块注释里：清空系统 standby list 需要管理员权限的
-`EmptyStandbyList`，不做 —— 只做「自己那部分」，不假装能做全局的。
-失败一律静默：优化是锦上添花，绝不能因为它挡住启动。
-
-### 验证
-
-* `tests/test_round188_memory.py`（30 条）：五种 GC 模式的参数注入、**显式 GC 与
-  G1GC 组互斥**（ZGC+G1GC 不能同时出现、g1_tuned 的调优参数不能被重复注入两次）、
-  实例 on/off/跟随全局三态、面板两个下拉与写回。
-* `regress.py` **57/57**；i18n **1864 = 1864**；文案门禁 0 命中。
-* 实拍：设置页内存区（内存条 + 说明行 + GC 下拉 + 启动前内存优化下拉，选 ZGC 时
-  G1GC 复选框自动置灰）。
-
-## round-187（2026-11-07）— 编辑面板 8 页重排 5 页 + 功能补齐（对齐 PCL）
-
-用户：「实例修改页面很难受，看看其他启动器怎么做的」「主要不是空，是功能和
-便捷性和完整性」。
-
-### 结构：8 页 → 5 页（对齐 PCL 的 概览/设置/修改/Mod 管理/导出）
-
-| 新页 | 收编了什么 |
-|---|---|
-| **概览** | 原基础页（名称/分组 + 状态卡）+ 原高级页的 实例 ID/来源、导出整合包，新增 **快捷方式**（游戏目录 / mods / 存档三个直达按钮，PCL 概览同名卡片） |
-| **设置** | 原 启动 / Java / 目录与格式 三页合并：启动格式、版本隔离与自定义目录、实例标识、Java、内存与性能、JVM 与游戏参数、**服务器（自动进入）**、启动前后命令 |
-| 修改 / 模组 / 内容 | 原样保留 |
-
-旧 5 个页函数（basic/launch/java/dir/adv）退役，字段一个没丢 —— `_collect`
-读的还是同一批属性。
-
-### 功能补齐（对着 PCL 的设置页一项项核）
-
-1. **内存可视化条**（PCL 同款三段色块：其他程序已用 / 本实例分配 / 剩余）+
-   一行说明「系统内存 X GB · 可用 Y GB · 本实例分配 Z GB」。分配超过系统内存
-   85% 时红字提醒（PCL 同款护栏）。读内存用 ctypes
-   `GlobalMemoryStatusEx` —— psutil 在本机 venv 是坏的（缺
-   `_psutil_windows`），不要引。
-2. **自动进入服务器**（PCL「自动进入服务器」同款）：实例字段
-   `auto_server`（IP:端口），启动时自动追加 `--server/--port`。优先级：
-   收藏服务器直连（round-83 一次性覆盖）> 实例字段 > 全局参数里的 --server。
-   `launch.py` 的 `parse_game_args` 本来就会解析这两段，这里只是把入口从
-   「手改游戏参数」升级成独立字段。
-3. **补全文件**（PCL 概览「高级管理」同款）：概览页新增按钮，手动触发
-   `install_instance` 的幂等校验 + 重下缺失文件 —— 不用等启动失败才知道文件缺了。
-
-### 验证
-
-* `regress.py` **56/56**；i18n **1849 = 1849**；文案门禁 0 命中；PII 351 文件 zero。
-* 实拍：概览页（信息+快捷方式+高级管理）、设置页（内存条渲染正确、8192 MB
-  时紫段约占一半）、内存说明行文案正确。
-* 端到端断言：`auto_server` 写回实例、`_collect` 全字段保留。
-
-## round-186（2026-11-07）— 修改页按版本过滤 + 装加载器顺手装 Fabric API
-
-用户三条：「下加载器不下配套 fabric api」「修改的选项中会出现不存在的加载器与
-版本，而且功能不全，建议仿照 PCL」。
-
-### 修复：出现「不存在的加载器与版本」
-
-根因是**从来没按 MC 版本筛过**：
-
-| 位置 | 旧实现 | 后果 |
-|---|---|---|
-| 加载器下拉 | 直接列 `LOADERS` 全表 | 1.12.2 的实例也能选 NeoForge（1.20.1 才有）、Fabric（1.14+）、Quilt |
-| Fabric 版本 | `mll.fabric.get_all_loader_versions()` | **全历史**构建（0.4.x → 最新），不区分 MC 版本 |
-| NeoForge 版本 | `mll.Neoforge.get_loader_versions()` | **所有 MC 版本**混在一起（20.1.x / 20.4.x / 21.x） |
-
-* 新增 `src/core/loader_catalog.py`：加载器 × MC 版本的可用性目录
-  （Fabric ≥1.14、Quilt ≥1.18、NeoForge ≥1.20.1、LiteLoader ≤1.12.x、
-  Legacy Fabric ≤1.13.2、Cleanroom 只 1.12.2）。**快照版不做静态判断**，
-  交给「版本列表为空」兜底。
-* 修改页的加载器下拉按当前 MC 版本重建；改 MC 版本立刻跟着变。
-  实例**当前**的加载器永远保留 —— 否则用户一打开面板自己的加载器就"消失"了，
-  保存时还会被悄悄换成原版。
-* Fabric / Quilt 的版本列表改走官方 meta 的**按 MC 版本**接口
-  （`net_api.fetch_loader_builds`）；NeoForge 按版本号前缀裁（20.1.x ↔ 1.20.1），
-  且先卡「NeoForge 压根没有 19.x」的下限。
-* 版本列表为空时给的是「{mc} 没有这个加载器的可用版本（不是网络问题）」，
-  并**禁用安装按钮** —— 空列表不再被当成网络失败。
-
-### 新增：装加载器顺手装 Fabric API
-
-* 修改页加「同时安装 Fabric API」勾选项（默认勾上），只在 Fabric / Quilt
-  时出现。
-* 加载器装成功后自动按「当前 MC + 当前加载器」从 Modrinth 拉对应版本的
-  Fabric API 进 mods 目录（`core/loader_swap.install_fabric_api`）。
-* 这一步失败**不会**把「加载器已装好」说成失败 —— 两件事分开提示。
-
-### 视觉：复选框终于有勾了
-
-全局 QSS 的勾选态原本是「一块纯紫方块」，没有勾形标记 —— 模组列表几十行
-都是这样，分不清「已勾选」还是「一个色块」。改成白底 + accent 描边 + 紫色
-对勾（`assets/icons/tick.svg`），任何 accent 亮度下都读得清。
-
-### 验证
-
-* `tests/test_round186_loader.py`（40 条）：静态规则逐条、1.12.2 与 1.20.1 两套
-  加载器表、NeoForge 前缀裁剪、Fabric API 只对 fabric/quilt 生效、
-  面板下拉确实按版本过滤、当前加载器永远在、勾选项只在 fabric/quilt 显示。
-* 实拍：1.12.2 实例的修改页（无 NeoForge）与 Fabric 实例的修改页
-  （共 255 个可选版本 + Fabric API 勾选）。
-* `regress.py` **56/56**；i18n **1832 = 1832**；文案门禁与 PII 门禁全过。
-
-## round-185（2026-11-07）— 模组页重做：读 jar 真实元数据 + 搜索/筛选/批量
-
-用户：「mod 功能太难用了，建议整个重做，学其他启动器的」。
-
-### 诊断：难用在「根本不知道装了什么」
-
-| 项 | 旧实现 | 后果 |
-|---|---|---|
-| 名称 | 文件名去掉 `.jar`，`-` `_` 换空格 | `fabric-api-0.92.2+1.20.1` 显示成「fabric api 0.92.2+1.20.1」 |
-| 加载器徽章 | 文件名里**含 "fabric"/"forge" 子串** | `sodium.jar` 没徽章；`fabric-api` 被认成 fabric 加载器 |
-| 描述 / 作者 / 图标 | **完全不读** jar 里的清单 | 只剩一行文件名 |
-| 找模组 | 无搜索、无筛选、无多选 | 20+ 个只能一条条滚 |
-| 密度 | 74px 大卡片 | 一屏 6 条 |
-| 批量 | 一次只能点一条 | 40 个模组想全禁用得点 40 次 |
-
-### 新增 `src/core/modmeta.py`：读 jar 里的真清单
-
-按优先级探测 ``fabric.mod.json`` / ``quilt.mod.json`` /
-``META-INF/neoforge.mods.toml`` / ``META-INF/mods.toml`` / ``mcmod.info``，
-取出 id、名称、版本、描述、作者、环境、依赖的 MC 版本，以及**图标字节**
-（fabric 的 icon 可能是字符串或分辨率字典，取最高档）。
-
-* 不依赖 Qt（只回字节，转 pixmap 是 UI 的事）；
-* 读不出来返回 ``None`` 而不是抛异常 —— 一个坏包不该让整个列表打不开；
-* 按 (路径, mtime, 大小) 缓存，30 个模组首次 0.12s、重载 0.06s。
-
-### 新增 `src/mod_list.py`：对齐 PCL 的 Mod 管理页
-
-    搜索（名称 / 描述 / 作者 / 文件名）
-    工具条：添加模组 · 打开文件夹 · 刷新 · 全选
-    筛选：全部 / 已启用 / 已禁用 / 可更新
-    列表：58px 紧凑行（图标 · 名称 · 版本 · 加载器 · 作者 · 描述 · 启停开关）
-    选中后底部条：已选 N 项 → 启用 / 禁用 / 更新 / 删除所选 / 取消选择
-
-* 「可更新」复用现有 `mod_updater.check_updates`（网络失败自动退回「全部」）；
-* 点行任意空白也能勾选（18px 的勾选框点起来太费劲）；
-* 选中行整行高亮 + 左侧紫条 —— 全局 QSS 的 checkbox 选中态是**一块纯紫方块**，
-  没有勾形标记，几十行都这样分不清「已勾选」还是「一个色块」（见 punchlist）；
-* 空态给三条路：从文件安装 / 打开 Mod 文件夹 / 说明「拖 .jar 进去也算安装」。
-
-### 变更
-
-* 编辑面板「模组」页整页换成 `ModListPanel`；旧 `ModCard` 仍用于独立的
-  模组页（那里的 `_mod_display_name` 也改为优先读 jar 清单）。
-* i18n 增 19 个键（zh/en 各一份，1826 = 1826）。
-
-### 验证
-
-* `tests/test_round185_mods.py`（58 条）：**造真 zip 包**覆盖 fabric / quilt /
-  forge / neoforge / 老版 mcmod.info 五种清单 + 坏包 + 无清单包；断言读出来的
-  是 jar 里写的名字而不是文件名、图标字节能解码、缓存命中、搜索命中描述/作者、
-  筛选三态、批量启停真落盘（文件名真的变成 `.jar.disabled` 再变回来）、批量删除。
-* 实拍：5 个模组的列表页与批量条截图；30 个模组时滚动范围正常。
-* `regress.py` **55/55**；文案门禁与 PII 门禁全过。
-
-## round-184（2026-11-07）— 「修改」页对齐 PCL / 导出 .mrpack / 更多按钮
-
-### 用户报的两件事
-
-1. **「这里为什么有一个下拉还有 3 个点的省略？」** —— 实例卡的「更多操作」钮。
-   `QPushButton("⋯")` + `setMenu()` 时 Qt 会在文字旁**再画一个 ⌄**
-   （`menu-indicator`），30px 方钮里挤成「⋯⌄」；而且「⋯」是 U+22EF，
-   常用中文字体没这个字形，缺字时是豆腐块。
-   * 新增 `assets/icons/more.svg`（三点图标），按钮改纯图标；
-   * 全局 QSS 加 `QPushButton::menu-indicator { image:none; width:0 }`
-     （文字已表达「更多」，不需要第二个箭头）；
-   * `icons_rc.py` 重新生成（61 个图标）。
-
-2. **「去看看 PCL 的修改版本到底是什么再来改」** —— 查了 PCL2 源码
-   （`Pages/PageInstance/PageInstanceLeft.xaml`）。版本设置左侧其实是
-   **概览 / 设置 / 修改 / Mod 管理 / 导出**；「修改」= `PageDownloadModify`，
-   职责是**装 / 换 Mod 加载器**，不是字段表单。设置页里才有内存、Java、
-   JVM、窗口标题那些，且每个设置项旁有「初始化」重置该版本的独立设置。
-
-### 变更：新增「修改」页
-
-* 第 3 项导航「修改」，把**游戏版本 / 加载器 / 加载器版本 / 安装·更新 /
-  退回原版**从「启动」页整体搬过来；「启动」页只剩内存、JVM、渲染器与
-  性能开关。
-* 为什么值得单独一页：换加载器是「真下文件、真删目录」的重操作，和调内存
-  这种改个数就生效的设置混在一起，玩家分不清哪一下会动磁盘。页面顶部直接
-  写明「只影响本实例；mods、存档、libraries 都不动」。
-
-### 新增：导出 .mrpack（此前只能导入）
-
-* `src/core/mrpack_export.py`：写 `modrinth.index.json` + 把内容放进
-  `overrides/`；依赖映射 fabric→`fabric-loader`、quilt→`quilt-loader`、
-  forge→`forge`、neoforge→`neoforge`，原版不写加载器键。
-* **为什么 files 全空、内容走 overrides**：`files` 每项都必须带可直链下载
-  地址与 sha1/sha512，而本地 jar 无从反查它来自哪个 CDN —— 硬编假 URL 会让
-  对方的导入直接失败。规范本身允许「无法从 CDN 获取的内容」整体塞进
-  `overrides/`（随包附带），保真优先，代价只是没有 CDN 去重。
-* `src/export_pack_dialog.py`：包名 / 版本号 / 简介 / 六个内容块勾选
-  （mods、config、options.txt 默认勾；资源包、光影、存档默认不勾）/ 保存位置 /
-  后台打包进度。入口两个：实例卡「⋯」菜单、编辑面板「高级」页。
-* 单块超过 512 MB（存档很容易爆）直接跳过并在结果里列出来，不把磁盘写满。
-
-### 验证
-
-* `tests/test_round184_export.py`（33 条）：索引结构 / 依赖映射 / 勾选控制 /
-  边界（无版本、无内容、非法字符）/ 进度回调，以及**用
-  `minecraft_launcher_lib.mrpack` 读回自己写的包**（第三方解析往返 ——
-  只靠自己读自己会掩盖格式错误）。实测 `get_mrpack_launch_version` 推出
-  `fabric-loader-0.15.11-1.20.1`。
-* `tests/test_round183_editor.py` 扩到 8 页断言，并加「修改页含加载器控件 /
-  启动页不再放加载器」两条结构判据。
-* `regress.py` **54/54**；i18n **1807 = 1807**；文案门禁与 PII 门禁全过。
-
-## round-183（2026-11-07）— PCL 式整页编辑面板 / 加载器真装真卸 / pcl 格式
-
-> 用户拍板（2026-11-07 00:56）：「新建整页编辑面板，左侧分组导航，加载器
-> 真装真卸，模组增删启停内嵌不跳页；新建向导补启动格式下拉与 pcl 枚举」。
-> 对应 `docs/quality_punchlist.md` 第十一章 ②③。
-
-### 新增
-
-* **`src/instance_editor.py` — `InstanceEditorDialog`**：把原来 480×620 的
-  一条长滚动框换成整页式编辑，左侧竖排导航（基础 / 启动 / Java / 目录与格式 /
-  模组 / 内容 / 高级），右侧单页内容。同一面板内直接增删启停 mod、删资源包与
-  存档、装卸加载器，不再跳页。
-* **`src/core/loader_swap.py` — 加载器真装真卸**：
-  * `swap_loader()` 走 `core.install.install_instance`（幂等补全）真装，成功
-    后清理不再被引用的旧加载器版本目录——这才是「换」而不是「叠一层」；
-    失败**回滚字段**，不把实例留在半个加载器的状态。
-  * `uninstall_loader()` 删实例自己 `versions/<loader-id>/` 退回原版，mods 与
-    存档保留；`external` 实例（导入的外部游戏目录）**拒绝卸载**，避免把别的
-    启动器弄坏；路径越界（`..` 跳出 versions）一律拒绝；`libraries/` 永不删。
-* **启动格式 `pcl`**：`INSTANCE_FORMATS` 补 `pcl`，`_probe_format` 用 PCL2 的
-  工作目录特征（`<mc>/PCL/Setup.ini|Latest.ini|PCL.ini`）识别；徽章色 `#0EA5E9`，
-  文案 zh/en 各一份。
-* **新建向导**：目录下拉补 `pcl`（选 PCL2 的 `.minecraft`），并新增一行
-  「启动格式将标记为：…（建好后可在「编辑实例」里改）」——此前新建全程
-  一处都不显示格式，玩家自然觉得「看不到各种格式」。
-
-### 变更
-
-* 实例右键新增「编辑实例」；详情面板齿轮与右键都打开新面板。
-* `pages_instances._edit_instance_settings` 由 280 行内联对话框改为薄封装：
-  只保留「版本变了触发后台补全」与刷新列表两件收尾。
-
-### 收尾：按七页真机截图修排版（12:5x）
-
-面板能开 ≠ 画得对。用部署目录的两个真实实例 offscreen 渲染七页截图逐页目检，
-查出并修掉六处：
-
-* **实心按钮上的图标是一团暗影**（放大 4× 才认出是下载箭头）：`make_button`
-  一律拿主题文字色 tint 图标，近黑压紫底。改为 `kind ∈ accent/play/danger` 走
-  `on_accent()`，跟随 `text_on_accent`（浅色 accent 下自动转深，不写死白色）。
-  全项目 4 处 accent+icon 按钮同时受益（「新建实例」「添加模组」「安装 / 更新」）。
-* 「＋ ＋ 添加模组」两个加号：文案键 `mods.add` 自带「+」，与图标重复 →
-  新增 `inst.mods_add`。
-* 模组空态标题写着「暂无可用实例」（借用实例列表的空态键）→ 新增
-  `inst.mods_empty_title`。
-* 高级页游戏目录显示成 `\Appdata\AC_Launcher\…`（盘符被吃掉）：只读 QLineEdit
-  设值后光标停在末尾 → `setCursorPosition(0)`。
-* `QSpinBox` 右侧怪线 + 滚动区滚轮静默改内存值 → `NoButtons` + 全局
-  `wheelEvent` 补丁。
-* 「当前状态」半屏灰字墙 → 两列表格 + 路径独立段落。
-
-### 收尾二：大尺寸图标描边（用户实拍指出「四方圆角图标被遮挡」）
-
-模组页空态那个四宫格图标做成 56px 后，描边同比涨到 4.7px、方块间隙只剩
-4px（gap/stroke = 0.67）→ 四块粘成一团，读起来像「被相邻方块遮挡」。
-先前我只检查了「有没有被容器裁掉」，没看**描边配重**，所以漏了。
-
-* `icons.pixmap_large()`：按目标**物理像素**反推 SVG 单位描边
-  （``stroke_px / scale``，只减不增）。描边取 ``size × 0.06`` 并夹在
-  [2.6, 5.0] —— 固定值在 80px 上会显单薄（2.8 偏细、4.2 又回到粘连，
-  是四档 1:1 实拍比出来的）。实测 56/72/80px 三档观感一致：
-  描边 4/4/6px，中缝 6/8/8px。
-* `ui_kit.empty_state()` 与登录页的 56px 头像回退全部改走这条路径；
-  品牌/状态图（`_KEEP_COLOR`，加载器 logo / 绿勾 / 警告三角）**不参与**收细，
-  否则会把它们自带的颜色洗掉。
-* 判据（`tests/test_round183_editor.py` ⑩）：量 56px 渲染的「中缝/描边」比值
-  必须 ≥ 1.2，同时断言**旧实现 < 1.0**（先证明判据本身能抓到问题，再谈通过）。
-  实测 0.67 → 1.50。
-
-> ☠ 探针陷阱：`QTest.qWait` 会饿死后台 `Worker`（等满 12s 后台函数一次没跑，
-> Java 页恒显「尚未判定」）→ 必须用 `time.sleep()` + `processEvents()` 循环。
-
-### 验证
-
-* 新增 `tests/test_round183_editor.py`（62 条）：结构 / 文案漏键 / 格式枚举 /
-  卸载边界（误删、外来实例、越界）/ 装失败回滚 / PCL2 识别 / offscreen 真开
-  面板并保存 / UI 标签不污染字段 / 端到端落盘。
-* `regress.py` **53/53 exit 0**；i18n **1772 = 1772**；文案门禁与 PII 门禁全过。
-* 产物反查（dist_beta 与部署 exe 各一次）`ALL IN PRODUCT`：6 个模块逐个查名字与
-  字面量，含新文案键与 `ui_kit.on_accent`。
-* 体积：裁掉 68 个非 zh_CN/en 的 Qt 翻译后 **116.8 MB / 4098 文件**；
-  部署冒烟 pid 存活、206 MB、`crash.log` 未生成。
-
-## round-182（2026-11-07）— Cleanroom 拿错 Java / 黑窗 / 亮度与窗口模式 / 客户端增强包
-
-> 用户报：「cleanroom 的 1.12.2 我用 java25 他启动不了，而且还拉起我 D 盘
-> java26 的 cmd 空窗口」。先复现再改，四条独立缺陷叠在一起。
-
-### 实测到的根因链
-
-用探针在**部署目录**（`D:\Appdata\AC_Launcher`）跑，输出与用户描述逐字对应：
-
-| 步 | 实测输出 | 含义 |
-|---|---|---|
-| 1 | `installed_majors() = {25: …\data\java\jre-25\…\java.exe}` | Java 25 确实装着（round-177 装的那份） |
-| 2 | `scan_javas(deep=False)` 只有 `Oracle\javapath\javaw.exe`（major 0） | **自动选择看不到启动器自己下的 JRE** → `java25_path() = None` |
-| 3 | `cleanroom_installer_java() = D:\Appdata\java26\bin\javaw.exe` | 于是回退到「最高的现代 JVM」，正是用户看到的 java26 |
-| 4 | `select_java('1.12.2', need=25) = None` | 启动前判据直接判「没有兼容 Java」 |
-
-连带三处：`run_cancellable` 用裸 `Popen`（窗口应用拉起控制台程序 → **全黑 cmd 窗**）；
-`javaw→java.exe` 归一后更明显；找不到 25 就走 `--provision-java`，而 Zulu CDN
-在国内实测卡在 `~/.cleanroom/java/.zulu25.38.107-…zip.part` **822 KB** 不动 → 900 s 超时。
-
-### 落地
-
-* `core/java.py`：`scan_javas` 把 `<data>/java/jre-*`（`installed_majors()`）并入，
-  且排在最前 —— 精确匹配优先选启动器自己的运行时。round-177 只接进了 Java 管理页
-  的下拉，自动选择/体检/Cleanroom 安装器都还是瞎的。
-* `core/install.py`：`cleanroom_installer_java(user_path)` 支持玩家显式选择
-  （≥17 即可跑安装器）；`_console_java()` 把 javaw 归一成同目录 java.exe。
-* `core/install.py`：新增 `_ensure_java25()` —— 缺 25 时用**我们自己的镜像链路**
-  （USTC/Adoptium，实测 20 MB/s 级）装一份，再交给 `--java`；装不上才退回
-  `--provision-java`，并在退回前清掉超过 1 小时的 `.part` 残包。
-* `core/mirror.py`：`run_cancellable` / `kill_process_tree` 一律带
-  `CREATE_NO_WINDOW`，安装器不再弹黑窗。
-* 安装失败信息补上「用的哪个 Java」：`Cleanroom installer failed (exit N) · Java 25 (path): …`。
-* 设置 → 基础：新增**亮度（Gamma）覆盖**（`gamma_override` / `gamma_value`，
-  0–10）。启动前写进 `options.txt`，退出**不还原**（退出时回写反而会抹掉玩家
-  在游戏里手调的值）。
-* 设置 → 基础：新增**游戏窗口模式**（窗口化 / 无边框 / 全屏，`window_mode`）。
-  `launch._apply_game_window_mode()` 启动前写 `options.txt` 的 `fullscreen`；
-  原版没有原生无边框全屏（要 OptiFine/Sodium），`borderless` 按全屏处理。
-
-### 客户端增强包（新功能）
-
-用户问：「有没有能力给 AC 配一些可以便利游戏中的功能，比如 mod 中的鼠标手势
-功能可以不加 mod 直接在游戏中使用？」先查证再动手——
-
-* 查证结论：他指的是 **Mouse Tweaks**（YaLTeR，BSD-3，Modrinth `mouse-tweaks`）。
-  它 hook 容器界面的 `mouseClicked / mouseDragged / mouseScrolled`，必须知道
-  「光标下是哪个 slot、手里拿着什么、对面是什么容器」。启动器在进程外只有像素，
-  硬做等于按坐标盲点，**最坏会把物品丢到地上**。所以这条路只能装 mod。
-* 落地为「一键装 / 卸」：实例右键 → **客户端增强**（`src/enhance_dialog.py`）。
-  14 个条目分 5 组（操作手感 / 性能 / 光影 / 信息与界面 / 前置库），覆盖
-  Mouse Tweaks、Controlling、AppleSkin、Sodium、Lithium、FerriteCore、
-  Entity Culling、ModernFix、Iris、Jade、Mod Menu 与三个常用前置库。
-* ☠ **支持范围走运行时查询**（`net_api.project_supports` 读 Modrinth 声明的
-  loaders / game_versions），不硬编码——上游扩了支持范围这里自动跟上。
-  只在**确认不支持**时禁用，未知一律放行。
-* ☠ **卸载只删自己的主文件**：自动带上的前置库保留（别的 mod 可能也在用），
-  并明确提示「没删，确实不要去 mods 目录手删」。
-* 记录 `<mc_dir>/.ac-enhance.json`（原子写；点开头 JSON，Minecraft 与
-  PCL2 / HMCL / Prism 都不读）。记录失效时靠 jar 里的 mod id 兜底识别，
-  不会把用户从资源中心装的同一 mod 再装一遍成两份。
-* 加载器候选链：quilt → (quilt, fabric)、cleanroom → forge、legacyfabric →
-  (legacyfabric, fabric)；**neoforge 不拿 forge 顶替**（1.20.2 后已分家）；
-  原版 / OptiFine / LiteLoader 明确告知「没有加载器，装不了」。
-
-### 验证
-
-* 探针 before/after：`java25_path()` 由 `None` → 真实路径；`cleanroom_installer_java()`
-  由 `java26` → Java 25；`select_java(need=25)` 由 `None` → 命中。
-* 增强包清单里 14 个 Modrinth slug **逐个实测存在**（不猜），加载器与版本
-  范围从 API 实读（例：`sodium` = fabric / neoforge / quilt，**无 forge**；
-  `mouse-tweaks` = fabric / forge / modloader / neoforge）。
-* 新增 `tests/test_round182_cleanroom_java.py`（扫描合并 / 优先级 / 隐藏控制台 /
-  javaw 归一 / gamma 写入与夹取，19 条）。
-* 新增 `tests/test_round182_enhance.py`（清单完整性 / 加载器链 / 记录读写 /
-  已装三层识别 / 卸载保留前置 / 状态机 / 中英对齐，45 条）。
-* `regress.py` **52/52 exit 0**。
-
----
-
-## round-181（2026-11-07）— 资源中心秒加载 / 加载器图标复用主流现成集
-
-> 用户反馈「资源中心点一个加载一次，好慢，图标加载慢得要命」，并要求
-> 「加载器看看其他启动器是什么样的，基本上是一样的，可以复用他们的，
-> 不要自己乱找」。本批按可测量证据修，不靠感觉调参。
-
-### 实测到的四个真因（量化，见 `_scratch` 日志）
-
-| 现象 | 证据 |
-|---|---|
-| 点一次加载一次 | `pages_browse.py:133` / `:414` / `store_detail.py:246` 各 `new ImageLoader(self)`，详情面板**每次点都新建** → 3 套 `QNetworkAccessManager` / 内存缓存 / 并发队列，连接池与 TLS 握手重来 |
-| 图标慢得要命 | 真机 `data/cache/icons/` **38 MB / 240 文件**，最大单文件 **18.8 MB**，反查是 `media.forgecdn.net/avatars/*.gif`（CF **作者头像动图**，被 `_cf_map_row` 当项目图标）。curl 实测该图 **25.0 s / 752 KB/s**，一个就占满 6 个并发槽之一 |
-| 缓存越用越大 | 落盘存的是未经缩放的原图；另一次实测 Modrinth 原图冷连 16.4 s |
-| 详情重复请求 | 每次点开都 `_load_first_page()` + `_translate(auto=True)`，前者拉版本列表、后者走在线机翻，均无跨点击缓存 |
-
-### 落地
-
-1. **全局单例** `async_image.get_image_loader()`：三处调用点统一，进程内共享连接池与已解码图标。
-2. **数据层过滤** `net_api._cf_map_row`：`/avatars/` 路径或 `.gif` 一律当无图标，交给卡片首字母占位。
-3. **加载层熔断** `ImageLoader._on_ready_read`：`readyRead` 累计字节 > 512 KB 立即 `abort()`；`_read_orig` 读盘前淘汰旧版超大缓存文件。
-4. **落盘压成缩略图**：成功下载后统一缩到 ≤128 px、以 PNG 原子落盘（列表 48 / 详情 88 都够用），体积从 MB 级降到 KB 级。
-5. **详情 TTL 缓存** `store_detail._VERSION_CACHE` / `_TRANSLATION_CACHE`：按 `(source, project_id)` 缓存 10 分钟，第二次点开本地命中，不再重拉版本列表、不再重机翻；机翻渲染抽成 `_render_translation()` 供两条路径复用。
-6. **加载器图标改复用主流现成集**：按用户要求不再逐个溯源上游官方原图、不再猜 CDN 变体，直接采用 **HMCL `assets/img/*@2x.png`** 的 8 张（Fabric/Forge/NeoForge/Quilt/OptiFine/Cleanroom/LegacyFabric/草方块），补齐了官方未单发 logo 的 Cleanroom；LabyMod / LiteLoader HMCL 未收录，保留上一轮官网 favicon。QRC 与 `icons_rc.py` 重新生成，10 个图标逐个 Qt 渲染实测非 null。来源与 GPL-3.0 署名见 `assets/icons/LOADER_LOGOS.md`。
-
-### 门禁与验收
-
-* `regress.py` **50/50 exit 0**（新增 `tests/test_round181_perf.py` 32 条判据：单例、熔断、淘汰、缩略图、CF 过滤、TTL、图标渲染与许可）。
-* 构建 `EXIT=0`，产物 PYZ 反查 **18/18 PASS**；⚠ 用户 23:56 起一直开着
-  启动器验收，本批**未覆盖安装目录、未冒烟** —— `dist_beta` 产物已备好，
-  等其退出后一条命令即可部署。**双轨验收仍欠真机目检**（滚动图标补全速度、
-  连续点两个项目是否秒开、Cleanroom 图标观感）。
-
-## round-180（2026-11-06）— 官方图标 / 图标缓存 / 加载器交互 / 排版
-
-> 用户要求：「本来就不要 svg 生成，全部都是复用对应官方给的，包括下载版本
-> 也是」；「资源中心有缓存有些还是没图片，其他启动器怎么搞的」；「顺便美化
-> 页面排版和点击进入后的详情页表现，契合其他启动器」。
-
-### 官方加载器图标（零自绘）
-
-* 9 个 `assets/icons/loader_*` 全部替换为**上游官方原文件**：
-  Fabric / Forge 官方站 PNG，Quilt / NeoForge 官方 SVG，OptiFine / LabyMod /
-  LegacyFabric / LiteLoader 官网 favicon.ico，**Vanilla 用随包官方 MC
-  `grass_block` 贴图**（与版本卡片同一套资源）。删掉全部手绘 SVG。
-* `icons.py` 新增 `_ICON_EXTS = (.svg, .png, .ico)`，`_icon_path` /
-  `_svg_bytes` / `_plain_icon` 与 `tools/generate_qrc.py` 全部按扩展名解析，
-  `icons.qrc` / `icons_rc.py` 重新生成；Qt `qico` / `qsvg` 插件承载原格式。
-* **Cleanroom 官方仓库与官网均未发布品牌图** → 不硬造，删掉自绘占位，
-  走中性色块 + 卡片名称。OptiFine 官方 favicon 只有 16×16，放大略糊但不重绘。
-* `assets/icons/LOADER_LOGOS.md` 记录每个文件的来源、许可、署名、GitHub
-  多源获取方式，以及**主流启动器实证对比**：Prism 用 FreeDesktop 图标主题
-  （`index.theme` + 11 个尺寸目录 + scalable），HMCL 用 48 个 `*.png` /
-  `@2x`（含 `cleanroom.png`、无 liteloader），PCL2 用 WPF 内置 PNG。
-  这三家都是各自维护的图标集，不是嵌官方原图；本仓按用户要求走官方原文件。
-* GitHub 直连不通时换通路：DevHub `gh_proxy_health` / `gh_proxy_fastest`
-  选节点 + 联网抓取直接读仓库页定位**真实路径**（`static/img/logo.svg` 不在
-  根目录）+ `gh-proxy.org` / `github.cnxiaobai.com` / `gh.monlor.com` 三节点
-  代理 raw（对 NeoForge logo 均 200 / 12434 B）。
-
-### 资源中心图标缓存（「有缓存还是没图」的真因）
-
-`async_image.ImageLoader` 重写。真机 `data/cache/icons/` 80 个文件 =
-40 URL × 2 尺寸、最小 848 B、**零坏文件**，所以不是缓存损坏，而是：
-
-1. 旧实现按 `(url, size, dpr)` 各存一份、各发一次网络请求，一次搜索 N 个
-   结果就是 2N 个并发（48px 卡片 + 72px 预取），QNAM 同主机默认 6 连接；
-2. 失败时**不重试、不记负缓存、不检查 HTTP 状态码**（403/429 返回 HTML
-   会当成功但不写盘）→ 失败的 URL 永远没有缓存；
-3. 部分 CF 卡片 `logo.url` 为空 → 显示首字母占位，看着像「没图片」；
-4. `bump()` 让在途回复即使成功写盘也不回写已重建的卡片。
-
-现在：**原图按 URL 只缓存一份**（`<md5>.img`），各尺寸内存派生；同 URL
-在途请求去重并挂等待表；检查 `HttpStatusCodeAttribute`；失败负缓存 + 指数
-退避（60s 上限）；最多 6 个在途、其余排队；坏缓存文件删除重下；`bump()`
-只让旧 widget 失效，同 URL 的新卡片照样能拿到图。`net_api._cf_map_row`
-补 `logo.thumbnailUrl` / `screenshots[0]` 回退。
-
-### 加载器选择与版本展示（punchlist 第十章 ①③）
-
-* `_select_loader`：重复点同一张卡不再重发 Worker；版本下拉结果按
-  `(mc, loader)` 缓存；`ldver_box` 改用高度占位隐藏（不再 `setVisible`
-  造成布局跳动）；选中态不再依赖 `card.isVisible()`；
-  `selected_loader_version()` 改用显式标志，避免占位隐藏时误取值。
-* 默认项从「最新稳定版（推荐）」改为**显示具体版本号**（`最新版本
-  0.16.10（推荐）`），玩家知道会装哪个、可复现。
-* `version_channel()` 从上游标题识别 `beta/preview/snapshot/recommended`，
-  UI 加「测试版 / 稳定版」角标；**纯版本号一律 `unknown` 不加角标**，
-  不假造稳定性。各数据源统一补 `channel` 字段。
-
-### 排版（按设计系统 token，只改结构真问题）
-
-* 列表卡片：描述改单行 `QFontMetrics.elidedText`（旧 `wordWrap(True)` 会把
-  84px 卡撑成两三行、整列节奏忽松忽紧），全文放 tooltip；标题加字重；
-  meta 行加来源标签 + `ui_kit.format_count()` 人读下载量，次信息降到
-  `text_disabled` token，拉开三级层级。
-* 详情页：封面 72 → 88px、主标题改用全站 `big` 类、meta 加来源标签与
-  格式化下载量。**未引入新色值 / 渐变 / 卡中卡**，全部走现有
-  `COLORS` / `RADII` / `ui_kit` 组件。
-
-### 验证
-
-* `regress.py` **49/49 exit 0**（新增 `test_round180_ui.py` /
-  `test_round180_icon_cache.py`）；i18n **1634=1634**、文案门禁 / PII /
-  `git diff --check` 全过；9 个官方图标逐个 Qt 渲染实测非 null。
-* 新 exe 重打部署到 `<本机部署目录>`，保留 `launcher_config.json` / `data/`；
-  `AC_NO_TERMS=1` 10 秒冒烟通过。
-
-> ⚠ 双轨验收仍欠真机：切换加载器不再跳、默认版本号显示、渠道角标、
-> 资源中心滚动时图标补全率、详情页观感；以及此前累计的所有真机项。
-
----
-
-## round-179（2026-11-06）— 实例布局专属标识 / 启动格式自动查验
-
-> 用户方案：新建/下载版本本来就能选格式（AC 自有 / 原版共享 / 版本隔离 /
-> 其它启动器实例），给这些格式加**只有 AC 识别**的标识码；顺序为
-> 「先找识别码 → 命中就按对应格式查漏补缺 → 没查到（或选了不查验完整性）
-> 才看一遍实例特征并补写识别码」；**把默认 AC 格式识别改成自动查验**，
-> 防止外来实例被按 AC 规矩乱补全。评审记录见 punchlist 第九章。
-> 用户已拍板：标识**写进 `.minecraft`**、**一次做到自动查验**。
-
-### 落地
-
-* 新增 `src/core/instance_marker.py`：`<mc_dir>/.ac-layout.json`（点开头的
-  未知 JSON，Minecraft / PCL2 / HMCL / Prism 都不读不索引，**不影响正常启动、
-  不影响迁移、不影响其它启动器识别**）。内容不是格式枚举，而是**逐项路径
-  映射**（`install_dir` / `versions_root` / `mods_dir` / `saves_dir` /
-  `assets_dir` / `libraries_dir`，相对 `mc_dir`）——格式枚举表达不了「游戏
-  目录被拆成多层、资源分散在不同层」的极端布局。
-* `instances._resolve_layout()` 成为唯一解析入口：
-  **找标识 → 命中且指纹有效就直接用记录的路径 → 没标识才看磁盘特征 →
-  高置信度才把结果写回标识**。`detect_format()` 与 `layout_of()` 都走它；
-  `layout_of()` 返回结构保持原 5 键，启动 / 补全 / 重建 / 体检四个消费点
-  **零改动**，另加可选 `from_marker` / `marker_missing` 供体检显示。
-* ☠ **默认 AC 格式识别改成自动查验**：过去 `detect_format()` 第一优先级
-  `_is_ac_owned()` 直接 `return "ac"`，跳过一切特征；现在 AC 自有目录里
-  若出现 `mmc-pack.json` / `minecraftinstance.json` / `profile.json` /
-  `instance.cfg` 等**权威外来标记**，会降级到实时探测，不再按 AC 规矩补全。
-  同时保留 round-164 的「AC 扁平 json 不切根」保护（这一点在回归里被抓到
-  并修正，见下）。
-* ☠ **修「自定义启动格式没实际作用」的真 bug**：`instances.py:779`
-  `add()` 里 `format=(format or "").strip() if base else ""` —— AC 自有布局
-  （`base` 空）时**向导里选的格式被直接丢弃**。现无条件保留。
-* 标识绑定实例身份（`owner` / `kind` / `launcher` / `game_version` /
-  `declared_format`）+ 目录指纹：实例来源变了、游戏版本换了、玩家在设置里
-  改了手选格式、或目录结构被外部改动 → 标识自动作废重探，**绝不拿旧表硬补**。
-  低置信度（特征全 miss 兜底 vanilla）不写标识。原子写，写失败静默降级。
-* 设置 → 行为新增「查验启动格式完整性」开关（默认开，`_DEFAULTS` /
-  UI / 回写 / 中英文案全接线）。关闭后不读不写标识，每次实时识别；
-  **AC 自动查验仍生效**（那是防错补的核心，不能关）。
-* ☠ `core/instance_rebuild.py:_collect_candidates` 排除点开头的隐藏 json：
-  标识是 `.json`，落在 `mc_dir` 里会被当成版本文件，导致「无版本文件」误判
-  成有、重构出错误实例定义。同类扫描点已排查（元数据目录 / 资源索引 /
-  主题包目录都不受影响）。
-
-### 验证
-
-* `regress.py` **47/47 exit 0**（新增 `test_round179_instance_marker.py`
-  27 条：读写/降级/指纹/身份/路径安全/自动查验/开关/add() 保留格式/
-  标识不被当版本 json）。
-* 回归中真实抓到并修掉两处：`AC 扁平 json 不切根` 保护被破坏、
-  `test_format.py` 同目录多实例导致标识串（改为绑定身份 + 指纹校验）。
-* i18n **1631=1631**、文案门禁 / PII / `git diff --check` 全过。
-* 新 exe 重打部署到 `<本机部署目录>`，保留 `launcher_config.json` / `data/`；
-  `AC_NO_TERMS=1` 10 秒冒烟通过。
-
-> ⚠ 双轨验收欠账：本批仍是代码轨 + 构造判据，**未真机复现**。需要真机看
-> ① 首次启动实例后 `data/instances/<id>/.minecraft/.ac-layout.json` 生成；
-> ② 手动往 AC 实例目录塞一个 `mmc-pack.json` 后，格式徽章/体检不再标 `ac`；
-> ③ 设置里关掉「查验完整性」后不再写标识；④ 把该 `.minecraft` 复制给别的
-> 启动器仍能正常启动。
-
----
-
-## round-178（2026-11-06）— 模组 / 资源链路第二批（A/B/C/D 组）
-
-> 承接第八章审计的剩余 P1。用户「先干其他那一组的事情」授权后按
-> B（底层通用能力）→ A（依赖与版本）→ C（检测）→ D（入口）顺序落地。
-> 逐条状态（含**明确未修**项）见 `docs/quality_punchlist.md` 八章「round-178
-> 收尾状态」。本批同样**未联网 / 未真机复现**。
-
-### B 组：下载完整性做成通用能力
-
-* `download_file` / `parallel_download_file` 新增 `expected_sha1`：在 `.part`
-  **阶段**校验，坏字节永远不会被 `os.replace` 成正式文件；不匹配就丢弃
-  `.part` 按瞬时错误重下（分片路径同样回退单流从头下）。
-* 新增 `_cf_sha1()` 兼容 CF 官方 `hashes[algo=1]`、cfwidget 字典与顶层字段，
-  **MD5 / fileFingerprint 绝不冒充 sha1**；`download_curseforge_mod`、
-  `_download_cf_keyless`（缓存里一并存 hash）、`download_curseforge_file`、
-  `download_cfwidget_file` 全部接入；Modrinth 两条路径改走通用参数，删掉
-  「先落盘再验、验不过删 dest」的下游补丁。
-* 顺带修 `download_cfwidget_file` 对字符串 fileID 直接 `// 1000` 的
-  `TypeError`，并给 3 处文件名拼接补 `_safe_filename`。
-
-### A 组：依赖树与 CF 版本口径
-
-* `resolve_mod_dependencies` 跳过 `embedded`（已打包进本体的库，多下一个
-  jar 会 duplicate modid）、递归传依赖声明里的 `version_id`、顶层指定版本
-  不存在时明确抛错。
-* **CF 资源中心卡片下载不再取最新一条**：新增 `mc_version` / `loader` 参数与
-  `_cf_filter_files()`，按 `gameVersions`（cfwidget 用 `versions`）过滤，
-  无匹配直接拒绝并说明原因；三路 UI（官方 API / keyless slug / cfwidget
-  文件）全部传实例版本。整合包 manifest 指定 `file_id` 时是精确版本，不过滤。
-* `_download_cf_keyless` 指定 fileID 找不到时**不再静默退回最新文件**（会装出
-  与作者声明不一致的整合包且玩家无感知），改为明确报错。
-* `get_mod_download` / `download_modpack_to` 支持 `version_id`（默认路径保持
-  单参调用，老调用点 / mock 全兼容）；`get_mod_download` 指定版本不存在报错。
-* 详情页是玩家**显式选了版本**，只接 sha1，不做实例版本二次过滤（会误拒）。
-
-### C/D 组：模组依赖统一为一套能力
-
-* 新建 `src/core/mod_repair.py`：`scan_missing()` 显式区分「没有缺失」与
-  「jar > 60 深扫被跳过」（旧行为误报「依赖齐全」）；`match_project()` 只接受
-  规范化后完全相等（`Fabric API` ↔ `fabric-api` 认，**不做 `startswith`
-  宽松匹配**，`fabric-api` 不再误命中 `fabric-api-base`）；
-  `repair_missing()` 返回结构化结果与 `search` / `match` / `download`
-  三阶段失败原因。
-* `crash_analysis.search_and_download_missing` 改为兼容薄封装，旧签名不变。
-* 崩溃弹窗「一键修复」补汇总终态（不再只调依赖补装却什么都不说）、
-  结构化失败明细、跳过扫描提示；实例右键新增「补装缺失依赖」，走同一模块。
-  中英 4 组新文案对齐。
-* **纠错**：右键菜单本来就有「实例体检」和「崩溃分析」，八章原登记「无入口」
-  不准确，已在 punchlist 里更正。
-
-### 仍未修（非遗漏，有意排期）
-
-CF `required` 依赖树递归（keyless 通道能否稳定返回 dependencies 未核实）、
-`find_missing_dependencies` 不解析版本区间、启动前缺前置是否拦截（产品语义
-待定）、体检对话框 `missing_dep` 仍 `fix=None`、三处「一键修复」中
-`diagnostics.repair_all` 刻意不并入模组域（职责不同）。
-
-### 验证
-
-* `regress.py` **46/46 exit 0**（新增 `test_round178_mod_integrity.py` 30 条、
-  `test_round178_mod_repair.py` 22 条）；i18n **1629=1629**、文案门禁 /
-  PII 门禁 / `git diff --check` 全过。
-* 新 exe 重打部署到 `<本机部署目录>`，保留 `launcher_config.json` / `data/`；
-  `AC_NO_TERMS=1` 10 秒冒烟通过、无残留锁。
-
----
-
-## round-176（2026-11-03）— 安装路径断点续传 / 低速判据 / 429
-
-> 横评发现：HMCL、XMCL 全路径 Range 续传，PCL2 有低速判据，Prism 对 429 指数退避；
-> 我们只有自有下载器具备这些能力，**版本安装走 mll 的 `download_file` 时全都没有**。
-> 本轮补齐这三处，全部落在 `src/core/mirror.py` 与 `src/net_api.py`。
-
-### 修复 / 改进
-
-* **mll 安装路径断点续传**：`_wrap_download_file` 不再对非大文件原样转发，改走
-  `_resume_mll_download()`：写 `<path>.part`，下次用 `Range: bytes=N-` 续传；
-  206 追加，200（服务器不认 Range）自动清空重下；sha1 边下边算（省掉 mll 下完
-  再整文件读一遍），完成后 `os.replace` 原子落位。416 时按 `.part` 校验收尾。
-  任何无法接管的异常（含 lzma 目标）退回原实现，行为不变。
-* **低速判据**：已收 ≥256 KB、窗口 ≥8s、平均 <6 KB/s 视为「活着的死链」，
-  断开后从 `.part` 续传重试一次；仍慢则退回原实现。专治读间隔超时抓不到的
-  「几 KB/s 吊着」场景。
-* **429 单独处理**：`_try_source` 解析 `Retry-After`（秒数，缺省 5s，上限 20s），
-  等一次再试；**不计入来源健康失败**——限流说明源是活的，不该被 90s 冷却。
-  超过一次后仍按普通失败切源。
-* **分片只补失败段**：`net_api.parallel_download_file` 第一轮只收集失败段，
-  第二轮单独补跑（每段内部已有 3 次重试），仍失败才清残件回退单流；重跑时
-  回退该段进度，避免进度条越过 100%。
-* 顺带修正 `_try_parallel_mll._cancel()` 把属性当方法调用的问题。
-
-### 🔍 验证
-
-* 新增 `tests/test_mll_resume.py`（第 36 套，24 项断言）：Range 续传 / 200 回退 /
-  已存在跳过并清 `.part` / sha1 不符抛 `InvalidChecksum` / 低速两轮退原实现 /
-  429 只等一次且不计健康失败 / `Retry-After` 解析 / 包装器不误调原实现。
-* `regress.py` **36 / 36** 全绿；`compileall` 通过。
-* 构建 116.4 MB / 4097 文件（round-175 瘦身后不变）；部署
-  `<本机部署目录>`（exe 6,356,104 B），10 秒冒烟 `ALIVE pid=25692`，
-  已杀进程并清理锁与 `.upd_bak`。
-
-## round-175（2026-11-03）— 共享 assets + 打包瘦身 19 MB
-
-> 来源：用户提出「怎样减少启动器大小，是否需要转语言」，并行对照 HMCL / PCL2 /
-> PrismLauncher / Modrinth App / XMCL 后，落地两项：磁盘去重与安装包瘦身。
-> 调研全文见 `docs/launcher_comparison_2026-11.md`。
-
-### 修复 / 改进
-
-* **assets 共享池（磁盘）**：现代版本单实例 assets 约 300–600 MB，此前每个实例
-  各存一份。`src/core/shared_libs.py` 把 round-48 的 libraries 联接机制抽象成通用
-  `_ensure_shared_dir()`，新增 `ensure_shared_assets()`，实例 `<mc_dir>/assets`
-  指向 `data/shared/assets`。内容按 sha1 寻址、indexes 按版本命名，天然可共享；
-  已有实例首次启动时自动把旧 assets 并入池（同卷 rename，不复制）。
-  `instances.py` / `launch.py` 在创建与启动前调用；删除实例前统一摘除
-  libraries/assets 两个联接（`_strip_shared_junctions`），不会顺着链接误删池。
-* **打包瘦身（安装包 19.2 MB）**：spec 新增 `_DROP_BINARY_PATTERNS` 过滤
-  `a.binaries`，剪掉被插件连带收集、项目零使用的 Qt 组件：Qt6Quick / Qt6Qml* /
-  Qt6VirtualKeyboard（由 `platforminputcontexts/qtvirtualkeyboardplugin.dll` 拉入）、
-  Qt6Pdf（由 `imageformats/qpdf.dll` 拉入），以及 tiff/icns/tga/wbmp 图像插件、
-  direct2d 平台插件、qtuiotouch 插件。构建 135.6 → **116.4 MB / 4097 文件**。
-* **分发压缩暂不换 LZMA**：实测 LZMA 可把包压到 46.6 MB（Deflate 58.8 MB），
-  但 Windows 资源管理器内置解压**不支持** LZMA 方法，玩家手动解压会失败；自动
-  更新虽可用 `tar.exe` 解，但首次安装面更广。故保持 Deflate，待改为安装器时再议。
-
-### 🔍 验证
-
-* 新增 `tests/test_shared_assets.py`（第 35 套，19 项断言）：旧 assets 并入池、
-  联接可读、幂等、libraries/assets 两池互不污染、摘联接后池完整、空/不存在
-  game_dir 安全返回 False。
-* `regress.py` **35 / 35** 全绿；`compileall` 通过。
-* 构建产物核对：Qt6Quick/Qml/Pdf/VirtualKeyboard 与 qpdf、platforminputcontexts
-  均已不存在，Qt6Widgets/Qt6Multimedia/opengl32sw 保留。
-* 部署 `<本机部署目录>`（exe 6,351,833 B），10 秒冒烟 `ALIVE pid=22560`，
-  随后杀进程、清理锁与 `.upd_bak`。
-
-## round-174（2026-11-01）— 来源健康与超时策略（BMCLAPI 不再「一直等响应」）
-
-> 来源：用户现场反馈「部分情况下载慢，还有 bmclapi 总是等待响应」。排查结论：
-> 镜像挂住时，每个文件都按官方源口径等连接 10s + 读 30s，还在同一个镜像上再
-> 重试一次（≈80 秒/文件）；即便最后回退官方，几百个文件累加就是「一直在等」。
-> 403/404 之外的超时/连接错误也没有任何记忆，下一个文件继续白等。
-
-### 修复 / 改进
-
-* **按来源超时**：镜像 `(5, 15)`、官方 `(10, 30)`。镜像只是「加速手段」，
-  不值得为它长时间等待；官方跨境连接慢，超时保持原值。显式传入 timeout 的
-  调用方（如分片下载）不受影响。
-* **镜像失败不重试**：超时 / 连接错误直接换官方，省掉一次完整的白等；
-  官方源仍保留 1 次重试。`_try_source` 新增 `retries` 参数按来源区分。
-* **进程级来源健康表 `SourceHealth`**：连续 2 次连接类失败（超时 / 连接重置）
-  或 5xx → 冷却 90 秒，冷却期内所有请求直接走官方、不再逐文件试探；冷却结束
-  自动恢复探测（再给 2 次机会）。401/403/406（镜像明确拒绝）立刻冷却。
-  404 不计入 —— 可能只是该文件没同步，逐文件回退即可。
-* **慢镜像让位**：响应头 EWMA ≥ 4 秒且样本 ≥ 5 时，把官方排到候选链首位，
-  镜像保留作回退（不直接判死，避免「官方也慢」时反而没得用）。
-* **大文件分片路径一并生效**：`_rewrite()`（客户端 jar 分片并行用）在镜像
-  不健康时不再改写为 BMCLAPI，20~25MB 的 jar 不会卡在挂住的镜子上。
-* **保持 strict 语义**：镜像被健康表剔除后官方变成单候选，仍按「双源皆失败
-  必须显式报错」处理，避免 mll 的 `download_file` 把 404 静默吞成「安装完成」。
-* 诊断日志（`set_diag(True)`）新增 `health <source> down (<reason>)` 行。
-
-### 🔍 验证
-
-* 新增 `tests/test_mirror_health.py`（第 34 套）：超时/重试按来源区分；健康表
-  连续 2 次失败进入冷却、0.4s 后自动恢复、403 立刻冷却、EWMA 慢源判定；
-  `_rank_candidates` 三种形态（镜像在前 / 只剩官方 / 官方+镜像回退）；
-  `MirrorSession.send` 真流程前两次「镜像失败→官方」、第三次起只发官方且
-  仍 `strict=True`；`_rewrite` 在镜像不健康时保持官方 URL。
-* `python -m compileall -q src tests` → 通过。
-* `python regress.py` → **34 / 34 全绿**（i18n 1605 / 1605、文案门禁全过）。
-
-## round-173（2026-11-01）— Java 下载看得见：阶段 / 大小 / 速度 / 可取消
-
-> 来源：用户现场反馈「其他下载进度和大部分信息看不到，比如说 java 下载」。
-> AC 自有的 Java 下载器（`core/java_install.py`，Adoptium Temurin）此前在
-> 「设置 → Java」里只有一根进度条：服务器不给 `Content-Length` 时永远空白，
-> 解压阶段完全没提示，而且**没有取消**——关掉对话框线程还在后台拉几十 MB。
-
-### 修复 / 改进
-
-* **一行说清在干什么**：下载区新增状态标签，按 `connect`（连接下载服务器）→
-  `download`（`已下载 10.0 MB / 50.0 MB（20%） · 2.0 MB/s`）→ `extract`
-  （解压运行时）切换；总大小未知时退回「已下载 X（总大小未知）」，不再一根空条。
-* **可以取消**：`install_java(..., cancel=...)` 每读一块检查一次取消标记，
-  抛 `JavaInstallCancelled`；下载区新增「取消下载」按钮，点后变「正在取消…」，
-  收尾后显示「已取消下载」。
-* **不留垃圾**：取消 / 失败一律删掉半截 `_dl_<major>.zip`；解压中途取消
-  （zipfile 没有取消点）会在解压后复查一次，直接丢弃半成品目录，避免留下
-  一个启动不了的坏运行时。
-* **关掉对话框就真的停**：重写 `done()`——点标题栏关闭或底部「关闭」，都先
-  `cancel()` + `wait(2000)` 再收尾，不再出现「窗口关了还在下」。
-  连接超时从裸 `60` 改为 `(10, 30)`，点取消最多等一个读超时即可退出。
-* **新手教程同一套信息**：`_JavaInstallThread` 增加 `phase_changed(str, float)`
-  与 `cancelled` 信号（下载回调按 100ms 节流，顺带算平均速度），教程页
-  也显示「连接 / 下载 + 速度 / 解压 Java {major}」。
-
-### 🔍 验证
-
-* 新增 `tests/test_java_download.py`（第 33 套）：假响应 2 MB / 8 KB 一片（不取消
-  要 ~2.5s）→ 下载中取消，断言 0.01s 抛出 `JavaInstallCancelled`、zip 与半成品
-  目录都不在；正常路径断言阶段顺序 `connect → download → extract` 并落盘
-  `bin/java.exe`；`_JavaInstallThread.cancel()` 只发 `cancelled`；对话框状态行
-  实测「已下载 10.0 MB / 50.0 MB（20%） · 2.0 MB/s」，关闭时 `cancel()` +
-  `wait(2000)` 被调用；i18n 中英 9 个新键齐全。
-* `python -m compileall -q src tests` → 通过。
-* `python regress.py` → **33 / 33 全绿**（i18n 1605 / 1605、文案门禁全过）。
-
-## round-172（2026-11-01）— 取消启动真正停下下载（在途响应 / 安装器子进程 / 补全分支）
-
-> 来源：用户实测「启动时补全版本，点取消启动后下载不会停」。排查结论是取消
-> 一直是「协作式」的——只在**下一个请求发出前**生效，已经在读的文件会读到
-> 结束；加载器安装器 jar 的 `subprocess.run` 更是完全不可取消。
-
-### 修复
-
-* **在途下载立刻中断**：`InstallContext` 现在用弱引用登记每个在途响应，
-  `abort()` 直接 `shutdown(SHUT_RDWR)` 底层 socket + `close()`，阻塞中的
-  `copyfileobj` 当场抛错（实测中断耗时 **0.00s**，此前要读完整个文件）。
-  `_wrap_raw` 在没有测速计时器时也会登记，避免「无 meter 就漏登记」。
-* **安装器子进程可取消**：新增 `run_cancellable()`（`Popen` + 每 0.2s 轮询，
-  取消即 `taskkill /F /T` 杀整棵进程树并抛 `InstallCancelled`），并把
-  `subprocess.run` 换成 `_SubprocessShim` 注入 fabric / forge / neoforge /
-  quilt 四个 mll 模块——这几个安装器 jar 自己还会下载几百 MB。
-  Cleanroom / OptiFine 的 `java -jar` 调用一并改走 `run_cancellable`。
-* **取消不再换源重跑**：`_retry_with_mirror` 之前把取消异常当成「源失败」，
-  会切到另一个源把整套安装重来一遍。现在 `abort_requested()` 时直接抛
-  `InstallCancelled`；`install_instance` 入口也先判一次取消标记。
-* **启动期补全不再吞掉取消**：`launch.py` 的 classpath 补全分支原先
-  `except Exception: pass` → 取消后还会继续拉起游戏。现在进入补全前先查取消
-  标记，取消异常（含 socket 被掐后抛出的杂项异常）统一归一为
-  `InstallCancelled` 向上抛，界面按「已取消」显示。
-* **大文件分片下载也停**：分片下载跑在 mll 的池线程里，线程局部上下文为
-  空，`_cancel()` 之前恒返回 False。现在从会话带上 `ctx`（并让「分片失败 →
-  回退单流」的判断也用它），取消时不再退回单流接着下。
-
-### 🔍 验证
-
-* `tests/test_cancel.py` 新增 round-172 段：本地慢速 HTTP（1 MB / 20ms 一片，
-  不取消要读 ~2.5 秒）→ 0.4s 后 `abort()`，断言线程 < 1.5s 内结束且**记为
-  异常而非正常完成**（实测 `0.00s raised:AttributeError`）；子进程那条用
-  `sleep 30` 的 Python 进程 → 断言 < 2s 结束、抛 `InstallCancelled`。
-* `python -m compileall -q src tests` → 通过。
-* `python regress.py` → **32 / 32 全绿**（含第 29 套「任务取消/强制退出」）。
-
-## round-171（2026-11-01）— 投影材料清单 / 存档地图 / 2D 分层预览（round-170 规格落地）
-
-> 来源：round-170 只写了 `docs/world_map_schematic_spec.md`，本批按规格
-> P1 → P2 → P3 真做出来。全部自研（不引入 `numpy` / `nbtlib` / 原版纹理），
-> 只用标准库 + PySide6。
-
-### 新增
-
-* **投影材料清单（P1）**：实例右键「导出材料清单」→ 选 `.litematic` → 后台
-  解析 → 同目录写 CSV（UTF-8 BOM，Excel 双击不乱码；表头
-  `block_id,count,percentage`，按数量降序）。未知方块种类数、文件头
-  `TotalBlocks` 与实际统计不符都会在提示里写明。
-* **存档地图（P2）**：实例右键「查看存档地图」→ 世界 / 维度（主世界 / 下界 /
-  末地）切换、1/2/4/8× 缩放、左键拖动平移、玩家与出生点标记。只读 `.mca`，
-  **绝不写存档**；缓存落在 `<data>/map_cache/`，以 mca 的 mtime + size 失效。
-* **投影 2D 分层预览（P3）**：实例右键「投影预览」→ 层滑杆（Y 范围取自投影
-  包围盒）、悬停显示方块短名、一键导出材料清单；空气留空，超过 6 像素/格时
-  画网格线。
-* 自建依赖：`core/nbt.py`（只读 NBT，gzip / zlib / 未压缩；深度 64、单数组
-  8M、解压 512 MB 三道安全上限）、`core/block_palette.py` +
-  `assets/block_colors.json`（约 190 条**自建近似色**，未知方块按 id 的 sha1
-  稳定灰阶，不打包任何 Mojang 纹理）、`core/schematic.py`（材料统计 /
-  分层网格 / CSV）、`core/world_map.py`（高度图定位表层 → 调色板取块 → 顶视图
-  RGBA）、`src/map_dialog.py`、`src/schematic_dialog.py`。
-
-### 变更
-
-* `pages_instances.py`：右键菜单新增「导出材料清单 / 投影预览 / 查看存档地图」
-  三项，解析与渲染全部在 `Worker` 后台线程，UI 不阻塞。
-* i18n 新增 34 键 × 2 语言（zh 1596 / en 1596，差异 0）。
-* `AC_PiTest_noupx.spec`：`_src_modules` 补 `src.core.nbt` / `block_palette` /
-  `schematic` / `world_map` / `src.map_dialog` / `src.schematic_dialog`。
-
-### 修复
-
-* **NBT 长数组字节序**：`array.frombytes` 按本机小端解释，而 NBT 是大端 →
-  `BlockStates` / 高度图在 x86 上整体错位、解出的方块索引全错。已加
-  `_to_big_endian()`（小端机器 `byteswap`）。这条由新测试当场抓出。
-
-### 🔍 验证
-
-* 新增 `tests/test_schematic_tools.py`（63 项断言，测试内自造 NBT 字节，
-  不依赖外部样本）：NBT 三种压缩 / 负数数组长度 / 超上限 / 递归深度；
-  位解包「1.16+ 不跨 long」与「1.15- 跨 long」互不等价；材料统计与空气过滤、
-  CSV BOM / 表头 / 降序 / 百分比、负尺寸区域起点回退、体积超限、旧版
-  `.schematic` 与空 `Regions` 的明确报错；合成 `.mca` → 顶视图 RGBA、
-  未生成区块透明、模组方块计入未知种类、磁盘缓存命中、`level.dat` 出生点与
-  玩家坐标；`MapDialog` 无存档空态 / 有存档铺图 / 两个标记；`SchematicDialog`
-  层滑杆范围 / 切层出图 / 悬停方块名 / 空层占位。
-* `python regress.py` → **32 / 32 全绿**（新增第 32 套「投影/存档地图解析」）。
-
-## round-170（2026-11-01）— 对齐 LumilioCL 0.2.3：启动命令双件套 / 正式版优先 / 目录向导 / 下载暂停重试
-
-> 来源：用户指出「LumilioCL 有一些新功能我们是没有的」。对照
-> `docs/lumiliocl_study.md` 第 11 节差距清单，补四项可直接落地、收益明确的
-> 能力；世界地图 / 投影预览 / 材料清单另出调研规格（只文档、不实现）。
-
-### 新增
-
-* **启动前命令（`pre_launch_cmd`）**：设置页「启动钩子」组新增输入框，
-  启动时在游戏目录执行并**等待完成**（上限 60 秒）。非零退出 / 超时都中止
-  启动，错误提示带末 400 字输出，避免「准备脚本没跑完就进游戏」。
-* **包装命令（`wrapper_cmd`）**：把完整 Java 命令交给外层工具，`{java}`
-  指定插入位置、不写则作为前缀（如 `mangohud {java}` / `prime-run`）。
-  Windows 走 `cmd /c`、POSIX 走 `/bin/sh -c`，支持引号 / 环境变量 / 管道。
-* **下载暂停 / 继续 / 重试**：下载对话框底部新增「暂停下载」→「继续下载」，
-  失败后保留对话框并出现「重试下载」（取消按钮变「关闭」）。暂停 =
-  协作式中断 + 保留 `.part`；继续 / 重试复用同一对话框与任务记录，从断点续传。
-  任务中心新增 `paused` 开路状态，实例卡显示「已暂停 N%」。
-* **目录丢失处置向导**：点击启动时游戏目录不存在，不再只报错，改为三选一
-  「新建空目录 / 打开所在位置 / 取消」；新建成功即继续启动，打开位置只
-  定位到最近现存上级目录。
-* **Modrinth 更新正式版优先**：一键更新优先选 `version_type == release`，
-  只有该游戏版本 + 加载器下完全没有正式版时才回退到列表首条（beta/alpha），
-  避免正式版内容被「更新」成测试版。
-
-### 变更
-
-* `launch.py`：新增并导出 `apply_wrapper()` / `run_pre_launch_cmd()`；
-  `launch_instance` 组装命令后先跑启动前命令、再套包装命令，任一步失败即抛错。
-* `launch_dialog.py`：新增 `pause_requested` / `resume_requested` /
-  `retry_requested` 信号与 `mark_paused` / `mark_resumed` / `mark_failed`；
-  `mark_failed` 不再自动关框；`set_cancelling` 同时禁用暂停 / 重试。
-* `main_window.py`：`_dl_dialog_for()` 复用对话框（信号只在新建时连一次）；
-  新增 `_pause_download` / `_resume_download` / `_retry_download` /
-  `_resolve_missing_game_dir`；`_on_download_error` 保留对话框改为「重试」入口；
-  `_on_download_error` / `_pause_download` 均登记 `_dl_stopping` 并轮询
-  `isRunning()`，等线程真正退出再允许继续 / 重试（防两个 worker 同写一份目录）；
-  `_cancel_download` 支持暂停态（worker 已停时不再要确认）；
-  `_active_task_dialog` 把暂停态也算作活动任务（状态栏可召回）。
-* `pages_instances.py`：`set_task_state` 新增 `paused`（警示色 + 「已暂停」），
-  不再把暂停误显示成「就绪」。
-* `core/task_center.py`：新增 `STATE_PAUSED`，`_OPEN_STATES` 含 `paused`
-  （状态机 `queued → running ↔ paused → done | failed | cancelled`）。
-* i18n 新增 25 键 × 2 语言（zh 1561 / en 1561，差异 0），未改
-  `tests/copy_allowlist.txt`（提示文案均压在长度预算内）。
-* 新增 `docs/world_map_schematic_spec.md`：世界地图 / 投影 2D/3D 预览 /
-  材料清单 CSV 的调研与规格。结论：材料清单 CSV 先做 → 世界地图次之 →
-  3D 预览最后；不打包原版纹理（用自建近似色表规避版权）。
-
-### 🔍 验证
-
-* 新增 `tests/test_launch_extras.py`（63 项断言）：包装命令（空 / 纯空白 /
-  前缀 / `{java}` 插入 / 非首位插入）、启动前命令（空 / 成功 / 非零退出 /
-  超时）、正式版优先与「无正式版回退」、目录向导三路分支（Windows 下 patch
-  `os.startfile` 记录打开的是最近现存上级目录）、下载对话框暂停 / 继续 /
-  重试按钮与信号、任务中心 `paused` 状态链、24 个新增 i18n 键实际取值。
-* `python regress.py` → **31 / 31 全绿**（新增第 31 套「启动命令/暂停下载」；
-  i18n 1561/1561 差异 0，`tests/check_copy.py` 全 PASS）。
-* 离屏真构造 `MainWindow` + 假 worker 探针（`_probe_170.py`，不入库）走完
-  新建 → 暂停 → 继续 → 失败 → 重试 → 暂停中取消，**29 项全 OK**：
-  复用同一对话框、恢复后新 worker、失败不关框、任务 id 正确翻开 / 收口。
-
-## round-169（2026-11-01）— 设置页冲突选项可见化（只加提示，不改行为）
-
-> 来源：用户截图指出「启动后自动关闭启动器」与「最小化到系统托盘（关窗不
-> 退出）」可以同时勾选，问「为什么一些冲突选项可以一起选择？」排查后确认
-> 设置页是扁平表单、逐键独立写配置，没有跨字段互斥或联动，运行期优先级
-> 只存在于代码里，玩家看不到。
-
-### 变更
-
-* **自动关闭 + 托盘常驻**：外观页新增说明——自动关闭会真正退出、优先于
-  托盘常驻；托盘常驻只对启动前手动关窗生效。
-* **自动关闭 + 退出后命令**：命令非空时提示自动关闭在运行期会被跳过、
-  命令仍会执行（行为未变，只是把静默跳过说出来）。
-* **低配模式**：开启后显示「外观/音效开关暂不生效，偏好保留」，对应
-  `slim.effective()` 对被压制项的处理，避免误以为两套开关冲突。
-* **Java 自动检测 + 强制不兼容**：自动检测开启时禁用「强制」开关并提示
-  「请先关闭自动检测」（自动检测下没有作用对象）。
-* i18n 新增 4 键 × 2 语言（zh 1536 / en 1536，差异 0），文案均压在
-  提示长度预算内，未改 `tests/copy_allowlist.txt`。
-
-### 🔍 验证
-
-* 新增 `tests/test_settings_conflicts.py`（17 项）：懒加载逐页进入后，
-  自动关闭/托盘的说明随勾选出现与消失、退出后命令输入的变化同步、
-  低配模式提示随开关切换、自动检测 Java 时强制开关禁用且取消后恢复。
-* `python regress.py` → **30 / 30 全绿**（i18n 1536/1536 差异 0，
-  `tests/check_copy.py` 全 PASS）。
-* 全页面构造冒烟消除 flake：冒烟只验构造，统一 no-op
-  `TrackedThread.start`（Worker / ProgressWorker / 下载队列都继承它），
-  不再让体检/Java 扫描线程与正在构造的对话框并发；带
-  `QT_QPA_FONTDIR` 连跑 8 次均 `exit=0`。
-
-## round-168（2026-11-01）— 下载可中断 / 启动可取消 / 强制退出与强制关闭
-
-> 来源：用户连问三句——「下载不能中断取消？启动游戏不能强制退出？不能强制
-> 关闭？」此前下载与启动只能在完成或失败时结束，玩家点 × 会被托盘隐藏，
-> 后台任务会一直拖住进程。
-
-### 新增
-
-* **下载可取消**：下载/补全对话框底部新增「取消下载」按钮
-  （`launch_dialog.py` 的 `cancel_requested` 信号）。点击后主窗弹确认
-  （「取消下载」/「继续下载」），确认即 `ProgressWorker.abort()` +
-  `requestInterruption()`，任务中心记「已取消」，进度条/速度/实例徽标复位，
-  面板显示「已取消下载」1.2 秒后自动关闭。
-* **启动可取消**：启动准备阶段同一位置显示「取消启动」；取消瞬间若游戏
-  进程已被 spawn，`cancelled` 信号带回运行结果，主窗用
-  `taskkill /F /T /PID`（非 Windows 走 `proc.kill()`）强杀整棵进程树，
-  不留孤儿游戏进程。
-* **托盘「强制退出（结束游戏）」**：无确认，直接 `kill_game()` →
-  `_abort_all_tasks()` → 关闭；普通「退出启动器」在有任务/游戏时先确认。
-* `src/win_rounded.py` 新增公开 `ask(parent, title, text, buttons, detail,
-  icon)`——复用 `_msgbox` 的主题化多按钮确认框，供取消/退出确认共用。
-
-### 变更
-
-* `ProgressWorker` 新增 `cancelled = Signal(object)`（与 `finished` /
-  `error` 三选一）与自有 `_cancel_requested` 标记；`run()` 建立下载 ctx 后
-  补一次 abort 检查；取消后再抛出的异常**不再**走 `error`（取消 ≠ 失败）。
-* `launch_dialog` 新增 `set_cancelling()`（禁用两个按钮 + 状态「正在取消…」）
-  与 `mark_cancelled()`（只改状态文案、不点亮步骤）。
-* 退出语义三级对齐：系统 × → 托盘隐藏（原行为，`tray_minimize` 且托盘可用）；
-  托盘「退出」→ 有任务/游戏先确认；真关闭（`closeEvent`）→ 有任务先确认，
-  拒绝则 `event.ignore()`，通过则 `_abort_all_tasks()` 后再
-  `drain_workers(4000)` 并 `QApplication.quit()`。
-
-### 保护措施与判断
-
-* **防双写**：新增 `_dl_stopping` 表记录「已取消、线程仍在收尾」的下载
-  worker；线程真正退出前禁止同实例重新下载（最多轮询 18 秒兜底放行），
-  避免两个 worker 同时写同一份游戏目录。
-* **防回滚**：`_on_download_status/_progress/_done/_error` 开头统一 guard
-  `if inst_id not in _dl_workers: return`，取消后的残留信号全部丢弃，
-  UI 不会被「下载中」状态复活，也不留下失败记录。
-* **防重入**：`_play_stopping` 在启动取消收尾期间拦截再次启动并给出提示；
-  `_poll_play_stopping` 校验 worker 是否仍是当前 `_play_worker`，旧任务
-  收尾不会误清新任务状态。
-* **一定能退出**：确认框不可用（无托盘 / headless）时
-  `_confirm_quit_with_tasks()` 返回 True 兜底；`_force_quit` 与 `kill_game`
-  的清理异常不阻断关闭（状态栏提示包 try/except）。
-* **Qt 6 判定修正**：`requestInterruption()` 在线程未运行时被静默忽略，
-  `isInterruptionRequested()` 不可靠 → 取消判据改为
-  `_cancel_requested or isInterruptionRequested()` 两者取或。
-* i18n 新增 16 键 × 2 语言（zh 1532 / en 1532，差异 0）；
-  `launch.dl_busy_toast` 改为「请先取消下载或等完成」。
-
-### 🔍 验证
-
-* 新增 `tests/test_cancel.py`（29 项）：取消发 `cancelled` 不发 `finished`
-  /`error`、`cancelled` 携带结果、未取消正常 `finished`、真失败仍 `error`、
-  取消后异常不发 `error`、`abort()` 置自有标记；TaskCenter `cancel()` 终态
-  且 `update()` 不复活；两种对话框取消按钮与文案区分、
-  `set_cancelling` 禁用、`mark_cancelled` 只改文案；14 个 i18n 键存在。
-* `python regress.py` → **29 / 29 全绿**（i18n 1532/1532 差异 0，
-  `tests/check_copy.py` 全 PASS；原 28 套无回归）。
-* `python -m compileall -q src` → 0 错误。
-* 离屏探针 `_probe_168.py`（不入库）24 项全 PASS：真 `MainWindow` +
-  `FakeWorker`/`FakeProc` 验证下载取消（abort、表清理、任务中心已取消）、
-  启动取消（收尾态、假进程被 taskkill、状态复位）、强制退出、带任务拒绝
-  确认时 `QCloseEvent` 保持未接受且不 abort。
-
-## round-167（2026-10-31）— 模块化启动器：功能页改成可物理删除的扩展包 + 低配模式
-
-> 来源：用户要求「允许玩家深度自定义启动器，剔除功能与性能改进」，并明确
-> 剔除的含义：「直接删掉，相当于模块化启动器，删掉一部分不影响；需要时可以
-> 回 GitHub 下回来，也可以手动写脚本装载到启动器上（类似另类插件）」。
-
-### 新增
-
-* **功能扩展包体系** `src/features.py`（核心骨架不变、功能可整块删）：
-  - 每个功能页 = `data/features/<id>/` 下的 `manifest.json` + `entry.py`；
-  - 首次启动从 `assets/features/<id>/` 复制安装；`registry.json` 的 `known`
-    记录「曾装过」，因此玩家删掉目录后**不会被自动装回**，可用模块页一键恢复；
-  - `install_from_folder` / `install_from_zip` / `install_from_script` /
-    `install_from_url`：支持手写 `.py`、文件夹包、zip、GitHub raw/zip 链接
-    直接装载（URL 仅 http(s)、32 MB 上限；zip 解包 fail-closed 防路径穿越，
-    `entry` 只允许单个 `.py` 文件名）；
-  - 动态 import 走合成模块名 `src._feature_<id>`，包内可继续用 `.theme`
-    / `.i18n` / `.ui_kit` 相对导入；单个坏包只跳过自身，不影响启动器。
-* **首批外置 3 个内置包** `assets/features/{music,achievements,console}/`：
-  原 `src/music_page.py` / `src/achievements_page.py` / `src/pages_console.py`
-  内容整体迁入包内 `entry.py`（`create_page(ctx)` 工厂），原文件删除。
-* **模块页新增「功能扩展」分组**：已装列表（内置徽章）、删除、恢复内置、
-  「从文件安装…」（`.py` 需二次确认）、「从链接安装…」；装/删后即时重建
-  侧栏与页面，无需重启。
-* **低配模式** `src/slim.py`（设置页「性能」组开关 `slim_mode`）：
-  - 运行时压制壁纸（none）、页面切换/流光/成就弹窗、透明与磨砂、启动画面、
-    音效与 BGM、降低窗口透明度动效，图片缓存上限 256 → 64 MB；
-  - 只改「有效值」（`slim.eff` / `slim.effective`），玩家的偏好原样留在配置里，
-    关闭低配即恢复。
-* i18n 新增 27 键 × 2 语言（zh 1516 / en 1516，差异 0；含 2 个安装确认键）。
-
-### 变更
-
-* `STACK_INDEX` 只保留核心 8 页（home…toolbox），扩展页从
-  `FEATURE_BASE_INDEX = 8` 起动态编号；旧 key（music/achievements/console）
-  作为别名保留，包被删后点击提示「该功能扩展已移除」并回首页。
-* `MainWindow`：`_register_feature_pack` / `_feature_nav_items` /
-  `_resolve_page_key` / `_page_index_of_key` / `_reload_feature_packs`；
-  侧栏「扩展」分组、顶部导航「更多」自动出现功能条目；`retranslate_ui`
-  改为遍历已建好的扩展页对象。
-* 壁纸应用统一读 `slim.effective`（`MainWindow._apply_wallpaper` 传原始配置，
-  避免低配副本覆盖玩家偏好）；`async_image` 增加 `set_mem_limit`。
-
-### 保护措施与判断
-
-* **清单校验**：字段必须是字符串且限长（name / version / icon / description），
-  `order` 非整数拒绝、越界夹紧，`icon` 只允许安全字符，`nav_group` 白名单。
-* **命名空间**：扩展 id 不得与核心页面/顶部导航重名（home / instances /
-  settings 等），单脚本文件名同样检查，避免扩展冒充内置入口。
-* **体积上限**：manifest ≤ 256 KB、入口 ≤ 2 MB、整包 ≤ 128 MB / 2000 文件；
-  zip 解压前按清单 `file_size` 预估，防 zip bomb；超大入口包扫描阶段直接跳过。
-* **入口静态检查**：手写脚本必须是 UTF-8、语法正确且含 `create_page`，
-  安装前就拒绝；运行期坏包仍只影响自身，不会拖垮启动器。
-* **链接策略**：只允许 https（http 仅放行本机调试地址），并校验重定向后的
-  最终 URL，防止 https → http 明文降级；下载仍限 32 MB。
-* **权限提示**：`.py` / zip / 链接安装在执行前统一弹出「扩展以启动器权限
-  运行」确认；内置恢复来自安装包，可信不提示。
-* **页面返回值判断**：`create_page` 必须返回 `QWidget`，否则显示错误占位；
-  删包保留栈槽，重载新包时占位登记完整，不会叠出空页。
-
-### 🔍 验证
-
-* 新增 `tests/test_features.py`（46 项断言，临时目录纯逻辑）：清单校验
-  （id 清洗拒绝、entry 路径穿越拒绝）、内置首次安装/不覆盖/删除后不重装、
-  恢复、扫描、文件夹/脚本/zip 安装、重复拒绝、坏包与缺 `create_page` 隔离、
-  zip 路径穿越 fail-closed、保留 id、字段类型/长度、order 夹紧、URL 策略、
-  超大 manifest / 入口 / zip 数量、缺 `create_page` 与语法错误脚本。
-* `python regress.py` → **28 / 28 全绿**（新增本套，原 27 套无回归）。
-* 离屏探针 `_probe_167.py`（不 入库）18 项全 PASS：三包扫描与侧栏入口、
-  `feature:` / 旧别名跳转、删目录后重载（槽位保留、旧入口回首页）、恢复内置、
-  低配压制与关闭后偏好恢复。
-
-## round-166（2026-10-31）— 修改与重构实例
-
-> 来源：用户要求「加入修改与重构实例功能」。此前实例只能在创建时定型：
-> 名称/版本/加载器不可改，记录与磁盘漂移时只能删除重建。
-
-### 新增
-
-* **修改实例**（实例设置对话框顶部新增「基本信息」）：
-  - 名称、游戏版本、加载器、加载器版本均可编辑；
-  - 导入实例（external）的游戏文件属于来源启动器 → 版本/加载器置灰并给出
-    说明，名称仍可改；
-  - 改版本或加载器后自动清空 `version_id`、`needs_convert`，保存即触发
-    后台补全（`install_instance` 幂等，存档与模组保留）。
-* **重构实例**（实例详情「⋯ 更多」新增菜单项）：
-  - 只读扫描 `versions/**/*.json`（含版本隔离的扁平 json），按评分选中最
-    匹配的版本文件，重新推导 `game_version` / `loader` / `loader_version`
-    / `version_id`，并把布局格式清回自适应（交给 round-164 的 `layout_of`）；
-  - 支持 Forge / NeoForge / Fabric / Legacy Fabric / Quilt / Cleanroom /
-    LiteLoader / OptiFine：从版本 id 与 `libraries` 判定加载器与版本号；
-  - 绝不删除或覆盖游戏文件；记录已一致时提示「无需修改」（幂等）。
-* 新增 `src/core/instance_rebuild.py`（Qt-free，`reconstruct` / `infer_loader`
-  / `loader_version_of`）。
-* i18n 新增 15 键 × 2 语言（zh 1489 / en 1489，差异 0）。
-
-### 🔍 验证
-
-* 新增 `tests/test_instance_rebuild.py`（28 项）：原版/Forge/Fabric/NeoForge、
-  无文件、格式残留、隔离扁平原文件、辅助函数。
-* `python regress.py` → **27 / 27 全绿**（原 26 套无回归）。
-
-## round-165（2026-10-31）— 下载实例允许玩家自选布局 / 启动格式
-
-> 来源：用户要求「下载实例允许玩家自选对应格式」。此前新建/下载向导只有
-> AC 独立目录一种写盘位置，玩家无法下载到已有的 .minecraft 或自定义目录。
-
-### 新增
-
-* **新建实例向导第 2 页新增「游戏目录」**（4 选 1）：
-  - `AC 独立目录（推荐）`：原行为，`data/instances/<id>/.minecraft`；
-  - `原版共享 .minecraft`：选已有 .minecraft，下载写入其 `versions/<版本>`；
-  - `版本隔离目录`：选 .minecraft，实例自动定位到 `versions/<版本>`；
-  - `自定义游戏目录`：选任意目录，按标准布局写入 `versions/<版本>`。
-  选择非 AC 时显示目录输入框 + 「浏览…」，并实时预览实际保存路径；
-  未选有效目录点「创建」会直接提示，不会建出半成品实例。
-* **`InstancesManager.add(..., format="", base="")`**：`base` 非空即按
-  external 实例记入（删除实例不动玩家真实文件），`format` 为
-  vanilla / iso / custom，与 `layout_of` 的写盘根/启动根完全一致。
-* `MainWindow._start_instance_download(..., allow_external=True)`：只对
-  向导显式选择已有目录的新实例放开下载；扫描导入的实例仍绝不写入。
-* i18n 新增 17 键 × 2 语言（zh 1474 / en 1474，差异 0）。
-
-### 🔍 验证
-
-* 新增 `tests/test_instance_create_format.py`（17 项）：默认 AC、
-  vanilla 共用目录、iso 上溯 `.minecraft`、custom 目录、落盘重载保留。
-* `python regress.py` → **26 / 26 全绿**（原 25 套无回归）。
-* `python tests/test_format.py` 36 项仍全过（round-164 语义未被破坏）。
-
-## round-164（2026-10-31）— 格式识别 → 布局联动（启动 / 补全 / 体检同口径）
-
-> 来源：用户要求「自动适应对应实例格式加入识别后判断联动其他功能（如补全等
-> 正确识别功能），防止识别错误导致错误补全」。round-163 只修了「怎么识别」，
-> 本轮把识别结果真正接到写盘动作上。
-
-### 修复
-
-* **外来版本隔离实例「补不完」**：`core.install.install_instance` 原先固定按
-  `inst.mc_dir` 安装；iso/flat 布局（`mc_dir` 本身就是 `versions/<id>`）会被
-  mll 写成 `<mc>/versions/<id>/<id>.json` 的嵌套目录，而启动只认
-  `<mc>/<id>.json` —— 体检/启动永远判定缺失。现在按 `layout_of.install_dir`
-  写盘（flat 布局上溯两层），补全产物正好落在启动解析的真实位置。
-* **启动与补全根不一致**：`launch.versions_root` 改为委托 `layout_of`，启动
-  解析根、补全写盘根、体检判定统一由同一函数给出，不再各自一套特征判断。
-
-### 新增
-
-* **`instances.adapt_format(inst)`**：读到实例即纠正结构上确定错标的格式——
-  `_base` 空且非 external（AC 自有布局）如果残留 `vanilla` / `iso` / `multimc`
-  / `curseforge` / `modrinth` / `custom` 标签，自动改回 `ac`（内存生效，下次
-  保存落盘）；外来实例保留玩家手选格式不动。
-* **`instances.layout_of(inst, version="")`**：返回 `format` / `version` /
-  `flat` / `install_dir` / `versions_root`，作为格式识别结果的唯一消费入口。
-  AC 目录内即使出现同名扁平 json 也不切根（保护自有布局）。
-* `tests/test_format.py` 新增第 6 节「识别结果联动补全/启动」（11 项断言）；
-  `regress.py` 接入「格式/布局联动」套件（现 25 套）。
-* 修正 round-163 遗留的旧测试语义：「手动指定优先于 AC 首判」改为
-  「AC 自有布局压过手动格式」，外来实例的手动格式优先断言保留。
-
-### 🔍 验证
-
-* `python tests/test_format.py` → 36 项全过（含 AC 残留格式自愈、iso 补全根
-  上溯两级、`versions_root == install_dir`、AC 扁平 json 不切根）。
-* `python regress.py` → **25 / 25 全绿**（i18n 1457/1457 差异 0；原 24 套无回归）。
-
-## round-163（2026-10-31）— 实例完整性 / 启动格式 / 启动窗口 / 强制 Java
-
-> 来源：用户真机反馈六连——启动窗口无限下坠、体检修复无反馈、两个本地实例
-> 「识别不到完整性」、启动格式识别错误、Cleanroom 1.12.2 报「没有有效 Java」，
-> 并要求新增「强制使用不兼容 Java + 按游戏需求自动选 Java」。
-> 规格：`docs/round163_instance_java_reliability/spec.md`。
-
-### 修复
-
-* **启动窗口无限向下延伸**：`launch_dialog` 删除 `resizeEvent` 覆写；文本高度
-  改为按对话框宽度计算、2~5 行硬钳制、幂等 `setMinimumHeight`，单行标签只设
-  一次静态高度。彻底断开「增高 → resize → 再增高」的布局正反馈。
-* **体检修复无反馈**：`HealthDialog` 新增底部状态行——`apply_fix` 真的改了
-  字段才提示「已应用：…」并重扫；已是目标状态则提示「无需修改」。
-* **两个实例「识别不到完整性」**：体检新增第一层「安装完整性」
-  （`loader_missing` / `client_missing` / `base_missing`），与启动的「已安装」
-  判据共用 `core.install.find_installed_loader`；缺加载器时卡片直接给
-  「一键补装」按钮，后台复用安装器 + 启动进度框，完成后自动保存并重扫。
-* **启动格式识别错误**：`detect_format` 改为「磁盘结构优先」——AC 自有布局
-  （`_is_ac_owned`）直接判 `ac`，遗留的显式 `format` 只对外来实例生效；
-  实例设置页新增「实际识别」与手动格式不一致时的提示。
-* **Cleanroom 报「没有有效 Java」**：安装器 JVM 与目标 JVM 解耦——
-  运行安装器用「有 25 用 25，否则最高且 ≥17 的已装 JDK」，目标 Java 25 交给
-  安装器 `--provision-java` 自行落盘到 `~/.cleanroom/java`，完成后清扫描缓存；
-  状态栏明示「未找到 Java 25，将自动下载」。同时补上 `core/install.py` 缺失的
-  `t` 导入（原先无 25 时会 NameError）并把安装器 javaw 归一为 java.exe 以保留
-  失败输出。
-
-### 新增
-
-* **`Instance.java_force`** + 设置页全局开关 `java_force_incompatible`
-  （双层、默认 False，任一为真即强制）。
-* **`core.java.java_plan(inst, settings)`**：启动 / 体检 / 实例设置共用同一
-  Java 决策（need / path / major / compatible / forced / auto / detected）；
-  `java_major_or_zero(path)` 供任意路径识别版本。
-* **启动前三选一**：不兼容且有替代 →「本次改用 Java X / 仍然使用 Java Y /
-  取消」；无替代 →「仍然使用 / 取消」（默认取消）；已开强制则不弹框。
-  `launch_instance(force_java=True)` 只提示不拦截，无可用 Java 的报错会列出
-  已检测到的运行时。
-* i18n 新增 36 键 × 2 语言（zh 1457 / en 1457，差异 0）。
-
-### 🔍 验证
-
-* `python -m compileall -q src` → 0 错误。
-* `python regress.py` → **24 / 24 全绿**（新增「Java 计划/强制」17 项、
-  「启动对话框高度」4 项；原 22 项无回归）。
-* 新套件覆盖：stale `curseforge` → `ac`；iso 布局识别；Cleanroom / Forge /
-  NeoForge 加载器目录匹配不误吞；`required_java_major_for` 25/17；
-  `java_plan` 自动选 17 / Cleanroom 缺 25 / 实例与全局强制 / 手动 26 不兼容；
-  `set_java_force` 幂等语义；对话框 20 次超长文本后高度 389→397 后恒定，
-  总增高 52px（≤60）。
-* 真机只读诊断（`_diag_instances_java.py`，cwd 指向真实安装目录）：
-  Forge 1.20.1 实例的 `format` 从 `curseforge` 纠正为 `ac`，
-  `find_installed_loader=None` + `loader_missing`（critical）；
-  Cleanroom 1.12.2 实例同样 `loader_missing`，`java_plan` need=25、无 25 时
-  path 为空且 `compatible=False`，安装器 JVM 取到本机 Java 26（≥17，可跑
-  `--provision-java`）。两实例的体检不再「看起来一切正常」。
-* 离屏 UI 冒烟：24 套件中的全页面构造冒烟通过（设置页 / 实例页新控件可构造）。
-
-## round-162（2026-10-31）— 条款版本化门禁 + 更新后内容弹窗
-
-> 来源：LumilioCL 调研第 9 节「条款要版本化，不要一次性同意」。
-> 首次使用或条款改版时启动必须重新同意；更新器装完后的首次启动展示
-> 本次更新内容（只弹一次）。
-
-### 新增
-
-* **`src/terms.py`**：隐私协议 / 用户守则 / 免责声明的**唯一正文来源**，
-  `TERMS_VERSION = 1`（`TERMS_UPDATED = 2026-10-31`）。改正文只需改这一处
-  并 bump 版本；`needs_acceptance(cfg)` 对脏值（None / 字符串）回落为 0。
-* **`src/terms_dialog.py`**：可滚动条款 + 「我已阅读并同意」勾选门禁；
-  未勾选时「同意并继续」不可用，关闭 / 退出即拒绝。
-* **`main.py` 启动门禁**：QSS 应用后、splash 之前征询；拒绝则直接退出、
-  不创建主窗口；同意后把 `terms_accepted_version` 写回配置。
-* **更新后内容弹窗**：读取更新器写入的 `data/updates/pending_notes.json`，
-  等主窗口真正显示后弹一次，随即清除——不会每次启动都骚扰。
-* **设置页「隐私协议 / 用户守则 / 免责声明」**改为读取 `src/terms.py`，
-  与启动门禁共用同一份正文（原先硬编码在 `settings_dialog.py`）。
-* i18n 新增 8 键 × 2 语言（1421/1421）。
-
-### 🔍 验证
-
-* `python -m compileall -q src main.py` → 0 错误。
-* `python regress.py` → **22 / 22 全绿**（新增「条款版本化门禁」14 项）。
-* 条款套件覆盖：首次 / 已同意 / 改版 / 更高版本记录 / 脏值回落、
-  三段正文齐全且带最后更新日期。
-* 离屏 UI 冒烟：`TermsDialog` 构造正常，未勾选时继续按钮禁用、勾选后启用。
-
-## round-161（2026-10-31）— 更新器 UI + 下载校验 + PowerShell 自替换
-
-> 来源：LumilioCL 调研第 9 节「更新要能自己完成，失败要能自己回来」。
-> 签名清单通过后才下载；下载完再复核 size/sha256；替换只动 exe 与
-> `_internal`，配置 / 账户 / `data/` 原地不动；失败自动回滚并重启旧版。
-
-### 新增
-
-* **`src/core/update_install.py`**：
-  * `download_update` —— `data/updates/<version>/<asset>.zip.part` 流式写入，
-    硬上限 = 清单 size，超限/中断/哈希不符一律删 `.part`；成功后 `os.replace`
-    原子落盘并再次复核；已存在且校验通过的缓存直接复用；支持进度回调与取消。
-  * `write_upgrade_script` —— 生成带 BOM 的 PowerShell 助手（中文路径不乱码）：
-    等待主进程 PID 退出（≤120s）→ 把 `AC_Launcher.exe` / `_internal` 改名为
-    `.upd_bak` → `Expand-Archive` 覆盖 → 校验新 exe → 删备份并重启；
-    任一步失败则删除新文件、改回原名、重启旧版。单引号路径做 `''` 转义。
-  * `launch_upgrade_helper` —— 隐藏窗口、脱离父进程启动助手；仅 Windows。
-  * `pending_notes.json` —— 更新说明交接给下次启动的内容弹窗。
-* **设置页「启动器更新」**（高级分区）：
-  * 更新源可留空（官方 GitHub Releases `latest.json`）或填自建 https 地址；
-  * 检查更新 → 验签失败 / 网络失败按错误码给出人话原因；
-  * 发现新版本显示版本号与更新说明，确认后「下载并重启更新」；
-  * 下载进度条 + 取消；下载/校验/写助手全在 Worker 线程，UI 不卡；
-  * 游戏运行中拒绝更新；源码运行（非 frozen）拒绝自动替换；
-  * 成功后自动保存配置、拉起助手并退出主程序。
-* `AC_PiTest_noupx.spec` 收录 `src.core.update_install`、`src.terms`、
-  `src.terms_dialog`；`regress.py` 新增「更新下载/自替换助手」套件；
-  i18n 新增 27 键 × 2 语言（1413/1413）。
-
-### 🔍 验证
-
-* `python -m compileall -q src main.py` → 0 错误。
-* `python regress.py` → **22 / 22 全绿**（新增「更新下载/自替换助手」35 项）。
-* 新套件覆盖：file:// 下载成功 / 进度单调 / 缓存复用（源被改也不受影响）/
-  损坏缓存重下 / size 与 hash 不符清理 / 非 https 拒绝 / 取消无残留 /
-  脚本 PID、`.upd_bak`、`Expand-Archive`、`-WorkingDirectory`、回滚分支 /
-  `'` 转义 / pending notes 读写清理 / 开发版与缺资产拒绝 /
-  **PowerShell 语法解析通过**（只解析不执行）。
-* 离屏 UI 冒烟：高级分区构造出更新控件，默认隐藏下载/进度/取消，
-  且未改动时 `is_dirty() == False`（懒加载不误判）。
-
-## round-160（2026-10-31）— 更新签名信任链核心（Ed25519 + 清单校验 + 发布密钥）
-
-> 来源：LumilioCL 调研第 9 节「签名是信任成本，不是最佳实践」。
-> AC 不学「无签名分发 + 教用户放行」：更新清单必须先通过离线密钥签名
-> 验证，再谈下载；签名覆盖**清单原始字节**，避免 JSON 规范化歧义。
-
-### 新增
-
-* **`src/core/ed25519.py`**：纯 Python 的 RFC 8032 Ed25519 签名/验签。
-  不引入 `cryptography`，冻结包在干净 Windows 上也能验证；RFC 8032
-  两组官方向量已写成回归断言。
-* **`src/core/update_trust.py`**：
-  * `parse_version` / `compare_versions` / `is_newer` —— 语义化版本比较
-    （含 `-beta` / `-rc.2` 预发布排序）；
-  * `verify_signed_manifest` —— 严格 JSON（拒绝重复键）→ 信任表查
-    key_id → Ed25519 验签 → schema/kind/版本/资产字段校验；
-  * 资产必须 `.zip`、sha256 为 64 位小写十六进制、大小 1B~2GB、
-    文件名禁止路径分隔符；URL 默认只允许 https（http/file 仅在测试
-    `allow_insecure=True` 时放行）；
-  * `check_for_update` —— 拉取 `latest.json` + `latest.json.sig`
-    （默认 GitHub Releases，设置可覆盖），返回 update/current；
-  * `file_sha256` / `verify_asset_file` —— 下载后按清单复核大小与哈希。
-* **`src/core/update_keys.py`**：只提交公钥（key id
-  `ac-e5a35f41ce3faf1f`，2026-10-31 生成）；私钥在
-  `~/.ac_launcher_update_key`，不入库、不进构建、不打印。
-* **`tools/ac_update_keygen.py`**：一次性生成密钥对（拒绝覆盖，需
-  `--force` 轮换）；只打印公钥与 key id。
-* **`tools/ac_update_sign.py`**：对清单**原始字节**签名，输出
-  `latest.json.sig`（含 schema/algorithm/key_id/sig）。
-
-### 🔍 验证
-
-* `python -m compileall -q src tools` → 0 错误。
-* `python regress.py` → **20 / 20 全绿**（新增「更新签名信任链」44 项）。
-* 新增套件覆盖：RFC 8032 向量、篡改清单/签名/算法/密钥、重复 JSON 键、
-  版本排序（含 rc.2 < rc.10）、http 拒绝与测试放行、file:// 拉取、
-  读取上限、资产 size/hash/缺失、未知密钥。
-* 生产密钥端到端：`ac_update_sign.py` 签临时清单 → `verify_signed_manifest`
-  用仓库公钥验签成功（key id 一致）；私钥内容未出现在任何输出。
-
-## round-159（2026-10-31）— IA 用户路径表（源码标记生成 + 过期即失败）
-
-> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 8 节、第 11 节 #8）。
-> 「文档不会说谎」：路径表由源码里的标记生成，代码改了而文档没更新，
-> `regress.py` 直接失败——不靠人记、不靠手写维护。
-
-### 新增
-
-* **`tools/gen_paths.py`**：
-  * 扫描 `src/**.py` 里的 `# ia[page]: 操作 | 层/组件 | 结果与反馈 [| 备注]`
-    标记，生成 `docs/ia/paths.md`；
-  * `--check` 与磁盘内容逐字比对，过期/标记格式错误 → 退出码 1；
-  * 只记源文件不记行号，避免无关编辑导致文档天天「过期」。
-* **`docs/ia/paths.md`**：首页 / 实例 / 设置三页共 15 条真实操作路径
-  （启动、结束游戏、首页留意行动作、实例切换/删除/体检/打开目录、
-  设置分区切换/保存、模块从文件安装）。
-* **`tests/check_paths.py`**：以 `--check` 模式跑生成器并透传退出码。
-
-### 变更
-
-* 在 `main_window.py` / `pages_instances.py` / `settings_dialog.py` /
-  `modules_page.py` 的关键动作函数上方补 IA 标记（仅注释，无运行时代码变化）。
-
-### 🔍 验证
-
-* `python tools/gen_paths.py` → 3 页 / 15 条 / 0 错误。
-* `python regress.py` → **19 / 19 全绿**（新增「IA 路径表（过期检查）」）。
-* 手动改坏 `docs/ia/paths.md` 一行 → `--check` 退出码 1；重新生成后恢复。
-* i18n 无新增键（1386 / 1386）。
-
-## round-158（2026-10-31）— 诊断包导出（脱敏 zip：版本/配置/日志/自检结果）
-
-> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 9 节、第 11 节 #9）。
-> 「一键把问题打包给作者」不该靠用户手动截图、翻目录、贴日志；导出的包
-> 在写盘前就完成脱敏，可以直接贴到公开 issue 而不泄漏令牌与用户名。
-
-### 新增
-
-* **`src/core/support_bundle.py`**（Qt-free）：
-  * `redact_config()` —— 敏感键（`dev_mode_key` / `curseforge_api_key`，
-    含嵌套）替换为 `<redacted>`，其余字符串统一走 `log_mask` 打码；
-  * `build_support_bundle()` —— 原子写出 zip：`summary.txt`（版本/平台/
-    Python/数据目录/自检计数）、`config.json`（脱敏副本）、
-    `diagnostics.txt`（逐条状态）、`logs/`（数据根与 `logs/` 下的 `.log`）；
-  * 日志按修改时间取最新 12 个，每个只保留尾部 256KB，读取即打码
-    （`accessToken` 首尾 5 位 + Windows 用户名）；
-  * `default_bundle_name()` —— `AC_support_YYYYMMDD_HHMMSS.zip`。
-* **诊断对话框**：新增「导出诊断包」按钮（export 图标），保存对话框选择
-  路径后在 worker 线程打包，完成弹窗给出路径；运行/修复期间按钮禁用。
-
-### 🔍 验证
-
-* `python -m compileall -q src` → 0 错误。
-* `python regress.py` → **18 / 18 全绿**（新增「诊断包导出（脱敏打包）」
-  套件 29 项）。
-* 新增套件覆盖：敏感键与嵌套键打码、配置/日志中的原始 token 与用户名
-  不出现在归档、两类日志入包且非 `.log` 不入包、600KB 日志截断到 256KB
-  尾部、缺失数据目录与空结果仍可导出、无 `.tmp` 残留、文件名格式。
-* i18n 中英对称 **1386 / 1386** 键（+4 键 × 2 语言）。
-* 全页面构造冒烟通过（DiagnosticsDialog 可构建，新按钮接线无异常）。
-
-## round-157（2026-10-31）— 移除 Chromium（QtWebEngine 扩展宿主整体砍掉）
-
-> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 3 节「没有浏览器内核」）
-> + 用户拍板「没有 chrome 核心之类的，能不能砍掉」。
-> 结论：启动器不该为「用不上的 JS 扩展」背一整套 Chromium；主程序与发行物
-> 从代码到依赖全部去 WebEngine，把内存和体积让给游戏。
-
-### 删除
-
-* **`src/plugin_host.py`**：JS 扩展宿主（QWebEngine 注入桥、权限授予、
-  `ExtensionWindow`）整体移除。
-* **`src/feature_pack.py`**：WebEngine 组件包（下载/校验/安装/卸载）整体移除。
-* **模块页扩展区**：`_fill_extensions()`、`_ext_grp`、扩展窗口映射与
-  `threading/QTimer/QProgressBar` 相关导入、组件包下载线程与进度条字段一并删除。
-* **i18n**：`ext.*`（41 键）+ `pack.err.*`（10 键）中英共 102 行全部删除。
-* **启动参数注入**：`launch.py` 不再消费 `ext_launch_arg_jobs`；
-  `settings_dialog._DEFAULTS` 删除 `ext_grants` / `ext_launch_arg_jobs`。
-* **组件打包链**：`build.py` 删除 `_make_component()` / `run_components()`
-  与 `AC_LITE` 分支，只保留单一主包形态；`requirements.txt` 由 `PySide6`
-  改为 `PySide6-Essentials`。
-
-### 变更
-
-* **spec 恒排除 Chromium 整栈**：`_QT_EXCLUDE` 无条件包含
-  `QtWebEngineCore` / `QtWebEngineWidgets`（连同 Quick/WebChannel 等），
-  不再依赖 `AC_LITE` 环境变量；`_src_modules` 移除两个已删文件。
-* **模块页文案**：分区名改为「模块 / Modules」，文档字符串同步为
-  「内容模块市场 + 从文件安装」三分组。
-
-### 🔍 验证
-
-* `python -m compileall -q src` → 0 错误。
-* `python regress.py` → **17 / 17 全绿**（含 i18n 对称、全页面构造冒烟——
-  证明删掉扩展区后设置页/模块页仍可完整构建）。
-* i18n 中英对称 **1382 / 1382** 键，差异 0。
-* 全仓 `plugin_host` / `feature_pack` / `QWebEngine` 引用仅存于历史文档与旧
-  CHANGELOG，`src/` 内为零。
-
-## round-156（2026-10-31）— 启动即降载（装饰动画暂停 + 壁纸缓存释放 + 插件窗即毁）
-
-> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 3 节、第 11 节 #7）。
-> 游戏跑起来后启动器只是后台面板：把「不在屏幕上的像素」和「没人看的动画」
-> 交还给玩家，而不是让启动器和游戏抢内存/CPU。
-
-### 新增
-
-* **装饰动画随游戏暂停**：`effects.py` 增 `GAME_RUNNING` / `set_game_running()`；
-  游戏运行中主表停摆、流光卡 paintEvent 退回静态卡片，游戏退出自动恢复。
-  游戏运行中新建的流光卡也不注册主表。
-* **壁纸降载**：`WallpaperWidget.suspend()` 停播并销毁动图/视频、丢弃全景六面
-  贴图与缩放缓存、隐藏壁纸层；`resume()` 只清标记，重新上屏由窗口随后的
-  `apply()` 完成。降载期间 `apply()` 不重新加载新图（配置仍由窗口保存）。
-* **接线**：`_set_game_running_ui` 在游戏进程登记/退出时统一切换上述两项，
-  并把页面表面退回不透明（避免透明页面露出一块无内容的底色）。
-
-### 变更
-
-* **插件窗口用完即销毁**：`ExtensionWindow` 设 `WA_DeleteOnClose`；模块页在
-  `destroyed` 后清掉映射，并对已销毁的旧窗口做 `RuntimeError` 兜底重建。
-  关闭后不再让 QWebEngine 渲染进程静默常驻。
-
-### 🔍 验证
-
-* `python -m compileall -q src` → 0 错误。
-* `python regress.py` → **17 / 17 全绿**（新增「启动即降载（动画/壁纸）」套件
-  13 项：游戏运行中不注册流光卡、退出后恢复；suspend 丢弃大图/缩放缓存并隐藏、
-  暂停期间 panorama 停表、降载期间 apply 不加载、resume 后重新上屏）。
-* i18n 中英对称 1433 / 1433 键（本轮无新增 UI 文案）。
-
-## round-155（2026-10-31）— 来源链（Provider/Chain + 逐源失败可见）
-
-> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 4 节、第 11 节 #4）。
-> 来源从「全局布尔开关 + 主机重写」升级为可展开的提供者链：每个请求按偏好
-> 得到「镜像 / 官方」候选，逐源尝试，失败原因按源记录并显示在下载/启动详情。
-
-### 新增
-
-* **`src/core/transfer.py`**（Qt-free）：
-  * `MirrorRule` —— 重写表变成纯数据（前缀必须落在路径边界，避免误伤同前缀主机）；
-  * `OfficialProvider` / `PrefixMirrorProvider` —— 官方与镜像提供者；
-  * `SourceChain` —— 三档偏好（`official_only` / `official_first` / `mirror_first`），
-    候选按 URL 去重；本次安装的失效主机只跳过**镜像**候选，官方回退永远保留；
-    `preferred_concurrency()` 取首个非零并发上限；
-  * `SourceTrace` —— 线程安全的逐源记录：只记失败（环形上限 20），成功只记最后
-    一条；`summary()`（任务历史用，≤4 失败 + 1 成功）、`describe()`（详情一行）。
-* **`InstallContext.trace`**：每次安装自带一份来源记录；`ProgressWorker.trace`
-  在上下文销毁前留下快照，完成回调仍可读。
-* **UI**：下载 / 启动进度对话框新增「来源：…」行（失败源 + HTTP 状态 +
-  最后成功源）；`TaskRecord.sources` 同步写入，任务历史里可追每个源为什么失败。
-
-### 变更
-
-* `core/mirror.py` 的 `MirrorSession.send` 改为走来源链：镜像优先时逐候选尝试，
-  非末位失败记录原因后换源，末位 strict（两源皆失败 = 安装已损坏，显式抛错）；
-  连接错误/超时同样触发换源（此前只对 HTTP ≥400 回退）。
-* `_rewrite`（分片并行等自有路径）保持旧语义：返回链中的镜像候选，未命中则原样。
-
-### 🔍 验证
-
-* `python -m compileall -q src` → 0 错误。
-* `python regress.py` → **16 / 16 全绿**（新增「来源链（逐源失败）」套件 41 项：
-  规则边界、三档顺序、去重、失效过滤、trace 环形上限/摘要、`_rewrite` 与旧
-  重写表等价、假 transport 下镜像 404 → 官方兜底、两源皆失败显式抛错且逐源记账、
-  镜像关闭时不写成功噪声）。
-* i18n 中英对称 1433 / 1433 键（新增 `launch.sources_line`）。
-
-## round-154（2026-10-31）— 任务中心第一步（TaskRecord + 状态机 + 持久历史）
-
-> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 5 节、第 11 节 #3）。
-> 下载 / 启动 / 导入不再各管各的回调，统一上报到一台任务记录表；本轮只做
-> 地基（记录 + 历史），任务页 UI 与重试/暂停留到第二步。
-
-### 新增
-
-* **`src/core/task_center.py`**（Qt-free）：`TaskRecord{id, kind, label,
-  state, stage, completed, total, detail, sources, target_page, created_at,
-  updated_at}`；状态机 `queued → running → done | failed | cancelled`。
-  `TaskCenter` 线程安全，提供 `start/update/finish/fail/cancel/running/recent`。
-* **持久历史**：完成后原子写 `<data_dir>/task_history.json`（只保留最近
-  **50** 条已结束任务）；进行中的任务不落盘，避免半截任务变成历史。
-  进程重启后 `get_task_center()` 自动加载，坏文件/坏记录静默丢弃。
-* **统一上报**：
-  * 实例后台下载：阶段文案 + 下载百分比 + 完成/失败原因；
-  * 游戏启动：启动进度 + 成功（已启动）/ 失败原因；
-  * 整合包应用到实例：阶段文案 + 完成/失败原因。
-
-### 修复
-
-* `core/last_session.py` 导入路径 `from .paths` → `from ..paths`。此前模块
-  导入即失败、异常被静默吞掉，导致 round-153 的「上次启动未成功」实际
-  从未生效；修正后首页聚合能真正读到会话结果（新增冒烟用例覆盖）。
-
-### 🔍 验证
-
-* `python -m compileall -q src` → 0 错误。
-* `python regress.py` → **15 / 15 全绿**（新增「任务中心（记录/历史）」
-  套件 19 项：状态机、结束后忽略迟到 update、进行中不落盘、50 条裁剪、
-  坏文件/坏记录清洗、同目录重建实例后历史仍可读）。
-* i18n 中英对称 1432 / 1432 键（本轮无新增 UI 文案）。
-
-## round-153（2026-10-31）— 首页两问（继续哪个 / 哪些挡住你）+ Java 三档 + 启动前确认
-
-> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 11 节 #1、#2）。首页不再
-> 只是「一堆实例卡」，而是先回答两个问题：最近能玩哪个、哪些会挡住你。
-
-### 新增
-
-* **首页聚合**（`src/core/home_summary.py`，Qt-free）：
-  `HomeSummary{continue_with, needs_attention}`。继续 = 最近玩过且**无 Error**
-  的实例；需要留意 = Warning 及以上（Info 不计），每实例只显示最严重一条
-  + 「另有 N 条」；排序口径 **严重级 → 最近玩过 → id**。未登录时追加一条
-  全局 Warning（action=login）。
-* **会话记录**（`src/core/last_session.py`）：`last_session.json` 原子写，
-  记录 `starting/ok/failed/crashed` + 简短原因；首页据此提示「上次启动未成功」。
-* **`Instance.last_played`**：启动时写入并持久化（同时进摘要索引，懒加载也能排序）。
-* **首页两问 UI**（`main_window.py`）：hero 下方一行一条 `_AttentionRow`
-  （Critical 红 / Warning 琥珀 / 继续 强调色），整行与右侧按钮都可触发；
-  动作路由：继续→切实例并直接启动，fix→切实例页后一键修复，java→设置页
-  Java 分区，login→账户页，其余→实例页。最多显示 4 条 + 1 条继续。
-* **健康扫描降本**：只对当前实例 + 最近玩过的 2 个实例跑 `scan_health`
-  （90s TTL 缓存，按模组目录 mtime / 设置签名失效），其余实例只跑
-  `quick_check`（Java / 内存 / 启动参数，不读 jar）。
-
-### 变更
-
-* **Java 三档语义**（`core/instance_health._check_java`）：
-  * Error（Critical）：缺可用 Java，或指定 Java 不兼容且**没有替代**；
-  * Warning：指定 Java 不兼容，但扫描到可自动切换的版本（体检给
-    「切到 Java N」修复按钮，启动前会先确认）；
-  * Info：能跑但非推荐版本、且本机已装精确匹配版本（只建议，不拦启动）。
-* **启动前 Java 确认**（`main_window._confirm_java_before_launch`）：
-  将更换玩家指定的 Java 时弹一次确认（「本次改用 Java N」）；同意后经
-  `launch_instance(java_override=...)` **只影响这一次**，不写实例/全局设置。
-  `launch_instance` 新增 `java_override` 关键字参数。
-
-### 🔍 验证
-
-* `python -m compileall -q src` → 0 错误。
-* `python regress.py` → **14 / 14 全绿**（新增「首页两问聚合（继续/留意）」
-  套件 23 项：继续避开 Critical、severity→last_played→id 排序、Info 不计与
-  不挡继续、more 计数、未登录全局项、Java 三档、90s 缓存命中/失效）。
-* i18n 中英对称 **1432 / 1432 键**（新增 `home.attn.*` 10 条、
-  `health.*java_advice` 5 条、`launch.java_confirm_*` 3 条）。
-
-## round-152（2026-10-31）— 设计基建：动效 token / 减少动效 / 文案门禁
-
-> 来源：LumilioCL 调研（`docs/lumiliocl_study.md` 第 11 节 #5、#6）。先落地
-> 两条「低成本、全库受益」的设计基建，为后续首页聚合 / 任务中心 / 来源链
-> 提供统一的节奏与文案约束。
-
-### 新增
-
-* **动效 token**（`theme.py`）：`MOTION_INSTANT_MS 90` / `MOTION_QUICK_MS 160`
-  / `MOTION_SETTLE_MS 280` / `MOTION_SCENE_MS 700` / `MOTION_LIFT_PX 8`。
-  页面淡入、上浮、侧栏展开、toast 滑入的散写时长统一改引 token（行为不变）。
-* **减少动效（reduced motion）**（`effects.py` + `settings_dialog.py` +
-  `main_window.py`）：设置 → 外观新增「减少动效」复选框（默认关）。
-  开启后页面切换瞬时到位、列表不再淡入、流光卡退回静态卡片并停表、
-  toast 直接落位、侧栏展开不做宽度过渡；保存后即时生效，重启后保持。
-  与 `EFFECTS_ENABLED`（花哨装饰总开关）解耦——关的是过渡，不是功能。
-* **文案门禁**（`tests/check_copy.py` + `tests/copy_allowlist.txt`，
-  并入 `regress.py`）：中英 AI 禁用词零容忍；`_hint/_help/_note`
-  加权长度预算（中文 40 / 英文 80，汉字 1、其余 0.5）；存量 38 条超预算
-  进 allowlist，**只缩不增**——新增超标或改好未删行都会 FAIL。
-
-### 🔍 验证
-
-* `python -m compileall src` → 0 错误。
-* `python regress.py` → **13 / 13 全绿**（新增「文案门禁」套件：
-  zh/en 各 1414 键、提示 91 条、禁用词 0 命中、allowlist 38 条无新增无过期）。
-* 减少动效手工路径：设置勾选 → 切页瞬时、流光卡停止跑动；取消勾选 → 动画恢复。
-
-## round-151（2026-10-31）— 下载弹窗文本挤压 / 点状态栏召回任务 / 30s 无进展自动切源
-
-> 用户反馈：①「随便下载一个实例即可发现文本被挤压」（截图：下载游戏文件
-> 弹窗的副标题、状态行、步骤行上下被裁）；②「这个窗口被关闭放后台后无法
-> 再次被打开」——要求点底部状态栏回到对应页面与窗口，无任务时不响应；
-> ③（可选）下载源过慢时 30s 无进度直接切源。
-
-### 修复
-
-* **① 下载 / 启动弹窗文本被裁**（`launch_dialog.py`）：
-  根因是像素字体（`Minecraft AE`）的 `fontMetrics().height()`（13~15px）
-  与 QSS 行高不一致 —— 单行 QLabel 只拿到一行高度，上下半截被裁；
-  `wordWrap` 的状态行换行成 2~3 行时布局仍只给 1.8 行，文字被压扁。
-  新增 `_fit_text_heights()`：逐标签按 `max(lineSpacing, height)` 设最小
-  高度，状态行按 `heightForWidth(实际宽度)` 算换行需求；在 `showEvent` /
-  `resizeEvent` / 每次 `set_status_text` 后重算（带 `_fitting` 防重入）。
-* **② 后台任务对话框无法召回**（`main_window.py`）：
-  原来只有 8px 进度条本身能点（`status.click_to_return` 提示几乎不可能点中）。
-  改为**整条状态栏**都能点：状态栏本体 + 所有子控件装 `eventFilter`，
-  `MouseButtonPress` → `_reopen_launch_task()`：
-  - `_active_task_dialog()` 先查 `_dl_workers`（实例下载）再查
-    `_play_worker` + `_launch_dlg`（启动），**只在 worker 真在跑时**返回；
-    无任务时点击完全不响应（不切页、不弹窗）。
-  - `_task_page_key` 记录任务发起页：实例下载固定 `instances`，
-    启动任务用新增的 `_current_page_key()`（`STACK_INDEX` 反查）在
-    `_handle_play` 里记下当前页。
-  - 命中后 `_goto_page_key()` 切回该页（AC 侧栏走 `nav.setCurrentRow`，
-    顶栏布局走 `_pcl2_goto`），再 `show()/raise_()/activateWindow()`
-    把被关闭或隐藏的对话框拉回前台。
-* **③ 30s 无字节进展自动切源**（`core/install.py` + `core/mirror.py` +
-  `i18n.py`）：新增 `_start_source_watchdog(meter, callback, timeout=30)`，
-  daemon 线程每 5s 读一次传输层计量 `SpeedMeter.snapshot()`，`total_bytes`
-  连续 30s 不变 → `set_mirror(True)` 一次并发状态「下载源 30 秒无进展，
-  已自动切换到 BMCLAPI 镜像…」。只对官方源启用（`mirror != "bmclapi"`）；
-  请求超时 / 4xx 仍由 `MirrorSession` 逐文件回退负责，互不重叠。
-  - `SpeedMeter.__slots__` 补 `__weakref__`（看门狗用弱引用感知安装结束，
-    `__slots__` 类默认不可弱引用，否则 `install_instance` 直接 `TypeError`）。
-  - 看门狗循环里 `snapshot()` 后立刻 `del m`：局部强引用会让弱引用永不为空，
-    线程永不退出（实测残留 2 条 `ac-source-watchdog`）。
-* **④ LittleSkin 一键预设**（`login_dialog.py` + `i18n.py`，用户选定「只做
-  登录预设」）：外置登录本就是标准 Yggdrasil，但要求玩家自己记 API 路径。
-  第三方卡片里新增「快速填入：LittleSkin」chip，一点即把验证服务器地址填成
-  `https://littleskin.cn/api/yggdrasil`（悬停 tooltip 显示完整地址），
-  登录后启动照旧自动挂 authlib-injector。未改动任何认证 / 皮肤代码。
-
-### 🔍 验证
-
-* `python -m compileall -q src` 通过；`python regress.py` **12/12**
-  （i18n 中英 **1412/1412** 对称，含新增 `dl.switch_source` / `login.third_preset`）。
-* **文本挤压**（`_probe_launch_dialog.py`，真实 `LaunchProgressDialog`
-  + 真实 `Minecraft AE` 字体）：修复前 `status_lbl h=24 / sizeHint=36`
-  （只给 1.8 行）、`sub_lbl h=12 / fm=13`；修复后 `status_lbl h=52 /
-  sizeHint=48`、`sub_lbl h=19 / 22`，抓图 `_shots/_r151_download_dialog.png`
-  中标题 / 副标题 / 速度 / 状态（2 行）/ 步骤 / 底部提示全部完整。
-* **状态栏召回**（`_probe_statusbar_recall.py`，真实 `MainWindow` +
-  `QTest.mouseClick`，12/12）：空闲时点状态栏无任何反应（栈页不变、
-  无对话框）；模拟下载任务时关闭对话框→点状态栏文案区→对话框重新可见
-  且栈页切回 `instances`；隐藏（非关闭）同样可召回；启动任务从 `settings`
-  页发起→召回后栈页回到 `settings`。
-* **30s 切源**（`_probe_source_watchdog.py`，真实 `SpeedMeter`，
-  把 30s 压成 3s）：无进展 → `_MIRROR_ON=True` 且回调文案 ==
-  `dl.switch_source`；持续每 2s 有字节 → 全程不切换；计量器回收后
-  看门狗线程自行退出（线程数 3 → 1）。
-* **LittleSkin 预设**（`_probe_login_preset.py`，真实 `LoginDialog` + `QTest`，
-  3/3）：chip 唯一存在；点击后 `ext_server == https://littleskin.cn/api/yggdrasil`；
-  「快速填入」提示文案在中文界面下可见。
-
-### 附：LittleSkin 等第三方皮肤站可行性评估（登录预设已实现，其余未做）
-
-* **登录 / 启动**：现有外置登录已是标准 Yggdrasil（`core/auth.py`
-  `yggdrasil_login`），启动时 `launch.build_options` 写 authlib-injector
-  配置并挂 `-javaagent`。玩家把服务器填 `https://littleskin.cn/api/yggdrasil`
-  即可登录与进服 —— 这一步代码已具备，只缺「一键填入 LittleSkin」预设。
-* **账号皮肤**：`skins.manager.fetch_account_skin()` 目前把 Mojang
-  `sessionserver` 写死；LittleSkin 同样提供
-  `GET {base}/sessionserver/session/minecraft/profile/<uuid>`，
-  `properties[].textures` 解出 SKIN/CAPE，只需把 host 参数化即可复用现有
-  皮肤库 / 渲染链路（改动小）。
-* **皮肤站搜索（皮肤库）**：属站点私有 Web 接口，官方手册（2025-08 版）
-  已无 API 章节，无公开文档与稳定性承诺；要做只能抓页面或逆向，
-  违背「不做脆弱爬取」的既有取向 —— 建议不做，或先做只读最小实验。
-
-## round-150（2026-10-31）— 动态壁纸遮挡全部 UI / 版本背景回退白底 / 整合包导入补全
-
-> 用户反馈三条：①「使用动态壁纸会导致所有功能不可见」（截图中整窗只剩壁纸，
-> 标题栏 / 侧栏 / 卡片 / 文字全部消失）；②版本背景取不到资源时显示一片淡紫底；
-> ③整合包导入「收尾时间过长，重启启动器后打开会补全版本，识别不到正确格式」。
-
-### 修复
-
-* **① 动态壁纸覆盖全部界面（P0）**（`wallpaper.py`）：
-  根因不是层级/透明度，而是 `QVideoWidget` —— 它把帧交给多媒体后端的
-  独立合成表面，**不参与 Qt 控件栈序**，`backdrop.lower()` 对它无效，
-  于是视频盖住了标题栏、导航、卡片与所有文字。改为 `QVideoSink` +
-  自绘 `_VideoSurface`：`videoFrameChanged → frame.toImage() → 按物理像素
-  缩放 → QPainter` 绘制，受正常栈序约束（DPR 规则沿用 round-148）。
-  `_start_video` 不再创建 `QVideoWidget`；`_teardown_dynamic` 一并释放 sink。
-* **② 版本背景无资源时的淡紫底**（`wallpaper.py` + `main_window.py`）：
-  原先回退到 `draw_version_wallpaper()` 的程序化主题（浅色下是
-  `#F7F6FB→#ECEAF7` + 紫色光晕），用户看到的就是「紫色底色」。改为隐藏
-  壁纸层并发 `panorama_unavailable` 信号 → 窗口 `set_wallpaper_surface(False)`
-  + `apply_qss()`，页面回到默认白底、卡片恢复实色；真实全景到达时
-  `panorama_ready` → 恢复透明页面（避免卡片一直透明压在白底上）。
-* **③ 整合包导入后的「收尾 / 补全版本」**（`modpack_import.py` /
-  `core/install.py` / `pages_instances.py` / `pages_browse.py` / `i18n.py`）：
-  - **导入完成即安装**：旧流程只写元数据（`loader=forge`、`loader_version`
-    但 `version_id=""`），首次启动时 `launch_instance` 才发现版本未装，
-    弹「安装 / 修复游戏版本」——即用户说的「重启后打开又补全版本」。
-    现在导入末尾直接 `install_instance()`（先 `_persist` 再安装，安装失败
-    也不丢已下载的整合包），装好后启动是零下载直启。
-  - **官方源失败自动换 BMCLAPI**（`_retry_with_mirror`）：实测
-    `maven.minecraftforge.net` 的 `maven-metadata.xml` 8s 读超时，官方源下
-    `ml.install` 在写版本 json 之前就抛错 → 每次启动重跑安装，这是
-    「补全版本」反复出现的直接原因；失败后换镜像再试一次。
-  - **收尾阶段给出真实文案**：下载完成后不再只显示「正在收尾」，改为
-    「正在安装游戏版本与加载器…」+ mll 的实时状态（`progress(label,-1,0)`
-    约定，两处导入对话框同步支持不定长自定义文案）。
-  - **进度口径修正**：`progress(label, done, total)` 的 total 改用批任务数
-    （原为 manifest 条目数，缺 `projectID` 的条目不入批 → 百分比永远到不了
-    100%，收尾状态提前/滞后）。
-  - **失败可解释**：安装失败时弹「整合包内容已导入，但游戏版本/加载器安装
-    未完成：{e}\n首次启动时会再试一次」，不再让用户以为导入失败。
-
-### 🔍 验证
-
-* `python -m compileall -q src` 通过；`python regress.py` **12/12**
-  （i18n 中英 1410/1410 对称，含「整合包进度桥接」「全页面构造冒烟」）。
-* **动态壁纸实证**（`_probe_wallpaper_ui.py`，真实 mp4 + 真实窗口）：
-  修复前桌面区域抓屏只有视频、UI 全灭；修复后窗口抓屏里同时出现视频帧
-  与标题栏 / 侧栏 / 卡片 / 文字，`backdrop` 栈索引 0，
-  `childAt(topbar/sidebar/content)` 命中 `_WinBtn` / `QWidget` / `RoundedCard`。
-* **版本背景回退**：无 6 张 cubemap 的版本切到「版本背景」→ backdrop 隐藏、
-  `panorama_unavailable` 触发、页面 `bg_app` 白底；有全景的版本恢复透明页面。
-* **Forge 源实测**（`_probe_forge_fetch.py`）：官方
-  `maven-metadata.xml` **8s 读超时**，BMCLAPI 200；installer 两源均 200 ——
-  印证「官方源下安装器在写 json 前失败」的因果链。
-* **Java 检测旁证**（`_probe_javas.py`）：本机仅有 Java 26 时
-  `select_java(1.20.1)=None`（兼容上限 21），安装器改用 PATH 上的 `java`
-  （26 可运行 Forge 处理器），不影响安装；游戏启动仍按 round-146 的兼容
-  规则提示装 Java 17–21。
-
-## round-149（2026-10-31）— 导入进度条内嵌百分比被 8px 条裁切
-
-> 用户反馈「自动导入进度条被遮挡了一部分」（截图里条内「38%」只剩上半截）。
-> 根因不是布局，是全局 QSS：`QProgressBar { height: 8px }` 把控件钉成 8px 高，
-> 而内嵌百分比文字按 12px 字高绘制 → 字形被控件边界裁掉。
-
-### 修复
-
-* `pages_instances.py` / `pages_browse.py` 两处 CurseForge 导入流程：把
-  `QProgressDialog` 内置的 `QProgressBar` 关掉 `setTextVisible`，百分比并入
-  label 文案（`正在导入，请稍候…（27/71 · 38%）`），与 round-107 的 slim 条
-  「百分比用旁侧标签」约定一致。
-* `scan_dialog.py`（扫描后复制实例的进度框）同款问题一并关掉内嵌文字。
-
-### 🔍 验证
-
-* `_probe_import_dialog.py`（offscreen 复现真实构造，PNG 快照）：
-  修复前 `bar=398x8 text_visible=True`，快照里「38%」只剩上半截；
-  修复后 `text_visible=False`，条体完整、无残留字形。
-  label 宽 398 / 文字需求 308 → 长文案不换行、不裁切。
-* `python -m compileall -q src` 通过；`python regress.py` **12/12**。
-
-## round-148（2026-10-29）— HiDPI(125%) 渲染修复：壁纸/图标/头像全链路按物理像素渲染
-
-> 用户反馈「估计又是渲染 bug」。实测定位为 **devicePixelRatio（DPR）处理缺失**：
-> 本机显示器 125% 缩放（DPR=1.25），壁纸与自绘图标链路全程按**逻辑**尺寸
-> 绘制，被 Qt 的设备变换二次放大 1.25 倍 → 整屏发虚 + 全景面缝被放大成黑线。
-
-### 修复
-
-* **① 壁纸链路 4 处 DPR 缺口**（`wallpaper.py`）：image / version / 全景 /
-  程序化回退四条路径全部改为「按物理像素建缓冲 → 打 devicePixelRatio 标记」。
-  - 新增 `_device_dpr(widget)`：取控件表面的设备像素比（无屏幕时回落 1.0）。
-  - 新增 `_flat_raster(pm)`：`QPixmap.scaled()` 的目标尺寸是在**源栅格自身的
-    设备坐标系**里解释的，源图已带非 1.0 DPR 时必须先归一化，否则会被缩两次。
-  - `draw_version_wallpaper(version_id, size, dpr=1.0)`：画布改按
-    `size × dpr` 的物理像素建，绘制坐标仍用逻辑单位（`p.scale(dpr, dpr)`），
-    返回前打标记。
-  - `paintEvent` 的 image / version 分支：缩放目标改为物理像素尺寸，缩放结果
-    打标记后按逻辑尺寸居中绘制；缓存键同时校验物理尺寸与 DPR，避免换屏/缩放
-    后命中旧缓存。
-  - `_paint_panorama`：全景缓冲按物理像素建，落屏用
-    `drawPixmap(QRectF(0,0,w,h), buffer, QRectF(buffer.rect()))` 1:1 铺满。
-* **② 自绘图标 DPR 感知**（`icons.py` / `ui_kit.py`）：新增 `screen_dpr()` 作为
-  全项目唯一的 DPR 判定处；`icons.pixmap()` 改为按 `size × dpr` 的物理像素
-  渲染并打标记（**注意**：`QIcon.pixmap(QSize)` 两参版会自动套用屏幕 DPR，
-  必须用三参版 `pixmap(size, dpr)`，否则尺寸会多算一次）。
-  `ui_kit.state_pix()` 同样改为物理像素画布 + `p.scale(dpr, dpr)` + 打标记，
-  并把 4 处 `icon(key).pixmap(N, N)` 换成统一的 `icon_pixmap(key, N)`。
-* **③ 窗口按钮 / 侧栏图标 / 头像**（`main_window.py` / `skin_render.py`）：
-  `_win_svg_pixmap()`、`_nav_item_icon()`、`render_head()` 全部改为物理像素渲染
-  + 打标记。侧栏原先存 1×/2× 两档位图且 `pixmap(QSize)` 会被自动套 DPR 导致
-  尺寸错位，改为只存**屏幕 DPR** 一档，与 delegate 请求的 `pixmap(size, dpr)`
-  精确匹配。
-* **④ 占位图标 / 折叠按钮对齐**（`onboarding.py` / `settings_dialog.py` /
-  `login_dialog.py` / `pages_instances.py`）：新手引导、设置项、登录框的图标
-  改用 `icon_pixmap()`；实例页折叠按钮的 chevron 位图尺寸 14→15，与
-  `setIconSize(QSize(15,15))` 对齐（否则 QIcon 会再缩放一次）。
-
-### 🔍 验证
-
-* `python -m compileall -q src` 通过；`python regress.py` **12/12**
-  （i18n 中英 1408/1408 对称；PII 门禁因本机 git 不在 PATH 上 SKIP）。
-* **壁纸 DPR 无损 A/B**（`_probe_render_dpr.py`，`QT_SCALE_FACTOR=1.25`）：
-  构造「恰好等于设备物理分辨率」的源图（逻辑 400×300 → 物理 500×375），
-  理想结果是逐像素复现。修复前现状路径 **RMSE = 34.11**（细节已丢）；
-  修复后 A/B 双双 **RMSE = 0.00**。附带验证 `QPixmap.scaled()` 缓存命中：
-  首次重绘 0 次调用、随后 5 次重绘共 0 次 → 缓存正常。
-* **全景真实资源对照**（`_probe_pano_dpr.py`，实例 `25w14craftmine` 的
-  vanilla 6 张 1024² 贴图）：旧路径清晰度 RMSE 恒 > 0（0.90 ~ 2.57）；
-  孤立暗像素（面缝）新路径 0~2 个 → 无可见黑缝。
-* **图标 / 头像链路**（`_probe_icon_dpr.py`，125% 下全 OK）：
-  `icons.icon(...).pixmap(16px, dpr)` → 20 物理 px；`ui_kit.state_pix('done',16)`
-  → 20 物理 px；`main_window._win_svg_pixmap('close',18)` → 22 物理 px；
-  `icons.pixmap('play',18)` → 逻辑 18.40 / 物理 23 px（布局不被撑大）。
-* **QLabel 端到端 1:1**（`_probe_qlabel_dpr.py`）：50×50 物理像素 + DPR 标记
-  1.25 的纯红位图放进 QLabel，抓图红像素 **2500**（= 物理 50×50）——
-  若被忽略 DPR 会被画成 ≈3906。`QLabel.sizeHint()` 仍为 16×16，
-  **不撑大布局**。
-* **性能**（`_probe_wall_dpr.py`，真实 cubemap + 真实控件，1536×960@1.25）：
-  `WallpaperWidget.paintEvent` 中位耗时 新 **11.44ms** / 旧 **10.11ms**
-  （×1.13）；按 20 tick/s 计占单核 22.9% vs 20.2% —— DPR 修复的代价可接受。
-* **整窗视觉巡检**（`_shots_r148.py`，125%）：1280×800 逻辑窗口抓图得
-  **1600×1000 物理**（= ×1.25，1:1 落屏）；首页 / 实例页 / 资源中心 / 设置页
-  四页均无图标变大、布局溢出或元素错位。
-* ⚠️ 中文在 offscreen 下渲染为方块，**目视验收仍需用户在真机重启后确认**
-  （壁纸清晰度、自绘图标锐度、头像清晰度）。
-
-## round-147（2026-10-29）— 全景帧率对齐原版、壁纸几何守恒、残留紫边清理、两条护栏实测
-
-> round-146 收口后新增任务「游戏背景帧率遵照原版帧率」；其余 3 项为 round-146
-> 收口时未完成的实测与补漏。
-
-### 修复
-
-* **① 全景动画帧率对齐 MC 原版**（`wallpaper.py`）：原版 Java 版主菜单全景跟随
-  **游戏 tick 钟**（20 tick/s），与显示器刷新率无关（Bedrock 早期「刷新率越高转越快」
-  是已知 bug MCPE-218915）。改为常量化——`PANO_TICK_HZ=20` / `PANO_FRAME_MS=50`
-  / `PANO_YAW_PER_TICK=0.15°`（合 3°/s），并用 `QElapsedTimer` 的**真实经过
-  时间**推进 yaw（`yaw += elapsed × 3°/s`），既消除 QTimer 定时漂移，也让 144Hz
-  与 60Hz 屏转速完全一致；`_start_pano_timer` / `_set_playing(True)` 处
-  `restart()` 重置基准，暂停恢复不跳一大段。
-* **② 点侧栏壁纸被拉伸缩小**（`main_window.py`）：round-144b 把壁纸从 HomePage 改
-  挂到 MainWindow（要盖住标题栏/侧栏/状态栏），但 `HomePage.resizeEvent` 仍用
-  **首页自己的 `self.rect()`**（916×650 内容区）去设置**主窗级**壁纸几何——
-  任何触发首页重排的动作（切页、滚动条出现、缩窗）都把壁纸裁成内容区大小，
-  全景随之重投影变形。改用 `self.window().rect()`。
-* **③ 残留紫边清理**（`main_window.py` + `login_dialog.py`）：round-146 删了侧栏
-  选中条与实例卡播放按钮描边，漏掉首页 hero 卡与登录弹窗的 `RoundedCard(
-  accent_border=3)` 左侧 3px 纯紫竖条——正是用户抱怨的「紫边」。两处改为
-  `RoundedCard(radius=…)` 不带 accent 竖条。
-
-### 🔍 验证
-
-* `python -m compileall -q src main.py` 通过；`python regress.py` **12/12**
-  （i18n 中英 1408/1408 对称）。
-* **壁纸几何守恒探针**（`_probe_wallpaper_trace.py`）：包住 `MainWindow.resizeEvent`
-  / `showEvent` / `HomePage.resizeEvent`，每次事件后立刻断言
-  `backdrop.geometry() == window.rect()`——修复后 **0 违规**；把代码回退成
-  `self.rect()` 可稳定复现 3 次违规（`916×650` / `1096×730` / `716×530`）。
-* **圆角/黑底巡检**（`_probe_square_widgets.py` + `_shots_dialogs.py`）：浅色主题
-  14 个弹窗亮度统计 p5≈239（无纯黑底）；实例页「资源包/存档」网格与操作栏按钮
-  已由全局 `QPushButton{border-radius:10px}` 覆盖。
-* **Java / 下载护栏探针**（`_probe_java_april.py`，16/16 全绿）：
-  a) `required_java_major("25w14craftmine")=21`、`required_java_major_for(...)=21`
-     （与 Mojang 版本 json `javaVersion.majorVersion=21` 一致）；
-  b) `java_max_ok(21)=30` → `is_java_compatible(21,26)=True`，只装 Java 26 时
-     `select_java` 正确选中；手动指定 Java 26 原样采用；
-  c) Cleanroom 档未被改坏：`JAVA_MAX_OK[25]=25`、`is_java_compatible(25,26)=False`；
-  d) 下载中调 `_handle_play` → **不创建启动 worker**，状态栏提示「正在下载中」。
-* **启动存活探针**（`_probe_startup_alive.py`）：`main.py` 子进程在
-  「无 splash / 有 splash / 有 splash + 真实 data 目录」三种组合下观察 30–35s
-  **进程均存活**，未复现 round-146 记录的「启动后静默退出」。
-* ⚠️ 目视验收仍未做（offscreen 环境中文渲染为方块，只能验形状与圆角）；
-  需用户在真机上重启后逐项确认。
-
-## round-146（2026-10-28）— 背景清晰度/可读性、黑弹窗、按钮描边、下载中拒绝启动、Java 判定
-
-> 用户反馈 10 项：版本动态背景模糊 + 黑色噪点；大部分文字可阅读性低；百宝箱不知
-> 有什么用；按钮留黑边/紫边；白底框要圆角；点侧栏壁纸被拉伸缩小；浅色下部分
-> 弹窗是黑的；下载中回主页/实例页仍能启动游戏；皮肤页弹窗要滚动才显示全；愚人节
-> 版本要 Java 25，选 Java 26 仍被拒。
-
-### 修复
-
-* **① 版本全景模糊 / 黑噪点**（`wallpaper.py` + `panorama.py`）：
-  a) `PANO_BUFFER_DIV 2 → 1`（半分辨率缓冲再放大 = 先丢一半细节，改为按窗
-  口原生分辨率重投影 + `SmoothPixmapTransform`）；
-  b) 缓冲底色由纯黑改为全景平均色 `PanoramaRenderer.avg_color`（16×16 稀疏
-  采样）——面间亚像素缝不再透出黑点；
-  c) `_draw_face` 多边形绕质心外扩 0.75px，消掉旋转时的面缝闪烁。
-* **② 文字可读性低**（`theme.py` + `wallpaper.py`）：light `text_sub`
-  `#6B7280 → #4B5563`（晨光包 `#64748B → #475569`）；全景可读性遮罩 light
-  目标亮度 `0.68 → 0.76`、底部下限 `0.46 → 0.56`，文字在任何角度都压得住。
-* **③ 浅色下部分弹窗全黑**（`theme.py`）：`QDialog[cls="card"]` 补实色底
-  （壁纸模式下 `$glassy` 是 transparent，顶层弹窗无底 → 整块黑）；`QToolTip`
-  由反色（`$text_main` 底 = 浅色下纯黑小窗）改为常规浮层 `$bg_panel` + 细边框。
-* **④ 按钮黑边 / 紫边**（`theme.py` + `main_window.py`）：AC 导航选中态删除
-  左侧 3px `$accent_press` 竖条（浅色下近黑）；实例卡 40×40 播放按钮删除内联
-  `border: 2px solid $accent_press`，与 `[cls="play"]` 统一为无边框。
-* **⑤ 下载中拒绝启动**（`main_window.py`）：`_handle_play` 硬护栏——该实例
-  `_dl_workers[id]` 仍在跑 → 状态栏提示 + toast「仍在下载（N%），完成后再启动」
-  直接 return；删除旧「取消下载并启动」逃生口（首页/实例页共用此入口）。
-* **⑥ 皮肤页弹窗要滚动**（`skin_dialog.py`）：初始尺寸按屏幕自适应
-  `resize(760, max(560, min(880, avail-80)))`，不再固定高度导致底栏被裁。
-* **⑦ Java 判定**（`core/java.py` + `launch.py` + `instance_health.py`）：
-  a) 快照 ID `^(\d{2})w(\d{2})` 按所属正式版推断（24w+ → 21、22w → 17、
-  21w → 16、更早 → 8）——旧逻辑把 `25w14craftmine` 当主版本 25，故「愚人节
-  版本要 Java 25」；
-  b) 优先读版本 json `javaVersion.majorVersion`（`find_version_json`）；
-  c) 兼容上限表 `JAVA_MAX_OK` 收拢到一处，手动选 Java 改走
-  `is_java_compatible(need, major)`（原精确相等 → 选 Java 26 被拒）。
-* **⑧ 百宝箱自解释**（`main_window.py` + `i18n.py`）：三个工具各配一行说明
-  （按钮左、说明右，窄窗换行），不再只有图标不知所云。
-
-### 🔍 验证
-
-* `python -m compileall -q src` 通过；`python regress.py` **12/12**（i18n
-  中英 1408/1408 对称）。
-* Java 兼容单测：`is_java_compatible(25,26)=True`（Cleanroom 档仍 25 严格）、
-  `(21,26)=True`、`(17,26)=False`、`(8,17)=False`；实例 25w14craftmine 的
-  version json `javaVersion=21` → 选 Java 26 可启动。
-* ⚠️ 目视验收未完成（本批结束时重启后出现「启动器静默退出」，见明日待办）。
-
-## round-145（2026-10-28）— 浅色下拉黑底 / 按钮黑边 / 版本背景切换 / 白框圆角 / 方块图标比例
-
-> 用户反馈 5 项：①浅色状态下所有下拉栏全黑看不到文字；②部分按钮边框难看；
-> ③版本背景不随选择切换、部分版本取不到背景；④剩余白底框加圆角；
-> ⑤下载版本的草方块等图标还是压扁的（「看看其他启动器怎么做的」）。
-
-### 修复
-
-* **① QMenu 黑底黑字**（`theme.py`）：QMenu 此前无任何专属规则 → 吃全局
-  `QWidget{background:$bg_app_frost}`（壁纸模式=transparent），顶层菜单弹窗
-  透出暗区 + `$text_main` 深字 = 黑底黑字。补显式 `QMenu` 规则（实色
-  `$bg_panel` + 文字/hover/disabled/separator 全套）。
-* **② 开始游戏按钮黑/紫描边**（`theme.py`）：`[cls="play"]` 原
-  `border: 2px solid $accent_press`——浅色主题下 accent_press 深紫近黑，
-  按钮四周一圈「黑边/紫边」。改 `border: none`，hover/pressed 只靠底色变化。
-* **③ 版本背景不切换 / 取不到背景**（`main_window.py` + `wallpaper.py`）：
-  a) 首页实例下拉 `_on_inst_changed` 补调 `_apply_wallpaper(version_id=…)`
-  （原只有实例页 `current_changed` 触发，懒构建导致首页换实例背景不动）；
-  b) `wallpaper._on_panorama_ready` 遇 images 空/≠6 不再静默 return——
-  `mode=="version"` 时回退 `_fallback_procedural()`（`draw_version_wallpaper`
-  程序化主题背景 + 显隐/veil 同步），无全景贴图的版本不再「取不到背景」。
-* **④ 白底框补圆角**：嵌入式「选择游戏版本」向导面板（`pages_instances.py`，
-  无 DWM 窗口圆角可用 → 控件级 QSS `border-radius:14px`）、下拉弹层
-  `QComboBox QAbstractItemView`（8px）、`QMenu`（8px）、扫描「已导入」按钮
-  （`scan_dialog.py`，8px）。
-* **⑤ 方块图标压扁**（`async_image.py`）：`_draw_iso_block` 竖直棱由
-  `hypot(cx,hh)≈0.559·s` 改为 **0.6124·s**——照 MC 官方 GUI 投影
-  （block model gui display rot [30,225,0]：竖边/总宽 = 0.866/1.414），
-  总高 h/w 由 1.059 → **1.112**（实测 48px 图标 bbox 1.100）。参考调研：
-  HMCL 直接渲染 MC 原版模型（高瘦 3D 立方体）、PCL2 用 2D 平面图标——
-  按官方比例取「高瘦」方案；`make_version_pixmap` 尺寸公式同步 `s=box/1.1124`。
-
-### 🔍 验证
-
-* `python -m compileall -q src` 通过；`python regress.py` **12/12**。
-* 目视（computer-use 截图）：账户菜单浅色底黑字可读（① 修前为黑底黑字）；
-  实例创建向导方块图标离屏渲染 bbox h/w=1.100（⑤，修前 1.051 vs 官方 1.112）；
-  向导白卡四角确认为直角后补 radius（④）。
-* ③a 实测旁证：用户切实例到 25w14craftmine 后首页背景已随之切换；
-  ③b 代码路径验证（panorama 空图 → 程序化兜底），待用户确认。
-* ②④ 改动在最后一次重启**之前**落盘，待下次重启生效后由用户目视确认。
-
-## round-144（2026-10-28）— 壁纸模式整窗去白底：仅留文字与背景
-
-> 用户指令（附两张截图）：「仅留文字与背景，白色文字底不要」——去掉文字背后
-> 所有白色底，文字直接落在壁纸 + 可读性 veil 上；后补「后方壁纸没铺满」
-> 「左侧栏目会遮挡壁纸，需要透明（非纯色背景时）」。
-
-### A. 白底 5 大来源逐一透明化（仅壁纸模式，非壁纸模式零变化）
-
-* `theme.build_qss()` 置顶 `_wallpaper_surface` 分支：`bg_app_frost` /
-  `band` / `band_card` / `glassy` → `transparent`；`win_bg` → `bg_app` 实色
-  垫底（壁纸加载间隙不透桌面，ExtensionWindow 等独立 QMainWindow 同享）。
-* QSS 模板 token 替换：`QMainWindow`→`$win_bg`；标题栏 / 页头 / `QStatusBar`
-  →`$band`；页脚→`$band_card`；**左导航 `#ac-nav`→`$band`**（round-144b，
-  用户反馈侧栏遮壁纸）。
-* 新增 `theme._on_wallpaper_window()` / `default_card_fill()`：壁纸主窗上的
-  卡片默认填充全透明（`RoundedCard`、`effects.LightTrailCard` 统一转调），
-  **对话框 / 独立顶层窗保持实色白卡**（靠 `MainWindow` 的
-  `wallpaper_backdrop` property 判定归属）。
-* 弹层与交互控件不改：下拉列表 / 菜单 / 提示框 / 输入框 / 按钮仍走实色 token。
-
-### B. 壁纸铺满整窗（round-144b）
-
-* backdrop 从 central **改挂 MainWindow** 并 `lower()`：QStatusBar 在 central
-  之外，原挂法状态栏区永远露 `$win_bg` 白条；现在壁纸盖到状态栏之下。
-* `resizeEvent` / 新增 `showEvent` 同步 `backdrop.setGeometry(self.rect())`：
-  修「首显四边白条、resize 一次后又正常」的过期几何（首显时 central 布局
-  尚未完成）。
-
-### 🔍 验证
-
-* `python -m compileall -q src` 通过；`python regress.py` **12/12**。
-* offscreen QSS 探针：壁纸模式 27 处透明无残留 token、对话框卡 alpha=255、
-  主窗卡 alpha=0、关壁纸复原实色。
-* 真机目视（computer-use 截图逐页核对）：首页 hero 无白卡、实例页左右白面板
-  与页头灰条消失、左导航 / 标题栏 / 状态栏 / 四边整窗铺壁纸、
-  「选择游戏版本」对话框白卡保留、无透桌面穿帮。
-
-## round-143（2026-10-28）— 启动回调修复 + 实例卡重叠 + 详情打开即机翻
-
-* **修「启动失败：'dict' object is not callable」**（`core/install.py` 两处、
-  `launch.py`）：mll 的 dict 回调被当函数调用 —— Cleanroom / 非默认加载器
-  路径启动必炸，改为正确的回调形式。
-* **修「选非默认加载器后实例卡片互相重叠」**（`pages_instances.py`）：内容
-  高度超出容器时改为滚动 / 自适应，不再叠压。
-* **详情页打开即机翻**（`store_detail.py`，用户拍板）：描述默认自动机翻成
-  中文（gtx→MyMemory 兜底、带缓存）；修 CF 卡片误拼 Modrinth 链接导致
-  点开必 404。
-* **验证**：compileall + regress 12/12；①选非默认加载器卡片不重叠
-  ②1.12.2-cleanroom 启动不报 dict 错 —— 两项**待用户真机确认**。
-
-## round-142（2026-10-28）— CF 全链下载打通 + 设置文案人话化 + 详情打开即机翻
-
-> 用户三连：「cf的东西给下载」「设置里不要透露 PCL 等其他启动器以及听不懂的
-> 方案，玩家不会去管直接删掉」「翻译干脆默认用机器翻译——要么拿到翻译，
-> 要么不跳官网直接用机器翻译」。
-
-### A. CF 整合包一键安装（此前只 toast「尚未支持」）
-
-* **免 key 三级下载链**（`download_curseforge_mod` 新增 `file_id` 参数）：
-  镜像精确端点 `/mods/{id}/files/{fileId}` → 镜像文件列表 `/mods/{id}/files`
-  → cfwidget 兜底。新实锤：**MCIM 镜像的文件端点也免 key 且带官方
-  downloadUrl**（forgecdn 直链）；**cfwidget 对整合包 slug 一律 404**、
-  对部分项目 `files=[]` —— 这正是 round-141 只做 toast 的原因。
-* `import_curseforge_zip` 逐文件传 manifest 的 `projectID+fileID`
-  （此前丢弃 fileID 只下最新版，装出来的包与作者声明版本不一致）。
-* `pages_browse._install_modpack` CF 分支：主 zip 按数字 project_id 直下
-  → `detect_pack_format` → `import_curseforge_zip` 逐文件安装（QProgressDialog
-  + Worker，与本地导入同一范式）；删除 `store.cf_pack_unsupported` toast、
-  「需要 CurseForge API Key」前置确认及 4 条 i18n 键。
-* 详情页免 key 版本列表改传数字 project_id（镜像列表），slug 版 cfwidget
-  只作最后兜底 —— CF 整合包详情的版本列表此前必然 404。
-* 实测 **8/8**：精确 file_id 下载、最新版下载、ATM10 5 条版本（url 全有）、
-  200MB 主 zip、499 文件 manifest 解析、前 3 个 manifest 文件精确落盘。
-* **用户实测 403 修复**（the-shooting-star）：cfwidget 的 `file.url` 是
-  **网页链接**（www.curseforge.com/.../files/N）不是直链，GET 被 Cloudflare
-  403；且该包镜像 downloadUrl 回 null → 误落网页链接。修：新增
-  `_cf_direct_url` 守卫（网页链接一律视为无直链），第 3 级兜底不再用
-  cfwidget 的 `url`，改**恒拼 forgecdn**（实测 200、字节数吻合）；
-  `store.download_fail` 去掉外层前缀（`download_file` 已带「下载失败：」，
-  不再出现「下载失败：下载失败：」）。问题包精确/最新下载实测通过。
-* **「导入整合包这么久」根因与提速**（用户实测反馈）：
-  - **真凶是崩溃**：`StorePage` 没有 `mgr` 属性 → 主 zip 下完后回调
-    `AttributeError`，安装 Worker 根本没启动，界面永远停着（crash.log
-    18:43 实锤）。`StorePage.__init__` 补 `self.mgr = manager()`。
-  - **每文件 4 次往返 → 2 次**：`_download_cf_keyless` 拿到 fileName 即拼
-    forgecdn（downloadUrl 为 null 不再往下问列表/cfwidget），并新增元数据
-    缓存 `cfx:{pid}:{fid}`；实测冷 2.25s/文件、热 1.44s/文件（63 文件 /
-    8 并发 ≈ 20s 内）。
-  - **进度从无限转圈 → 实时 n/N**：两处导入对话框（资源中心 CF 安装、
-    实例页导入）接 `import_curseforge_zip` 的 progress 回调，QTimer 轮询
-    state 驱动 QProgressDialog（跨线程零信号管道），文案
-    「正在导入整合包（逐文件下载模组）…（12/63）」。
-  - **「导入包」空提示闪烁修复**：文件下完后的收尾阶段（补全游戏版本/
-    装加载器），轮询每 200ms `setValue(总值)` 触发 QProgressDialog
-    「自动关→reset(清空 label)→再 show」循环 → 空框一直闪。双保险：对话框
-    `setAutoClose(False)+setAutoReset(False)`（掐灭所有自循环变体）+ 收尾阶
-    段一次性切不定长转圈 + `modpack.finishing` 文案，结束手动 `hide()`；
-    计数期文案/值加变更守卫；中英对称 1404=1404，regress 12/12。
-
-### B. 设置 / 文案人话化（zh+en 16 键）
-
-* 去掉其他启动器提及与术语：PCL/HMCL、镜像、manifest、slug、cfwidget、
-  forgecdn、MyMemory、3rd Party API、MCIM 等 —— `settings.*` 5 键 +
-  `mirror_hint`、`store.*` 7 键、`err.cf_zh_missing`、`err.translate_quota`、
-  `pack.err.no_source`（去 config 键名）、`pack.err.no_manifest`、`ext.hint`；
-  删除无人引用的 `store.cf_hint`。i18n 对称 1403=1403。
-
-### C. 详情描述打开即自动机翻（不逼玩家跳官网）
-
-* `StoreDetailPanel.__init__`：有简介即自动 `_translate(auto=True)`
-  （gtx→MyMemory 兜底 + 缓存，翻译链路已存在，此前要玩家手点按钮）；
-  成功后头部短简介同步换成中文；自动失败静默保留原文（按钮仍可手动重试，
-  按钮文案改「重新翻译」）。
-* 顺手修：CF 卡「在线页面」此前硬拼 Modrinth 链接（点开必 404）→ 按
-  `card.source` 拼 CurseForge 正确路径；README 清洗补 HTML 标签剔除
-  （`<center><img …>` 不再被剥成乱码参与翻译）。
-* 实测：详情页（CF 卡）打开 → 状态「已翻译成中文（机器翻译）」、头部简介
-  中文化 PASS；`regress.py` 12/12。
-
-## round-141（2026-10-28）— 资源中心修复批次：分类/合并源/翻页/搜索质量 + 版本库切标签性能
-
-> 用户验收 round-140 时连报：「我搜的是整合包但出来全是模组」「往下翻全是重复」
-> 「sodium 搜不到」「为什么两源不能合起来显示全部」「版本页重复切换标签很卡」。
-
-* **分类胶囊在 CF 源下生效**：`search_curseforge` 此前写死 `classId=6`（模组），
-  资源中心的整合包/光影/资源包/数据包标签全被忽略（与 PCL 表现不一致）。
-  新增 `CURSEFORGE_CLASS_OF` 映射（modpack=4471 / shader=6552 /
-  resourcepack=12 / datapack=6945——6945 经官网 `/minecraft/data-packs/`
-  路径实锤，4546 是 customization 不是数据包）；搜索同时补传
-  `self._offset`（此前 CF 源永远拉第一页，是重复加载的根因之一）。
-* **「全部」源**：源下拉新增默认项「全部（Modrinth + CurseForge）」，
-  `search_all` 双线程并行搜索合并（单源失败不拖死另一边）；卡片/详情/下载
-  按 `card["source"]` 分流（详情页本就按卡片源，天然兼容）。
-  CF 整合包一键安装此阶段给出明确提示（`store.cf_pack_unsupported`，
-  manifest zip 逐文件免 key 解析列为后续工作）。
-* **无限滚动到底闸门**：`_has_more` 不足一页即关，新搜索重新武装 ——
-  彻底杜绝「下面没有内容还反复拉同一页塞重复卡片」。
-* **搜索质量（sodium 搜不到根因）**：实测 CF v1 / MCIM 镜像引擎把名字
-  精确匹配的本体埋到 100+ 位（sortField 不起作用），只取前 20 永远看不见。
-  `search_curseforge` 首屏改走 `_cf_pool`：3×50 页并行拉取 + slug 精确
-  钉顶 + 本地四级相关性重排（精确名 > 全词 > slug 含 > 名字含），
-  后续翻页从池切片零网络开销；池为唯一权威（不读修复前的旧排名切片缓存）。
-  实测 sodium/jei/the-shooting-star 全部第 1，第 2 页零重复。
-* **版本库切标签性能**：过滤 pill / 搜索框从「整列 tear-down 重建」改为
-  「数据到达建一次卡片（`_rebuild`），此后纯显隐（`_apply_filter`）」——
-  旧实现每次点击销毁/重建上百张 LightTrailCard + 同跑上百个淡入动画。
-* 实测：搜索六项断言全过；`regress.py` 12/12（i18n 1407=1407）。
-
-## round-140（2026-10-28）— CurseForge 免 Key 关键词搜索（MCIM 镜像，全默认开）
-
-> 用户需求：「cf源不是说直接搜索也能搜到吗不需要key也可以……那我为什么输入
-> the shooting star 搜不出来」；拍板「搜索+下载全默认开」。
-> 规格：`docs/round140_cf_keyless_search/spec.md`
-
-* **调研定路**：HMCL/PCL2/PCL2-CE/Prism 全走官方 API+key，无人逆向 CF 网页
-  端点（自探 403 Cloudflare 挑战）；唯一免 key 可行路 = **MCIM 公益镜像**
-  `mod.mcimirror.top`（同 API 契约、免 x-api-key，HMCL/PCL2-CE 在用）。
-* `search_curseforge` 无 key 时同路径换镜像域名、去 `x-api-key`；中文名库
-  反查 / 分页 / 缓存语义不变。`curseforge_keyless` **默认 True**
-  （显式偏离 round-108 的默认关，用户拍板），设置里仍可关回「仅官方 key」。
-* 新增 `download_cfwidget_slug`：镜像搜索命中只有 slug → cfwidget 最新文件
-  → forgecdn 直链落盘；页面 `_download` 无 key 无 `cf_file` 时走此分支。
-* UI 三态：有 key→官方 API 提示 / 通道开→「免 Key 镜像搜索」提示
-  （`store.cf_hint_mirror`，zh/en 新增）/ 都无→填 key 提示；通道开时搜索框
-  恢复关键词 placeholder（粘贴完整链接仍走 slug 解析）。
-* 实测：`jei` 20 命中、**`the shooting star` 10 命中**（原痛点解决）、
-  中文「小地图」→ xaeros-minimap、sodium 直链下载 1.9MB 落盘；
-  `regress.py` 12/12（i18n 对称 1403=1403）。
-* 顺带：全仓明文密钥扫描 0 真实命中（唯一命中是调研临时目录里 Prism
-  公开 key，整个 `cf_research/` 已删）；git 历史审计待 git 可用。
-
-## round-137（2026-10-28）— 打包体积优化：580.4 → 349.0 MB（lite 135.4 MB）
-
-> 用户需求：「遗留你可以自行决定怎么搞。现在启动器打包后多大？需不需要搞优化？」
-> 规格：`docs/round137_build_optimization/spec.md`
-
-### A. 体积实测（`build.py` 输出的 `[size]` 三行）
-
-| 阶段 | 体积 | 文件数 |
-| --- | --- | --- |
-| 优化前基线 | **580.4 MB** | 6,991 |
-| 仅 excludes 后（未裁剪） | 485.5 MB | 4,310 |
-| **默认构建（裁剪后）** | **349.0 MB** | 4,127 |
-| **lite 构建（裁剪后）** | **135.4 MB** | 4,105 |
-
-* 大头是 `Qt6WebEngineCore.dll` **195.3 MB**（Chromium 内核），占默认包 56%。
-* 对标：Electron 档 CurseForge ~120 MB / XMCL ~136 MB；原生档 PCL2 15.2 /
-  Prism ~22.8 / HMCL ~6-9 MB —— lite 已进 Electron 档，原生档需弃 HTML 扩展宿主。
-
-### B. 三刀（全部安全档，不碰任何插件目录）
-
-1. **spec `excludes` 47+2 项未用 PySide6 模块**（Qt3D/Charts/Quick/Qml/Sql/
-   Xml/Positioning/WebChannel 等）—— excludes 强于 hiddenimports（modulegraph
-   lazynodes），被排模块的 post-graph hook 不跑，其收集的 DLL/qml//translations
-   一并消失；已收集二进制的 PE 静态导入依赖仍由 `find_binary_dependencies` 兜底。
-   全库 grep 证实用到的 Qt 模块仅：Core/Gui/Widgets/Network/Svg/Multimedia/
-   MultimediaWidgets/WebEngineCore/WebEngineWidgets/PrintSupport。
-2. **构建后裁剪 `_trim_dist()`**（`build.py`）：`*.debug.pak/*.debug.bin` 77 MB +
-   `qtwebengine_devtools_resources.pak` 11 MB + 非 zh/en 翻译 + 非 zh-CN/en
-   WebEngine locales（53→4）；`build.py` 打印裁剪前后 `[size]` 对比。
-3. **`build.py --lite`**：`AC_LITE=1` → spec 额外排除 WebEngine 整栈，
-   `rmtree qml/` 兜底；扩展区走 `plugin_host` 既有降级路径显示「扩展宿主不可用」。
-   实测 lite 构建里 excludes 连 resources//locales 都没收集（142 MB 起步）。
-
-### C. round-136 遗留项处置（用户授权自行决定）
-
-* **做**：启动页蒙版按背景亮度自适应 —— `splash_window._estimate_veil()`
-  缩图取 32px 亮度均值，alpha 线性映射 40（暗图少压）~170（亮图压深），
-  替换原固定 `QColor(0,0,0,120)`。
-* **不做**（避免过度设计）：托盘图标替换（白色剪影有系统托盘可读性要求）、
-  「整页一张图」「左上角文字开关」、`custom_logo_path` 存原路径、图标磁盘缓存。
-
-### D. 验收
-
-* A1 349.0 ≤ 360 MB ✅；A6 lite 135.4 ≤ 140 MB ✅
-* A7 `regress.py` **12/12** ✅（含品牌自定义回归、全页面构造冒烟）
-* A2/A4 目视：默认包与 lite 包各启动一次，14s/17s 存活，欢迎页正常渲染
-  （截图见本地测试运行产物目录：`_default_run.png` / `_lite_run.png`）
-
----
-
-
-## round-136（2026-10-28）— 品牌自定义：左上角标志 / 左上角文本 / 启动页
-
-> 用户需求：「添加左上角AC标志可自定义替换和启动页面自定义以及左上角AC文本可自定义」
-> 规格与任务清单：`docs/round136_brand_customization/spec.md` / `tasks.md`
-
-### A. 补全了什么
-
-1. **新增统一入口 `src/brand_custom.py`**
-   * 一处管「路径归一化 + 有效性校验 + 解码缓存」，三处调用方（主窗口 /
-     启动页 / 任务栏图标）只管用，避免各写一份解析。
-   * 任何读取都容错：文件被删 / 移动 / 损坏 → 静默回落默认，**不让启动器崩**。
-   * 支持 `png / jpg / jpeg / bmp / webp / svg / ico`；解码结果按
-     `(路径, mtime, 尺寸)` 缓存 → 用户换图自动失效。
-2. **左上角标志可自定义替换**
-   * 新增配置键 `custom_logo_path`，**一张图三处共用**：标题栏左上角小图标、
-     窗口 / 任务栏图标、启动页标志。
-   * 窗口图标有 3 个来源，本轮改了 2 个：`main.py::_app_icon()`（任务栏）
-     与 `main_window.py::_apply_window_icon()`（窗口）。
-   * 托盘图标**不动** —— `ac_launcher_icon` 是白色剪影（系统托盘可读性要求），
-     与 logo 无关，用户也未要求。
-3. **左上角文本可自定义**
-   * 新增配置键 `custom_title_text`，改标题栏 logo 右侧的 `QLabel`；
-     留空回落 `APP_DISPLAY`。
-   * **窗口标题 `setWindowTitle(APP_DISPLAY)` 不动** —— 单实例守卫
-     （`main.py` 的 `FindWindowW(None, APP_DISPLAY)`）依赖它识别在跑的旧实例，
-     改了标题 = 双击启动器变双开。
-4. **启动页自定义（背景图 + 标志，进度条保留）**
-   * 新增配置键 `splash_bg_image`：背景图 cover 铺满 + 半透明暗色蒙版
-     （保证前景在任何背景下可读）。
-   * 有自定义标志时，**手绘矢量 AC 字母改为显示用户图片**（淡入 + 轻微放大），
-     进度条位置 / 样式 / 100% 收敛逻辑一行未动。
-   * 两者都没有 → 现有矢量路径**一行不改**，默认体验零变化。
-5. **设置页 UI**
-   * 外观页新增「品牌自定义」组：标志图（选择 / 清除 / 40×40 预览）+ 左上角文本。
-   * 启动页「启动动画」组新增：启动页背景图（选择 / 清除）。
-
-### B. 关键设计决策
-
-| 决策 | 取舍 |
-|---|---|
-| 存储路径 | **直接存用户原路径**（与既有 `wallpaper_image` 一致），不拷进 `data/` |
-| 标志范围 | **一张图三处共用**，不另设启动页专属标志（用户已选定同一范围） |
-| 文本范围 | 只改标题栏 `QLabel`，**不改窗口标题**（单实例守卫依赖） |
-| 加载方式 | 统一 `QPixmap(path)`（走 Qt 图像插件，jpg/webp 天然可用），失败静默回落 |
-| 生效时机 | 设置保存 → 立即刷新标题栏与图标；启动页下次启动生效 |
-
-### C. 明确「没改」的部分（避免误读）
-
-* **启动页进度条完全保留**（位置 / 样式 / 100% 收敛逻辑未动）。
-* **托盘图标未换**（白色剪影，系统托盘可读性要求）。
-* **未做「整页一张图」模式**（用户选的是「背景图 + 标志」）。
-* **未做「不要左上角文字」开关**（空串回落 `APP_DISPLAY` 已够用，不加无用配置项）。
-* `settings_dialog` 的导出 / 导入备份不受影响（品牌信息非敏感键）。
-
-### 🔍 验证
-
-* `tests/test_brand_custom.py`（新增，**35 项断言全 PASS**）：配置键存在性与
-  默认值、文本三种输入回落、路径校验（不存在 / 后缀不支持 / 非 str）、
-  `load_pixmap` 缩放与缓存、标题栏刷新、窗口图标非空、启动页默认分支与
-  自定义分支 `grab()` 不崩。
-* 端到端实效验证（临时脚本，已删）：真实写盘 → 读到 → 标题栏文本/标志 /
-  窗口图标 / 启动页背景渲染 → 恢复原配置，**11 项全 PASS**（含「窗口图标
-  角落像素 = 用户图绿底 `#00ff00`」「启动页左上角 = 背景色 `#0a1c2e`」）。
-* 设置页 UI 验证（临时脚本，已删）：**14 项全 PASS**（懒加载回落、控件写回、
-  改后 `is_dirty=True`、还原后 `is_dirty=False`）。
-* `python -m compileall -q src main.py` → exit 0。
-* `regress.py` → **12/12 通过**（i18n 中英对称 zh=1378 en=1378 差异=0；
-  默认值审计缺失 0 个）。
-* **测试隔离**：`test_brand_custom.py` 把 `sd.CONFIG_FILE` 与
-  `brand_custom.get_config_path` 指向临时目录 —— MainWindow 关闭时会
-  `save_config()`（窗口几何），不隔离就会把测试值写进用户真实配置。
-
-## round-135（2026-10-26）— 启动格式功能补全：AC 自有布局 + 其它启动器格式识别
-
-> 用户反馈：「我们启动器的实例格式是自己做的，启动方式和原版不一样，另外我们
-> 支持了其他启动器的启动格式和原版的，这个功能要补好。」
-> 背景调研见项目根目录的 `2026-10-26_AC启动器_启动格式补全调研_明日施工.md`。
-
-### A. 补全了什么
-
-1. **新增 `ac` 档 —— AC 自有实例布局不再是「原版」**
-   * AC 自建实例（以及「复制导入」的实例）住在
-     `data/instances/<id>/.minecraft`：独立 .minecraft + `<mc>/libraries`
-     指向共享池联接（round-48 去重），**与原版共享 .minecraft 是两种布局**，
-     此前却一律被标成 `vanilla`「原版」。
-   * 判据用 `_is_ac_owned()`：`external=False` 且 `_base` 为空
-     （`_base` 的语义见 `instances.py` round-34/49 注释）→ `ac`。
-     该判据必须在磁盘特征**之前**，否则 AC 实例也会被特征误判。
-2. **Modrinth 探测补 `profile.json`**
-   * scan 认定 Modrinth 实例靠的就是 `profile.json`（`scan.py:526`），
-     而特征表里没有它 → Modrinth 实例显示「原版」。现已补入特征表首位。
-3. **`kind` 兜底 —— 导入时判定的权威布局不再被浪费**
-   * `kind`（standard/mmc/curseforge/modrinth）是 scan 时按权威文件判定的，
-     但 `detect_format` 只看磁盘。目录改名/移动/元数据文件缺失时特征会全 miss，
-     此前直接给「原版」。现在按 `_KIND_TO_FORMAT` 兜底，来源不再被抹掉。
-4. **顺手修一个真 bug：非法手动值不再返回 `"auto"` 字符串**
-   * 原实现 `return fmt if fmt in INSTANCE_FORMATS else "auto"` —— 老版本遗留
-     或手改配置里的非法值会让徽章显示「自适应（自动识别）」，且**永远不再
-     探测**。现在非法值按自适应走探测。
-5. **UI 去硬编码**
-   * 设置页下拉原为硬编码 7 元组 + `_fmt_vals` 又抄一份，加格式必漏改。
-     现在遍历 `INSTANCE_FORMATS`；`FORMAT_BADGE` / `_fmt_keys` 同步加 `ac`。
-   * `ac` 徽章取 AC 品牌紫 `#7C3AED`（与 `brand.BRAND_ACCENT` 一致）。
-
-### B. 文案校准
-
-| 键 | 改前 | 改后 |
-|---|---|---|
-| `instances.fmt_vanilla` | 原版 | 原版共享 .minecraft |
-| `instances.fmt_iso` | 版本隔离 | 外来版本隔离 |
-| `instances.fmt_ac` | — | AC 自有布局（新增） |
-| `instances.fmt_tooltip` | 未区分 AC 与原版 | 补一句说明两者差别 |
-
-### C. 明确「没改」的部分（避免误读）
-
-* **`ac` 档不改变任何解析行为**：`launch.versions_root()` 只对 `iso` 特判，
-  其余一律 `root = mc_dir`；AC 实例现状就走这条，新增 `ac` 是纯「表达 + 可
-  手动指定」，**零解析风险**。
-* `resolve_game_dir()` 仍只看 `isolation` / 全局隔离设置，不接入 `format`
-  ——隔离行为归隔离管，格式只表达磁盘布局，避免引入行为变化。
-* `multimc` / `curseforge` / `modrinth` 不参与解析**不是 bug**：这些布局的
-  mc_dir 都经 scan 用 `_enum_standard_versions` 验证过含
-  `versions/<v>/<v>.json`；真正没 json 的走 `needs_convert` + 转换。
-
-### 🔍 验证
-
-* `tests/test_format.py`（新增，25 项断言 **全 PASS**）：AC 首判、手动指定
-  优先、非法值回退、vanilla/iso/multimc/curseforge/modrinth 六种磁盘特征、
-  四种 `kind` 兜底、目录不存在时的兜底、`versions_root` 分流、枚举契约。
-* 离屏冒烟（20 项全 PASS）：AC 实例徽章文本 = 「AC 自有布局」、徽章色
-  `#7C3AED`、`_fmt_keys` 覆盖全部格式、8 个格式各有中文文案、下拉已改为
-  遍历枚举、8 种格式徽章均可构造。
-* `python -m compileall -q src main.py tests` → exit 0。
-* `regress.py` → **11/11 通过**（i18n 中英对称 zh=1369 en=1369 差异=0）。
-* 临时探针已删（`_probe_fmt_ui.py`）。
-
-## round-134（2026-10-26）— 彻底移除 Nuitka
-
-* **venv 卸载**：`pip uninstall nuitka` → 移除 `Nuitka 4.1.3` 与残留
-  `site-packages/nuitka/` 目录；`venv\Scripts` 下无 nuitka 入口。
-* `src/paths.py`：`get_resource_path()` 文档从「三种打包布局」改为两种
-  （dev / PyInstaller），删掉 Nuitka standalone 的 `_internal` 分支说明；
-  分支代码保留（对任何 `sys.frozen` 的打包方式都安全）。
-* `.gitignore`：删掉 `*.nuitka*` / `nuitka-crash-report.xml`。
-* `docs/launcher_landscape.md`：技术栈改为「PyInstaller 打包」（原
-  「PyInstaller / Nuitka」）。
-* 全项目 grep `nuitka` **0 命中**。
-
-### 🔍 验证
-
-* `pip list` 无 nuitka；`import nuitka` 失败（预期）；`site-packages/nuitka`
-  目录已删。
-* `python -m compileall -q src main.py build.py` → exit 0。
-* `regress.py` **11/11**（编译 / i18n 1368×1368 / PII 门禁 SKIP / 默认值审计
-  / mll 分片 / 整合包进度 / mod 下载进度 / 设置页脏检测 / 核心冒烟 /
-  全页面冒烟）。
-* `import PyInstaller` 正常（6.21.0），打包链路不受影响。
-
-## round-133（2026-10-26）— 发布打包切换为 PyInstaller（弃用 Nuitka）
-
-### A. 为什么切
-
-* 本机最小探针复现：**Nuitka 4.1.3 + PySide6 6.11 + Python 3.13** 用
-  `--standalone --enable-plugin=pyside6` 构建成功，但运行即
-  `Unable to import Shiboken ... ImportError`。dist 内 `shiboken6/` 只有
-  `Shiboken.pyd` + MSVC DLL，缺 `__init__.py`，且 `shiboken6.abi3.dll`
-  落在 dist 根；补 `--include-package=shiboken6` 仍不解决。
-* PyInstaller 的 PySide6 hook 自带 shiboken6 / Qt 插件处理，同版本组合
-  最小探针一次通过。运行期性能两者持平（启动差距 <1s），故发布改用
-  PyInstaller onedir。
-
-### B. 改动
-
-* `build.bat`：Nuitka 命令行 → 调用 `build.py`（PyInstaller onedir），
-  产物 `dist_beta\AC_Launcher\AC_Launcher.exe`。
-* `build.py`：缓存清理 `os.system('rm -rf ...')` 在 Windows cmd 下一直
-  静默失败（无 `rm`），改为 `shutil.rmtree(ignore_errors=True)`。
-* `AC_PiTest_noupx.spec`：
-  * `_src_modules` 补齐 round-104 ~ round-132 新增的 22 个模块
-    （`aclive` / `batch_download` / `downloader` / `effects` /
-    `launch_dialog` / `log_mask` / `mod_check_dialog` / `mod_names` /
-    `mod_updater` / `modpack_import` / `modules` / `modules_page` /
-    `pages_console` / `panorama` / `plugin_host` / `server_favorites` /
-    `server_fav_dialog` / `store_detail` / `ui_kit` / `welcome_window` /
-    `win_acrylic` / `win_dpapi`，以及 `core.backup` /
-    `core.instance_health` / `core.mod_check` / `core.shared_libs`）；
-  * 新增 `_mll_dynamic`：`mirror.py` 用 `importlib` 动态导入的
-    `minecraft_launcher_lib._helper/install/runtime/fabric/forge/mrpack/quilt`
-    与 `mod_loader._forge`，PyInstaller 静态分析看不到，显式声明。
-
-### 🔍 验证
-
-* 最小 PySide6 探针（PyInstaller 6.21 onedir）：运行输出
-  `PI PYSIDE OK 6.11.1`，探针目录已删。
-* 完整构建：`venv\Scripts\python.exe build.py` exit=0，耗时约 194s；
-  产物 `dist_beta\AC_Launcher`（exe + `_internal`）。
-* 归档核对：PYZ 595 个模块，上述 32 个新增/动态模块 **0 缺失**；
-  `assets/icons`、`assets/sounds/launch_default.wav`、`assets/mc_textures`
-  与 `PySide6/translations/qt_zh_CN.qm` 均在 `_internal` 内。
-* 成品离屏冒烟（`QT_QPA_PLATFORM=offscreen AC_NO_SPLASH=1
-  AC_NO_ONBOARDING=1 AC_DIAG=1`）：进程存活 25s，`_startup.log` 走到
-  `10 MainWindow built` 与 `M 10 tray ok`，`crash.log` / `boot_err.log` /
-  `fault.log` 均未生成。测试产生的 `data/`、`ac.lock`、`_startup.log`
-  已从交付目录清除。
-* 未做：真机（非离屏）首启目检、Program Files 只读安装路径验证 ——
-  仍需在真机上跑一次。
-
-## round-132（2026-10-26）— 资源详情内嵌 + 加载器已安装判定修正 + 双页防回归
-
-### A. 资源中心详情改为页内面板（去掉独立 QDialog）
-
-* `StoreDetailDialog` → `StoreDetailPanel`（`store_detail.py`）：基类 QDialog
-  改为 QWidget，删除 `exec()` 模态、独立标题栏、无边框圆角与固定最小尺寸。
-* 资源中心 `StorePage` 改用 `QStackedWidget`：第 0 页为原列表（标题 / 分类 /
-  搜索 / 状态 / 下载进度），第 1 页为详情面板。点卡片在内页打开，顶部
-  「← 返回」回列表；返回时停 Worker、`hide()` 后 `deleteLater()`，不留残页。
-* 版本行不再单独套滚动区，改为整页滚动 —— 窗口较矮时也能看全详情，不会
-  再把「加载更多 / 翻译」挤进列表内部。
-* 语言切换时先退回列表（避免英文界面残留中文详情），下次点开按新语言重建。
-* `tests/smoke_all.py` 同步改为构造 `StoreDetailPanel`。
-
-### B. 加载器「已安装」判定修正（启动链路）
-
-* 新增 `launch._find_installed_loader()`：原实现按 `*<loader>*<mcver>*` 找
-  版本目录，但 **NeoForge 1.21+**（`neoforge-21.1.0`）和 **Cleanroom**
-  （`Cleanroom-0.7.12-alpha`）的版本 id 不含 MC 版本号，永远匹配不上 →
-  每次启动都被判「未安装」，重跑安装器（Cleanroom 一次可达数分钟）。
-  现改为：先按 id 子串快判，再用版本 json 的 `inheritsFrom == game_version`
-  兜底匹配。
-* 撞名防护：glob 的 `*forge*` 会命中 neoforge、`*fabric*` 会命中
-  legacyfabric，逐一排除，避免启动成另一种加载器。
-* 修正 `launch.py` 中残留的「Cleanroom 跑 Java 21」注释 —— 0.7.x 实际按
-  Java 25 选择（代码早已是 25，仅注释过期）。
-
-### C. 「退出后双页」防回归
-
-* `tests/smoke_all.py` 新增断言：打开内嵌「新建实例」面板后立即关闭，
-  要求 `_new_panel is None`、`_body_stack.count() == 2`、当前页回到
-  空态或列表页 —— 锁死 round-126 的双页场景。
-
-### 🔍 验证
-
-* 离屏探针（临时脚本，已删）：列表 → 详情切换后 `stack.count()==2`、
-  返回后 `count==1` 且 `detail_panel is None`，返回按钮/标题文本正常。
-* 加载器判定探针（临时脚本，已删）：fabric / forge / neoforge-1.21 /
-  Cleanroom 四类命中，neoforge-1.20.1 / liteloader 正确返回 None。
-* `py_compile` + `pyflakes` 干净；`regress.py` **11/11**（含全页面冒烟
-  17/17，新增双页断言通过）。
-* 同日补验两项历史遗留：设置 → 外观页 1280×800 / 1000×700 / 900×640 三档
-  无底部裁切（round-101 玩家报告）；扫描面板列表/搜索/分组折叠离屏通过
-  （NameError 修复有效，真实目录发现仍需真机）。
-
-## round-131（2026-10-26）— 皮肤预览比例核验：无挤压
-
-* **实测包围盒比例**（内容实际占用的宽/高）：
-  * 3D 皮肤 120×240 与 240×240 两种画布下完全一致 —— wide 0.498 /
-    slim 0.447，说明 `render_skin_3d` 是等比缩放 + 居中，没有拉伸；
-  * 2D 平铺 `render_skin` 恒为 1:2（0.500），pixmap 高 = 宽 × 2；
-  * 披风背面 120×192 = 0.625，正好是 10:16 原始比例。
-* **隐患加固**：`render_cape` 原实现是「拉伸填满调用方给的 width×height」，
-  尺寸比例一旦不对就会把披风压扁。改为等比适配 + 居中：现有 120×192
-  调用结果不变，传 240×240 也保持 0.625。
-* 首页角色按 pixmap 的逻辑尺寸居中绘制（不按控件拉伸）；皮肤卡片 QLabel
-  未开 `setScaledContents`，不会二次缩放。
-* `py_compile` + `pyflakes` 干净；`regress.py` 11/11。
-
-## round-130（2026-10-26）— 皮肤 3D 可拖动旋转
-
-### A. 皮肤库：2D 平铺 → 可拖动 3D
-
-* 新增 `SkinView3D`（`skin_dialog.py`）：用 `render_skin_3d` 渲染，按住左键
-  左右拖动改 yaw，实现 360° 旋转；光标 OpenHand / ClosedHand 反馈。
-* 皮肤卡片预览由 `render_skin` 的 2D 平铺图换成 120×240 的 3D 模型；
-  当前使用中的皮肤会套上已装备披风，与首页角色一致。
-* 渲染结果按 (皮肤 / 披风 / 角度 / 尺寸 / DPR) 缓存，静止时不重复计算；
-  拖动时单帧约 8.3ms（120×240，2× 超采样）。
-* 损坏 / 非 64×64 皮肤仍回退「预览不可用」，不会画空图。
-
-### B. 首页角色：自转 + 手动拖动
-
-* `_CharStage` 此前只有自动转台；现在按住拖动可手动旋转（10px ≈ 1 帧，
-  30 帧一圈），拖动时暂停自转、松手继续。
-* 位移 < 4px 仍判定为点击（打开皮肤库），拖动不会误触。
-
-### C. 文案
-
-* 新增 i18n `skin.drag_hint`「按住角色左右拖动可 360° 旋转」（中英对称
-  1367/1367）；皮肤页与卡片 tooltip 都有提示。
-
-### 验证
-
-* `SkinView3D`：`has_content=True`；拖动 120px → yaw 22°→118°，反向
-  60px → 334°；截图渲染正常。
-* `_CharStage`：拖 60px → 第 6 帧且 `clicked` 不触发；原地单击 → 触发 1 次。
-* 真实皮肤卡片截图：3D 预览、名称、按钮均正常，无挤压。
-* `py_compile` + `pyflakes` 干净；`regress.py` 11/11。
-
-## round-129（2026-10-26）— 版本页方块图标「被压缩 / 低清」修复
-
-### A. 根因（实测确认）
-
-* 版本图标的源头是随包的**原版 16×16 方块贴图**。旧实现按目标 56px 直接做
-  最近邻 + 斜切映射：每个 texel 只占 ~3.5px，斜面全是阶梯状硬边；泥土 /
-  圆石这类噪点贴图被拉成颗粒——观感就是「低清 + 像被压坏的小图」。
-* 几何比例本身没被压扁（round-119 的 `s = box*4/(2+√5)` 是对的），所以
-  「压缩」来自采样方式，不是方块被拉扁。
-
-### B. 修复
-
-* `make_version_pixmap` 改为 **4× 超采样**（`_ICON_SS = 4`）：内部按
-  `size*dpr*4` 渲染，开 `QPainter.SmoothPixmapTransform`（贴图双线性），
-  最后 `SmoothTransformation` 缩回目标物理像素并 `setDevicePixelRatio`。
-  斜边不再阶梯化，噪点贴图读起来是干净的小渲染图。
-* 按 `(vtype, size, dpr)` 缓存图标：5 个类型首次渲染 11.8ms，命中 0.04ms
-  （版本列表几十行也只渲染 5 次）。
-* 新增可选 `dpr` 参数；`VersionsPage._make_card` 与
-  `NewInstanceDialog._make_version_card` 传 `self.devicePixelRatioF()`，
-  多屏不同缩放时不再拿主屏 DPR 画错尺寸。
-
-### 验证
-
-* 四方案对照网格（现状 / 3× 最近邻 / 4× 平滑 / 6× 平滑）目视对比，
-  选定 4× 平滑：现状锯齿明显，4× 后草方块顶面与砖块边缘干净。
-* 1.25× 屏幕：物理 70px / 逻辑 56px；QLabel 抓图 3× 放大确认无二次缩放。
-* 真实 VersionsPage 卡片截图：图标完整、比例正常、无挤压。
-* `py_compile` + `pyflakes` 干净；`regress.py` 11/11。
-
-## round-128（2026-10-25）— 资源中心改走「MC百科 + 中文名库」，机翻降为兜底
-
-### A. 根因
-
-* Modrinth 搜索**不认中文**：搜「小地图」只命中翻译补丁类项目，facet
-  `project_id` OR + 空 query 也返回 0 条 —— 用户搜中文名等于搜不到。
-* 详情页把「中文说明」全押在逐段机翻上，而免费额度（round-127 已查明）
-  只有约 1 万字符/天，点两次就烧光；主流启动器（PCL2 / HMCL）根本不
-  逐段机翻，做法是「中文名库 + 中文站外链」。
-
-### B. 改动
-
-* **中文名库清洗 + 扩容**：`mod_names.py` 删除 35 个在 Modrinth 验证
-  不存在的死 slug（`iris-shaders`、`just-enough-items`、`optifine` 等），
-  修正拼写（`ferritecore`→`ferrite-core`、`apple-skin`→`appleskin`、
-  `ok-zoom`→`ok-zoomer`、`mini-hud`→`minihud`、
-  `applied-energistics-2`→`ae2`），新增整合包 11 / 光影 13 / 资源包 9 /
-  热门 mod 13 条。可反查中文词达 **113** 条。
-* **中文搜索反查**：`net_api.search_mods()` 检测到汉字即走
-  `search_mods_zh()` —— 名库反查（精确 > 前缀 > 包含）→
-  `/v2/projects?ids=` 批量取（25 个/批）→ 按 `project_type` 过滤 →
-  分页。实测「小地图」→ Xaero's Minimap、「光影」→ 13 条、
-  「物品栏」→ JEI；英文查询路径不变。
-* **CurseForge 两条通道同步支持中文**：有 key 时把中文反查成 slug 走
-  `slug` 精确参数；免 key 通道逐个试反查 slug，全不中给中文提示
-  `err.cf_zh_missing`。
-* **详情页主入口换成 MC百科**：新增「在 MC百科查看中文说明」按钮
-  （`mcmod_entry_url()`：带浏览器 UA 抓 `search.mcmod.cn`，命中解析
-  `/class/<id>.html` 精确条目，失败退搜索页；7 天缓存**只存命中**，避免
-  mcmod 偶发空壳页把失败缓存一周）。机器翻译按钮保留但降级为「机器翻译
-  （兜底）」。
-* **正文已是中文就跳过机翻**：`_fetch_and_translate` 先算 CJK 占比
-  （≥ 20%），直接显示原文并标注「作者已提供中文说明」，零额度消耗。
-* **空结果提示**：中文关键词在名库未收录时，状态栏提示「中文名库暂未
-  收录该关键词，试试英文名（如「小地图」→ minimap）」，而不是冷冰冰的
-  「0 个结果」。
-
-### 验证
-
-* 真实网络实测：`cn_slug_map` 113 条；`search_mods("小地图")` → 1 条
-  Xaero's Minimap；`("光影", shader)` → 13 条；`("优化")` → 2 条；
-  `("sodium")` → 20 条（原路径不变）；`("宝可梦")` → `[]` + 中文提示。
-* `mcmod_entry_url`：「机械动力」→ `class/2021.html`、「暮色森林」→
-  `class/61.html`、「钠」→ `class/2785.html`（连续请求需间隔，已改为
-  失败不缓存）。
-* CJK 短路实测：中文 README 下 `translate_text` 调用次数 0。
-* 详情页离屏：MC百科按钮 186px = hint 186px、翻译按钮 146px = hint
-  146px，无挤压。
-* `_cjk_ratio`：纯英文 0.0 / 纯中文 0.9 / 中英混合 0.455。
-* `py_compile` + `pyflakes` 全过；`regress.py` 11/11（i18n 中英
-  1365/1365，差异 0）。
-
-## round-127（2026-10-25）— 资源中心「获取翻译失败」根因修复
-
-### A. 根因（实测确认，非猜测）
-
-* Google gtx（`translate.googleapis.com`）在国内网络 **connect timeout**
-  （每次 4-5s），所以每次都落到 MyMemory 兜底。
-* MyMemory 匿名额度只有 **约 1 万字符/天/IP**，超限后统一返回
-  HTTP 429 + `MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS
-  FOR TODAY`。旧代码把这个英文原文直接塞进状态栏，就是用户看到的
-  「获取翻译失败」。
-* 实测：同一 IP 连续 2 次长文本（~4500 字符）通过，第 3 次即 429。
-  而 `_fetch_and_translate` 单次最多送 5000 字符 README —— **点两次就烧光
-  一整天额度**。
-* 旧代码还有三个放大器：① 只缓存 24h，重试要从头再烧一遍额度；
-  ② 翻的是整段 README，但详情页原文区只显示 1200 字符；
-  ③ 每次点击都先白等 4-5s 的 Google 超时。
-
-### B. 修复
-
-* **按 chunk 缓存 7 天**（`trc:` 键）：一次失败也保留已翻好的段落，
-  明天重试只补缺失 chunk，不再重复扣额度。
-* **源头减量**：`_fetch_and_translate` 先剔徽章图片 / Markdown 链接 /
-  裸 URL（这些都是噪声），再截到 1600 字符（原文区只显示 1200）。
-* **Google 失败负缓存 30 分钟**：连不上就跳过（4.1s → 0.0s），
-  避免每次点翻译都白等；超时 5s → 4s。
-* **额度用尽给中文提示**：识别 429 / `ALL AVAILABLE FREE TRANSLATIONS`
-  → 「免费翻译额度已用完（MyMemory 匿名额度约 1 万字符/天），请明天再试，
-  或在设置里配置代理后走 Google 翻译。」不再甩英文原文。
-* **错误前缀去重**：`translate_text` 不再自己加「翻译失败：」，避免状态栏
-  出现「翻译失败：翻译失败：…」。
-* 新增 i18n `err.translate` / `err.translate_quota`；详情页成功文案
-  「24 小时内缓存」→「7 天内缓存」。
-
-### 验证
-
-* 实测同 IP 配额耗尽场景：`translate_text()` 与详情页任务都返回中文提示
-  （0.8s / 1.6s），无 traceback。
-* `_google_translate` 第 1 次 4.1s ConnectTimeout，第 2 次 0.0s 直接跳过。
-* chunk 缓存：4 段文本首次 4 次请求、二次 0 次请求且结果一致。
-* 源清洗：含徽章/链接/裸 URL 的 README → 输出 1600 字符、`http` 计数 0、
-  无 `[![` 残留。
-* `py_compile` + `pyflakes` 全过；`regress.py` 11/11（i18n 中英 1361/1361）。
-
-## round-126（2026-10-25）— 第三批回归：角色 / 加载器 / Cleanroom / 壁纸 / 双页
-
-### A. 首页角色（「角色直接看不到了，变成紫色柔光」）
-
-* **根因**：`HomePage.rebuild()`（语言、主题、设置保存都会触发）会重建
-  `_CharStage`，但 `_char_key` 仍留在 HomePage 上；`_refresh_character()`
-  发现 key 未变就跳过渲染，新 stage 永远是空的 —— 只剩背后的紫色 spotlight。
-* **修复**：新建 stage 时清空 `_char_key`；`_refresh_character()` 在
-  `char_stage._frames` 为空时强制重渲；渲染抛异常时回退到单帧
-  `render_skin_3d`，不再留空台。
-* **同步刷新**：启动补拉皮肤完成、关闭皮肤库后，首页角色一起重渲
-  （之前只刷头像）。
-
-### B. 角色/图片「低清」
-
-* **3D 采样**：皮肤是 64×64 像素画，显示到 ~9 device px/texel。双线性会把
-  每个 texel 抹成灰雾（读起来就是低清）→ 纹理改回最近邻，轮廓仍由
-  抗锯齿 + 2× 超采样保证，观感回到像素画而不是糊图。
-* **2D 预览**：皮肤库卡片 / 披风预览按控件 `devicePixelRatioF()` 渲染
-  （1.25 缩放下不再被 Qt 二次放大）。
-* **版本方块图标**：`make_version_pixmap` 按物理像素渲染并 `setDevicePixelRatio`。
-* **卡片封面图标**：`ImageLoader._round` 原来只按逻辑像素出图（DPR 恒 1），
-  在 125% / 150% 缩放下被 Qt 二次放大 → 资源中心 / 实例卡封面发虚。改为按
-  目标控件的 `devicePixelRatioF()` 出物理像素并 `setDevicePixelRatio`，
-  磁盘缓存文件名带 `@dpr` 后缀（旧缓存自然失效，不会混用）。
-* **皮肤网格**：16×32 上采样走最近邻（原来 smooth 把 1px 描边拉成灰边），
-  仅缩小时才平滑。
-
-### C. 加载器卡片重叠（「选择部分加载器会出现被压缩」）
-
-* `_update_compatible_loaders()` 对仍在 `QGridLayout` 里的卡片再次
-  `addWidget` 不会移动旧格 item → 两张卡叠画。改为先 `removeWidget` 再按
-  3 列重排。
-* `_LoaderCard` 固定高 82：描述换两行时行高不齐，视觉上像被压扁。
-
-### D. Cleanroom 下载/安装报错（「cleanroom 下载报错」「首页开始游戏才报错」）
-
-* **构建源**：`api.github.com` 在用户网络 404/被阻断 → 改为抓官方
-  `download.cleanroommc.com` 的安装器文件名（实测 10 个 0.7.x 构建），
-  下载走 `repo.cleanroommc.com` Maven 镜像；两条 host 失败互备。
-* **安装命令**：旧代码用的是 pre-0.7 的 Forge 式 `--installClient <dir>`，
-  0.7.x 只认 `client -d <dir> --version <id> -y`（实测 installer `--help`
-  与 `--dry-run --json` 验证），且安装前先补 vanilla 1.12.2 底座。
-* **Java**：0.7.x 安装器只接受 **Java 25**（24/26 都被拒）。新增
-  `required_java_major_for()`：cleanroom → 25，`select_java` 支持
-  `need_override`（25 的兼容区间仅 25）；无 25 时安装器
-  `--provision-java` 自带一份到 `~/.cleanroom/java`，并把该目录加进
-  Java 扫描根 + 清扫描缓存，安装完立即能选到。
-* **版本目录**：0.7.x 写的是 `versions/Cleanroom-<build>/`，旧逻辑按
-  `<mc>-` 前缀找不到 → 改为任意含 cleanroom 的版本目录。
-
-### E. 启动后整窗淡紫（「点击一次启动后就出现淡紫色背景底色」）
-
-* `wallpaper` version 模式在有实例时会先画 `draw_version_wallpaper`
-  （浅色主题是 `#F7F6FB→#ECEAF7` 淡紫渐变）。实例 assets 不完整 →
-  panorama 永远失败 → 整窗永久淡紫。
-* 现在不再画 fallback：panorama 真就绪才 `setVisible(True)`，没有就保持
-  正常页面底色。
-
-### F. 版本列表变少 / 退出后双页
-
-* **版本清单**：网络抖动 + 30 分钟内存 TTL 过期会让 `fetch_versions()`
-  直接抛错 → 下拉变空/变少。新增 `_stale()` 七天兜底，磁盘缓存也保留
-  ｜过期条目，离线时仍能列出全部版本。
-* **双页**：内嵌「新建 / 扫描」面板关闭时 `deleteLater()` 要等下一轮事件
-  循环，期间仍在绘制 → 先 `hide()` 再延迟删除。
-
-### G. LabyMod 直连下载
-
-* 官方不发行独立 Forge mod jar（只有安装器，内含客户端 jar + 版本配置）。
-* 「点击即跳浏览器」改为：确认框说明后，应用内直接下载官方安装器
-  （`releases.r2.labymod.net/.../LabyModLauncherSetup-latest.exe`）并启动，
-  装完可用「扫描并导入」接管；非正版账号无法进游戏的限制在确认框写明。
-
-### 验证
-
-* `py_compile` + `pyflakes`（本轮触及的全部文件）全过；
-  `regress.py` 11/11 通过。
-* live view 实测：首页角色 30 帧非空且像素清晰、无淡紫底；加载器页 6 张卡
-  不重叠；Cleanroom 下拉 10 个真实构建；cleanroom 安装器 CLI 用
-  `--dry-run --json` 实测 exit 0 并确认写入
-  `versions/Cleanroom-0.7.12-alpha/`。
-* 壁纸离屏实测：`version` 模式 + 不存在的实例目录 → `isVisible()=False`、
-  `_pixmap=None`、`_panorama=None`（不再画淡紫渐变）；无实例同样隐藏。
-* 内嵌向导离屏实测：打开 → 关闭后 `_body_stack` 只剩 1 个可见页、
-  `_new_panel=None`，无残留大尺寸可见控件（双页复验）。
-* 图标 DPR 实测：`ImageLoader._round(48, dpr=1.25)` → 60 物理像素 +
-  `devicePixelRatio=1.25`（逻辑 48）；DPR 1.0 仍是 48。
-
-## round-124（2026-10-25）— 审计清单 10 项收尾
-
-### A. 视觉/文案修复
-
-* **侧栏分组标题**：`.nav-group` 的 `padding: 14px 0 4px` 在 26px 行高 + 11px
-  字号下只剩 8px 内容区，文字被压成灰条 → 改为 `5px 0 4px`（内容区 17px），
-  实测「游戏/资源/联机/其他/系统」五行高度均 24px 且完整可读。
-* **实例详情路径**：QFormLayout 只按 wordWrap 标签的单行 sizeHint 分配行高，
-  长 `mc_dir` 被裁到只剩盘符 → 路径（标题 + 值）改由纵向布局承载，
-  `heightForWidth` 生效；窄窗实测 488px 宽时高 36px（两行完整显示）。
-* **崩溃分析空态**：同一句「未发现崩溃记录…」原先在正文与状态行各写一次，
-  且无实例时也复述「该实例最近一次运行看起来正常」→ 空态只在正文出现一次，
-  无实例改为「请先选择一个实例」，状态行隐藏；标题不再拼接重复提示。
-* **实例详情分区图标**：`icon("image")` / `icon("sparkles")` 不存在 →
-  改 `resourcepack` / `shader`，四个分区按钮图标均非空。
-* **设置页页脚**：`[cls="page-footer"]` 用 `$bg_panel`，浅色主题下与内容白底
-  差半档、像一条独立白条 → 改 `$bg_card`，只留上边框分隔线。
-
-### B. 入口与加载态
-
-* **百宝箱入口**：AC 侧栏此前无此页入口（仅顶部导航布局可达）→ 新增「其他」
-  分组 + 百宝箱项，`toolbox` 图标回退到 `tools`；实测侧栏第 8 行可达。
-* **首帧骨架屏**：版本库 / 资源中心首次网络往返 0.6–1.2s 内整页空白 →
-  分别铺 6 行静态骨架（图标块 + 两条占位条），数据到达后整页清空重绘；
-  失败路径会主动清掉骨架，不会留在错误提示下面。
-
-### C. 资源与卫生
-
-* **图标资源路径**：`icons.qrc` 的 `<file>` 带了 `assets/icons/` 前缀，嵌入后的
-  资源路径实际是 `:/icons/assets/icons/<name>.svg`，与代码查找的
-  `:/icons/<name>.svg` 不符 —— 每次查找都触发 `Cannot open file
-  ':/icons/logo.svg'` 警告并退回磁盘。改为 `<file alias="...">` 并重新
-  `pyside6-rcc` 生成 `src/icons_rc.py`；同步 `assets/icons.qrc`。
-  复验 8 个图标 `:/icons/*.svg` 全部 `exists=True`。
-* 删除 `settings_dialog._on_style_combo_changed`（pass-only 死方法，无连接）。
-* 实例详情「来源启动器」为空（AC 自有实例）时不再插入空值行，消除 8×19 的
-  空白 label；六个页面扫描空文本可见 label 均为 0。
-
-**验证**：`py_compile` OK；`pyflakes src main.py regress.py` 0；`regress.py`
-11/11；离屏截图（`_shots/audit/r124-*.png`）逐项对照通过。
-
-## round-123（2026-10-25）— 正版账号皮肤：手动刷新 / 上传换肤 / 失败可见
-
-### A. 刷新我的皮肤
-
-* 皮肤库工具栏新增「刷新我的皮肤」，只对正版（Microsoft）账号显示。
-  走新的 `SkinManager.fetch_account_skin(name, uuid)`：先按玩家名请求 Mojang
-  （纹理属性带 `metadata.model`），失败再回退 crafatar。成功后设为当前皮肤，
-  并通知主窗口即时重绘顶栏头像与首页角色卡。
-* 登录时的自动拉取改为复用同一入口，不再有两份重复逻辑。
-
-### B. 上传到正版账号
-
-* 皮肤卡片（正版账号）新增「上传到账号」：`POST /minecraft/profile/skins`，
-  multipart 提交 `variant`（slim/classic，由条目元数据或像素探测决定）+ `file`。
-* 上传前二次确认——这会真实修改账号在 Minecraft 里的皮肤。
-* 401 时用 refresh_token 静默续期，再重试一次；服务端拒绝时把
-  `errorMessage` 原样显示在状态行。成功后本地也把该皮肤设为当前。
-
-### C. 失败不再静默
-
-* 登录后若正版账号始终没拿到皮肤，状态栏提示「未能获取正版皮肤……皮肤库点
-  『刷新我的皮肤』可重试」，而不是无声地显示默认 Steve。
-
-**验证**：`pyflakes` 0；`regress.py` 11/11；离屏构造确认刷新按钮仅正版账号可见、
-游客不可见；非 PNG 上传在联网前即被拒（`SkinUploadError`）。
-真实上传需用户自己的正版账号端到端确认。
-
-## round-122（2026-10-24）— 审计修复：模组页样式级联 / 皮肤模型判定 / 登录信号重复 / 仓库卫生
-
-### A. 模组管理页：操作行背景再次被父容器级联抹掉
-
-* `ModsPage` 的 `action_widget` 上仍留着 `setStyleSheet("background: transparent;")`，
-  父规则优先于应用级 QSS，把 `inst_combo`（#F8F9FA）与 accent「添加」按钮
-  （#7C3AED）的背景一并清成 alpha 0 —— 白字配白底，按钮等于隐形。
-* 删掉该内联样式（QWidget 默认不画背景，无需声明）。离屏采样复验：
-  `add_btn` #7C3AED α255、`update_btn` #FFFFFF α255、`inst_combo` #F8F9FA α255。
-
-### B. 皮肤渲染：slim 判定恒为 True + 左臂 UV 偏移
-
-* `_is_slim` 原实现对任何 64×64 皮肤恒返回 `True`（把 46–47 列的探测写反了）。
-  改为**元数据优先**（`skins.json` 的 `model` 字段 / Mojang `metadata.model`），
-  未知时才探测：slim 手臂 3px 宽，其展开只用到 32–45 列，46–47 恒透明。
-* 新增 `_SLIM_LARM_UV`：front `36..38`、back `43..45`、left `39..42`、
-  top/bottom 同步左移。旧代码把 classic 矩形硬裁成 3px，back 取 44 正好落在
-  透明列 46，slim 角色后背会画出一条空条。
-* `render_skin`（平面图）左臂采样错误：取 `(36,20)` 实为**躯干背面**，
-  回退 `(40,20)` 是右臂侧面 —— 所有现代皮肤的右手都是一块躯干补丁。
-  改为 legacy 64×32 镜像右臂 `(44,20)`，1.8+ 取 `(36,52,3|4,12)`，空则回退镜像。
-* `render_skin` / `render_skin_3d` / `skin_model` 全部接受 `model=` 透传；
-  首页从 `skin_manager().active_of()` 取条目元数据，皮肤库卡片把
-  `skin.get("model")` 传给缩略图，默认 Steve/资源目录素材固定 `classic`。
-* 登录后拉取皮肤改走 `download(name)`：Mojang 纹理属性里带 `metadata.model`，
-  而 crafatar 不返回该字段 —— 此前微软账号皮肤永远按 classic 渲染；
-  失败再回退 `download_by_uuid`。
-
-### C. 微软登录：重试时信号重复连接
-
-* `ms_user_code_ready.connect(self._on_ms_user_code)` 写在 `_start_microsoft` 里，
-  每点一次登录就叠加一条连接，第 N 次重试时同一个设备码会触发 N 次
-  （重复开浏览器 / 重复写剪贴板）。连接移到 `__init__`，只连一次。
-
-### D. 仓库卫生
-
-* `.gitignore` 补 `ac.live.lock`（live view 专用锁）与 `_startup.log`。
-
-**验证**：`regress.py` 11/11；`pyflakes src main.py regress.py` 0；离屏渲染
-四份皮肤（wide/slim × Steve/Alex）确认左右臂贴图正确、slim 无空条；
-`skin_model` 自动判定 wide→classic、slim→slim；模组页三控件背景 alpha 采样 255。
-
-## round-121（2026-10-24）— 首页玩家角色重做 / 单卡启动面板 / 滚动区样式污染修复
-
-### A. 玩家角色：真 2.5D 方盒渲染（学主流启动器的账号视觉锚点）
-
-* 用户反馈：「去学别的启动器怎么做玩家角色的，我们这个是来搞笑的吗」——旧版
-  首页是 96px 正面贴纸 + 36px 披风缩略图 + 一个「—」占位，像未完成的占位图。
-* `skin_render.render_skin_3d`：头/躯干/双臂/双腿各按 6 个面取皮肤 UV
-  （含帽子叠层、slim 3px 手臂、64×32 老皮肤回退），Y 轴 26° + X 轴 8° 正交
-  投影，按平均深度排序后逐面 `quadToQuad` 贴图，3× 超采样再缩小；披风作为
-  躯干后方微外扩平面一起绘制（top half-width 5.2 → bottom 6.9，贴身不外飘）。
-* `skin_model` 暴露 classic / slim，首页徽章显示「经典 / 纤细」。
-
-### B. 首页：角色并入启动主卡（不再「卡中卡」）
-
-* 原「实例卡 + 我的角色卡」两张卡合并为一张 400px 的 hero：左侧「当前实例」+
-  下拉 + 下载版本（空状态）+ 开始游戏锚在左下；右侧账号信息（我的角色 /
-  名称 / 模型徽章 / 账号类型 · 披风）在上、200×240 角色立绘居中、
-  「更换皮肤与披风」在脚下。等距台座换成无边框柔光 + 脚底径向阴影，点角色
-  本体也可打开皮肤库。
-* 空状态：名称由「—」改为「未选择实例」，无实例时不显示只有一项的下拉框，
-  并给出「下载版本」入口，避免一个禁用的开始游戏成为死路。
-* 角色素材无披风时保持透明；披风纹理按 `(1,1) 10×16` 贴在背后。
-
-### C. 样式污染：滚动区 inline QSS 清空了所有子控件背景
-
-* 首页 `QScrollArea.setStyleSheet("background: transparent; border: none;")`
-  会级联到全部子控件，把 `QComboBox` / `QLineEdit` 等的背景和边框一起抹掉
-  ——实例下拉框因此看起来像一行裸文字（离屏像素采样确认透明）。
-* 改为只依赖全局 `QScrollArea` 规则 + `viewport().setAutoFillBackground(False)`；
-  壁纸仍能从首页透出（带壁纸离屏验证）。
-* `QPushButton[cls="secondary"]` 描边由 `$border` 提到 `$border_light` 并补
-  `$bg_btn` 底，浅色主题下「更换皮肤与披风」不再像纯文字。
-* 自定义 `_Combo` 画下拉箭头：全局 QSS 给 `::drop-down` 定了宽度却没给
-  `::down-arrow` 图片，Qt 就不画箭头，全应用的 combo 都缺可点击暗示。
-* 禁用的「开始游戏」图标从 `on_accent`（白）换成 `text_disabled` 灰。
-
-**验证**：`regress.py` 11/11；`pyflakes src main.py` 0；离屏渲染验证
-light / dark / guest / 有实例 / 带披风 / 带壁纸六种状态；live 125% DPI 真机
-截图确认字体、描边、角色比例与下拉箭头。
-
-## round-120（2026-10-24）— CurseForge 资源详情 / 返回首页修复 / 壁纸薄纱自适应 / 卫生清零
-
-### A. 资源中心：CurseForge 也有版本选择
-
-* `net_api` 新增 `_curseforge_versions`（官方 `/v1/mods/{id}/files`，需 Key）与
-  `_curseforge_versions_keyless`（cfwidget，免 Key），两者都把文件映射成
-  Modrinth 版本的同一形状（`game_versions` / `loaders` / `files` / `date_published`），
-  详情页一套渲染器通吃两种源。
-* 新增 `download_curseforge_file`：官方 `files/{fileId}/download-url` 拿直链，
-  作者禁止第三方分发时回退列表里的 `downloadUrl`；免 Key 走
-  `download_cfwidget_file`。
-* 搜索 / 免 Key 链接解析的结果统一带 `source`（`modrinth` / `curseforge`），
-  `StoreDetailDialog` 按来源选版本列表与下载器；无实例时两种源都能「不选版本
-  另存为」或直接按版本下载。
-* 详情对话框尺寸修复：`setMinimumSize(880, 760) / resize(920, 800)`。此前强制
-  680 高小于布局真实最小高度（753），「加载更多」压住版本行、翻译框盖住状态行。
-
-### B. 导航：从版本库返回首页
-
-* `_show_page` 在目标导航行已选中时不再空转：若侧栏行没变但栈仍在无行子页面
-  （版本库 / 模组 / 成就等），直接 `_switch_stack`。修复「首页高亮却停在版本库、
-  点首页没反应」。
-
-### C. 壁纸薄纱自适应
-
-* `_Veil` 支持 `set_alpha`；图片 / GIF 载入后按美术平均亮度算薄纱强度
-  （浅色主题目标 luma 0.86、深色 0.18，下限 0.46 上限 0.92），GIF 取首帧采样。
-  此前固定 alpha 118 让亮灰壁纸上的「找到 N 个结果」等裸标签发灰。
-* 视频无法低成本取帧，保留固定强度；全景仍走自带的自适应遮罩。
-
-### D. 质量清单收尾（P3 / P4）
-
-* 成就页单数分区最后一张卡跨两列，网格节奏统一。
-* 实例「路径」行由 `text_sub` 改为 `text_main`。
-* `pyflakes src main.py` 清零（含 `main.py` 的 `src.paths` 与未用 `e`）。
-* 删除全仓确认无人调用的死函数：`read_json` / `write_json` / `ensure_dir` /
-  `stop_bgm` / `play_sfx` / `stop_preview` / `validate_client_id` /
-  `login_with_microsoft` / `login_with_microsoft_code_display` / `docs_url` /
-  `node_running` / `recommended_majors` / `note_bytes` / `version_theme` 及
-  `VERSION_THEMES` 常量。
-
-**验证**：`regress.py` 11/11；pyflakes 0；live 截图复核侧栏收起态（56px 图标
-居中、无溢出）、正式版/快照/愚人节/远古四类版本图标比例、皮肤/披风双页、
-资源中心带壁纸的裸文字对比度。
-
-## round-119（2026-10-24）— 全窗动态壁纸 / 皮肤与披风 / 资源中心无实例下载 / 侧栏与版本图标收尾
-
-### A. 动态壁纸：覆盖全启动器 + 首尾淡入淡出 + 不挡内容
-
-* **背板上移到主窗口**：`WallpaperWidget` 从 `HomePage` 移到 `MainWindow`
-  （`central` 的子控件、`lower()`、`WA_TransparentForMouseEvents`），跟着
-  `central` 尺寸走；`panorama_ready` 仍转发到首页做文字对比度刷新。此前只有
-  首页有壁纸，实例/资源/设置等页面是裸背景。
-* **可读性薄纱**：新增 `_Veil`（主题底色 alpha 118，盖在媒体之上、UI 之下），
-  页面本身是全透明的，文字直接压在壁纸上会低对比；实测首页 / 资源中心
-  标题、提示、筛选行均可读，卡片保持实色。全景（panorama）自带亮度自适应
-  遮罩，此时薄纱自动隐藏。
-* **循环接缝**：新增 `_LoopFade`（壁纸内部的一层主题色渐变遮罩，永远盖不到
-  UI）＋ GIF 末尾帧 / 视频末尾 `positionChanged` 回绕检测——循环前 3 帧
-  （GIF）或最后 420ms（视频）盖到全不透明，回绕后再淡回。状态机（cover→1、
-  clear→0、回绕触发）已用离屏脚本逐项验证。
-* 图片模式实测：首页与资源中心整窗可见壁纸；视频模式在 `grab()` 里拿不到
-  画面（QVideoWidget 原生表面），只能真机目检。
-
-### B. 左侧栏收起态
-
-* **图标画不出来的真因**：PySide6 的 `QStyleOptionViewItem.icon` getter 与
-  成员共享数据指针——先捕获 `ic = opt.icon`、再 `opt.icon = QIcon()` 会把
-  已捕获的 `ic` 一起清空（「背景画了、图标没画」）。修法：**先取 pixmap**，
-  再在另一个 `QStyleOptionViewItem` 副本上清 icon/text 调 `CE_ItemViewItem`。
-* 收起态行高统一 48、`ScrollBarAlwaysOff`（消除 56 > 55 视口造成的横向
-  溢出）、图标居中、选中行用 `QIcon.Selected` 白色变体、分组标题在收起态
-  不再生成（不再有被压扁的「游戏/资源/联机/系统」小字）。真机截图复核：
-  无横向滚动条、无水波纹。
-
-### C. 版本页等距方块
-
-* 几何修正：侧棱 `vh = hypot(cx, hh)`，剪影高 `s(2+√5)/4`，由目标高度反推
-  宽度 `s = box*4/(2+√5)`——草方块不再被压扁。
-* 愚人节版本由「蛋糕」换成 `crafting_table`（语义仍贴合「愚人节=工作台彩蛋」
-  且贴图比例正常）；快照=命令方块、旧版=铁砧/圆石保持不变。五类图标离屏
-  拼条复核通过。
-
-### D. 资源中心：版本/目标选择 + 不选实例也能下载
-
-* `StoreDetailDialog` 新增「下载到」下拉：实例列表 + 「不指定版本 · 另存为…」；
-  未选实例时弹目录选择器（默认 `data/downloads`），直接把选中的资源版本存盘。
-* 无实例时也允许打开详情（此前直接 info 拦截），资源卡的下载按钮在无实例
-  Modrinth 源下改为打开详情，等价于「先选版本/目标再下载」。
-* i18n 新增 `store.detail_target` / `store.detail_target_save` /
-  `store.detail_save_title` / `store.detail_save_confirm` / `store.detail_no_folder`。
-  离屏验证：有实例时下拉 3 项且默认当前实例；无实例时仅 1 项 `__save__`。
-
-### E. 玩家皮肤与披风
-
-* `skins.py`：披风库与皮肤库同目录（`data/skins/` + `skins.json` 的 `capes` /
-  `active_cape`）；新增 `list_capes` / `add_cape_file` / `set_active_cape` /
-  `remove_cape` / `download_cape`（Mojang profile CAPE → crafatar 回退，校验
-  PNG 头）。
-* 登录成功自动拉取皮肤与披风（`login_dialog._fetch_skin`），多数账号没有披风
-  时静默跳过。
-* `skin_render.render_cape()`：取披风背面 `(1,1) 10x16`，按 10:16 缩放，
-  兼容 64x32 / 64x64 两种披风文件。
-* **首页新增「我的角色」卡**：全身皮肤预览（未设置时回退内置 Steve）＋披风
-  缩略图＋账号名/账号类型/披风名＋「更换皮肤与披风」入口（未登录时改为「登录」）。
-  账号切换、登录、关闭皮肤库后都会即时刷新。
-* `SkinDialog` 改为「皮肤 / 披风」双页：披风页支持导入 PNG、按玩家名下载、
-  装备 / 装备中、卸下披风、删除；无账号时装备按钮禁用并给出提示。
-* 新增 i18n：`skin.tab_skin|cape`、`skin.cape_*`、`home.char_*`。
-
-### F. 其他收尾
-
-* 首页「开始游戏」禁用态原本被 QSS 级联成近白底浅灰字（视觉上像不存在），
-  新增 `QPushButton[cls="play"]:disabled` 规则：浅底 + 灰字 + 边框，明确
-  「可点但当前不可用」。
-* `_pii_gate.py` 在无 git 的机器上从 `WinError 2` 崩溃改为打印 `SKIP` 退出 0；
-  `regress.py` 11/11 通过。
-* 卫生项：清掉 `main_window` / `wallpaper` / `login_dialog` / `store_detail` /
-  `pages_browse` / `onboarding` 六处顶层未使用导入。
-* 复核 round-102 设置页裁切：设置 → 网络 / 第三方服务截图无裁切、长提示
-  正常换行、滚动到底正常（详见 `docs/quality_punchlist.md`）。
-
-## round-115（2026-10-23）— 验收评审（代码设计 + 实际作用）
-
-> 验收标准不是「能跑、不报错」，而是**代码设计上有没有实质缺陷**、**功能是不是
-> 真的在起作用**。本轮只取证定性，**不改代码**。
-> 完整报告：[`docs/round115_acceptance_review.md`](docs/round115_acceptance_review.md)
-
-### A. P0 —— 启动前置预检的两处硬闸门
-
-* **低内存判据用错指标**：`main_window.py:2948-2962` 用 `GlobalMemoryStatusEx.ullAvailPhys`
-  （**当前可用物理内存**）去比 JVM 堆上限 `-Xmx`。本机 15.19GB 总量 / 0.82GB 可用
-  时判「内存不足」——别的程序占内存就误报。正确判据应是 commit headroom。
-* **默认按钮是「取消」**：`setDefaultButton(box.buttons()[-1])` 把「取消」设为默认，
-  误报时用户按回车 = 启动被取消。
-* **磁盘预检同类问题**：`main_window.py:2963-2987` 用 `ram + 2048` 推导磁盘需求
-  （内存与磁盘占用无因果关系），默认按钮同样是「取消」，且 `except Exception: pass`
-  把 `resolve_game_dir` 的真实失败一并吞掉。
-
-### B. P1 —— 视觉层的两个系统性缺陷
-
-* **图标颜色全部写死**：56 个 SVG 中 55 个把颜色写死、**0 个**用 `currentColor`。
-  其中 32 个用 `#475569`（暗色描边）→ 暗色主题 `bg_card #2A2A2E` 下对比度仅
-  **1.89:1**、「控制中枢」`#141B28` 下 **2.28:1**，低于图形对象 3:1 门槛 → 切暗色
-  后约 1/3 图标糊进背景。另有 6 个用旧强调色 `#6366F1`（当前 accent 是 `#7C3AED` /
-  `#00E5FF`），与全站强调色对不上。
-* **按钮图标尺寸被静默压成 16×16**：`QPushButton(icon(k), text)` 的 `iconSize`
-  实测 = 16×16（Qt 样式默认 `PM_ButtonIconSize`），全项目无 QSS `icon-size` 规则。
-  音乐页 44×44 的播放按钮里只画了 16×16 的小三角。此前截图里的「小方块」由此而来
-  ——**不是缺 SVG**（56 个文件全在、全部 `isNull=False`）。
-* **中文侧栏两个「联机」**：`nav.group.multiplayer` 与 `lobby.nav_lobby` 中文同名
-  （英文分别是 Multiplayer / Lobby，不重复）→ 纯中文 i18n 缺陷。
-* **联机页文案承诺的输入框不存在**：`lobby.join_help` 说「在下方输入大厅编号」，
-  但页面层只有「加入/创建」两个按钮（都跳同一个弹窗），`QLineEdit` 只在
-  `lobby_dialog.py` 里。
-
-### C. P2
-
-* 首页 hero 内「26.2」重复 3 次（标题 / detail 行 / combo 当前项）。
-* `aclive.py` 6 项：主线程 JPEG 编码、主线程 sleep 打字、`eval` 无超时无沙箱、
-  控件坐标相对主窗口但抓帧目标可能是弹窗（坐标系不一致）、`_cmd_nav` 调私有方法
-  `_switch_stack`、WS 广播无背压。
-
-### D. ✅ round-113 下载源改造复核通过
-
-逐行对照 mll 安装源码确认：并发 48 注入生效（模块级全局查找）、连接池 64 生效
-（`install_libraries`/`install_assets` 各自建**一个** session 复用全部文件）、
-`_forge` 单独替换必要且已做、13 条镜像路径规则正确。
-`BMCLAPI_OPTIFINE_LIST` **不是残留死代码**（仍服务于「新建实例→加载器」入口）。
-唯一打折点：`_RequestsShim.get()` 每次新建 Session，mll 未传 session 的分支
-（版本 json / client jar）不跨调用复用连接池。
-
-### E. 撤回的两条旧结论
-
-* 「开始游戏堵死 UI 线程」→ **不准确**：`QMessageBox.exec()` 是嵌套事件循环，
-  用户界面仍可交互；实际发生的是 live view `/ctl` 通道 10s 超时。真因是
-  **预检弹窗 + 误报**，非 `on_play` 路径上的同步网络调用。
-* 「侧栏分组标题与条目视觉权重相同」→ **不准确**：`nav-group` 为小字号 + 灰 +
-  700 字重 + 1px 字距，层级是分开的。
-
----
-
-## round-116（2026-10-23）— 验收整改 + MC 全景背景 + 退出闪退根治
-
-> 接 round-115 验收结论。本轮把 P0/P1/P2 里**当时就定下的部分**全部落地，
-> 并新增「版本全景背景」功能；另在验证过程中发现并根治了一个**退出即闪退**
-> （0xC0000409）的线程生命周期缺陷。
-
-### A. 新功能：版本全景背景（真全景图 + 伪 3D + 整合包覆盖）
-
-设置 → 壁纸的「版本主题背景」升级为「版本全景」：直接使用**该 MC 版本原版主界面
-那张全景图**（`assets/.../gui/title/background/panorama_0..5.png`，立方体贴图
-6 面），在首页做**伪 3D 透视**缓慢环绕旋转，而不是程序生成的渐变。
-
-* `src/panorama.py`（新增）
-  * `locate_faces()` 取面顺序：**整合包资源包（zip 里的 `assets/.../panorama_N.png`）
-    → 整合包 `overrides/` → 原版资产索引**（`assets/indexes/<assetIndex.id>.json`
-    的 objects 映射 → `assets/objects/<hash[:2]>/<hash>`），整合包换过背景就用
-    整合包自己那张。
-  * 渲染：相机在立方体中心 → 立方体面是平面，纹理 (u,v) → 屏幕是**单应矩阵**；
-    近平面 + 四条屏幕边界用 Sutherland–Hodgman 半平面裁剪（可见区是纹理空间里的
-    凸多边形，直接当 clip region）。
-* `src/wallpaper.py`：全景作为壁纸层的一个分支，半分辨率缓冲 + `SmoothPixmapTransform`
-  放大，实测 **3.25 ms/帧**（20fps 预算 50ms，约占单核 6.5%），页面不可见时停表。
-* **可读性**：全景是整屏媒体背板，落在背板上的文字（品牌行、修复日志行）必须
-  仍可读。蒙版强度**由美术自身平均亮度自适应**（不是写死数值）：暗色主题朝黑压
-  到 luma ≤ 0.44，亮色主题朝白提到 luma ≈ 0.55；深色洞穴在暗色主题下几乎原样
-  呈现（顶 24% 黑 / 底 0%），亮色主题呈柔和淡彩（顶 47% 白 / 底 30% 白）。
-  两侧都满足 WCAG 对比度（浅色主题下次级文字升级为 `text_main`）。
-* 找不到全景（版本没装 / 资产索引缺失）→ 静默退回原程序渐变，不留黑洞。
-
-### B. P0 整改（启动前置预检）
-
-* **P0-1 低内存判据**：`GlobalMemoryStatusEx.ullAvailPhys`（当前可用物理内存）
-  → **`CommitLimit - CommitTotal`（可提交内存余量）**。堆是虚拟预留 + 按需提交，
-  别的程序占着物理内存不代表提交不了新内存；提交额度用尽才是真失败。
-  读 `psapi.GetPerformanceInfo`，结构体按指针宽度自适应（x64 内核计数器是 64 位，
-  MSDN 那份全 DWORD 的 56 字节布局只在 x86 成立）。
-* **P0-1 默认按钮**：`setDefaultButton(box.buttons()[-1])` 把「取消」设成默认 →
-  改为显式持有「仍然启动」按钮并 `setDefaultButton(它)`。误报时按回车 = 直接启动。
-* **P0-2 磁盘预检**：`ram + 2048`（内存与磁盘需求无因果关系）→ 固定常量
-  `MIN_FREE_DISK_MB = 3072`；`resolve_game_dir` 的失败不再被 `except: pass`
-  一起吞掉（路径解析失败与取不到空间分成两处处理）；默认按钮同样落在「继续」。
-
-### C. P1 整改（视觉）
-
-* **P1-3 图标配色**：`icons.py` 新增 `_TintedIconEngine`——把 SVG 按控件要求的
-  尺寸光栅化后用 `CompositionMode_SourceIn` 整体染成主题色（保留抗锯齿边缘）。
-  单色图标默认取 `text_sub`、强调类取 `text_accent`，随主题联动；
-  品牌 / 状态类（`_KEEP_COLOR`）保留原色。
-* **P1-4 图标尺寸**：`QPushButton(icon(k), text)` 的图标被 Qt 样式默认
-  `PM_ButtonIconSize`（Windows 16×16）静默压小 → `AcSliderStyle` 统一把该指标
-  抬到 **18px**（显式 `setIconSize` 的按钮仍以显式值为准），关键大按钮另加显式
-  `setIconSize`。
-
-### D. P2 整改
-
-* **P2-5 中文侧栏两个「联机」**：`lobby.nav_lobby` 中文改为「大厅」，与分组标题
-  「联机」区分（英文 Multiplayer / Lobby 本就不重复，是纯中文 i18n 缺陷）。
-* **P2-7 首页 hero 版本号重复 3 次**：detail 行不再无条件写版本号——实例名里
-  已经含版本号时（AC 自建实例名 = 版本号）省掉，只在实例名不含版本号时补上，
-  保证「版本信息至少可见一次」而不重复三遍。
-
-### E. 退出闪退根治（0xC0000409）
-
-round-115 之前就存在的缺陷：解释器析构**仍在运行的 QThread** → Windows 上
-fail-fast。本轮定位到三处设计问题并根治：
-
-1. **注册时机**：`Worker` / `ProgressWorker` / 下载队列线程都在 `run()` **内部**
-   才注册进 `worker._LIVE`——`start()` 与 `run()` 之间存在窗口，那段时间里
-   `drain_workers()` 看不到它。→ 新增 `TrackedThread` 基类，**在 `start()` 里注册**。
-2. **注销时机**：原来在 `run()` 的 `finally` 里注销——那一刻线程还在收尾，注销后
-   注册表就不再持有最后一个引用，owner（对话框/页面）被销毁时线程会被从脚下抽走。
-   → 改为**线程真正停止后**（`finished` 信号）才注销。
-3. **覆盖范围**：全景加载线程（`PanoramaLoader`）此前不在任何关停流程里，
-   `main.py` 的 `os._exit()` 又会跳过 atexit → 在 `panorama.py` 加模块级线程注册表
-   + `wait_for_loaders()`，并挂到 `main.py` 的 `aboutToQuit`。
-
-附带收益：**对话框在后台任务进行中被销毁不再闪退**（注册表保证线程存活）。
-
-### F. 验证
-
-* `python -m compileall src main.py tests` 全量通过。
-* `tests/smoke_all.py`：16/16 构造成功，**退出码 0**（此前稳定 0xC0000409）。
-* 离屏渲染截图（暗/亮）确认全景构图与配色。
-* **有头实跑**（`tools/aclive` live view，`--headful`）：真窗口截图确认全景渲染、
-  中文排版、深浅两套主题下落在背板上的文字均清晰可读。
-* 实测性能：1600×900 下 3.25 ms/帧（p95 4.62 ms）。
-
----
-
-## round-117（2026-10-23）— 联机页输入框 + live view 六项缺陷整改（外加两处新发现）
-
-> 承接 round-115 验收报告里留到本轮处理的两项：**P1 联机页大厅编号输入框**
-> 与 **P2 `aclive.py` 六项设计缺陷**。
-> 整改过程又挖出两处**报告里没写、但更要命**的问题（见 C、D）。
-
-### A. 联机页：文案承诺的输入框真的存在了
-
-* `lobby.join_help` 写着「在下方输入大厅编号」，而页面层根本没有输入框——
-  编号只藏在后面对话框里。**现在大厅页直接有编号输入框**：输入后按回车或点
-  「加入大厅」，编号带进 `LobbyDialog` 并在窗口显示后**自动加入**（不再让人
-  在对话框里再输一遍）。
-* 新增 i18n 键 `lobby.join_help_page`：页面上的按钮叫「加入大厅」而对话框里的
-  按钮叫「加入」，同一句帮助文案不能同时对两者成立，故页面用独立文案
-  （英文同理 `[Join Lobby]`）。
-* 卡片 `minWidth=460`、按钮 `minWidth=116`：原先卡片按内容收缩到 300px 宽，
-  输入框只剩 128px，占位文案「编号应长得像这样：U/NNNN-AAAA-SSSS-EEEE」被截断。
-
-### B. `aclive.py` 六项设计缺陷
-
-| 项 | 缺陷 | 修法 |
-|---|---|---|
-| a | GUI 主线程做 JPEG 编码 | 新增 `_JpegEncoder` 线程：输入队列 `maxsize=1` 只留最新帧，**GUI 线程只做 `grab()`**。注意 `QPixmap` 与 `QImage` 共享缓冲，跨线程前必须 `.copy()` |
-| b | 主线程 `time.sleep` 逐字符打字 | 改为 `QTimer` 逐 tick 推字符，**目标控件在首个 tick 锁定**（避免焦点漂移）；非 ASCII 字符走 `QInputMethodEvent` 提交 |
-| c | `eval`/`exec` 无超时无沙箱 | `sys.settrace` 设 deadline（默认 5s，可 `timeout_ms` 调）+ 受限 builtins（剔除 `open`/`__import__`/`exec`/`eval`/`compile`/`input`/`globals`/`locals`/`vars`/`setattr`/`delattr`），提供 `import_module()` 助手 |
-| d | 坐标相对主窗口，但抓帧目标可能是弹窗 | 新增 `_capture_target()`：所有报坐标的接口（click/move/wheel/find）统一以**当前抓帧窗口**为原点；`find` 响应里带 target 身份 |
-| e | `_cmd_nav` 调私有方法 `_switch_stack` | 改调 `MainWindow.show_page(key)` 公开 API（新增于 `main_window.py`），未知页面返回可读错误 + 页面清单 |
-| f | WebSocket 广播无背压 | 每个客户端独立**有界队列（maxsize=4，满则丢最旧）+ 独立写线程**，`select` 探可写性 + 5s 超时 + 自行处理部分写；一个卡住的客户端不再拖死其他人 |
-
-### C. 新发现①：点击弹模态框会让整个控制口失声（本轮最关键修复）
-
-现象：点「创建大厅」后 `/ctl` 全部 `main-thread timeout`，而**帧流照常**
-（面板仍在刷新）。
-
-根因：Qt 中**同一个 QTimer 在其槽函数执行期间不会再次触发**（实测：
-槽内进入嵌套 `QDialog.exec()` 后，同一定时器再未触发，别的定时器照常）。
-点击是在泵槽里同步投递的 → 按钮弹出模态框 → 泵槽被嵌套事件循环占住 →
-泵定时器再也不触发 → 命令队列无人消费 → 控制口全线超时（帧流因为是另一个
-定时器而幸存，这正是「看得见动、却发不出命令」的原因）。
-
-修法：**点击/按键不再在命令槽里同步执行**，改由 `QTimer.singleShot(0, …)`
-投递给事件循环。模态框在事件循环的回调栈里打开，泵定时器不被占住 →
-**弹窗打开期间控制口照常可用**（已实测：弹窗状态下 `info`/`find`/`shot` 均正常）。
-点击响应改为 `{"deferred": true}`，目标控件在**投递时**解析（避免待投递的点击
-还没落地就取焦点）。
-
-### D. 新发现②：帧像素 vs 逻辑像素（125% 缩放下点偏 25%）
-
-`grab()` 出来的是**设备像素**（本机 125% 缩放：窗口 1100×720 逻辑 → 帧
-1375×900 物理），而控件几何是逻辑像素。浏览器面板按帧像素回传坐标，
-控制口却按逻辑像素解释 → **每个点击都偏 25%**。
-
-修法：控制口对外统一使用**帧像素**——`find` 返回的坐标乘以
-`devicePixelRatioF()`，`click`/`move`/`wheel` 的入参除以它；`find`/`info`
-响应里附 `dpr` 与 `frame` 尺寸，调用方可直接核对。
-
-### E. 其它
-
-* `_cmd_click` 补 `setFocus()`：合成鼠标事件不会移动键盘焦点，真实点击会——
-  不补的话「点击输入框 → 打字」会把字打到别的控件里。
-* `type` 命令新增 `wait_ms`：等打完再返回（等待发生在 HTTP 线程，不占 GUI 线程）。
-* `live.py` CLI 补 `--wait-ms` / `--timeout-ms` / `--cls`。
-
-### F. 验证
-
-* `python -m compileall` 全量通过；`tests/smoke_all.py` 16/16，**退出码 0**。
-* live view 真窗口实跑：`nav` → `find` → `click` → `type` → `shot` 全链路；
-  输入框实收到 `U/1234-ABCD-5678-EFGH`；点「加入大厅」→ 对话框带编号自动加入
-  → 编号不存在时正确弹出「未找到该编号的大厅」告警。
-* 死循环防护实测：`exec --code "while True: pass"` **5.0 s 后**返回
-  `timeout: evaluation exceeded 5.0s`，界面随后仍可正常响应。
-* 沙箱实测：`open(...)` → `NameError: name 'open' is not defined`，
-  `__import__(...)` 同理被拒。
-* 打字不卡帧流实测：1.4 s 打字任务进行中，`shot` 命令 **475 ms** 返回。
-* 模态框存活实测：弹窗打开期间 `info` 360 ms 返回、`find`/`shot` 正常。
-
----
-
-## round-118（2026-10-23）— 新手教程「外观风格」档位 + 占用参考条
-
-> 玩家要求：教程里加一个「简洁 / 正常 / 复杂 / 自定义」的外观风格选择，
-> 直接决定手动打开哪些外观效果（进而决定 AC 占用），并给玩家一条可视化占用参考。
-
-### A. 教程新增「外观风格」步骤（语言 → 主题色 → **外观风格** → 内存 → Java）
-
-* **档位就是五组开关本身**，不额外存一个「档位」键：简洁 = 全关；正常 =
-  页面切换 + 成就弹窗；复杂 = 五项全开；自定义 = 逐项勾选。再次打开教程时
-  按当前配置反推档位（`_derive_style_tier`），配置与 UI 不会各说各话。
-* **占用参考条**：内存 / 单核 CPU 两条 6px 细条 + 数值（`+21 MB` / `+4.5%`），
-  随档位与勾选实时变化。权重按各效果的绘制路径折算（流光独占 30fps 重绘表、
-  亚克力把模糊交给 DWM、毛玻璃/切换只在绘制期、成就弹窗平时闲置），
-  **界面明确标注「估算、非实测」**，避免把参考值当 benchmark。
-* **选择即安装模块**：选中档位会安装对应的内置特效包（`effect-frosted-glass`
-  等五个）并按档位写开关；「模块」页因此仍有真实的卸载开关。取消选择的模块
-  保留在本地（不替玩家删东西），只把开关与 `_effect_owners` 清掉，避免模块页
-  继续显示「已应用」而效果其实是关的。
-
-### B. 顺带修掉教程设置从不落盘（这条不修，上面的档位重启就没了）
-
-* 教程此前**从不调用 `save_config`**：语言 / 主题色 / 内存只在进程里生效；
-  而主窗口的 `closeEvent` 会用自己的**教程前**配置副本整个写盘 →
-  重启后教程里的选择全部丢失。
-* 现在完成教程时保存配置，并调用新增的
-  `MainWindow.apply_appearance_config(cfg)`：主窗口在教程弹出前就已构造，
-  不重新读取并应用的话，第一帧画面不会反映刚选的档位（毛玻璃/透底/流光/
-  页面动画都要重设 + `apply_qss`）。
-* `_prev()` 也补了 `_save_step()`：此前「上一步 → 下一步」会把单选悄悄
-  复位成 cfg 里的旧值。
-* `apply_effect_module(mod, reapply=False)`：教程一次可能装五个特效包，
-  逐个全窗口重应用会把 QSS 与首页重建跑五遍。
-
-### C. 验证
-
-* `compileall` 全量通过；`tests/smoke_all.py` 16/16、退出码 0。
-* 离屏断言：档位与读数（简洁 `+0 MB / +0.0%`、正常 `+4 MB / +0.3%`、
-  复杂 `+21 MB / +4.5%`）、自定义勾选联动、`_save_step` 写入开关。
-* 端到端（临时目录、真实拷包）：选「复杂」→ 五个特效包全部装好、
-  `_effect_owners` 五条齐全；再选「简洁」→ 开关全关、所有权清空、
-  已装模块不被删除。
-* i18n zh/en **1304 / 1304** 零单边；教程对话框按新步骤加高到 640×600。
-* 离屏几何检查：四张档位卡 126×64 等宽、两条进度条与三行复选框无重叠；
-  说明文字按三行预留高度（wordWrap 的 QLabel 只报一行 sizeHint，之前会被裁掉）。
-  离屏字体是方框，排版仍需真机目检。
-
-### D. 真机目检揪出的四处问题（都是既有代码，不是本轮新写出来的）
-
-* **教程正文从来没显示过**：`_show_step` 用 `for item in step_def[1:]`，而
-  `step_def` 是 `(key, [items])` —— 遍历到的是「包着列表的单元素元组」，
-  `key_type` 本身是个元组，永远匹配不到 `"body"`。所有步骤的说明文字都被静默
-  吞掉。改成遍历 `step_def[1]` 后正文恢复（欢迎/Java 步骤同样受益）。
-* **浅色主题下占用条不可见**：轨道用了 `bg_input`，而浅色主题 `bg_input` 与
-  `bg_panel` 同为 `#F8F9FA` —— 空条与卡片同色，只剩两串数字。轨道改用
-  `border` token。
-* **无实例时「版本全景」把主页染绿**：`wallpaper_mode="version"` 且没有实例时，
-  代码仍画程序化壁纸，`_theme_for_version(None)` 落 `overworld` → 绿色光晕；
-  叠加 `glow.setColorAt(0.55, QColor(theme.glow))` 用了**全不透明**中间色标，
-  整屏铺一层实色。现在：无实例（且无自定义图）直接不显示背板；无版本时回退
-  用品牌 accent；0.55 色标保持半透明。
-* **草方块图标顶面发灰**：原版 `grass_block_top.png` 是**灰度遮罩**，由生物群系
-  在运行时染色；直接贴图渲染出来像「带绿边的石方块」。新增按面染色表
-  （`_FACE_TINTS`，平原草色 `#91BD59`，Multiply），草方块恢复绿色顶面。
-
-### E. 清理
-
-真机验证期间生成的 `data/`、`launcher_config.json`、锁文件与 `_startup.log`
-已再次删除，保留「全清后首启」的干净状态。
-
----
-
-## round-114（2026-10-23）— live view：给 Agent 的「实际体验」工具
-
-> 对标共享工具目录里的 liveview（Chromium CDP 版）。此前 AC 只有
-> `regress.py --shots` 的**一次性离屏截图**（每次重起进程），没有
-> 「看着画面 → 操作 → 再看」的闭环，也就无法「自己操作应用实验功能」。
+> round-112 建立。目的：让「哪些地方没做好」的判断**有据可依、可跨会话追**，
+> 而不是每次靠临场感觉。
 >
-> **正式启动完全不受影响** —— 只有 `AC_LIVE=1` 时才挂载。
+> 配套入口：[`regress.py`](../regress.py) —— 一条命令跑完所有自检。
 
-### A. `src/aclive.py`（新增）—— 帧流 + 控制口 + 输入注入
+## 一、判定框架：什么算「没做好」
 
-* **帧**：QTimer 定时 `win.grab()` → JPEG → WebSocket 广播（二进制帧，非 base64）
-* **输入**：`QMouseEvent` / `QKeyEvent` / `QWheelEvent` 经 `QApplication.sendEvent`
-  注入 —— **不抢系统焦点**，离屏模式下照样能点
-* **控制口**：`POST /ctl`，命令集 `shot / nav / click / move / wheel / key / keys /
-  type / eval / exec / info / wait`
-* **eval 通道**：在应用进程里跑 Python（AC 是 Python，比 liveview 的 JS eval 更强），
-  预置 `win` / `app` / `Qt*` / `find(text=…, cls=…)` / `click_text(…)`
-* 所有碰 QWidget 的命令统一**回 Qt 主线程**执行（HTTP 线程入队 → 20ms 定时器
-  取件 → `Event` 回传结果）
-* 抓取目标按「弹出菜单 > 模态框 > 焦点顶层窗口 > 主窗口」取优先级——弹窗是独立
-  顶层窗口，`win.grab()` 抓不到
+按可证伪性从强到弱排——**越靠前越该先修**：
 
-### B. `tools/aclive/panel.html` + `tools/aclive/live.py`（新增）
+| 级别 | 判定信号 | 典型例子 |
+|---|---|---|
+| **P0 功能错** | 真跑一遍结果与声称不符；崩溃 / 数据错 / 逻辑反了 | 成就页幽灵卡片叠画；设置页 `is_dirty()` 恒真 |
+| **P1 布局/可见** | 截图能看出重叠、裁切、对比度不足、节奏不一致 | 分组标题被卡片压住（本轮已修） |
+| **P2 声称未接通** | 文档/CHANGELOG 说有，实测没有或返回空 | `_diag_all.py` 从未入库却写在发布清单里 |
+| **P3 一致性** | 同类控件/文案/行为不统一，但不影响可用 | 网格单卡占半宽、双卡占满宽 |
+| **P4 卫生** | 死代码、未使用导入、命名 | 30 个文件未使用导入、11 个死函数 |
 
-* 面板：canvas 画帧 + 假光标 + 鼠标/键盘/滚轮实时回传 + 页面下拉跳转
-* CLI：`start`（`--headful` / `--fps` / `--page`）、`stop`、`restart`、`ctl`、`shot`
+**反过来说，以下几种不算「没做好」，别误判：**
 
-### C. `main.py`（三处钩子）
+- 真死路做了**诚实降级**（如离线无联机层 → 明确提示，不假装能用）
+- 命中通用清单但属**本项目全站惯例**（design-review skill 铁律 1：惯例 > 清单）
+- 程序化导航导致的表象（如离屏截图里侧栏高亮不跟随——用户点击时正常）
+- 解释器 teardown 退出码非 0（round-107 记录的既存问题，测试内容其实全过）
 
-* live 实例用**独立锁文件** `ac.live.lock` —— 用户正常启动器可照常开着，
-  且 live 模式跳过「提升已有窗口」（否则直接退出）
-* `AC_NO_SPLASH=1` 跳过启动动画，第一帧即主窗口
-* `_show_main()` 里 `if os.environ.get("AC_LIVE") == "1": attach_live(win)`
-
-### D. 验证
-
-`compileall` EXIT=0 · `regress.py` 通过 10/失败 1（PII 门禁，根因**本机未装 git**）·
-PII 手工核验 0 残留 · click 注入生效（主题 `浅色`→`深色`，截图同步变化）·
-WS 帧流 8.3fps、单帧 27KB JPEG · 真实浏览器打开面板 7fps、canvas 正常、控制台无报错 ·
-有头模式窗口 1375×900 截图正常。
-
-### E. 已知限制
-
-* 主线程被业务代码占死时，`/ctl` 全部返回 `main-thread timeout`（10s），
-  帧流与截图同时停 —— 这与真实用户看到的「界面卡死」是同一件事，liveview 如实反映。
-* 离屏模式下导航栏分组小字（游戏/资源/联机/系统）渲染发糊，是离屏字体 artifact，
-  **有头模式正常**，勿当 UI bug 修。
-
-## round-113（2026-10-22）— 官方源提速 + 镜像路径修正 + loader maven 补全
-
-> 前一轮只做了实测没动代码（见 `2026-10-22_AC启动器_官方源加速实测.md`），
-> 本轮把实测结论落进代码。样本为 MC 1.21.11 的真实资源对象，均在本机实测。
-
-### A. 默认下载源 `bmclapi` → `official`（实测结论翻转）
-
-同口径 80 个真实资源对象（41.9MB）：**官方 8.35MB/s vs BMCLAPI 0.84MB/s**，
-官方快约 10 倍。round-110 时期「BMCL 更快」的结论已不成立——官方 CDN 响应带
-`X-Cache: TCP_HIT` 无 302 抖动，BMCLAPI 单连接速度在 0.02~1.35MB/s 之间乱跳。
-
-* `settings_dialog.py` 的 `DEFAULTS` 改默认值，**10 处散落的兜底默认值同步对齐**
-  （老配置缺字段会回落旧默认）
-* `pages_instances.py` 的整合包导入原本**硬编码** BMCLAPI，改为跟随用户设置
-
-### B. mll 库/资源并发 16 → 48（新增 `_patch_install_concurrency()`）
-
-mll 的 `install_libraries` / `install_assets` 支持 `max_workers`，但
-`do_version_install` **不传** → 落到 `ThreadPoolExecutor` 默认 `min(32, cpu+4)` = 16。
-
-* 二者在 mll 内部是**模块级全局查找**，替换模块属性即生效
-* `_forge.py` 用 `from ..install import install_libraries` **直接引用**，替换模块属性无效，
-  需单独替换 `_forge.install_libraries`
-* 包装器保留调用方显式传入的 `max_workers`，并打标记保证**幂等**
-
-### C. HTTP 连接池 10 → 64
-
-`requests` 默认 `pool_maxsize=10`，并发 48 时其余 38 条每次重新握手。
-同 32 workers 下 pool=10 比 pool=32 慢 16%。在 `MirrorSession` 挂自建 `HTTPAdapter`。
-
-### D. 镜像重写表改为**路径感知**（12 条规则 / 12 主机）
-
-* **补 `piston-meta.mojang.com`** —— 之前漏了，导致镜像模式下版本 json 与 assetIndex
-  一直直连官方。真实路径是 `/v1/packages/<sha1>/<id>.json`
-* **`libraries.minecraft.net` 路径修正为 `/maven`**（原 `/libraries`，与 PCL2 一致）
-* **补全 loader maven**：Fabric / Quilt / Forge / NeoForge 的 meta 与 maven 端点
-* NeoForge 上游 `maven.neoforged.net` 在本机 ConnectTimeout，**走镜像才装得上**
-* 前缀匹配加**路径边界保护**，不再误伤 `libraries.minecraft.net.evil.com`
-
-### E. 大文件分片：`chunk_mb` 4 → 2 + 显式 `threads=16`
-
-客户端 jar（40.1MB）：单连接 0.39MB/s、4 路 1.62MB/s、8 路 1.39MB/s（反而慢）、
-**16 路 3.19MB/s（最优）**。关键陷阱：`parallel_download_file` 的 `cap = threads or min(ncpu, 8)`，
-不显式传 `threads` 就永远只有 8 路。
-
-### F. 验证
-
-`compileall` EXIT=0；`tests/test_round113.py`（44 断言）ALL PASS；
-`tests/test_round113_live.py` 真机 **MirrorSession/48 比基线快 2.06×**；
-`regress.py` 通过 10 / 失败 1（唯一失败是 PII 门禁，根因**本机未装 git**，
-与改动无关，已手工核验 0 条 PII 残留）；i18n parity 1287=1287 差异=0。
-
-## round-112（2026-10-19）— 回归套件入库 + 质量开放项清单（返工循环）
-
-> WorkBuddy 侧收尾批次。动机：此前「哪些地方没做好」只存在于聊天上下文，
-> 换会话即失忆；发布清单里还写着「`_diag_all.py` 全部 exit=0」，而该脚本
-> **从未入库**——回归套件事实上不存在。本轮把它变成仓库里可执行的东西。
-
-### A. 回归入口 `regress.py`（仓库根）
-
-一条命令跑完 11 项自检，exit 0 才放行：
-
-* 编译 / i18n 中英对称（1287=1287 差异=0）/ PII 门禁（本机专属，找不到则 SKIP 不判失败）
-* 默认值缺漏审计 / mll 分片目标判定与集成 / 整合包与 mod 下载进度聚合
-* 设置页脏检测回归 / 核心功能冒烟 / 全页面构造冒烟（MainWindow + 11 页 + 8 对话框）
-* `--shots` 额外出视觉截图（离屏字体用 `QT_QPA_FONTDIR=C:\Windows\Fonts` 修复 tofu）
-
-### B. 测试脚本迁入受控 `tests/`
-
-* 原 `_` 开头的一次性诊断脚本被 `.gitignore` 的 `_*` 规则挡在仓库外——
-  换机/重 clone 就没了。全部迁入 `tests/` 并登记到 `regress.py` 的 `SUITES`
-* `.gitignore` 加注：**新回归脚本别再写 `_` 开头**
-* ☠️ 例外：`_pii_gate.py` **故意**留在仓库根被 ignore——它内部必须写出真实
-  PII 字面量才能检测它们，一旦入库等于把 PII 写回公开仓库
-
-### C. `docs/quality_punchlist.md`（跨会话记忆）
-
-* P0 功能错 / P1 布局可见 / P2 声称未接通 / P3 一致性 / P4 卫生 五级判定框架
-* 返工循环：改代码 → `regress.py` → `--shots` 看图审 → 新发现按级写回清单
-* 同时记录「不算没做好」的反例清单（诚实降级 / 全站惯例 / 程序化导航表象 /
-  teardown 退出码噪音），防止误判返工
-* 开放项：成就页单卡半宽节奏（P3）、实例页路径行对比度（P3）、30 文件未用
-  导入 + 11 死函数（P4，搁置）；发布清单 A 组剩余两项（真机启动冒烟、打包）
-  明确标注为**待用户**——离屏只能验逻辑与布局
-
-### D. `RELEASE_1.0.0_CHECKLIST.md` 引用同步
-
-发布阻塞项从「`_diag_all.py` 全部 exit=0」（脚本不存在）改为 `regress.py`
-exit=0，原句保留为历史说明。
-
-## round-111（2026-10-18）— mll 客户端 jar 分片并行 + 整合包下载进度/速度
-
-> 接手 round-110 CHANGELOG 末尾标注的两项「未做」。由 WorkBuddy 实现
-> （TRAE 批次之外的仓库侧攻坚）。
-
-### A. mll 客户端 jar 走分片并行（`src/core/mirror.py`）
-
-round-110 只给 **net_api 自己的下载**接了分片；mll 自持的游戏文件路径
-（客户端 jar / 运行时）仍是单连接。本项补上，但**刻意只对客户端 jar 生效**：
-
-* `_is_big_target()` 零网络成本判定，只认 `<mc>/versions/<id>/<id>.jar`
-  （正/反斜杠、Linux 路径均支持；`.part` 残件、同目录其它 jar 一律不认）
-* `_try_parallel_mll()` 与 mll `_helper.download_file` 语义逐条对齐：
-  路径安全检查、已存在且 sha1 通过则跳过、只发 `setStatus`
-  （**绝不发 setProgress/setMax** —— mll 的 install 用它们做「文件计数」进度，
-  掺入字节数会把进度条搞乱）、sha1 不符抛 mll 自己的 `InvalidChecksum`、
-  任何失败都回退原实现（不改变下载结果）
-* URL 先经 `_rewrite()` 做镜像重写再交给分片器 —— **net_api 不做 Mojang
-  主机重写**，不自己重写就会丢掉 BMCLAPI 镜像（隐藏回归点）
-* `chunk_mb=4`：阈值已是 8MB，按默认 16MB 切只会得 1~2 块，并行度太弱
-* ☠️ **为什么不给所有文件生效**：一次完整安装会调用 `download_file`
-  **数百到上千次**（libraries + assets 逐个下载），无差别加分片就要先探测
-  每个文件的大小 —— 那是几百上千个额外请求，在跨境链路上是几十秒到几分钟的
-  **净回归**。只认这一个确定是大文件的目标，其余零开销原样转发
-
-补丁方式：mll 的 install / fabric / forge / mrpack / quilt / runtime 都用
-`from ._helper import download_file` 拿了**直接引用**，所以逐个模块替换属性，
-只改 `_helper` 本身不够。由 `patch_install_session()` 统一调用（幂等）。
-
-### B. 整合包下载进度 + 速度（`src/net_api.py` / `src/pages_browse.py`）
-
-round-110 说「资源中心 store 整合包下载走裸 `Worker`，只拿到提速、未加进度/速度 UI」：
-
-* `download_modpack_to()` 新增 `callback` 参数，把 mll 风格 dict
-  （`setProgress` / `setMax`）桥接到 net_api 的 `progress(sofar, total)`；
-  `setMax` 只在总量首次已知时调一次
-* `StorePage` 新增 slim 进度条 + 速度标签（与启动/下载对话框同一范式），
-  平时隐藏，仅在下载整合包时出现；总量未知时走忙指示 `setRange(0, 0)`
-* `_install_modpack` 由裸 `Worker` 改用 `ProgressWorker`（它自动注入
-  mll 风格 callback，并在 `install_scope()` 内跑，速度计量天然可用）
-
-### C. 单个 mod 下载也接进度 + 速度（`src/net_api.py` / `src/pages_browse.py` / `src/store_detail.py`）
-
-CHANGELOG「仍未做」第 2 项，同批补掉：
-
-* 新增 `_CbProgress` / `_cb_progress()`：把 mll 风格 callback 桥接成 net_api 的
-  `progress(sofar, total)`。**多文件场景（依赖树）用「文件序号 × 100 +
-  文件内百分比」聚合**，让进度条跨文件平滑前进而不是每完成一个文件跳一格
-* `download_mod_to` / `download_mod_version_to` / `download_cfwidget_file` /
-  `download_curseforge_mod` 均新增 `callback` 参数（默认 None，旧调用方零影响）
-* `StorePage._download` 由裸 `Worker` 改用 `ProgressWorker`，复用 B 项那条
-  slim 进度条 + 速度标签
-* `StoreDetailDialog._download_version` 同样改用 `ProgressWorker`，
-  速度行进该对话框已有的 status 标签（本对话框没有独立进度条，
-  速度是用户明确要的可观测项）
-
-### 验证（全部离线，本地 HTTP 服务器）
-
-| 测试 | 结果 |
-| --- | --- |
-| `_is_big_target` 判定（12 例：正/反斜杠/Linux/part 残件/同目录其它 jar/空/None） | 12/12 |
-| mll 分片集成（17 项）：分块数与 offset 唯一性、字节正确、sha1 通过/不符抛 `InvalidChecksum`、无 Range 服务器回退且不留 `.part`、已存在零请求跳过、`setStatus` 有而 `setProgress`/`setMax` 无、**小文件零探测请求** | 17/17 |
-| 整合包进度桥接（8 项）：`setMax` 只一次且=总长、`setProgress` 单调不减至总量、`callback=None` 仍可下载、回调抛异常不拖垮下载 | 8/8 |
-| mod 下载进度聚合（8 项）：`setMax` = 文件数×100、`setProgress` 单调不减且跨文件平滑前进、三文件字节正确、`callback=None` 仍可下载 | 8/8 |
-| StorePage 离屏冒烟（12 项）：控件默认隐藏、忙指示/定长切换、速度行写入、错误路径收起、`show()` 无异常 | 12/12 |
-
-i18n 无新增键（沿用 `dl.speed` / `dl.speed_idle`），zh 1287 / en 1287 保持对称。
-
-### 仍未做（下轮候选）
-
-* mll 的 **runtime 文件**（`<mc>/runtime/...`，多个中小文件）与**大体积
-  library** 未接入分片 —— 已评估：libraries/assets 绝大多数 < 8MB（阈值），
-  而为判断大小需逐个探测，在数百到上千次 `download_file` 的安装里是净回归；
-  客户端 jar 已是单次安装最大的单文件，收益已拿走。若要覆盖需先解决
-  「无差别探测」开销（如按 `.part` 已有大小 / 进程内 size 缓存做启发式）
-* ~~资源中心**单个 mod** 的下载仍是裸 `Worker`，无进度/速度 UI~~
-  → **本批 C 项已补**
-
-## round-112（2026-10-18）— 修「没改设置也弹未保存」+ 全量审计
-
-> 仓库侧审计批次（非功能新增）。由 WorkBuddy 全页面离屏构造冒烟 + 静态扫描
-> + 默认值系统审计产出。
-
-### 🐛 P0 UX bug：进设置页什么都没改，离开时必弹「有未保存的更改」
-
-离屏构造冒烟时，导航 `settings → music` **直接挂死**在 `ask_save_dialog()` 的
-模态框上。挖下去发现不是模态框的问题，是 `is_dirty()` **恒为真**：
-
-| 键 | 原因 |
-| --- | --- |
-| `font_family` / `nav_layout` / `topmost` / `warn_non_ascii_path` | `_sync_ui_to_cfg` 会写这 4 个键，但 **`_DEFAULTS` 里根本没有** → 配置里缺键被当成「UI 改过」 |
-| `jvm_aikars` | **派生键自相矛盾**：`_DEFAULTS` 写 `jvm_aikars: True`，而 `jvm_preset: "default"`；同步逻辑是 `jvm_aikars = (jvm_preset == "aikar")` → 恒不相等 |
-
-即：**每次进设置页再离开都会被问一次是否保存**，对玩家是持续打断。
-
-修复（`src/settings_dialog.py`）：
-* 补齐 4 个默认键（取值与 UI 初始态 / `_sync_ui_to_cfg` 一致：
-  `font_family=""` / `nav_layout="ac"` / `topmost=False` /
-  `warn_non_ascii_path=True`）
-* `jvm_aikars` 默认改为 `False`，与 `jvm_preset="default"` 自洽
-* 顺带做了**系统审计**：解析 `_sync_ui_to_cfg` 里 47 个 `target[...]` 赋值，
-  与 `_DEFAULTS` 逐一比对 —— 确认只有这 4 个缺，无遗漏
-
-### 审计结论（其余维度）
-
-| 维度 | 结果 |
-| --- | --- |
-| 全页面/对话框离屏构造冒烟 | **16/16 全过**（MainWindow + 7 页导航 + 8 个对话框） |
-| 吞异常（`except: pass`） | 0 处（全部带 `noqa` 或显式处理） |
-| 可变默认参数 | 0 处（`callback={}` 是为兼容 mll 协议，非误用） |
-| 硬编码本机绝对路径 | 0 处（`java.py` 的 `C:\Program Files\...` 是 JDK 标准安装位，合理） |
-| 微软登录接线 | 正常（`login_dialog` 自走 device-code 流）；`core/auth.py` 里两个旧包装函数已死但**不影响功能** |
-| RELEASE 清单 | 5 项完成 / 23 项待办；**发布阻塞项**是「全量回归绿 + 真实启动冒烟」与「打包成品」 |
-
-### 已知非 bug（审计中排除的假阳性）
-
-* 导航到 **account** 会阻塞 —— 它不是页面而是弹模态 `LoginDialog`（`dlg.exec()`），
-  阻塞是预期行为
-* **30 个文件有未使用导入**、**11 个死函数**（`play_sfx` / `stop_bgm` /
-  `read_json` / `write_json` / `ensure_dir` / `login_with_microsoft` 等）
-  —— 纯卫生问题，不影响功能，本批未动
-
-### 🐛 P1 布局 bug：成就页分组标题被卡片压住一半（全局性）
-
-视觉自验收截图时发现：成就页「启程」标题被第一张卡片盖掉一半、卡片自身上半
-被裁切。挖下去是**两个独立 bug 叠加**：
-
-**① QSS `padding` 不计入 `QLabel.sizeHint`（Qt 已知行为，影响全部 10 处调用点）**
-
-`QLabel[cls="group"]` 样式里有 `padding: 4px 2px`，而 Qt 的 sizeHint 只按当前
-font 度量、**不含样式表 padding** → 实测 sizeHint 高度只有 **13px**，渲染需要
-~24px → 溢出的 11px 被紧随其后的卡片盖住。`cls="group"` 共 10 处调用
-（成就页 / 实例页×6 / 资源中心 / 模组检查 / 扫描对话框），只是多数背景同色
-看不出来。
-
-修法：新增 `ui_kit.group_label()` 统一工厂 —— 间距改用
-`setContentsMargins`（**会**进 sizeHint）、字号字重在代码里显式设置
-（QSS `font-size` 同样不进 sizeHint）；QSS 规则删掉 padding 只留颜色。
-10 处调用点全部切换，实测 sizeHint 13 → **25px**，与渲染需求一致。
-
-**② 页面双重构建 + `deleteLater` 延迟删除（成就页独有）**
-
-`__init__` 里 `_build()` 之后又调 `_refresh()`，后者清空重建 —— 清空用的是
-`deleteLater()`，但 **DeferredDelete 在同一层事件循环 / `processEvents()`
-里不投递**：旧的一整套卡片继续活着，与新内容叠画（诊断证实 group 标签存在
-**两套**、几何各不相同）。表现为「音乐收藏家」卡片在启程组出现一份被裁切的
-幽灵副本。
-
-修法：`__init__` 只调 `_refresh_header()`（更新进度条，不重建）；清空逻辑
-改为 **先 `setParent(None)` 立即从视口摘除、再 `deleteLater()` 回收**。
-复测 group 标签从 14 个降到 **7 个（每分组恰好 1 个）**，截图确认无重叠、
-无裁切、无幽灵卡片。
-
-### ⚠️ 方法论：视觉自验收流水线（本轮新增能力）
-
-之前认为「离屏截图必出 tofu，视觉验收只能靠用户人眼」——**前提是错的**。
-tofu 的真因是 `QT_QPA_PLATFORM=offscreen` 下 **QFontDatabase 字体数为 0**
-（offscreen 插件不加载系统字体），一个环境变量即可修复：
+## 二、返工循环
 
 ```
-QT_QPA_FONTDIR=C:\Windows\Fonts
+改代码
+  └─> python regress.py            # 11 项自检，exit 0 才继续
+        ├─ 编译 / i18n 对称 / PII 门禁
+        ├─ 功能冒烟（配置、体检、模组、崩溃、Java、成就、主题）
+        ├─ 构造冒烟（MainWindow + 11 页 + 8 对话框）
+        └─ 各批次回归（脏检测 / mll 分片 / 进度桥接 / 默认值审计）
+  └─> python regress.py --shots    # 视觉：截图到 _shots_r112/ 后自己看图审
+  └─> 把新发现按上表分级写进本文件（级别 / 位置 / 问题 / 修法 / 状态）
+  └─> 修完再跑一遍，直到 exit 0
 ```
 
-修复后中文完美渲染（微软雅黑实测），于是 **AI 可以自己截图、自己看图、自己
-做视觉验收** —— 本轮的成就页布局 bug 就是这么抓到的（纯读代码读不出来）。
-流水线：`_shots_all.py` 覆盖全部 11 个 stack 页面（侧栏 4 页走导航 + 7 个
-隐藏页从 `STACK_INDEX` 直切 + 懒构建），输出到 `_shots_r112/`。
-
-按 design-review skill 清单过一遍已截图页面：无渐变 hero、无斜体标题、
-无 emoji 当图标、图标风格统一（全 SVG 线性）、导航为侧栏形态（非 AI
-top-nav）、文案无编造数据 —— 整体没有明显 AI 味；最该修的就是上面两个
-布局 bug（已修）。
-
-### 验证
-
-* 设置页脏检测回归 **4/4**：`_sync_ui_to_cfg` 的键全部有默认值、
-  `jvm_aikars` 与 `jvm_preset` 自洽、**新建页面 `is_dirty() == False`**、
-  **改内存滑块后 `is_dirty() == True`**（确认没为了不弹窗而把检测废掉）
-* 成就页布局回归：group 标签 **每分组恰好 1 个**（原 2 套）、
-  sizeHint 25px 与渲染一致、截图无重叠无幽灵卡片
-* 全页面构造冒烟 16/16；compileall exit 0；i18n zh 1287 / en 1287 对称；
-  PII 门禁零残留
-
-## round-110（2026-10-18）— 下载测速 + 大文件分片并行（+下载诊断日志）
-
-> 依据 `docs/round110_download_throughput.md`（TRAE 实测记录）整理。承接用户真机反馈
-> 「下载怎么这么慢，而且看不到速度」，以及追问「为什么我 PCL-CE 的路线快到 10MB 左右（整合包）」。
-
-* **实测诊断**：`bmclapi2.bangbang93.com/libraries/...` 返回 **403 Cloudflare 拦截**
-  （`/assets/<hash>` 仍 200、`version_manifest_v2.json` 200）；Mojang 单文件 0.26 MB/s、
-  BMCLAPI client jar 0.37 MB/s；`Mojang → mirror` 每个库 3.03s = **403 白试 + 回退**。
-  而 `download_mirror` 默认值就是 `"bmclapi"`（`settings_dialog.py:123`），零状态包因此默认走镜像
-* **根因（本轮主因）**：慢不是网速，是**下载引擎的并发策略** —— 单条 TCP 的吞吐 ≈ 窗口 / RTT，
-  跨境链路常在 0.3~1 MB/s；整合包是「少数超大文件」，单文件单连接直接顶死上限。
-  AC 侧 `net_api.download_file` 单流、`BatchDownloader` `workers=4`（上限 8）且**每文件内部仍是单连接**、
-  mll 的并发只发生在文件与文件之间；PCL 则对每个大文件做分片多线程
-* **D 大文件自动分片（提速主体）** `src/net_api.py`：`download_file` 先以一次极小的
-  `Range: bytes=0-0` 探到远端总长，**≥8MB 自动改走 `parallel_download_file`**（HTTP Range 分片多线程）。
-  三条护栏 —— ①`_allow_parallel=False` 防「单流→分片→单流」递归（分片内部 4 处回退全传）；
-  ②**已有 `.part` 时不分片**，保住断点续传；③探测失败 / 服务器不支持分段（非 206）即回退单流
-* **D 并发上限** `src/batch_download.py` 上限 `8 → 16`；`src/modpack_import.py` 整合包导入 `4 → 8`
-* **A 速度可见（传输层记账）** `src/core/mirror.py`：mll 回调只有文件计数、拿不到字节数，
-  所以速度在传输层按响应字节记账 —— `_CountingRaw` 包住响应的 `raw`
-  （mll 用 `shutil.copyfileobj(r.raw, f)` 落盘，全程只调 `raw.read`），`SpeedMeter` 用滑动时间窗估 B/s，
-  窗口外样本丢弃、**长时间无新字节则速度自然归零**（不靠假时间戳）
-* **A 踩坑并修掉**：`install_scope()` 的令牌是 `threading.local()`，而分片的 `_tick` 跑在
-  `ThreadPoolExecutor` 工作线程里 —— 那些线程没有安装上下文，计量器收到 **0 字节**（离线测试第一轮即暴露）。
-  修法：在**调用线程**先取到计量器（`active_meter()`）再交给各分片线程
-* **A 显示** `src/worker.py` 新增 `ProgressWorker.speed` 信号 + `_speed_loop()` 轮询 + `_speed_text()`；
-  `src/launch_dialog.py` 进度对话框新增速度行；`src/main_window.py` 状态栏新增速度标签，
-  两处 `ProgressWorker` 均已接线（例：`1.2 MB/s · 已下载 34.5 MB`）
-* **B 镜像按主机失效（偏离原计划做法）**：原计划是「开局探测一次镜像、不可用则整体关闭」，
-  实际改为**请求级按主机闩锁** —— 某主机在镜像上返回 401/403/406 即记入本次安装的 `ctx.mirror_dead`，
-  后续该主机直连官方源。理由：不必硬编码脆弱的探测 URL、不多发请求、**404 不误伤整台主机**、
-  且能**保住 `/assets` 继续走镜像**（实测它是 200 且比官方快）—— 开局整体关闭做不到这个区分。
-  代价仅第一个库文件上那一次 403（~1.5s），而非每文件白试
-* **C 下载诊断日志（默认关）**：`set_diag(True)` 后每请求写一行
-  （时间 / status / 耗时 / 声明字节 / `mirror|direct` / 原始 URL）到 `data/logs/download.log`；
-  设置页网络分类新增「记录下载诊断日志」开关与 hint；
-  `install_instance` / `install_mrpack` / `repair_minecraft_dir` 三处入口均从配置读取
-* i18n +4 键 × zh/en（`dl.speed` / `dl.speed_idle` / `settings.dl_diag` / `settings.dl_diag_hint`），
-  合计 **1287 / 1287** 零单边
-* **验证**：`compileall` exit 0；i18n parity 1287/1287；**离线引擎测试 16 项全 PASS**
-  （本地 Range 服务器：20MB 走 4 次分片且 MD5 正确、512KB 只探一次不分片、`_allow_parallel=False` 纯单流、
-  已有 `.part` 时只发 1 次 Range 请求、`SpeedMeter` 累计/测速/停滞后归零）；
-  **镜像/日志测试 15 项全 PASS**（403 闩锁、404 不闩锁、`assets` 仍走镜像、计数包裹、日志门控）；
-  **离屏冒烟 11 项全 PASS**（状态栏标签、设置页新开关、对话框速度行、
-  `ProgressWorker` 产出 `10.8 MB/s · 已下载 11.0 MB`）
-* **已知取舍**：每次 `download_file` 多一次极小探测请求（小文件一发、大文件两发）；
-  嵌套并发瞬时峰值可能 ~64 条连接（8 批次 worker × 8 分片），属瞬态，过猛则调低 `_PARALLEL_MIN_BYTES`
-* **未做**：mll 自持的游戏文件路径（客户端 jar / 运行时）仍是单连接，本轮未接入分片
-  （需在 `_helper.download_file` 层包裹并兼顾 sha1 校验与 callback 协议，风险高于本轮范围）；
-  资源中心 store 整合包下载走裸 `Worker`，本轮只拿到提速、未加进度/速度 UI
-
-## round-109（2026-10-17）— 下载止血 + PCL 式详细进度
-
-> 依据 `docs/round109_download_hardening.md`（TRAE 实测记录）整理。承接用户实测
-> 「下载卡死半个多小时只能杀进程」的反馈。
-
-* **根因**：`minecraft-launcher-lib` 的每次下载都走 `requests.session()` /
-  `requests.get()` 且**从不传 `timeout`** —— 一个卡住的 socket 会永久阻塞它所属的
-  `ThreadPoolExecutor` 线程，`future.result()` 永不返回、不报错、无法取消。另发现
-  `requests.Session.request()` 总把 `timeout` 显式塞进 `send` 的 kwargs（默认 `None`），
-  故 `setdefault` 永不生效，必须判断「是 `None`」
-* **止血 1** `src/core/mirror.py`：`MirrorSession` 注入 `(10, 30)` 超时 + 单次重试，
-  挂住的 socket 必在 read 间隔超时后抛 `ReadTimeout`（read 是相邻两次读的间隔上限，
-  持续有数据的慢速下载不误杀）
-* **止血 2** 覆盖 mll 自持 session 的三条路径：`_helper` / `install` / `runtime`
-  （mrpack / fabric / forge / quilt 经 `_helper.download_file` 传递覆盖）；
-  `_RequestsShim.get()` 把无 session 的裸 `requests.get()`（版本 json / logging config /
-  客户端 jar / JVM 清单）也收进 `MirrorSession`
-* **止血 3** 游戏文件两源皆 404 时显式 `raise_for_status()` —— 此前只静默
-  `return False`，安装却照报 `"Installation complete"`，缺文件被误报为成功
-* **止血 4** `src/main_window.py`：`_handle_play` 的下载护栏加**逃生口** ——
-  默认拦截（防双写同一目录），但可「取消下载并启动」；`worker.abort()` 让在途下载
-  立即抛错退出
-* **PCL 式进度** `src/worker.py`：`_DlStatus` 把 mll 裸状态串翻译成
-  「阶段 + 计数 + 文件名」（`正在下载依赖库（12/88） · asm-9.7.1.jar`），
-  40 位 sha1 一律折叠，阶段未知时透传原始串
-* **停滞检测** `_STALL_SECONDS = 45`：无任何回调超时即提示「网络较慢，仍在等待下载…」，
-  让「慢」与「挂死」对用户可区分
-* **打补丁与走镜像解耦** `src/core/install.py`：`install_instance` / `install_mrpack`
-  的 `if mirror == "bmclapi" or proxy:` 条件包裹改为**无条件**打补丁 —— 官方源用户
-  同样拿到超时 / 重试 / 取消，镜像与否由 `set_mirror` 在请求时判定
-* **顺带补一处缺口**：`repair_minecraft_dir`（实例体检路径 `diagnostics.py:445`）
-  此前直连 mll 无任何加固，仅在「会话首个网络动作就是体检」时暴露；现补上与
-  `install_instance` 一致的 `set_proxy` / `set_mirror` / `patch_install_session()`
-* i18n +12 键 × zh/en（`dl.phase.*` / `dl.downloading` / `dl.complete` /
-  `launch.dl_busy_*` / `launch.dl_cancelled` / `status.download_stalled` /
-  `status.download_cancelled`）
-* **两源回退**：BMCLAPI（主源）失败 → 原始 Mojang URL（次源）；非 Mojang 主机
-  （Modrinth / maven / 自有 API）不重写主机。单文件最坏边界 = 2 源 × 2 次 × 30s = 120s
-
-## round-108（2026-10-17）— CurseForge 对外发布合规准备
-
-> 依据 `docs/round108_memory.md`（TRAE 实测记录）整理。
-
-* **公开发布只挂 Modrinth**：查证 CurseForge 官方口径后确认，`cfwidget +
-  edge.forgecdn.net` 直链绕过作者在 CF 上的第三方分发授权，公开分发与申请声明冲突。
-  故免 key 通道**默认关闭**（`curseforge_keyless=False`），CF 源改为「谁用谁填 key」；
-  官方 API key 待作者成年后再申请（或由 18+ 家长作为合同主体代签）
-* `settings_dialog.py`：`_DEFAULTS` 加 `curseforge_api_key=""` / `curseforge_keyless=False`；
-  `_SENSITIVE_CFG_KEYS` 加入 `curseforge_api_key`——**导出/导入配置备份永不携带该 key**；
-  网络页新增「第三方服务」分组（key 输入框 + 免 key 勾选 + 两段 hint）
-* `net_api.py`：新增 `curseforge_keyless_enabled()`；`pages_browse.py` 的 CF 源改
-  **三态**：有 key → 官方关键词搜索；无 key + 开关开 → slug/链接解析；都没有 →
-  提示去设置填 key（清列表 + 状态栏提示，不起 worker）
-* **顺带修一个潜在崩溃**：`pages_browse._download` 在 CF 源下无条件调
-  `download_cfwidget_file(cf_file, ...)`，但官方 API 搜索命中的 hit 没有 `_cf_file`
-  （`search_curseforge` 只返回 `project_id`）→ `cf_file=None` 会在 worker 里炸。
-  即「**配了 key 能搜到、但一下载就崩**」。现改为有 `_cf_file` 走 forgecdn 直链，
-  否则走 `download_curseforge_mod(project_id, dest)`
-* i18n +7 键 × zh/en：`settings.cf_group/cf_key_ph/cf_key_hint/cf_keyless/cf_keyless_hint`
-  + `store.cf_hint_key/cf_no_key`
-
-## round-107（2026-10-17）— 全启动器 UI/UX 反馈批次（用户手工测试第二轮）
-
-> 依据 `docs/round107_memory.md`（TRAE 实测记录）整理。承接
-> `docs/round105_ui_feedback.md` 执行清单。
-
-* **T3 分辨率预设完全删除**：启动器不再给游戏传分辨率，由玩家在游戏内自由拖动窗口
-  缩放。删 UI 组 + 两个联动方法 + `_DEFAULTS` 两项 + 保存赋值；`launch.py` 侧
-  `res=None`，旧配置里已存的 `res_w` 也一并忽略
-* **T4** 实例设置对话框改 `QScrollArea` + `ScrollBarAlwaysOff`（禁止横向滚动/挤两列）
-* **T5** 实例页「收起」键重做：删「展开条 + 折叠按钮」双按钮，改页头常驻 `panel_btn`
-  （位置永不偏移）
-* **T6 左侧导航可收起为纯图标**（像 Blockhelm）：标题栏汉堡 `nav_toggle_btn` + 宽度动画
-  + `icons_only` 重排 + `#ac-nav` 紧凑 QSS
-* **T7 导航精简**：移除 模组 / 版本库 / 音乐 / 成就 / 控制台 五个入口，功能改由页面内
-  入口承接（设置页新增 `open_page` 信号、资源中心新增 `open_versions_requested`）；
-  `_switch_stack` 默认关页面动画
-* **T8 版本下载前移**：点安装/选版本即下载（不再等首次启动才补版本）。实例创建后立即
-  后台下载，状态栏进度 + 可召回下载对话框 + 实例行「下载中 {pct}% → 就绪」徽标；
-  `_handle_play` 加护栏——下载未完成不并发启动；**仅 AC 自建实例触发**，绝不向其他
-  启动器真实目录写入
-* **T9 首页极简**：只留 hero 当前实例卡 + 开始/结束游戏 + 一行修复提示
-* **N1** 启动/下载对话框可召回（状态栏进度条可点击 → 重开被收起的对话框）
-* **N2** 自动持续加载 + 卡片淡入；顺带修「全部」过滤下正式版被 `continue` 隐藏的真 bug
-* **N3** 版本图标回归 MC 3D 等距方块（草方块/命令方块/蛋糕/铁砧·圆石）
-* **N4** 进度条重做：`QProgressBar[cls="slim"]`（6px 圆角 accent 填充），去「黑框+方块」
-* **N5 效果开关 → 可选模块**：`type="effect"` + `EFFECT_CONFIG_KEYS` + 5 个 effect
-  bundle（成就弹窗 / 亚克力窗 / 磨砂 / 流光 / 页面动画），玻璃拟态/透底/流光/页面动画/
-  成就弹窗从设置页移出，默认不装
-* 验证：compileall exit 0；i18n zh 1271 / en 1271 零单边；离屏冒烟 21 条断言全绿
-* **待真机目检**：下载对话框、实例行任务徽标、导航图标模式、第三方服务分组排版
-  （离屏无字体，只能验结构/配色/几何）
-
-## round-106（2026-10-17）— 实例体检：N5 冲突预检 → 多分区体检 + 一键本地修复
-
-> 依据 `docs/round106_memory.md`（TRAE 实测记录）整理。
-
-* 新增扫描引擎 `src/core/instance_health.py`（471 行，**无 Qt，可无头回归**），
-  对外仅 `scan_health(inst, settings)` / `apply_fix(inst, fix)` /
-  `apply_all_safe(inst, findings)`
-* 把 `core.mod_check.scan_conflicts` 与四层自有检查合成 `groups`
-  （**mods / perf / jvm / java / args**）+ 计数（critical/warning/info）+
-  `scanned` + `fixable`；每层用 `_safe()` 包住——**单项检查抛异常绝不影响整体体检**
-* 五层检查、共 **13 个 kind**，其中 6 个带安全 fix（`aikar_off` / `g1gc_off` /
-  `disable_explicit_gc_off` / `ram_small` / `ram_large` / `residual_server_arg`），
-  外加条件触发的 `pretouch_missing` / `java_mismatch`
-* 层 1 `perf` 渲染模组冲突（sodium+embeddium 同装、OptiFine 与 Sodium/Iris/Oculus
-  并存）与推荐集缺失——**均 report-only 不产出 fix**
-* 防噪设计：性能模组推荐集只收公认五项（刻意不含 iris/indium/c2me/moreculling）；
-  `aikar_off` 与 `pretouch_missing` 互斥；不误报手填 JDK；零模组/原版实例不刷提示；
-  jar 上限 `_MAX_SCAN_JARS=60`（避免上百 jar 元数据读取拖死 UI 线程）
-* 修复范围**仅本地安全修复**：不联网、不动用户游戏文件
-* 用户经 AskUserQuestion 拍板：方向 = 启动器性能体检 + 一键优化；载体 = 升级现有
-  「冲突预检」为完整「实例体检」
-
-## round-105（2026-10-17）— UI 反馈修复（第一批）+ 功能扩展方案
-
-> 依据 `docs/round105_ui_feedback.md` 与 `docs/round105_plan_feature_expansion.md` 整理。
-
-* **T1 主题色未同步**：首页「开始游戏」大按钮改主题色后仍是旧紫色。根因是
-  `_make_play_btn` 用**内联 setStyleSheet 烘焙**了构造时的 `COLORS['accent']`，
-  切 accent 时全局 QSS 会重生但内联样式被冻结。修法：theme.py 新增 QSS 类
-  `QPushButton[cls="play"]`（用 `$accent` 变量），`_make_play_btn` 改 `cls="play"`
-  并删除内联样式
-* **T2 重复的「当前」**：新建实例向导「选择游戏版本」页，被选中版本行同时出现绿色
-  「✓ 当前」徽章 + 黄色「当前」按钮。删多余绿色徽章，只保留按钮侧状态
-* `docs/launcher_feature_ideas_2026-10-17.md`：功能扩展点子池 + 取舍结论；
-  `docs/round105_plan_feature_expansion.md`：A2/A1/B6 三方向实现方案
-  （**本轮只出方案不写生产代码**；摸底后修正——A2/B6 缺口在 UI 落地，A1 才是真空白）
-
-## round-104（2026-10-17）— 全页面排版简化 · 对标其他启动器
-
-> 玩家要求：设置页别用折叠分栏、直接平铺；把「重复 / 多余 / 繁杂」的页面全部
-> 审一遍再简化；先总体审计、再对标其他启动器的排版与功能分布，做一轮优化。
-
-* **先只读审计**（`docs/round104_audit.md`）：通读 10 个导航页 + 15 个对话框，
-  穷尽清点设置页 **约 27 个折叠组**，并分页列出 `[重复] / [多余] / [繁杂] /
-  [布局风险]` 问题；对标 **Prism Launcher（左栏分类 + 类内 Tab）、HMCL（左栏
-  不折叠扁平分组）、PCL2（顶部四板块）**——三家一致走「左侧分类导航」。
-* **设置页：3 段 / 27 折叠组 → 9 扁平分类**。左菜单改为
-  `基础 / 外观 / 启动 / 网络 / 音效 / 账号 / 高级 / Java 管理 / 模块与扩展`，
-  **组内不再折叠**。删除折叠管理器 `_FoldMgr` 整类与四个旧构建方法；
-  去重复：**游戏内存**（预设 + 滑块合并，滑块为唯一数据源）、**分辨率**
-  （预设 + 像素框合并，双向联动）、**JVM**（两组并入「启动」页）。
-  移除无运行期消费者的「启动器内存」`launcher_ram_mb`，并在保存时清理
-  历史键 `launcher_ram_mb` / `collapsed_groups`。
-* **首页删三套多余模板**：`pcl_card / hmcl_list / modrinth_modern` 自 round-32
-  起切换入口已移除、属死代码 → 只留 `ac_default`。连带清理
-  `apply_home_style / _refresh_pcl_avatar / _instance_card / _list_row` 及
-  onboarding 的 `style_changed / style 单选 / _update_style_preview` 与
-  对应 i18n 键（`style.* / settings.home_style* / onboard.step_style`）。
-* **控制台页**：两个语义重叠的输入框（搜索 / 过滤）**合一**（搜索即过滤 +
-  高亮 + 计数）；页头 5 个同级按钮收敛为「自动滚动」开关 + 「更多」菜单。
-* **模块页**：已安装模块行的导出 / 卸载图标钮、扩展行的重授权 / 卸载图标钮
-  收进行尾「⋯」菜单（新增 `_more_btn` helper）。
-* **资源中心**：目标实例上移页头（与源切换同排）；删掉独立「搜索」按钮，
-  搜索框输入即防抖搜索。
-* **顺延项并入本轮**：①补全 `new_instance` 的 **LiteLoader** 版本分支（原缺失
-  → 版本下拉恒空，接入 `fetch_liteloader_builds`）；②**旧版 Fabric** 支持列表
-  接入——后台预热 `fetch_legacy_fabric_games` 缓存，`_compatible_loaders` 由
-  启发式改为「有缓存用真实列表、无缓存回退」；③**模块页**展示 QtWebEngine
-  不可用的**具体原因**（`webengine_unavailable_reason`，文本可选可复制）。
-* **验证**：`compileall` 通过；i18n zh/en 键 **1202/1202** 无单边键；离屏冒烟
-  覆盖 SettingsPage 九分类、HomePage 构建 + refresh、ConsolePage 搜索即过滤、
-  StorePage / ModulesPage 构建、OnboardingDialog 无 style 残留、
-  NewInstanceDialog 加载器兼容表（含 legacyfabric/liteloader），全部 OK。
-
-## round-103（2026-10-16）— 手绘矢量 logo · 死代码清扫 · 设置裁字修复
-
-> 玩家四点要求：①启动 logo 别再用手写的 MC 像素字体；②代码里无用/多余/
-> 100% 走 fallback 的收掉；③排查「设置项存了但实际不生效」类隐患；
-> ④（顺延）修设置→外观底部文字裁切。
-
-* **启动 logo 换手绘矢量 monogram**（`brand.py` 新增几何 + `welcome_window.py`
-  / `splash_window.py` 重写）。起因：MC 像素字体属「字体不随包」（玩家
-  2026-09-25 决定），发布环境三级查找**每一级都失败**，两个启动页实际永远在
-  渲染系统 fallback 字体——既是死路径也是每次启动的无谓开销。新方案为
-  **填充式锥形笔锋路径**（中轴粗、两端尖），零字体/零外部资源，任何 DPI 都清晰。
-  出现动画由「缩放+淡入」改为**手写显现**（笔画按手绘顺序逐段画出，A 先 C 后）。
-  离屏渲染预览已目检：A 圆角顶、C 开月牙开口向右，形态正常。
-* **删除 `src/fonts.py`**（整模块 100% fallback 死代码）；同时清掉
-  `welcome_window.mark_ready`（空实现、全仓无调用）、`_on_stroke_done`、
-  `brand.APP_TAGLINE`（无引用）。
-* **修复真隐患：页面切换动画被流光开关牵连**（`effects.py`）。
-  `fade_page_transition` 在 `EFFECTS_ENABLED`（流光装饰总开关，默认关）关闭时
-  直接瞬时跳转 → 设置里「页面切换动画」开关（默认开）**形同虚设**，默认配置下
-  动画从不播放。改为只由调用方按 `page_transition` 配置决定，与流光解耦。
-* **修复设置→外观/分辨率预设文字被横向裁断**（`settings_dialog.py`）。
-  实测根因：外观组 8 个复选框、分辨率组 8 个单选各挤在一行，`QScrollArea`
-  强制页宽贴合视口 → 每项被压到 83–188px，长标签（最长需 228px）被截断；
-  离屏量测 `need>got` 逐条命中。两处均改**两列网格**，并在 760–1024px
-  四档宽度复测：**裁切 0 项**。
-* **删除设置页重复的 `lay.addWidget(app_grp)`**（`L816`/`L932` 加同一控件，
-  Qt 会把「外观」组移到最后）——保留一次，恢复编号注释的预期顺序。
-* **死代码全量清扫（脚本化校验）**：判据为「符号名在整项目出现次数 == 1（仅
-  定义行）」，即无任何调用/引用点（也排除 getattr 字符串引用）。据此删除
-  **33 个函数 + 2 个常量**：`main_window` 的 round-100 遗留模板构造器
-  （`nav_items`/`_yield`/`_make_scan_btn`/`_make_settings_btn`/`_action_card`/
-  `_quick_btn`/`_open_mods`）、`settings_dialog` 的 dev_mode 桩、
-  `async_image` 的扁平化前装饰绘制（含 `_circle`/`_hex`/`_MOTIF` 等）、
-  以及 `achievements`/`downloader`/`i18n`/`lobby`/`modules`/`onboarding`/`scan`/
-  `theme` 的无用访问器。`python -m compileall src main.py` 通过。
-* **修复「重置新手教程」点了无反应**（`settings_dialog._reset_tutorial`）。
-  教程开关自 round-45 起改为显式 flag 文件 `onboarding_done.flag`，旧实现却
-  仍在删已废弃的 `launch_count.txt`，且该文件不存在时连提示都不弹 → 按钮
-  100% 空操作。改为调用 `onboarding.reset_onboarding()`（函数内导入避免与
-  onboarding 循环依赖）。**此缺陷为收尾复核时新发现，非上轮清单项。**
-* **保留并上报 4 个「疑似未接线」符号**（疑为功能隐患而非纯死代码，未删）：
-  `main_window.apply_home_style` 及 `onboarding` 的 style 步骤分支 /
-  `style_changed` 信号——均为已移除的「主页模板切换」**刻意保留的恢复入口**
-  （注释注明 re-add 方式），非误留；`net_api.fetch_liteloader_builds` /
-  `fetch_legacy_fabric_games`（疑似应接入版本选择，LiteLoader / 旧版 Fabric
-  目前不可选）、`plugin_host.webengine_unavailable_reason`（WebEngine 不可用
-  时未向用户展示具体原因）。（`onboarding.reset_onboarding` 本轮已接入。）
-* **配置键复核修正**（上轮「5 个从未读取」经二次核对后收窄）：`jvm_aikars`
-  （`settings_dialog L1072` 旧配置迁移时读取）、`collapsed_groups`（折叠组
-  读取/写回）实为**在用**；`launcher_ram_mb` 仅在设置页回填滑块，**无任何
-  运行期消费者 → 承诺的「AC 自身加速（模组加载/资源解压）」不生效**（疑死
-  设置，待定：接线 or 移除）；真正从未读取的只有 `enabled_modules` 与
-  `dev_mode_key`（后者为已移除功能字段、注释标明「字段保留」）。
-  （`sfx_click/hover/success/error` 经核为**动态键** `cfg.get(f"sfx_{key}")`，
-  非死。）
-* **核实并排除误报**：探索代理误判 `page_transition` / `achievement_toasts` /
-  `close_after_launch` 三项「设置不生效」；实查三者均在 `_collect` 采集
-  （`settings_dialog` L2377+）且在运行期被读取（`main_window` L2912 / L1794 /
-  L3366），功能正常。
-
-## round-102（2026-10-16）— 风格门禁：外部 skill 移植 + 首次全量扫描
-
-> 玩家在 WB 国际版装了 `humanizer`（文案去AI味）与 `hallmark`（设计反 slop
-> 58 门禁）两个 skill，要求评估 AC 是否需要并抄用。结论：AC 已基本达标，
-> 转为**固化门禁**防回归。
-
-* **全量扫描结果**：i18n 1194 条中文 AI 高频词 0 命中；2944 条英文仅 1 处
-  （`ld_fabric` 的 "vibrant"，本轮修复）；感叹号仅 7 处且全为功能性 toast。
-  对比度 9/9 配对全过（亮/暗；最低暗色 `text_accent` 3.38:1，判定为
-  ≥18px 粗体限定）；饱和面积 ≤2%（门禁线 5%）。
-* **新增 [docs/style-gates.md](docs/style-gates.md)**：两 skill 的 Qt 适配版
-  —— 文案 10 条 + 视觉 12 条 + 发版抽查流程；含已知豁免（frameless 关闭红、
-  splash 光晕、占位 em dash）。今后改文案/样式/发版前照单过一遍。
-* `i18n.py`：`new_instance.ld_fabric` 英文 "Lightweight, vibrant mod
-  ecosystem" → "Lightweight loader, active mod ecosystem"（对齐中文语气，
-  消 vibrabt 类促销词）。
-* 待办顺延（玩家验收时确认）：设置→外观页底部复选框行被卡片底边裁切；
-  内存进一步下探的取舍。
-
-## round-101（2026-10-13）— 验收修复：导航全失效 · 清数据首启闪退 · 教程无任务栏图标
-
-> 玩家真机验收 round-100 时连续暴露 3 个阻断性问题，均在本轮修复并回归验证。
-
-* **致命：关闭流光特效后全部导航点击无响应**（`effects.py`）
-  `fade_page_transition` 开头 `if not EFFECTS_ENABLED: return`，而
-  `EFFECTS_ENABLED` 由装饰性配置 `effect_light_trail`（默认关）驱动；
-  `_switch_stack` 又把该函数当作**唯一**切页口——玩家一旦关闭流光（默认即关），
-  点击任何左侧菜单都不切页、且无异常。改为关特效时执行瞬时 `setCurrentIndex`
-  （切换是功能不是装饰），开特效时维持淡入+上浮。新增导航点击离屏回归
-  （9 个功能页 + 分组标题/弹窗行分流，特效开/关两条路径均断言切页）。
-* **致命：清空 data/ 或全新首启时静默闪退**（`main.py` + `main_window.py`）
-  首启流程为 splash 关闭 → 延迟 1.2s 弹新手教程 → 教程结束才 show 主窗口；
-  Qt 默认 `quitOnLastWindowClosed=True` 在 splash（最后一个可见窗口）关闭瞬间
-  直接退出 app，表现为「窗口一闪而过、日志停在构建完成、无任何报错」。
-  改为 `app.setQuitOnLastWindowClosed(False)` 手动管理生命周期，主窗口
-  `closeEvent` 实关闭分支显式 `QApplication.quit()`（托盘最小化 hide 不误退）。
-* **新手教程窗口在任务栏无图标**（`onboarding.py`）
-  教程对话框的 owner 是尚未 show 的主窗口，Windows 不给这种 owned window
-  发任务栏按钮。`showEvent` 首次显示时加 `WS_EX_APPWINDOW` 扩展样式，强制
-  任务栏条目（图标继承 app windowIcon）；失败静默不阻断教程。
-* **发布前清理**：删除历史测试实例（含扁平化坏布局，版本 json 散落在
-  `.minecraft` 根导致版本解析 notfound）、图标/网络缓存、成就、配置、
-  `_diag*/_audit*` 等全部诊断脚本与截图、`dist/`（749MB 打包产物）、
-  `__pycache__`、试验性 `*.spec`；`.gitignore` 补 `*.spec`。
-
-## round-100（2026-10-07）— 极简美学重构第二波：其余页面清扫 · 欢迎页 token · 动画打磨
-
-> round-99 第二波（清单见第一波段落：其余页面 + 欢迎页/AC 标志 + 成就入口 +
-> 动画三件套）。玩家指令「ac搁太久了，赶快做完」。
-
-* **alpha 序盲区第二波清扫**：`ui_kit.badge`、`pages_instances`（行徽章底/
-  「当前」标签/ModCard 启用态/`_badge_style`）、`modules_page` 4 处、
-  `scan_dialog` 2 处状态标、`achievements_page`、`java_manager_dialog`、
-  `settings_dialog` 主题色徽章、`main_window` 来源徽章，全部从
-  `{color}1F`/#RRGGBBAA 式手拼 → `with_alpha()`；`pages_instances` 新增
-  `_loader_vivid()`/`_loader_badge()`（与资源详情同一套「主题包声明
-  `loader_vivid` 才品牌色、默认中性」模式）
-* **首页 hero 重写（`main_window.py`）**：accent→#28BCD8 大渐变底 + 白字 +
-  白 pill + 白底 combo 全套内联 → `RoundedCard(radius=16, accent_border=3)`
-  中性卡 + `badge`/`sub` 类 + 全局实例选择器样式；主按钮沿用全局 accent
-  按钮；hero 高 192→176。`login_dialog` hero 同款重写（紫→洋红渐变 → 中性卡）
-* **成就解锁弹窗默认关**：`achievement_toasts: False`（设置→效果可开，
-  带提示语；成就页始终可从左侧导航进入），`_show_achievement_toast` 首行守卫
-* **欢迎页（`welcome_window.py`）**：暗色文字色硬编码 `#A78BFA` →
-  `COLORS["text_accent"]`（随自定义 accent 联动提亮），亮色保持
-  `accent_text()`；AC 像素墨迹渲染/透明画布/浮现动画维持 round-93 方案
-* **动画打磨（克制）**：`fade_page_transition` 150→160ms，新页追加
-  **8px 上浮汇入**（上浮前强制同步布局取真实落点、结束归位 → 连续切换零
-  漂移）；新增 `effects.fade_in_widget()` 一次性淡入（结束必清 effect），
-  应用于资源中心结果列表（仅整页重置，加载更多不闪整屏）与实例列表刷新
-* **移除资源中心 OptiFine 分类入口（拍板）**：`STORE_CATEGORIES` 去
-  optifine；`pages_browse` 清理 `_load_optifine`/下载分支/预取调用；
-  OptiFine 仍可从「新建实例 → 加载器」作为独立安装入口使用
-* **验证**：py_compile 14 文件；`_audit_i18n` 886 键（仅 3 个已知误报）；
-  离屏冒烟 `_diag_round100_tmp.py` 17 项全过（含动画零漂移/effect 清理、
-  分类按钮=表长、实例页 8 位 hex 全 alpha 在前）；第一波回归
-  `_diag_store_detail_tmp.py` 24 项全过；真机启动 `_startup.log` 到
-  `MainWindow built` + `hero done` 无异常
-* **补充（玩家复核「查bug + 颜色不能花里胡哨」）**：
-  - 硬编码色修复 4 处：`pages_instances._style_filter_btn` 选中态白字
-    `#FFFFFF` → `COLORS['text_on_accent']`（浅 accent 下白字不可读 bug）；
-    实例页 splitter hover 硬编码紫 `rgba(124,58,237,0.3)` →
-    `with_alpha(COLORS['accent'], 0x3D)`；`settings_dialog` 自定义色点
-    三色 `#33333A/#555/#9CA3B0` → 主题 token；`login_dialog` 清理
-    未使用的 `QColor/QLinearGradient` import
-  - `modules_page` 去花：模块类型徽章删除 `_TYPE_COLORS` 4 色 → 中性
-    `cls="badge"`（与加载器徽章同一理由：多色同屏显花）；作者/描述灰字
-    `#9CA3AF`/`#6B7280` → `cls="sub"`；已应用/已安装绿标 → `success`
-    token（`with_alpha` 底色）；内置蓝标 → 中性 badge
-  - 新增离屏计量审计 `_audit_visual_tmp.py`：11 页面高饱和像素面积占比
-    （`s>0.45 且 v>0.25`）全部 ≤2%（home 1.86% 最高，为 hero 主按钮 +
-    3px 竖条 + 边框点缀），8-hex 反序内联残留 = 0；ModsPage 截图复核
-    绿/灰/紫块均为 token/类驱动（success 12% 底 / badge / tile）
-
-## round-99（2026-09-27）— 极简美学重构第一波：全局中性基座 · 资源详情/资源中心去花哨
-
-> 玩家反馈「很多页面配色不清晰、颜色丑、色块压住文字」，拍板提前上极简美学重构
-> （分两波推进）。本波 = 全局基座 + 资源详情页/资源中心 + 漏键 + 花哨默认翻转；
-> 第二波 = 其余页面清扫 + 欢迎页/AC 标志 + 成就入口 + 动画打磨。
-
-* **Qt 颜色解析 bug（截图「半绿半紫」的真根因）**：Qt 的 8 位 hex 是
-  **`#AARRGGBB`（alpha 在前）**，旧代码 `f"{accent}22"`（= `#RRGGBBAA`）会被
-  解析成完全无关的颜色——紫 `#7C3AED` + `"22"` → `(58,237,20)` **荧光绿**。
-  页面里所有「淡色 accent」（横幅渐变的 `accent18`、推荐条 `accent14/40`、
-  chip `accent26`、加载器徽章底 `colr1F`、版本行 hover `accent66`）全是怪绿。
-  修复：`theme.py` 新增公开助手 `with_alpha()`；`_apply_accent` 的 `accent_soft`
-  改正确序（`#22RRGGBB`，实测 `#14B8A6` → `(20,184,166)` 而非怪色）
-* **全局基座（`theme.py`，不改 token 名 → 主题包兼容）**：新增中性 QSS 类
-  `hero / latest / vrow / badge / bare`（实色底 + 1px 描边，无渐变、无 accent
-  底纹）；`chip:checked` 从整块实色改为「accent 描边 + 淡底」点缀；写入
-  **强调色使用规约**：accent 只允许出现在主按钮、选中态、focus 描边、进度条与
-  ≤16px 小图标点缀上，禁止作文字背景或大面积底色
-* **资源详情页（`store_detail.py`）全面清扫**：横幅紫渐变 → `hero` 中性卡；
-  「推荐」条去 accent 底纹 → `latest`（唯一强调 = 左侧 3px accent 竖条 + 星标）；
-  加载器 13 色品牌徽章默认关（主题包声明 `"loader_vivid": true` 才恢复，兑现
-  「花哨保留但自选」）；分类/加载器徽章 → `badge` 中性；loader 筛选 chip 删除
-  整段内联样式 → 全局 `chip`；版本号不再按最新态染 accent；`_fill_latest`
-  加载器名改中性纯文本；「在线页面/加载更多/获取中文翻译」统一 `cls="secondary"`
-  （旧 `surface` 是卡片容器类，按钮上会显示成裸文字"链接"）
-* **资源中心（`pages_browse.py`）**：`_letter_fallback` 首字母图标从
-  `hash(title)%360` 随机饱和色块 → 中性灰底 + 次级文字色；`TYPE_COLOR` 模块级
-  颜色快照改 `_type_color()` 按需读 COLORS（切主题实时刷新），去掉 `#DB2777`
-  硬编码（并入中性）
-* **漏翻译 4 键**（中英都缺、界面直接显示 key 原文）：`store.detail_shown` /
-  `store.detail_load_more` / `store.detail_more_n` / `store.detail_all_loaded`
-* **花哨默认翻转**：`frosted_theme / transparent_window / effect_light_trail`
-  默认改 False（`settings_dialog` DEFAULTS + `main.py` / `main_window.py` 读取点
-  全部同步）；`page_transition` 保持 True（动画是感官重点，后续专门打磨）；
-  本地 `launcher_config.json` 仅关这 3 个花哨项，Java/内存/实例等配置全保留
-* **暗色「深色补丁压字」修复**：plain `QWidget` 包装层会被全局 `QWidget` 规则
-  画上 `bg_app` 底色——亮色主题下不可见（贴卡片色），暗色主题下在行卡片上成为
-  一块深色补丁压住版本号文字。新增 `bare` 裸容器类，版本号包装层挂上后像素级
-  验证透明（`alpha=0`）
-
-🔍 **验证**（TRAE 离屏实测）：
-* `_audit_i18n.py`：4 键补齐，MISSING 仅剩 3 个已知误报（`scan.note_` 为动态
-  拼接、`key`/`some.key` 为文档字符串）
-* `_diag_store_detail_tmp.py` 离屏冒烟 23 项全 PASS：全局类挂载、行内样式零
-  8 位 hex、分页文案本地化（「加载更多（共 53 个）」）、切 accent 后 `accent_soft`
-  正确解析、`_type_color` 实时取值、`bare` 容器像素透明
-* `py_compile` 全绿；截图目检 `_shots/store_detail_minimal_{light,dark}.png`：
-  无渐变、无彩块压字，亮/暗两套均「中性底 + 单一 accent 点缀」
-
-## round-98（2026-09-25）— PCL 版本隔离导入启动失败修复 · 外来客户端宽容启动
-
-> 依据 `docs/round98_memory.md`（TRAE 实测记录）整理。
-
-* **PCL2 版本隔离实例导入后启动报「版本不存在」**（P0，玩家实测）：
-  根因是三层错位——①PCL2 版本隔离下 `versions/<id>/` 里既有 `<id>.json` 又有
-  `saves/ mods/`，扫描正确地把它判为版本目录；②**复制导入时把版本目录拍平**
-  到 `<instance>/.minecraft/*`；③`_probe_format` 见到 `<mc>/<id>.json` 判为 `iso` →
-  `versions_root` 返回**实例目录的上级** → mll 去
-  `data/instances/versions/<id>/<id>.json` 找，**必然不存在**
-  （修复前实测 `EXISTS = False`）
-
-* 修复（`instances.py::import_external` copy 分支）：复制前判
-  `isolated_src = version_id 且 mc_dir/<version_id>.json 存在` —— 是则目标目录取
-  `<new>/.minecraft/versions/<version_id>/` 并标 `isolation="isolated"`，
-  否保持原行为。修复后实测 `isolation=isolated`、`game_dir` 落在版本目录内
-
-* **外来完整客户端宽容启动**：PCL2/HMCL 等导入客户端（version_id 非空）启动时若
-  classpath 缺库——旧逻辑会触发 `install_minecraft_version` 下载官方原版库
-  （「在补 PCL 特殊格式的 MC」）。现在按其原库布局直接启动，缺失条目由 JVM 静默
-  忽略 + 进度提示，**绝不污染玩家客户端**（`launch.py`）
-
-* **关闭行为默认改「直接退出」**：`tray_minimize` 默认 False——点关闭按钮即退出
-  （主流直觉）；设置里勾选「最小化到系统托盘」可恢复藏盘常驻
-
-## round-97（2026-09-23）— 扫描 / 首页三处 bug
-
-* **PCL2 分组折叠完全失效**：组键是内部码（`"PCL-CE"`）而组头文字是显示名
-  （`"PCL2"`），旧 `_toggle_group` 靠 `launcher in w.text()` 反查按钮 → **永远匹配不上**。
-  修复：`_rebuild_instance_list` 用 `_group_headers[launcher]` 直接持有按钮引用；
-  `_toggle_group` 直查，并只替换行首 ▾/▸（老实现 `text[2:]` 每次点击累积空格）
-
-## round-96（2026-09-23）— 单实例守卫加固
-
-* 用户报「新手教程背后露出启动器页面」：根因是清理数据删掉 `ac.lock` 后旧实例未退出，
-  新实例 `tryLock` **误成功** → 双实例并存，教程叠在旧主窗口上
-* 修复：`tryLock` 成功后仍用 `FindWindowW` 按 `APP_DISPLAY` 标题找窗口，找到则提拉旧实例
-  并 `unlock` 退出；`splash_window.__init__` 设 `setWindowTitle(APP_DISPLAY)`，
-  让 **splash 阶段**也可被识别。实测：删运行中锁再启动 → 进程数不增
-
-## round-95（2026-09-22/23）— 实例页折叠 / 教程叠窗 / 版本图标扁平化
-
-* **实例页折叠后再也展开不了**：`_toggle_panel` 收拢时对整个 `_left_panel`
-  `setVisible(False)`，折叠按钮随之消失。修复：新增常驻 40px 展开条
-  （`_strip` + `reopen_btn`），收起后留在最左侧提供反向箭头
-* **新手教程背后露出主窗口**：根因 = `_force_foreground` 里的
-  `user32.ShowWindow(hwnd, SW_RESTORE)` 把"未显示"的窗口直接拉成可见，
-  而它原先在教程分支之前运行（round-30/46 只挪了 `win.show()`，没防住这条旁路）。
-  修复：repaint / raise_ / `_force_foreground` 整体移入 `_show_main()`、紧跟 `win.show()`
-* **扫描弹窗 NameError**：`scan_dialog.py::_rebuild_instance_list` 用 `launcher_label`
-  但仅在他函数局部 import → 模块级补 import。这可能是之前「扫描实例扫不出来」的元凶
-* **版本库图标扁平化**：`make_version_pixmap` 重写为 HMCL/PCL2 式纯色圆角方块 + 居中
-  版本号；无渐变 / 3D 方块 / 装饰 chips；文本色按底色亮度自适应（亮底深字）
-* **侧边栏「其他」分组**：新增 `nav.group.other`，音乐 / 成就从「娱乐」移入
-
-## round-94（2026-09-22）— 字体查找共享化（移除写死本机路径）
-
-* **字体不随包**（用户 09-25 决定）：后续 AC 走「暴力极简」美学重写，MC 像素字体
-  只是排障期可选外观，不再作为发布产物（另：随包字体 16MB 且属 Mojang 字形版权灰色地带）。
-  已移除 `assets/fonts/minecraft_pixel.ttf`；`fonts.py` 三级查找保留——
-  玩家想要像素字效果，把 .ttf 放进 `data/fonts/` 即可（优先级最高），不放则回退系统矢量字体
-* **启动页回退链防 tofu**：无 MC 字体时 `_font_family` 可能为空串
-  （极端环境下 `QFont().defaultFamily()` 返回 ""），`QFont("")` 渲染成缺字形方框；
-  两处字体构造加防线——空串改用 `QFont()` 默认构造
-
-* 新增 `src/fonts.py`：MC 像素字体三级查找——
-  ①`data/fonts/`（用户放置即覆盖默认）②`assets/fonts/`（随包只读）
-  ③系统已安装字体中 family 含 `minecraft` 的。全部缺失返回 None，调用方回退，启动动画永不崩
-* 移除原先写死的 `<本地字体目录>\[苦力怕论坛]Minecraft(...).ttf`
-  （换机 / 目录移动后静默失效），改为随包 `assets/fonts/minecraft_pixel.ttf`
-
-## round-92（2026-09-21）— 模块化内容市场 · JS 扩展宿主（选装桥接）
-
-* **模块化内容市场**（`src/modules.py` + `settings_dialog.py`「模块与扩展」分区）：
-  主题包 / JVM 预设 / 音效包 / 崩溃策略统一为「可安装模块」
-  （`data/modules/<id>/manifest.json` + 按类型载荷），支持本地 zip / 目录 /
-  旧主题 .json 导入、应用副作用（写主题桥接 / jvm_preset / sfx 卷 / crash_policy）、
-  导出、卸载回滚；内置精选目录 `assets/modules/catalog.json`（Aikar G1GC 预设、
-  午夜主题、崩溃后自动重启）
-
-* **JS 扩展宿主**（`src/plugin_host.py`，QWebEngine 选装）：扩展 =
-  `data/extensions/<id>/manifest.json` + HTML 入口，manifest 声明权限
-  （read_only_instance / change_args / exec_command / network），默认全拒 +
-  逐项授权弹窗；无 QWebChannel 下用「注入客户端脚本 + 页面队列 + QTimer 轮询
-  runJavaScript 回投」的沙箱桥接，越权调用一律返回 `__error`；随包示例 `sample-clock`
-  演示 `window.AC.listInstances()`
-
-* **崩溃策略接线**：`crash_pol` 模块接入崩溃流程——`active_crash_policy()` 读
-  action=restart 时崩溃弹窗追加「重启游戏」按钮并设为默认（复用完整启动流程，
-  含内存/磁盘预检）；auto_analyze=true 时弹窗关闭后非模态打开日志分析器
-  （`main_window.py:_show_crash_dialog`）
-
-* **扩展启动参数接线**：host `changeArgs` 写入的 `ext_launch_arg_jobs` 在
-  `build_options` 消费——追加到 JVM 参数末尾并按 token 与预设/玩家参数去重
-  （`launch.py`）
-
-### 🔍 验证
-
-1. `venv\Scripts\python.exe -m py_compile src/modules.py src/plugin_host.py src/modules_page.py src/settings_dialog.py src/i18n.py src/launch.py src/main_window.py`
-2. `pythonw main.py` 冒烟：设置 → 模块与扩展三分区正常；无 QWebEngine 时扩展区给出选装提示
-3. 市场流程：安装「Aikar G1GC 预设」应用、安装「午夜」主题应用、安装「崩溃后自动重启」应用
-4. 扩展流程：安装示例时钟 → 授权弹窗逐项选择 → 打开扩展窗口显示实例数 + 走秒
-5. 崩溃接线：应用 crash-policy-restart 后，人为制造非零退出（如启动不存在的版本），
-   崩溃弹窗应出现「重启游戏」默认按钮，关闭后自动打开日志分析器
-
-### 🐛 仓库侧审查修复（2026-09-21 入库前）
-
-1. **zip 安装的「manifest 位于包根」形式实际装不上**（P1，功能失效）：
-   `_install_from_folder()` 固定拿解压容器目录名去和 `manifest.id` 比对，
-   而 zip 安装时容器是随机临时目录（`ac_mod_xxxx`），**必然不一致**并抛错——
-   导致文档声称支持的包根布局全部安装失败。新增 `check_dir_name` 开关，
-   仅 zip 包根场景跳过该校验；本地目录安装与「包内唯一顶层目录」仍照常校验
-
-2. **扩展卸载后 `changeArgs` 注入的 JVM 参数永久残留**（P1，静默副作用）：
-   `uninstall_extension()` 原先只删目录与授权，没清理全局配置里的
-   `ext_launch_arg_jobs`——扩展卸载后它注入的启动参数**持续影响每次启动**，
-   而玩家在 UI 里已找不到来源、无法撤销。新增 `clear_ext_arg_jobs()` 并在卸载时调用
-
-3. **`changeArgs` 反复调用导致配置无限膨胀**（P2）：原实现每次追加一条 job，
-   同一扩展重复调用会不停堆叠；改为按 `ext` 归属先剔除同名再写入（替换语义）
-
-4. **zip 解压改为 fail-closed**（安全加固）：原先直接用 `zf.extractall()`。
-   实测确认 Python 3.13 标准库**已内置路径净化**（`../../a.txt` 折叠为
-   `<dest>/a.txt`，绝对路径去根），**并非可利用的 Zip Slip**；但净化是静默的，
-   恶意成员会被悄悄塞进模块目录。改为逐成员 `realpath` 校验后显式拒绝，
-   以便在安装阶段就报错中止，同时防御将来解释器行为变化
-
-### 🔭 扩大范围审查（2026-09-21 第二轮：视觉 / 体感 / 文案）
-
-offscreen 渲染 8 个页面逐一截图审查（`_shots_audit.py`，诊断脚本不入库）：
-
-### 🐛 启动页 logo 字母粘连修复（用户报障「logo 加载偏移」）
-
-1. **根因**：Minecraft AE 是位图字体，`setPixelSize(96)` 后 QFontMetrics 与
-   实际渲染**严重脱节**——实测 metrics 报 `horizontalAdvance("AC") == 18`，
-   实际墨迹约 134px（**失真 7 倍**）。`drawText` 按 advance 逐字符排布 →
-   A、C 完全重叠粘连成一团歪字形；按 metrics 宽度居中 → 整体错位。
-   round-78 加的 -14 负字距在失真度量上雪上加霜，纯调数字无解
-2. **修法**：`_render_ac_pixmap()` 预渲染——A、C 各自画到离屏图 →
-   逐像素测**实际墨迹**包围盒 → 按墨迹宽 + 14px 间距手动排布拼接；
-   `paintEvent` 改为按墨迹图实际尺寸居中绘制（透明度/缩放动画不变，
-   主题色经 `CompositionMode_SourceIn` 染色）。彻底绕开失真的字体度量
-3. 回退链保留：预渲染异常时兜底纯文本 `AlignCenter` 绘制
-
-offscreen 渲染 8 个页面逐一截图审查（`_shots_audit.py`，诊断脚本不入库）：
-
-1. **联机大厅卡片不居中**（布局 bug）：卡片 `setMaximumWidth(560)` 后
-   `QVBoxLayout.addWidget` 默认**靠左**，右侧空出约 600px，整个页面重心歪向左边。
-   加 `AlignHCenter` 水平居中（垂直方向上下 stretch 本来就对）
-2. **空状态文案敷衍**（AI 味）：`"市场为空。"`（4 字，与相邻 `"还没有安装内容模块。`
-   `去下方市场挑一个…"` 的详细引导形成鲜明反差）、`"还没有安装扩展。"`（无动作引导）。
-   中英 4 条全部重写为「现状 + 下一步动作」结构
-3. 审查中确认**健康**的部分：文案整体克制（感叹号全库 14 处、空话词仅 2 处且为
-   合理技术描述）、弹窗收敛已落实（`QMessageBox` 构造仅 6 处）、主题令牌体系完整
-   （radii 4/6/10/12/16）、`setStyleSheet` 硬编码颜色仅 14 处且均为中性灰
-4. **遗留观察项**（待真机确认，未动）：设置页「外观」分组 4 列 radio 文字疑似
-   横向挤压（offscreen 字体下溢出截断，真实字体待验证）；versions 页列表空时
-   滚动区为整块灰底（status 小字存在但视觉存在感弱，建议加居中空态图标）
-
-> 补记：本次为 09-21 完成、随日期批次补记；启动主线施工图见
-> `docs/LAUNCH_MODE_DESIGN.md`（⚠️ 编号冲突：round-92 已被本次占用）。
-
-## round-91（2026-09-12）— 自绘符号收尾 · 自定义强调色贯通
-
-* **全局消灭文本 emoji / 符号**：Windows 下 `✓` `●` `▶` 会被 Segoe UI Emoji 渲染成
-  彩色字形、风格突兀——对勾、圆点、折叠箭头全部改为自绘
-  （`pages_instances.py:380/1214`、`java_manager_dialog.py:93`、`crash_dialog.py:64`），
-  并删除已迁移到 `state_pix` 的残留文本符号表 `_GLYPH`（`launch_dialog.py:46`）
-
-* **强调色贯通自定义 accent**：主窗口光晕、按钮起色、强调边框均跟随玩家自定义强调色
-  （`main_window.py:265/520/656`），内置紫主题下仍与品牌 `#7C3AED` 一致
-
-* **字体下拉改为自动检测**：不再枚举候选列表，扫描系统全部已安装字体，
-  列表项各用自身字形预览，按钮文字跟随当前选中项（`settings_dialog.py:304`）
-
-## round-90（2026-09-12）— 横溢出治理：不出现底部横条
-
-* 确立 UI 原则：**页面不允许出现底部横向滚动条**。横向溢出一律改由内容自身收缩解决，
-  而非放任出现滚动条
-
-## round-89（2026-09-12）— 折叠箭头自绘
-
-* 版本卡折叠箭头改为自绘（不再用文本 `▶`/`◀`），继续 round-91 前的 emoji/符号清理
-
-## round-88（2026-09-12）— 加载器官方风格图标
-
-* 版本卡片左侧显示加载器官方风格图标，新增 10 个 `assets/icons/loader_*.svg`：
-  forge / fabric / quilt / neoforge / cleanroom / liteloader / legacyfabric /
-  labymod / optifine / vanilla（`pages_instances.py:342`）
-
-* 隐藏不兼容卡片后，剩余可见卡重新按 3 列排布，不留空位（`pages_instances.py:907`）
-
-## round-87（2026-09-12）— 全局自定义字体 · 徽章文字色跟主题
-
-* **玩家可改全局字体**：先于 `apply_qss` 生效，让 `build_qss` 用新字体重建；
-  设置页放弃修改时字体同步还原
-
-* **来源徽章文字色跟主题 `text_main`**：避免主题色为浅色（如琥珀黄）时徽章文字看不清
-  （`main_window.py:213`）
-
-## round-86（2026-09-12）— 来源徽章显示真实来源名 · 关于/守则置底
-
-* **导入实例允许显示来源启动器名**（PCL2 / HMCL / Prism 等），此前一律不显示
-  （`instances.py:227`、`main_window.py:212/1146`）
-
-* 设置页「关于 / 守则」独立成组并**置于最底部**——无论快速/高级分组怎么折叠都在最后
-
-## round-85（2026-09-12）— 资源中心详情页重构 · 版本列表分页
-
-* `store_detail` 重构为**行卡片流**，对齐主流启动器信息密度
-
-* `net_api` 新增 `limit` / `offset` 分页（`net_api.py:558`）——
-  Fabric API 上千版本，分页后秒开
-
-## round-84（2026-09-12）— 主题切换按钮修复 · 实例卡操作行简洁化
-
-* 修复「**主题切换按钮只有空框**」：图标/文字只在 `on_theme_change` 时更新导致丢失；
-  改为不再依赖 SVG 文件
-
-* 实例卡操作行简洁化：一行只放高频操作（打开文件夹 / 实例设置 / 设为当前 / 删除）
-
-## round-83（2026-09-12）— 服务器收藏一键直连 · 系统托盘常驻
-
-* **服务器收藏一键直连**：新增 `server_favorites.py` + `server_fav_dialog.py`。
-  收藏服务器 → 用当前实例直接启动并连入，覆盖 `game_args` / 全局里的
-  `--server`/`--port`（收藏直连优先于附加参数）
-
-* **系统托盘**：关闭窗口后藏到托盘常驻，游戏与下载不中断
-
-## round-82（2026-09-11）— 启动格式（磁盘布局）自适应识别
-
-* 新增 `detect_format()`（`instances.py:297`）：`auto` 自动识别磁盘布局
-  （`vanilla` / `iso` / `multimc` / `curseforge` / `modrinth` / `custom`），
-  实例设置可手动强制覆盖；`auto` 时下方灰字实时显示「检测到：xxx」，
-  强制时显示「已强制：xxx」
-
-* 识别结果驱动版本 json 定位与游戏目录解析
-  （**后续「启动方式自适应」UI 直接复用本 round 的交互模式**）
-
-## round-81（2026-09-11）— 多实例并行
-
-* 同一实例已在运行 → 提示而非重复启动
-
-* 多实例进程跟踪：`poll()` 非 None 即已退出，逐条清理
-
-* 崩溃诊断弹窗支持多实例：`log_path` / `base_dir` 取退出实例自己的值
-
-## round-80（2026-09-11）— 崩溃诊断弹窗 · 磁盘预检 · JVM 智能推荐
-
-* **崩溃诊断弹窗**：内容 = `latest.log` 尾部 + `crash-reports` 最新文件摘要；
-  三个动作——打开日志目录（优先 crash-reports）/ 复制诊断信息（方便贴给整合包作者）/ 好。
-  数据不足时按 reason 兜底，绝不阻塞 UI
-
-* **磁盘空间预检**：游戏盘剩余 < （堆内存 + 2GB 余量）时弹警告
-
-* **JVM 预设新增 `auto`**：按分配内存自动选组——≥8G 给完整 Aikar，
-  否则给轻量 G1GC 组（避免 `AlwaysPreTouch` 预占内存挤压堆）
-
-## round-79（2026-09-10）— 英文支持（实验性）· 大厅 · 工具箱
-
-* **英文支持**：尚未全覆盖（主页等仍有中文残留），先标注「实验性」
-
-* **79b**：大厅从「敬请期待」占位升级为真实页面；工具箱升级为真实快捷工具
-  （打开目录 / 清理缓存）；新增窗口置顶开关
-
-* **79e**：低内存警告——实例覆盖内存优先，超过可用物理内存时警告
-
-## round-78（2026-09-10）— 实例存储拆分升级 · 跨启动器版本隔离导入
-
-* **存储升级**：单文件 `data/instances.json` 拆分为
-  `data/instances/<id>.json`（每实例全量、真理源、原子写）+
-  `data/instances.index.json`（摘要索引，启动秒开、懒加载全量）。
-  旧版单文件首次启动一次性迁移后改名 `.legacy.bak`
-
-* **其他启动器版本隔离实例导入**：这类实例 `mc_dir` 本身就是 `versions/<id>` 目录，
-  按此布局正确解析
-
-## round-77（2026-09-03）— 日志终端：搜索高亮 · 导出到文件
-
-> 落地《RELEASE\_1.0.0\_CHECKLIST》B 段第 1 项（对齐 Zaphyrous 日志面板——9-02 对标报告点名的真实差距：无关键词搜索高亮与导出文件）。
-
-* **搜索并高亮全部匹配**：console 页新增搜索行（header 下方）。输入即高亮所有匹配片段
-  （`accent_soft` 主题底色、大小写不敏感），右侧实时显示「n 处匹配」；**Enter 跳下一个
-  匹配**（到底自动从头再来一轮），搜索框带清除按钮
-
-* **过滤 / 搜索职责分离**：过滤行 = 只展示匹配行（保持原有语义）；搜索行 = 全量保留 +
-  高亮 + 跳转。两行独立，互不影响
-
-* **渲染防抖**：`_render` 内容未变化时不再重建 QPlainTextEdit 文本——避免 1s poll 每次
-  重置选区、打断搜索选中（此前每次 tail 都会 `setPlainText` 全量重建）
-
-* **导出到文件**：「导出…」按钮把当前视图（过滤后的展示结果）存为 `.txt`，默认文件名
-  `<实例名>_<yyyyMMdd-HHmmss>.txt`；日志为空时 toast 拦截不落盘；成功 toast（复用
-  round-76 弹窗收敛）、磁盘/编码失败保留模态 warn
-
-* **i18n**：新增 `console.search_placeholder / search_count / export / export_title /
-  export_done_title / export_done / export_fail / export_empty` 8 键（中英对称）
-
-### 🔍 验证
-
-* compileall 0 错误；`_diag_console_search_tmp.py` 11 项断言全过（计数/高亮片段数/
-  清空复位/Enter 跳转选中/过滤联动/导出落盘内容一致/toast 触发/空日志拦截）
-
-* `_diag_all.py` 全量回归绿（新脚本自动纳入 glob 集）；`_audit_i18n.py` ZH\_NOT\_EN /
-  EN\_NOT\_ZH 均为空
-
-## round-76（2026-09-03）— 弹窗收敛：通用 toast 浮窗 · 模态 info 大批收敛
-
-* **通用轻提示浮窗** **`show_toast`**（main\_window）：右下角滑入 → 停留 → 淡出，
-  中性主题色（accent 左侧竖条 + 玻璃底 + 随主题 text\_main/text\_sub，无硬编码色），
-  与成就 toast（MC 棕金风）并存互不干扰；复用 `_active_toasts` 防 GC
-
-* **`win_rounded.toast`** **辅助**：主窗口上下文 → 浮窗；窗口外/对话框内自动回退模态 info
-
-* **收敛 10 处模态 info → toast**：
-
-  * 实例备份完成 / 无快照提示 / 恢复完成 / 克隆提示
-
-  * 实例应用整合包完成
-
-  * 整合包导入完成（modpack.done）
-
-  * 模组：未选实例提示 / 已是最新 / 批量更新完成 / 添加模组提示
-
-  * 资源中心：创建实例成功 / 未选实例下载提示（×2）
-
-* **保留模态的 info**（决策/错误/引导性质，3 处 + 对话框上下文）：
-  新实例向导提示、选错包格式错误、坏包提示
-
-* **顺带修 bug**：`_copy_mod_name` 里 `from .toast import toast` 引用不存在的模块
-  （round-74 并行编辑覆盖时残留——右键"复制文件名"触发即崩溃），改为 `win_rounded.toast`
-
-### 🔍 验证
-
-* compileall 0 错误；offscreen 冒烟通过（show\_toast 存在、QSS 无遗留 token、模块导入全通）；
-  残留检索确认无 `from .toast import`、剩余 info 仅 3 处合理保留
-
-## round-75（2026-09-03）— 交互反馈：整合包导入进度 · 按压反馈补齐
-
-* **整合包导入进度感**：`_import_pack_path`（按钮/拖拽共用入口）导入期间在主窗口状态条
-  挂上转圈进度条 + 「正在导入，请稍候…」文案，成功或报错都恢复就绪——解决大包导入
-  几十秒内"点了没反应"的错觉；复用已有 `modpack.importing` i18n 键（无重复新增）
-
-* **按压反馈补齐**：`icon-btn` / `chip` / `pcl2-pill` 补 `:pressed` 状态
-  （icon-btn → `$border_light`；chip/pcl2-pill → `$accent_soft` + accent 字），
-  与基础/accent/danger/secondary/seg 的既有按压体系对齐
-
-### 🔍 验证
-
-* compileall 0 错误；offscreen 冒烟通过；build\_qss 无遗留 `$token`；i18n 键中英对称
-
-## round-74（2026-09-02）— 主题一致性 QSS 层 · 模组右键菜单
-
-* **模组右键菜单**：模组管理页 `ModCard` 新增右键（对齐 Prism/CurseForge 鼠标流）——「打开所在文件夹」（explorer `/select` 直接定位文件，排查冲突更快）/「复制文件名」（写进剪贴板 + 状态条轻提示，查 Modrinth 时即贴即搜）；新增 `mods.open_folder` / `mods.copy_name` / `mods.copy_name_done` 中英键
-
-* **字号层级扩展**：`FONTS` 新增 `xs`(11) 档，`F_XS/F_XL` 五个档位常量；QSS 模板内散落的 `11px`（pill/导航分组）/`13px`（chip/pcl2-pill）全部改走 `$f_xs/$f_md` token——改字号档位或主题包覆盖 `fonts` 时全 UI 联动
-
-* **圆角 token 化**：`RADII` 新增 `icon`(8) 档；`[cls=surface/row/tile/pill/loader-card/icon-btn]` 的硬编码 `8/9/10/12px` 圆角统一走 `$r_card/$r_btn/$r_small/$r_icon`
-
-* **颜色 token 化**：seg/chip checked、secondary pressed 的 `#FFFFFF` 改 `$text_on_accent`（accent 亮度自适应文字色，不再固定白字）；radio 未选圆心 `#FFFFFF` 改 `$bg_frost`（dark 下随主题深色）；slider 白心新增 `slider_knob` token（浅/深主题同为白，主题包可覆盖，QSS 与 `AcSliderStyle` 自绘共用）；danger 按钮 hover 底的 `rgba(239,68,68,0.08)` 改为 `$danger_hover`（由 danger token 派生，自定义主题包改 danger 时联动）
-
-* **build\_qss 兜底**：`text_on_accent` 冷启动缺失时默认白字，杜绝 QSS 出现字面 `$text_on_accent`
-
-* **main\_window 主题切换按钮**：`_style_theme_toggle` 的 dark 三元色值改为读 `COLORS` token（`bg_btn/border/text_main/bg_hover`）、字号走 `F_MD`——"控制中枢"等任意主题包自适应，不再锁死 light/dark 两套灰
-
-### 🔍 验证
-
-* `build_qss()` 冒烟：QSS 生成无遗留 `$token`；`F_XS/R_ICON/F_MD` 常量正确；全量 `compileall` 0 错误
-
-## round-73（2026-09-02）— README 重写 · 版本号回归 · 批量下载队列
-
-* **README 重写**：以 round-72 现实为准（功能矩阵 / 技术栈 / DPAPI 隐私承诺 / 零遥测 / 自检命令 / 路线图），告别"轻量浅色主题"初版旧文案
-
-* **版本号体系回归**：新增 `_diag_version_parse_tmp.py`——验证 26.1/26.2 新版本号、26w 快照、愚人节分流、classic legacy、缺日期条目全部正常；结论：type+日期排序天然免疫语义化版本号，不变式固化防回归
-
-* **批量下载队列**：新增 `src/batch_download.py`（`BatchDownloader`）：4\~8 worker 线程池 + 任务队列 + **失败记录继续** + 线程安全进度/取消 + 存在即跳过 & sha1 复核；接入 CurseForge 整合包文件下载（原逐个顺序下载、失败中断整批 → 并发批下载、失败汇总）；新增 `modpack.curse_batch_fail` 中英键
-
-* 修复 `_diag_all.py` 审计发现的 i18n 中英不对称（`modpack.curse_batch_fail` 英文表先落、中文表补回）
-
-### 🔍 验证
-
-* `_diag_batch_tmp.py` 6 用例 + `_diag_version_parse_tmp.py` 5 用例新增并通过；`_diag_all.py` **21 脚本 + i18n 审计全绿**；全量编译 0 错误
-
-## round-72（2026-09-02）— 下载器加固：退避重试 · 毒 .part 清理 · 完整性校验
-
-### ⬇ 下载引擎加固（借鉴 PCL-CE `LoaderDownload.cs` / `FileDownloader.cs`）
-
-* `download_file` 重构为「单次尝试 + 有限退避重试」两层：网络类失败（连接/超时/5xx/内容不完整）最多重试 3 次，抖动退避 0.8s/1.6s ± 0.3s（对齐 PCL retry<4 + Sleep 300\~500+retry\*300），重试期间 `.part` 断点续传；**4xx 确定性失败立即抛错、不重试，并删除可能被污染的** **`.part`**（防毒化后续续传）
-
-* 新增下载完整性校验：`Content-Length` 已知但实际写不满 → 判定内容不完整按瞬时错误重试（PCL `FileChecker` actualSize 的简化版）
-
-* `.part` 临时后缀 + `os.replace` 原子收尾此前已有（round-37/48），本轮补上缺失的「重试 + 失败清理」两环；所有下载入口（mod/modpack/cf/optifine/java）统一收益
-
-### 🔍 验证
-
-* 新增 `_diag_retry_tmp.py` 5 用例（假传输 monkeypatch）：瞬时失败重试至成功（恰 3 次请求）/ 404 立即失败 + 毒 .part 清理 / 内容不完整重试 / 416 直接原子收尾 / 架构常数约定——全过
-
-* 真实网络下载（version\_manifest 274KB）端到端通过；`_diag_all.py` 19 脚本 + i18n 审计全部 exit=0；全量编译 0 错误
-
-## round-70/71（2026-08-30）— 日志打码 · 非 ASCII 路径警告
-
-### 🛡 round-71 日志打码（借鉴 PCL-CE `McLogFilter.cs`）
-
-* 新增 `src/log_mask.py`：`mask_launch_text()` 在**展示层**统一打码——启动参数段 `accessToken xxx`、当前登录 token、Windows 用户名，均保留**首尾各 5 位**中间 `*` 替换；磁盘日志原样保留，崩溃分析不受影响
-
-* 控制台页 `set_game()` 接收登录 token，tail 日志时逐块打码后显示；崩溃分析证据 `detail` 构建时同样过打码，防分享截图/日志时泄漏凭证
-
-* 修复 `_mask_access_token` 单段 token 尾部日志被重复拼接的缺陷（冒烟测试捕获）
-
-### ⚠ round-71 非 ASCII 路径警告（借鉴 PCL-CE McLaunchPrecheck）
-
-* 启动预检新增「游戏目录含非 ASCII 字符（如中文）→ 启动前给一次提示」：只警告不拦截，启动失败时把原因指向路径；设置 → 加载器 → 「非 ASCII 路径警告」开关可关闭（对齐 PCL-CE「不再提示」语义），配置 `warn_non_ascii_path`（默认开）
-
-* 补齐 `settings.warn_non_ascii_path(_hint)` 中英键值，i18n 审计中英对称
-
-### 📚 round-70 ModDownload.cs 下载引擎 · 崩溃分析模块深挖（PCL-CE 源码）
-
-* 抓取 PCL-CE 关键源码至 `<workspace>\_PCLCE\`（`ModDownload.cs`、`FileDownloader.cs`、`LoaderDownload.cs`、`ModBase.cs`、`CrashAnalysis/` 29 文件）
-
-* 下载引擎要点：多阶段 Loader 权重流水线 + 官方 URL `.Replace` 生成镜像源按序切换 + 临时文件后缀下载原子移动 + `FileChecker` 哈希按长度自动判型（MD5/SHA1/SHA256）+ 精确/最小 size + JSON 结构校验
-
-* 崩溃分析要点：Collect→Prepare→Analyze→Output 四步管道、按文件名前缀分类日志、Fatal→Primary→Secondary 三阶段规则短路、46 种稳定 `CrashCause` 枚举映射本地化建议
-
-* 详细对照见 `2026-08-30_PCL-CE下载引擎与崩溃分析深挖.md`
-
-### 🔍 验证
-
-* 冒烟测试：log\_mask 单/多段 token、用户名、无敏感文本全通过
-
-* `_diag_all.py` 18 脚本 + i18n 审计（ZH\_NOT\_EN/EN\_NOT\_ZH 为空）全部 exit=0；全量编译 0 错误
-
-## round-68/69（2026-08-30）— Quilt 加载器 · 设置简化 · 进程优先级
-
-### ✨ round-68 Quilt 加载器
-
-* 新建实例页新增 **Quilt** 加载器卡片与版本获取（`minecraft_launcher_lib` 的 Quilt 分支，`stable_only=True` 只列稳定版）
-
-* 设置 → 加载器 → **「显示 Quilt 加载器」开关**（对齐 PCL-CE 的隐藏加载器思路）：关闭后 `_compatible_loaders` 与新建实例卡片同时过滤，不残留入口
-
-### 🎛 设置简化（round-68）
-
-* 设置页由三分区（快速设置/Java/高级设置）合并为**两分区：设置 / Java 管理**；原「快速设置」+「高级设置」纵向合并进「设置」滚动页，Java 单独成区（对齐 PCL-CE「Java 归游戏分区」的分类）
-
-### ⚡ round-69 进程优先级
-
-* 新增「进程优先级」下拉：标准 / 高 / 实时，写入 `process_priority` 配置
-
-* `launch._priority_bits()` 用 Windows 原生 `CREATE_HIGH_PRIORITY_CLASS`(0x80) / `CREATE_REALTIME_PRIORITY_CLASS`(0x100) 与 `CREATE_NO_WINDOW` 按位或，随 creationflags 一次性生效，**零新增依赖**（不引入 psutil）
-
-### ✨ round-62\~67 汇总补录
-
-* 资源中心详情页（全部版本列表 + 按 MC 版本过滤 + 谷歌翻译中文说明，24h 缓存）
-
-* 设置页滚轮误调预防；版本列表 24h 缓存 + 主窗口构建时后台预取提速
-
-* Logo 页精简（去背景/文字，保留 AC 字母动画）；音乐播放/暂停按钮图标随状态切换
-
-* 联机大厅工具选择器（无联机插件时引导 Terracotta/EasyTier/MCTier）；MC 像素字体 Logo 与 Splash 动画
-
-* 修复：崩溃分析对话框缺 QWidget 导入、设置页未改动误弹保存、导航布局被硬编码篡改、启动窗口闪现与首次启动假死、authlib 配置原子写、退出后命令未执行、版本页加载缓慢等
-
-### 🔍 验证
-
-* `_diag_priority.py`（位映射/下拉/脏检测/creationflags 4 项）+ `_diag_quilt_tmp.py`（两分区/开关/过滤/兼容列表/版本分支 5 项）新增并通过
-
-* `_diag_all.py` 16 脚本 + i18n 审计（ZH\_NOT\_EN/EN\_NOT\_ZH 为空）全部 exit=0；全量编译 0 错误
-
-## round-61（2026-08-30）— 性能优化
-
-### ⚡ 性能
-
-* **流光卡视口裁剪**：`QScrollArea` 里滚出屏幕的卡片此前虽 `isVisible()=True`，仍每帧触发一次被裁剪掉的光栅化。现在按 `visibleRegion()` 判定，只有真正可见的卡片才推进动画（浏览页/实例列表滚动时 CPU 显著下降），滚回来自动续播
-
-* **动态壁纸随可见性暂停**：GIF/视频壁纸在页面被切走、窗口最小化时暂停解码（`QMovie.setPaused` / `QMediaPlayer.pause`），回到页面/还原窗口自动恢复，避免后台白跑 CPU
-
-* 修复进程退出时流光卡析构触发 `hideEvent → _stop_master()` 访问已销毁 QTimer 的 RuntimeError
-
-### 🔍 验证
-
-* 全量编译 0 错误；离屏功能验证（壁纸无媒体静默通过、滚动视口掩码正确）；`_diag_all.py` 全量回归 11 脚本 + i18n 审计全部 exit=0
-
-## 2026-08-30 — 启动高级设置（对齐 PCL2）+ 玻璃拟态 + 拖拽修复
-
-### ✨ 新增：启动高级设置（round-55，对齐 PCL2「启动游戏 / 版本设置」）
-
-* **游戏附加参数**：全局默认 + 实例级覆盖，追加到游戏启动参数末尾；支持 `--server <ip>` / `--port` 服务器直连（自动解析并交给 minecraft-launcher-lib 注入）
-
-* **JVM 参数预设**：三档下拉（默认不注入 / Aikar GC 优化 / 自定义），替换原 Aikars 单勾选框；旧配置 `jvm_aikars=true` 自动映射到 `aikar`，不丢用户选择
-
-* **版本隔离**：默认共享 / 版本隔离（`versions/<版本>/`）/ 自定义目录三选项，经 `gameDirectory` 下发，实例级可覆盖全局
-
-* **启动后 / 退出后命令**：`run_hook_cmd` 异步 `Popen` 执行（失败静默），游戏退出时自动补跑退出钩子
-
-### ✨ 体验
-
-* **窗口拖拽修复**：无边框 + Acrylic 透底下 `startSystemMove` 失效，改为「原生优先 + 手动移动兜底」双机制（标题栏 + 主窗口统一）
-
-* **玻璃拟态（毛玻璃）**：Acrylic 透底 + 半透明卡片 `bg_frost`，全局/实例设置界面统一升级
-
-* **版本页图标**：MC 风格 3D 等距方块（按区块纹理合成）
-
-* **authlib 自动更新**：后台线程检查 GitHub 最新版，原子替换 jar，失败静默回退
-
-* **渲染器选择 + 实验性 GC 性能选项**：实例级 `auto/software/legacy` 渲染器 + G1GC 优化组/禁显式 GC
-
-### 🔍 验证
-
-* 编译 0 错误；i18n 审计中英对称、模板变量全匹配；`_diag_launch/_diag_settings/_diag_exit/_diag_backup/_diag_shared` 等回归脚本全部通过
-
-* 功能单测：`--server` 解析（含 `=` 写法）、版本隔离三种目录解析、Aikar 参数注入均 PASS
-
-## 2026-08-03 — 导入体验修复
-
-### 🛠️ 修复
-
-* **复制导入进度条**：扫描导入选"复制到本启动器"时显示实时进度（文件级 + 当前文件名），可随时取消；取消则停止导入，不再静默回退为接管
-
-* **导入后立即刷新**：主页 / 实例页扫描导入完成后，主页实例卡、实例列表、模组页实例选择器一次性全部刷新——之前只有当前页刷新，导入的实例要等切页才出现
-
-* **主页"刷新列表"按钮修复**：之前点击必抛异常（HomePage 缺 inst\_mgr 引用），现在正常重读磁盘列表
-
-* **主页"扫描接管"修复**：对话框关闭后的成就检查之前会抛 AttributeError 导致主页不刷新
-
-* **新建实例顺序调整**：先选游戏版本 → 再选加载器 → Java（与主流启动器一致；加载器兼容性依赖版本）
-
-* **一键导入全部**：支持中途取消（复制到一半点取消即中断，不再继续导后面的实例）
-
-### 🔍 自检（不变）
-
-* 10 项检查：依赖 / 数据目录 / 配置 / 账户 / 外置登录 / 资源文件 / Java / 游戏文件 / 网络连通性 / 界面状态（双页预警）
-
-### ⚠️ 已知问题（Beta 1.1）
-
-* 偶发"双页"视觉问题仍在排查（自检"界面状态"可检测是否实例重复）
-
-* PCL2 实例目录结构与标准 MC 不同，启动可能触发多余下载（独立跟进中）
-
-* 启动崩溃（窗口消失）个案在排查，可能与 PCL2 实例或新建实例连点有关
-
-## 2026-08-03 — 首个公开测试版
-
-### ✨ 核心功能
-
-* **跨启动器实例接管**：扫描并导入 MultiMC / Prism / HMCL / PCL2 / 官方启动器的游戏实例（复制或接管）
-
-* **实例管理**：新建 / 导入 / 删除 / 设置当前实例，游戏版本 + 加载器（Fabric / Forge / Quilt / NeoForge 等 9 种）选择
-
-* **版本安装**：浏览并安装 Minecraft 版本（官方 / BMCLAPI 镜像源）
-
-* **模组管理**：按实例管理 .jar 模组（启用 / 禁用 / 删除 / 添加）
-
-* **启动游戏**：微软账户登录（Azure OAuth）/ 离线模式，自动选 Java、注入 Authlib-Injector（外置登录）
-
-* **统御面板**：已接管实例数 / 来源启动器数 / 待修复实例一目了然
-
-### 🛠️ 修复（本轮 20+ 项）
-
-* **单实例锁**：双击 exe 或进程残留不再开第二个实例（消灭"双页/双进程"）
-
-* **切页动画移除**：不再出现页面半透明叠加的"重影双页"
-
-* **实例页空状态**：重写为 toggle 可见性方案，不再堆叠双卡片
-
-* **"新建实例"按钮**：修复 LOADERS 元组解包崩溃（之前点击无反应）
-
-* **"新建实例"按钮文字**：去掉文案中多余的"+"（避免"++"）
-
-* **首页重建优化**：语言未变时跳过全量重建，欢迎页加载提速
-
-* **模组页快速交互**：同步删除 + 重入保护，不再崩溃
-
-* **SSL 修复**：exe 旁加载 libssl/libcrypto，资源中心 HTTPS 正常
-
-* **欢迎页（Onboarding）**：样式应用延迟，不阻塞响应
-
-### 🔍 新增：内置自检（诊断）
-
-* 10 项检查：依赖 / 数据目录 / 配置 / 账户 / 外置登录 / 资源文件 / Java / 游戏文件 / **网络连通性** / **界面状态（双页预警）**
-
-* 入口：左侧"工具"区 → 诊断，或 设置 → 诊断
-
-### ⚠️ 已知问题（Beta 1）
-
-* 偶发"双页"视觉问题仍在排查（自检"界面状态"可检测是否实例重复）
-
-* 欢迎页初次加载仍偏慢（已部分优化）
-
-* 微软登录需在 Azure 配置回环重定向地址
-
-### 🖥️ 环境
-
-* Windows 10/11 x64
-
-* 需要 Java 8+（自动检测，可用自带 Java 或系统 Java）
-
+**跨会话记忆靠本文件**，不靠聊天上下文——每次开工先读它。
+
+被测脚本在 **`tests/`**（受版本控制），`regress.py` 是唯一入口。
+新增回归脚本请放进 `tests/` 并登记到 `regress.py` 的 `SUITES`——
+**别再写成 `_` 开头**（`.gitignore` 的 `_*` 规则会把它挡在仓库外）。
+
+⚠️ **例外：PII 门禁（`_pii_gate.py`）故意留在仓库根、受 `.gitignore` 忽略。**
+因为它内部必须写出真实 PII 字面量（如**本机用户目录** / **仓库根路径** /
+**个人邮箱** …）才能检测它们——一旦入库就等于把 PII 又写回
+公开仓库。所以它是**本机专属工具**，不随仓库分发；`regress.py` 找不到它会
+跳过（显示为 SKIP）而不是判失败。新机器上若要做脱敏门禁，需按
+`notes/ac-launcher/` 下的规则文件本地重建一份。
+
+## 三、当前开放项
+
+| 级别 | 位置 | 问题 | 修法 | 状态 |
+|---|---|---|---|---|
+| ~~P2~~ | ~~`RELEASE_1.0.0_CHECKLIST.md`~~ | ~~发布阻塞项写着「`_diag_all.py` 全部 exit=0」，但该脚本**从未入库**（`git log --all -- _diag_all.py` 为空）——回归套件此前不存在~~ | **已解决**（round-112）：清单引用已改为 `regress.py`（原句保留为历史说明）；回归入口 11 项全绿 | ✅ 完成 |
+| ~~P2~~ | ~~`.gitignore` `_*` 规则~~ | ~~回归测试脚本全被忽略，换机/重 clone 就没了~~ | **已解决**（round-112）：脚本迁到受控的 `tests/`，`.gitignore` 加注说明别再写 `_` 开头 | ✅ 完成 |
+| ~~P3~~ | ~~`achievements_page.py` 网格~~ | ~~单卡分区的卡片只占左半宽，双卡分区占满宽——同一网格两种节奏~~ | **已解决**（round-120）：单数分区最后一张卡跨两列 | ✅ 完成 |
+| ~~P3~~ | ~~`pages_instances.py` 实例「路径」行~~ | ~~文字对比度偏低（截图中 `D:` 后几乎看不清）~~ | **已解决**（round-120）：路径改 `text_main`，live 真机截图可读 | ✅ 完成 |
+| ~~P1~~ | ~~`settings_dialog.py` 设置页裁切~~ | ~~round-102 遗留：设置页在小窗口 / 125% DPI 下底部内容可能被裁~~ | **已复核**（2026-10-24 round-119）：设置 → 网络 / 第三方服务真机截图无裁切；**2026-10-26 补验设置 → 外观页**：离屏 1280×800 / 1000×700 / 900×640 三档均无控件超出 GroupBox 底边，3 个复选框与「主页背景」组完整可见 | ✅ 完成 |
+| ~~P1~~ | ~~`main_window._show_page`~~ | ~~从版本库（无导航行的子页面）返回时，侧栏仍高亮首页 → `setCurrentRow` 同一行不发信号，「首页」点了没反应~~ | **已解决**（round-120）：行已选中时直接 `_switch_stack` | ✅ 完成 |
+| ~~P1~~ | ~~`wallpaper._Veil`~~ | ~~媒体壁纸薄纱固定 alpha 118：亮灰壁纸上「找到 N 个结果」等裸标签对比度不足~~ | **已解决**（round-120）：图片 / GIF 按平均亮度自适应薄纱，视频与全景保持原策略 | ✅ 完成 |
+| ~~P4~~ | ~~30 个文件~~ | ~~未使用导入（`QColor` / `QSize` / `QFrame` 等）~~ | **已解决**（round-120）：`pyflakes src main.py` 零告警 | ✅ 完成 |
+| ~~P4~~ | ~~11 个死函数~~ | ~~`play_sfx` / `stop_bgm` / `read_json` / `write_json` / `ensure_dir` / `login_with_microsoft` 等~~ | **已解决**（round-120）：全仓引用扫描后删除，死函数扫描 0 | ✅ 完成 |
+
+**待用户（真机，AI 做不了）**：`RELEASE_1.0.0_CHECKLIST.md` A 组剩余两项——
+① 新建 Fabric+Forge 实例真实拉取/启动到主菜单一次通过（含镜像可用性）；
+② `build.bat`/PyInstaller 打包成品 + 安装后首次运行冒烟。
+离屏环境只能验逻辑与布局，真机启动链路（JVM 参数/内存/Acrylic 降级）必须人跑。
+
+## 四、已知既存问题（非本轮引入，别当 bug 修）
+
+- **离屏 Qt 在解释器 teardown 阶段崩 `0xC0000409 (-1073740791)`**：测试内容其实
+  全部通过并打印成功标记，但进程退出码非 0。已在 HEAD `a9ffef4` 的 worktree 复现，
+  属既存问题。`regress.py` 已识别成功标记，不会误判。
+- **导航 `account` 会阻塞**：它不是页面而是弹模态 `LoginDialog`（`dlg.exec()`），
+  预期行为。离屏冒烟需跳过。
+- **离屏无字体（tofu）**：真因是 offscreen 平台插件不加载系统字体
+  （`QFontDatabase` 字体数 0）。`QT_QPA_FONTDIR=C:\Windows\Fonts` 即修复，
+  `regress.py` 已默认设置。
+
+## 五、2026-11-05 全链路代码审查（AC 主路径 vs 外来实例兼容路径）
+
+**审查范围**：仓库内没有第三方启动器源码，这里的「其他启动器」指 AC 兼容外来
+实例的链路——`src/scan.py` → `src/instances.py::import_external` →
+`src/core/instance_rebuild.py` / `src/modpack_import.py` → `src/launch.py`
+的 round-78 / round-92 分流，对比 AC 自建实例主路径与 `main.py` 应用初始化。
+静态审查，未跑真机启动验证。
+
+### P0 — 已修（本次落地；判据 `tests/test_p0_review_fixes.py`，已登记 regress.py）
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `src/main_window.py` 手选 Java 兜底 | 旧实现写到 `get_data_dir()/launcher_config.json`，而统一入口读 `get_config_path()` → 手选 Java 永远不生效；裸写非原子、读失败 `cfg={}` 清空回写 | 改 `load_config()` → 改键 → `save_config(cfg)`（原子写），同步 `self.cfg`；写盘失败弹框不重试 |
+| `main.py` 条款门禁 | 整段 try/except 外层只写日志 → 对话框/判据抛异常即「未同意条款直接进启动器」；`save_config` 失败被吞 | 改 fail-closed：判据/对话框异常 `QMessageBox.critical` + `return`；写盘失败明确警告，下次重新询问 |
+| `src/core/shared_libs.py` 合并 | `getsize` 相等即删源、单文件失败 `pass`、末了无条件 `rmtree`；junction 已建后 `is_junction()` 短路 → 失败文件永久丢失 | 改 sha1 判重；同坐标内容不同两边都留；返回失败数，调用方仅在 0 时删 pending；`is_junction` 分支与开头改为重试残留 |
+| `src/launch.py` + `src/instances.py` 共享池适用范围 | round-175 只按 `not external` 判定，「复制导入」(`external=False`) 的外来完整客户端也被套池，与 round-92「绝不改布局」冲突，补库写 jar 穿透联接污染全局池；`copytree` 未忽略新增 assets | 新增 `should_use_shared_pool(inst)`（`external` / `version_id` / `kind` / `launcher` 四判据），两处统一调用；外来导入改全量复制，`duplicate()` 只对 AC 自有实例忽略 `libraries`+`assets` |
+
+⚠ **存量迁移风险**：round-175 期间已被改成联接的外来实例，本次**不自动回滚**
+（池是共享的，无法还原单实例原始内容）。真机需检查这类实例的 `libraries` /
+`assets` 是否为联接；若缺文件，重新「复制导入」一次即可。
+
+### P1 — 待修（未动，避免与 TRAE round-175 批次撞车）
+
+| 位置 | 问题 / 影响 | 改进方向 |
+|---|---|---|
+| `src/launch.py:702/705-714` ↔ `src/core/java.py:395` ↔ `src/core/install.py:132-134` ↔ `src/launch.py:896` | 同一「Java 要求」四套判据：UI/体检显示 A、实启 B；安装期 `need_override=0` + `java = java or "java"` 会选错 JVM 或回退裸 java | 抽 `java_plan(inst, settings)` 为唯一来源，启动/安装/体检/`-noverify` 全复用 |
+| `src/launch.py:938/950-952` ↔ `:699`、`src/instances.py:423-455` | classpath 基于 `vroot`（iso 布局上移两级），补库却以 `mc_dir/libraries` 做 relpath → `..` 开头的缺失库被整批跳过 | `_libs_root` 改 `vroot/libraries`，或按 maven 坐标拼 URL |
+| `src/launch.py:964-969/994-998` → `src/main_window.py:5092-5118` | 补库失败吞掉后继续 spawn，`_on_launch_done` 无条件 `mark_launched()` + `last_session.record(...,"ok")` → 缺库秒退记成成功 | `launch_instance` 返回 `degraded_reason`；主库失败中止，宽容启动标注缺库数 |
+| `src/scan.py:482` → `src/i18n.py:1360` → `src/pages_instances.py:2153` | `needs_convert` 是死字段：UI 承诺「首次启动自动重建」，启动/安装链路零消费；`reconstruct` 仅手动按钮调，`instance_rebuild.py:216` 还无条件清标志 → MMC/Prism 组件包导入后按空壳重装，mods/patches 失效 | 启动前按标志走 `reconstruct`，仅转换成功才清标志 |
+| `src/launch.py:909` ↔ `:461/:484` | `_prepare_natives` 未传 `on_repair`，注释里的「补全后重试」永不执行；失败静默返回 None 仍启动 → 老客户端 `NativeLibraryNotFound` 秒退 | 传入回调；二次失败显式报错 |
+| `src/worker.py:365-379` | `ProgressWorker` 在「异常 + 已取消」时 `error/cancelled/finished` 一个都不发 → 任务中心/进度框永久运行中；`_cancel_requested` 裸 bool 无同步 | `finally` 发统一终态信号；`error` 带类型+traceback；改 `threading.Event` |
+| `src/settings_dialog.py:234-247` + 4 份 cfg 快照（`main.py:258`、`main_window.py:1833/4602`、`settings_dialog.py:385`、`onboarding.py:155`）；`onboarding.py:724-725/774-777` | `save_config` 整文件覆盖 + 多份长生命周期快照 → 旧快照回写回滚后续改动；教程 `reject()` 不提交却 `mark_done`，写盘失败被吞 → 语言/主题/RAM 全丢且向导永不再弹 | 单一配置仓储 + merge-on-write；`closeEvent` 只写窗口几何；写盘成功才标完成 |
+| `src/modpack_import.py:181-186/291-294`、`src/instances.py:657-659` | 整合包导入安装失败只 `print`，错误挂动态属性不进 `asdict` → 落盘丢失，UI 仍显示导入成功 | 正式 dataclass 字段 + `install_ok` 返回标志，错误上报任务中心 |
+
+### P2 / P3 — 待修（一致性与可维护性）
+
+| 位置 | 问题 / 影响 | 改进方向 |
+|---|---|---|
+| `src/settings_dialog.py:143/726/2765`、`src/main_window.py:3576` | `tray_minimize` `_DEFAULTS=False`，消费端三处 `.get(..., True)`；`jvm_aikars` 同类漂移。局部 cfg 快照缺键时「关闭即退出」变藏托盘常驻 | 去掉字面量默认值，扩展 `tests/audit_defaults.py` 全键扫描 |
+| 全仓 37 处 `load_config()`、4 处直读配置文件（`brand_custom.py:29`、`diagnostics.py:45`、`core/support_bundle.py:75`、`main_window.py` 旧实现已修）、`main.py:209` 在 `load_config()`(258) 前读配置、`settings_dialog.py:223` 异常白名单漏 `PermissionError` | schema 改键无法扩散；只读/杀软占用场景启动直接崩；三份行为各异的 `_read_json`（`modules.py:147` / `features.py:238` / `instance_rebuild.py:31`） | 抽 `config.py` 单一入口（缓存/校验/原子写），`except` 改 `OSError`，`_read_json` 合并到 `core/utils.py` |
+| `settings_dialog.py` 2945 行 / `main_window.py` 5739 行、根目录 36 个 `_probe_*.py`、全仓 310 处 `except Exception` 紧跟 `pass` | 启动期 i18n/主题/更新说明/退出 drain 全静默降级，排障只能翻 `_startup.log`；改动难回归 | 区分「可选装饰」（记诊断面板）与「关键状态」（回报 UI）；抽 `launch_options.py` 统一组装 Java/mirror/proxy/RAM；大文件按 mixin 拆，探针归档 |
+
+### 六维度一致性结论
+
+| 维度 | 结论 |
+|---|---|
+| 初始化顺序 | `main.py` 主线正确（单实例锁 → 配置 → i18n/主题），破口在「配置加载前读配置」与门禁 fail-open（已修后者） |
+| 配置读取 | 最不一致：统一入口 / 直读文件 / 写错路径三套并存，4 份长生命周期快照配整文件覆盖写 |
+| 依赖处理 | AC 路径全量安装 vs 外来路径「精确补库 + 宽容启动」；补库基准、Java 判据、natives 修复未对齐 |
+| 状态管理 | `needs_convert` 死字段、任务终态信号缺失、`last_session` 不认降级 = 状态与事实不同步 |
+| 异常处理路径 | 默认「吞掉后继续」，在门禁、跨实例文件合并、补库失败三处升级为合规/数据安全风险 |
+| 代码组织 | 配置 / Java / 镜像各有 3–4 个组装点 + 两个超大文件 + 310 处静默 except，是多数问题的共同根因 |
+
+---
+
+## 六、横向实现审计（2026-11-05）：AC vs 主流启动器
+
+完整报告 → `docs/launcher_interop_audit_2026-11.md`。审计阶段只读；
+**2026-11-05 晚经用户授权「动手」，三条 P0 已修**，P1/P2 仍待修。
+尺子：官方 Launcher / Prism / HMCL / PCL2 的公开实现 + authlib-injector 与 Modrinth
+官方规范 + 仓库内 `minecraft-launcher-lib 8.0` 实际行为（AC 把版本解析与命令行构造
+整体委托给它）。与第五章互补：第五章查 AC 内部路径分叉，本章查与业界标准相违背处。
+
+| 级别 | 位置 | 问题 | 状态 |
+|---|---|---|---|
+| **P0** | `src/launch.py:869-872` | 账号 profile 键 `name/id/access_token` 与启动读取的 `username/uuid/token` 不匹配 → 所有已登录账号以 `Player` + 空 UUID + 空 token 启动（运行时复现确认） | ✅ 已修：`src/accounts.py` 新增 `launch_identity()`，启动 / `_game_token` / 皮肤 uuid 统一走归一化 |
+| **P0** | `src/core/install.py:274-275` | 模块缺 `import json` → `find_installed_loader` 抛 NameError，NeoForge 1.21+ / Cleanroom 启动失败（运行时复现确认） | ✅ 已修：模块顶部补 `import json` |
+| **P0** | `src/core/install.py:482-492` | 手写 LiteLoader 子 json 覆盖父 `minecraftArguments` 且缺 `jar` → 1.12.2 实例秒退（mll `inherit_json` 复现确认） | ✅ 已修：读父完整参数串后追加 tweakClass + 写 `"jar": mc_version`；父串缺失显式报错 |
+| P1 | `src/core/auth.py`, `src/login_dialog.py:617`, `src/launch.py:288-318`, `src/core/authlib.py:174` | 认证链路四项：微软 token 无过期/刷新、离线 UUID 为空、authlib javaagent 传本地文件路径而非 API URL、javaagent jar `.version` 旁路免校验 | 待修（建议一起修，互相叠加） |
+| P1 | `src/launch.py:226-235,1064,944-971`, `src/net_api.py:321,1363` | 启动链路四项：logging 配置不注入、cwd 与 gameDir 不一致、补库裸拼 URL 且只按 1000 字节判有效、资源中心下载丢弃 sha1 | 待修 |
+| P1 | `src/scan.py:462-497`, `src/modpack_import.py:340-351`, `src/accounts.py:86-103` | 导入/持久化三项：MMC patches 与 instance.cfg 字段丢弃、文件夹导入按 jar 名猜 loader、accounts.json 非原子写 | 待修 |
+| P2 | `src/net_api.py:46`, `src/core/java.py:220`, `requirements.txt:3`, `src/launch.py:662` | UA 不可识别、Java 兼容区间硬编码、mll 未锁版本、完整性只看 json 存在 | 待修 |
+
+**P0 修复验证**：新增 `tests/test_interop_p0_fixes.py`（23 项静态 + 行为判据，
+含真实调用 `install_liteloader` 后让 mll 继承并核对 classpath 主 jar），登记 `regress.py`
+→ **38/38 exit 0**。刻意未动：离线账号目前拿到 12 位内部 id（非空但非规范 UUID），
+合法 `OfflinePlayer:<name>` UUID v3 仍列在 P1。
+
+**返工顺序**：~~P0 三条~~（已完成）→ 认证链路四条 → 下载完整性 → 渐进项。
+报告里另列了「AC 已做对/领先」的 5 类能力（Forge processors、natives exclude、
+安装期 sha1、共享池、取消链路），修的时候别误伤。
+
+---
+
+## 七、2026-11-06 真机验收（部署版 exe）发现
+
+场景：按 `docs/round163_instance_java_reliability/tasks.md` 重打部署后，用户在真机上
+新建 1.21.10 实例，连点「创建」十几次毫无反应（不弹框、不关向导、无网络等待）。
+证据：`<安装目录>/data/crash.log` 20:27:17–20:30:45 共 **15 条**同一异常。
+
+| 级别 | 位置 | 问题 | 状态 |
+|---|---|---|---|
+| **P0** | `src/pages_instances.py:500` / `:1346` | `created` 信号定义为 5 参，但 `result_data()` 自 `4811b8f` 起返回 7 元组（新增 `format` / `base`）。`emit(*7)` 抛 `TypeError: created(...) only accepts 5 argument(s), 7 given!`；Qt 槽内异常只被 `main.py:149` 的 excepthook 写进 crash.log，**界面静默失败**。版本页弹窗路径（`pages_browse.py:354`）已按 7 元解包，故只炸实例页嵌入式向导 | ✅ 已修：信号扩为 7 参；新增 `tests/test_new_instance_signal.py`（Qt 元对象运行时验签 + 返回值/信号/槽三方一致 + 全仓 63 处 Signal/emit 超参扫描），登记 `regress.py` → **39/39 exit 0** |
+| **P1** | `src/core/java_install.py` | Java 下载裸 GET `api.adoptium.net` → 307 跳 GitHub Releases（55.9 MB，本机 ≈10 KB/s ≈95 min），未接入项目已有的 Range 分片 / 来源健康 / 断点续传 | 待用户授权修（建议「USTC/TUNA 镜像优先 + 官方兜底 + 断点续传」；实测 USTC 同文件 22.8 MB/s、Content-Length 与官方一致、支持 Range） |
+| **P1** | `src/core/java_install.py:175-183` | 取消 / 失败分支 `shutil.rmtree(target)` 删的是**已装好的** `jre-25/` 整个目录，不只是半成品 zip；点「取消」会连带删掉可用运行时 | 待用户授权修（应与上条一起改，同一处代码） |
+
+**结构性教训**：Qt 信号是「定义处 arity 硬约束」，任何 `emit(*tuple)` 的返回值扩字段
+必须同步改 Signal 声明；而 Qt 槽内异常不弹框、不中断进程，只落 crash.log →
+「点了没反应」优先查 `data/crash.log`，不要先怀疑网络。新加的全仓 arity 扫描
+就是为防止同类分叉再次静默溜过回归。
+
+**同场已完成**：重打并部署含修复的 exe（保留 `launcher_config.json` / `data/`），
+`AC_NO_TERMS=1` 10 秒冒烟通过；JRE 25 已由国内镜像补装进 `data/java/jre-25`。
+
+### 七·续 真机连报三现象（20:49–20:53，同一条因果链）
+
+用户口述：① 下载资源文件时「左下角那个进度一直在闪，第一个数字正确、后面都是 9，又弹回正常值，反复跳，像是昨天的状态」；②「下载进度不会关」，于是以为没点上、又启动了一次；③ 再启动直接报「少了 classpath」。用户自己怀疑是「启动了两次」。随后再重启一次，补全跑完，游戏正常启动。
+
+**现场证据**（`<本机部署目录>/data/`）：
+- `Get-CimInstance Win32_Process` 只有 **1 个** `AC_Launcher.exe`（20:46:03 起），`ac.lock` 存在 → 单实例锁有效，**不是两个 exe 进程**；`_handle_play` / `_start_download` 的 `isRunning()` 护栏也确实挡住了并行双 worker。
+- `task_history.json`：**20:46 `cancelled launch 38/113`（正在下载依赖库 38/113）→ 20:47 `done launch 3058/5146`（资源下载完成）**，两次任务、前一次被取消，与用户「又启动一次」吻合。
+- `data/<id>.log`（游戏日志，GBK）：`错误: 找不到或无法加载主类 net.minecraft.client.main.Main / ClassNotFoundException`。但 `versions/26.3/26.3.jar` 41,483,720 B 完整、`net/minecraft/client/main/Main.class` 在包内、`26.3.json` mainClass 正确 / 114 libraries → **不是主 jar 坏，是 38/113 被取消后 classpath 没拼齐**；启动器崩溃分析把这条日志归类为 `exit.classpath`（「缺少游戏运行库(classpath)」）才显示成「少了 classpath」。再启动补全跑完即自愈，用户已确认。
+- `crash.log` 无新增（仍 15 条旧信号异常）→ 全程无 Python 崩溃。
+
+| 级别 | 位置 | 问题 | 状态 |
+|---|---|---|---|
+| **P1** | `src/main_window.py:2714,2720,2721`（下载）/ `:5049,5054,5055`（启动） | `w.status.connect(self.statusBar().showMessage)`、`w.speed.connect(self._set_speed)`、`w.progress.connect(self._set_progress)` 三路信号**直连全局状态栏且无 worker 归属检查**。取消/失败后 `self._dl_workers.pop()` 但**没有 disconnect**，`ProgressWorker` 的 `_speed_loop` 轮询与 `_on_stall` Timer 仍持续发信号；`_set_progress` 还会 `setVisible(True)` 重新点亮进度条。只有 `_on_download_progress` 有 `inst_id not in self._dl_workers` guard，注释声称「残留 status/progress 信号因 worker 已移出表而被丢弃」**是错的** → 旧任务数值（用户看到的 9…）与新任务正确值交替刷 = 闪 | 待授权修 |
+| **P1** | `src/main_window.py:2853-2858` `_on_download_error` | 明确写着「round-170：失败不再自动关框——保留对话框并提供重试下载」，**是设计**；但失败态视觉不够醒目，用户误判为「还在下载」→ 重复点启动，是整条链的触发点 | 待授权修（加醒目失败态 + 「重试」按钮语义） |
+| P2 | `src/worker.py:293-301,319-340` | `abort()` 后 `_speed_loop` / stall Timer 未立即停，是残留信号的上游；即使 UI 加了 guard，也该在 abort 时 `disarm_stall()` + 置 `_speed_stop` | 待授权修 |
+
+**修复方向**：给状态栏三路信号统一走「当前活跃 worker」归属槽（连接时带 worker 引用，槽首判 `self._active_status_worker is worker`），并在完成/失败/取消时清空 + `disconnect`；失败对话框加醒目终态。完成后必须**真机复现「点两次 → 状态栏不再闪」**才算结案（纯静态判据不足以证明运行时闪烁消失）。
+
+⚠ 本条登记时用户游戏正在运行，未改代码、未重打部署，避免打断。
+
+### 七·续 2 启动后行为 + 实例页「启动」按钮 + 模组侧完整性（20:57–21:00）
+
+| 级别 | 位置 | 问题 | 状态 |
+|---|---|---|---|
+| **P1** | `src/main_window.py:5322-5356`（原实现） | `close_after_launch` 默认 `True`（`settings_dialog.py:138`，真机 `launcher_config.json` 亦为 `true`）→ 游戏起来 5s 后 `_tray_auto_quit=True` + `close()` → `QApplication.quit()` **真退出**，强制绕过托盘。随主窗口销毁的还有 `_game_poll_timer`（`QTimer(self)`），导致 `explain_exit()` 退出码分类、崩溃弹窗、`last_session` 崩溃记录、退出后命令、控制台结束标记、托盘「结束全部游戏」全部失效。用户诉求「退出游戏后 AC 还在 + 崩溃检测能看到」 | ✅ 已修：改为 hide 到系统托盘（无托盘时 `showMinimized`），游戏退出时自动恢复窗口；同步中英文案，判据 `tests/test_post_launch_behavior.py` |
+| **P1** | `src/pages_instances.py:1667` / `:2052` | 实例详情卡的「启动」按钮名不副实：`_launch()` 只 `set_current()` + `_refresh()` + `current_changed.emit()`，**不启动游戏也不跳首页**（注释声称 `jumps home & selects`）。用户点着「毫无反应」，实际只是把实例悄悄设为当前 | 待用户选方案（推荐换成「体检 / 启动诊断」，复用 `mod_check_dialog.open_health_dialog` + 补一页启动命令/classpath/缺库视图；或按用户原话直接删掉） |
+| **P1** | `src/crash_analysis.py:328` | 崩溃自动补前置调 `download_mod_to(project_id, inst.mods_dir)` **未传 `mc_version` / `loader`** → `resolve_mod_dependencies` 取项目最新版本，可能装进与当前实例不兼容的 mod | 待授权修（应传 `inst.game_version` / `inst.loader`） |
+| **P1** | `src/store_detail.py:775-785`（CurseForge 分支） | CF 渠道走 `download_curseforge_file` / `download_cfwidget_file` 单文件直下，**无依赖树解析、无版本自适应**；「另存为文件夹」分支也把 `mc_version, loader` 置空 | 待授权修 |
+| P2 | 入口可发现性 | 冲突检测（`core/mod_check.py` + `core/instance_health.py`）、一键修复（体检 `apply_fix` / 崩溃弹窗 `_repair_all` / `diagnostics.repair_all`）三套能力都在，但分散在右键二级菜单与不同弹窗，无统一「模组完整性」入口 | 待授权（建议整合进「体检 / 启动诊断」） |
+| P2 | `src/settings_dialog.py:726` vs `:143` | `tray_minimize` UI 缺省值写 `True`、`_DEFAULTS` 是 `False`；配置缺键时勾选态与实际行为不一致 | ✅ 已修：UI 缺省对齐为 `False`；`_sync_behavior_hints` 的行为说明不再依赖 `tray_chk`（自动隐藏与托盘开关解耦），测试判据已覆盖 |
+
+**已有能力，勿重复造轮子**：Modrinth `required` 依赖递归（`net_api.py:805`，深度 5 / 去重 / 跳过 optional+incompatible）、按 MC 版本+加载器过滤（`net_api.py:707`、`store_detail.py:586`）、重复 modid 与缺前置扫描（`core/mod_check.py`）、OptiFine/Sodium 冲突（`core/instance_health.py:230-247`）、`install.repair_minecraft_dir` 版本文件自愈。
+
+
+---
+
+## 八、模组 / 资源链路复查（2026-11-06 round-177）
+
+> 用户指出「前面那三个缺口只是举例，去找找还有没有别的」。因此对
+> 「版本过滤 → 依赖解析 → 下载落盘 → 崩溃补前置 → Java 选择」重做了一遍
+> 逐行复查。**以下每一条都带实际读到的 file:line；没查实的明确标「待核实」，
+> 不把推测写成结论。**
+>
+> ⚠ 过程说明：先派了一个后台只读审计任务，其结论未通过工具通道稳定返回，
+> 因此本节每条 `file:line` 均由主 agent 逐行复查源码确认，未直接采信转述；
+> 没读透的部分单列「待核实」，不写成结论。
+
+### 本轮已修（✅ 均为真 bug，非功能增强）
+
+| # | 位置 | 问题 / 影响 | 判据 |
+|---|---|---|---|
+| 1 | `src/crash_analysis.py:328` | 崩溃自动补前置 `download_mod_to(target["project_id"], inst.mods_dir)` 不带 MC 版本 / 加载器 → `_modrinth_versions` 不过滤，拉到不兼容最新版，修完照样崩 | `test_round177_mod_diag.py` |
+| 2 | `src/crash_analysis.py:322` | 模糊匹配失败时 `target = hits[0]` 兜底 → 装进一个无关模组，比「没修好」更糟（多一个冲突源） | 同上 |
+| 3 | `src/net_api.py` `parallel_download_file` 预建 `.part` 前 `os.remove(dest)` | 分片失败 + 单流兜底也失败时，**已装 mod / 核心 jar 已被删掉**（数据损坏）。本来就是 `os.replace` 原子收尾，根本不需要预删 | 同上 |
+| 4 | `src/net_api.py:805-855` `resolve_mod_dependencies` | 本体网络错误 / 无匹配版本时静默 `return out` → `download_mod_to` 抛「没有可下载的文件」之前 UI 无差别，且子依赖被吞后显示成功却缺前置 | 同上 |
+| 5 | `src/net_api.py` 6 处 `os.path.join(dest_dir, filename)` | 服务端返回的文件名未 `os.path.basename` 清洗，带 `../` 可写穿目标目录 | 同上（`_safe_filename`） |
+| 6 | `src/net_api.py` Modrinth 两条下载路径 | 全链路无 sha1 校验；Modrinth version 的 `files[].hashes.sha1` 现成就没用 | 同上（`_verify_sha1`） |
+| 7 | `src/core/java_install.py` + `src/java_manager_dialog.py:319` | **Java 下拉候选不含本机已装 major**：`JAVA_CHOICES` 最大 24、`available_majors()` 离线回退静态表、`installed_majors()` 只用于渲染「已安装」卡片 → 玩家装好的 Java 25 路径能选、能启动，但列表里永远看不见 | `test_java_mirror_resume.py` |
+| 8 | `src/core/java_install.py` 整体 | Java 下载裸单流 GET `api.adoptium.net` → 307 到 GitHub（实测 ~10 KB/s，55.9 MB 约 95 分钟），无镜像 / 无 Range 续传；取消时 `shutil.rmtree(target)` 会把已装运行时一起删 | `test_java_mirror_resume.py` |
+| 9 | `src/main_window.py` 状态栏三路信号 | 见七·续：取消/失败只 pop worker、从不 disconnect，旧 worker 残留信号与新任务交替刷 → 左下角闪烁 | `test_status_signal_ownership.py` |
+| 10 | `src/pages_instances.py:1667` / `:2052` | 详情页「启动」按钮名不副实（只 `set_current` + refresh，不启动不跳首页）→ 改成「体检 / 启动诊断」，新增 `src/launch_diagnostics_dialog.py`（启动命令 / classpath / 缺库 / 体检两页，token 恒占位符） | `test_round177_mod_diag.py` |
+
+### 仍未修 — 真缺口（P1，按耦合分组）
+
+| 组 | 位置 | 问题 |
+|---|---|---|
+| A 依赖与版本 | `src/pages_browse.py:879-895` | CurseForge 下载分支（`download_cfwidget_file` / `download_cfwidget_slug` / `download_curseforge_mod`）**完全不解析 required 依赖树**，也不带实例版本/加载器；只有 Modrinth 分支传了。CF 靠 fileID 选版本，但依赖得单独查 |
+| A | `src/net_api.py:805` | `resolve_mod_dependencies` 递归时把 `version_id` 传空、`_seen` 按 `project_id` 去重 → 同一项目多版本依赖会被吞（当前设计取舍，改动前需定语义） |
+| A | `src/net_api.py:2188` `download_modpack_to` | 走 `get_mod_download(project_id)` 无版本参数，只能拿最新整合包版本；详情页「指定版本」走的是另一条路径，两条口径未统一（待核实是否会装错） |
+| B 完整性 | `src/net_api.py:1363/1681/1783` | CurseForge 三条下载路径**仍无 hash 校验**（本轮只补了 Modrinth 两条）；CF 文件侧是否有 hash 字段待核实 |
+| B | `src/net_api.py:328` `download_file` | 只有 Content-Length 长度校验，无期望 hash 参数；建议做成统一可选参数，别每个调用点各写一份 |
+| B | `src/net_api.py` mod 下载 | 失败时 `.part` 保留策略与 Java 侧不一致（Java 本轮做了「取消删、失败留」） |
+| C 检测 | `src/crash_analysis.py:279` | `find_missing_dependencies` 只比 modid 字符串，不解析 Fabric `depends` 版本区间 / Forge 依赖约束 |
+| C | `src/crash_analysis.py:297` | `except Exception: failed.append(dep)` 把网络错、解析错、写盘失败全折叠成一个字符串，UI 无法区分「没搜到」和「装失败」 |
+| C | `src/launch.py:1024` 注释 | 启动前只做轻量预检，缺前置不拦截（PCL2 / HMCL 会显式提示） |
+| D 入口 | 三处 | 「一键修复」分散在右键实例体检 / 崩溃弹窗 / 设置→诊断与修复，语义不一、无统一「模组完整性」入口 |
+| D | `src/pages_instances.py` | 右键菜单仍无「实例体检」「模组完整性」，能力藏在详情页二级 |
+
+### 待核实（本轮没读透，不写成结论）
+
+- `src/core/install.py` 对 `.mrpack` 的 `overrides/` 解压与覆盖策略；
+- `src/core/mod_check.py:_parse_jar` 对 Forge `META-INF/mods.toml` 的覆盖程度
+  （`crash_analysis.py:274` 有 `_toml_attr`，两条链路口径可能不一致）；
+- 资源包 / 光影 / 数据包是否与 mod 共用 `loaders` 过滤而被误筛；
+- CurseForge 缓存键是否包含版本 / 加载器（Modrinth 侧 `_modrinth_versions` 的 key 已含，确认过）；
+- `download_cfwidget_file` 目录口径与整合包 UI 读取路径是否一致。
+
+### round-178 收尾状态（2026-11-06 22:30，A/B/C/D 组按序落地）
+
+| 组 | 已修（✅） | 明确未修 / 有意不动（⚠） |
+|---|---|---|
+| **A 依赖与版本** | `resolve_mod_dependencies` 跳过 `embedded`、递归传依赖声明的 `version_id`、顶层指定版本不存在时抛错；CF 官方卡片下载按实例 MC 版本 / 加载器过滤（资源中心三路 UI 全部传参），无匹配**拒绝下载而不是取最新**；cfwidget 文件版本校验 + 字符串 fileID 容错；整合包 `get_mod_download` / `download_modpack_to` 支持 `version_id`；keyless 指定 manifest fileID 找不到时不再静默退回最新 | ⚠ **CF `required` 依赖树递归仍未做**：keyless 通道（cfwidget / 镜像）能否稳定返回 `dependencies` 未核实，贸然递归会多出 N 次网络请求且可能装错；下一批先定 API 契约再动。⚠ `_seen` 仍按 `project_id` 去重（同项目多版本依赖只装一个），**刻意保留**——全放开会往 mods 目录塞同名 modid 的两个版本，直接 duplicate 崩溃 |
+| **B 完整性** | `download_file` / `parallel_download_file` 统一 `expected_sha1`（在 `.part` 阶段校验，坏字节永不 `os.replace` 成正式文件；不符就丢 part 重下）；CF 三条下载路径 + keyless 通道接 `_cf_sha1`（兼容 CF `hashes[algo=1]` / cfwidget 字典 / 顶层字段，MD5 与 fingerprint 绝不冒充）；Modrinth 两条路径改走通用参数 | ⚠ `.part` 的取消策略**刻意不统一**：通用下载器保留 `.part` 供断点续传，Java 侧删半成品是用户明确要求，两者语义不同、不是 bug |
+| **C 检测** | 新建 `src/core/mod_repair.py` 收敛「扫描 → 精确匹配 → 补装」；`scan_missing` 显式区分「没有缺失」与「jar > 60 深扫被跳过」（旧行为会误报「依赖齐全」）；失败按 `search` / `match` / `download` 三阶段带原因；`crash_analysis.search_and_download_missing` 改为兼容薄封装；匹配只接受规范化后完全相等（`fabric-api` 不再误命中 `fabric-api-base`，也不做 `startswith` 宽松匹配） | ⚠ 启动前预检**维持「只提示不拦截」**：缺前置要不要拦启动是产品语义，等用户定；`find_missing_dependencies` 仍只比 modid 字符串，不解析 Fabric `depends` 版本区间 / Forge 约束 |
+| **D 入口** | 崩溃弹窗「一键修复」补汇总终态（不再只调 deps 却什么都不说）+ 结构化失败明细；实例右键新增「补装缺失依赖」，走同一 `mod_repair`；`crash_dialog` 与右键都显示「jar 过多已跳过」 | ⚠ 体检对话框 `scan_conflicts` 的 `missing_dep` finding 仍 `fix=None`（其「补装」按钮是重装游戏版本，不是补 mod）；`diagnostics.repair_all` **刻意不并入**模组域——它管配置 / 账户 / 游戏文件，与模组依赖不是一回事，硬合并反而让「一键修复」语义更乱 |
+
+**登记纠错**：八章原写「右键菜单仍无『实例体检』」不准确 —— `pages_instances.py` 右键本来就有
+`t("health.title")`（实例体检）与 `t("instances.crash_analyze")`（崩溃分析），本轮新增的是
+「补装缺失依赖」这一项，不是补体检入口。
+
+> ⚠ 双轨验收：本批全部是代码轨 + 构造判据，**未联网 / 未在真客户端复现**。
+> 真机要验：① 资源中心 CF 卡片下载装到的是匹配当前实例版本的文件；② 下载损坏 hash 时会重下而不是落坏 jar；
+> ③ 崩溃弹窗 / 右键「补装缺失依赖」的终态与失败明细；④ 模组 > 60 个时提示「已跳过」而不是「依赖齐全」。
+
+### 修复分组建议（历史记录，实际执行见上一节）
+
+- **A 组**：CF 依赖树 + 版本口径统一，一次改（分散修容易互相打脸）。
+- **B 组**：把 sha1 / `.part` 策略做成 `download_file` 的通用能力，再让 CF 三条路径接入，别继续按渠道各写一份。
+- **C 组**：崩溃分析的错误分类与启动前拦截，需先定义「缺前置时是拦还是提示」的产品语义。
+- **D 组**：纯 UI 增量，风险最低，可随时插入。
+
+> ⚠ 双轨验收：本节修复全部是代码轨 + 构造判据，**未在真客户端复现**。
+> 按项目铁律，必须真机走一遍「搜模组 → 下载 → 启动 → 体检 / Java 下拉」
+> 才算结案。特别是 #7 Java 25 下拉，要重开一次 Java 管理对话框目检。
+
+---
+
+## 九、启动格式与「AC 专属标识」（待设计，用户 22:06 提出，本轮不实现）
+
+> 用户原话要点：① 「我们启动游戏不是有个特殊格式吗？但是好像没有合理区分，
+> 自定义启动格式这个功能好像没有什么实际作用」；举例「一个目录实例层层叠进、
+> 把游戏拆成一个个文件夹混着叠在一起」这种极端布局该怎么搞；② 「搞一个专属标识
+> 只有我们能识别的，识别对应启动格式和实际格式对应，然后就可以直接自动选中
+> 对应选项启动，就不用判断这么多东西了」。
+> **排期**：用户明确「先干其他那一组的事情」→ 本节先登记，等第八章 A/B/C/D
+> 组收尾后再回来做设计评审，不要顺手改代码。
+
+### 现状（2026-11-06 逐行核实，勿凭印象改）
+
+- `src/instances.py:100` `Instance.format`（`""` / `auto` / `ac` / `vanilla` /
+  `iso` / `multimc` / `curseforge` / `modrinth` / `custom` 等 `INSTANCE_FORMATS`），
+  `:106` `_base` = **游戏目录本身**（不是实例根）；`:124` `mc_dir`、
+  `:139` `game_dir`、`:180` `mods_dir` 由它派生。
+- `detect_format()` `:325` 优先级：`_is_ac_owned()`（`:356`，`_base` 空且非
+  external ⇒ 结构性事实 `ac`）> 玩家手选（非空非 auto）> `_probe_format()`
+  （`:366`，只读扫 `mmc-pack.json` / `<ver>.json` / `minecraftinstance.json` /
+  `profile.json` …）> `kind` 兜底。`adapt_format()` `:409` 把 AC 自有布局上
+  残留的外来标签纠正为 `ac`。
+- `layout_of()` `:424` 是启动 / 补全 / 体检共用的**唯一口径**，返回
+  `format` / `version` / `flat` / `install_dir` / `versions_root`。
+  `src/launch.py:359`、`src/core/install.py:121`、`src/core/instance_rebuild.py:125`
+  都走它。
+- `src/pages_instances.py:2310/2454` 实例设置可手选格式；新建向导
+  `result_data()`（`:500`）返回 7 元组带 `format` / `base`。
+- i18n `instances.fmt_mismatch_hint` 只是「手选与实测不符」的**提示文字**，
+  不自动纠正、不落盘任何标识。
+- `src/scan.py:744` 已有「按 marker 文件猜别的启动器」的逻辑，但那是**扫描外部
+  实例时猜归属**，与 AC 自有实例的启动格式是两回事，别混用。
+
+### 为什么用户觉得「没实际作用」
+
+`format` 现在只是**一个粗粒度枚举标签**，不是「目录结构描述」：只够区分
+「AC 自有 / 官版共享 / 版本隔离 / 某启动器」，表达不了「游戏目录被拆成多层
+子目录、版本 json / mods / saves / assets 分散在不同层」这类布局。每次启动
+都靠 `_probe_format()` 按 marker 猜，目录一变就可能与手选不一致；而手选值
+又会被 `adapt_format()` 在 AC 自有布局上强行改回 `ac`。所以「自定义格式」
+既不能描述结构，也不能稳定生效。
+
+### 用户提的方案（待评审）
+
+在实例目录里放一个 **AC 专属标识文件**（只有 AC 识别），记录「声明的启动格式
++ 实际目录结构映射」，启动时直接读它自动选中对应选项，不再每次探测。
+
+### 设计时必须回答的问题（一条都不能跳）
+
+1. 文件名 / schema 版本 / 字段（是否含 `versions_root` `mods_dir` `saves_dir`
+   `assets_dir` 的**逐项路径**，而非一个枚举）、编码与原子写。
+2. 写入时机：新建 / 导入 / 复制 / 重建 / 手动改目录后；谁负责校验与更新。
+3. 与 `_base` / `format` / `layout_of()` 的关系：标识是**真理源**还是缓存？
+   冲突时以谁为准（建议：实际文件存在性优先，标识只作加速与声明）。
+4. 外来实例无标识 → 降级到现有 `_probe_format()`，不能因此启动失败。
+5. 存量实例迁移：一次性补全还是懒生成；老版本 AC 读到新文件会不会忽略。
+6. 标识被其它启动器 / 清理工具删掉时的兜底；目录被整体移动后路径失效检测。
+7. 极端嵌套布局是否需要「路径映射表」而不是扩展 `INSTANCE_FORMATS` 枚举
+   —— 若需要，`layout_of()` 与所有调用点（启动 / 补全 / 体检 / 诊断 / 整合包
+   导入目录口径）都要一起改，属于跨模块改动，必须单独一批 + 双轨验收。
+
+### 用户方案 v2（22:41）与设计评审
+
+> 用户明确方案：① 新建/下载版本时**本来就能选格式**（AC / 原版 / 其它启动器的
+> 不同实例），给这些格式**加标识码**；② 标识码必须**不影响迁移到其它启动器、
+> 不影响正常启动、不被其它启动器误识别，只对 AC 生效**；③ 顺序为
+> **先找识别码 → 找到就按对应格式查漏补缺 → 没找到（或选了「不查验完整性」）
+> 就跳过 → 若压根没识别码，则看一遍实例特征后补写识别码用于区分**；
+> ④ **把启动默认的「AC 格式识别」改成自动查验**，防止其它实例被按 AC 规矩补全；
+> 目标：省掉反复识别错误 → 乱补全 → 再查验完整性的繁琐流程。
+
+**新增硬证据（本轮逐行查实）**
+
+- `src/instances.py:779` `add()`：`format=(format or "").strip() if base else ""`
+  —— **`base` 为空（AC 自有布局）时，向导里选的格式被直接丢弃**。「自定义启动格式
+  没实际作用」是确凿 bug，不是体验问题，且**应该比标识更早修**。
+- `src/instances.py:346` `detect_format()`：第一优先级 `_is_ac_owned()` 直接返回
+  `ac`，跳过手选值与 `_probe_format()`；`adapt_format()`（`:409`）还会把 AC 自有
+  实例上残留的外来标签强行改回 `ac`。`layout_of()`（`:424`）被
+  `launch.py:359`（启动解析根）、`core/install.py:121`（补全写盘根）、
+  `core/instance_rebuild.py:125`（重建根）共用 → 这里判错，三处一起错着补。
+- 向导格式枚举：`pages_instances.py:123` `_fmt_keys` 共 8 个
+  （auto / ac / vanilla / iso / multimc / curseforge / modrinth / custom）；
+  新建向导 `current_layout()`（`:1299`）实际只给 ac / vanilla / iso / custom，
+  即「AC 自有 / 玩家指定 .minecraft / 版本隔离 / 指定游戏目录」。
+  **没有 PCL2 专属格式**——PCL2 实例在这里落到 `iso`（版本隔离）或 `custom`。
+
+**设计评审：方案方向成立，三处建议改**
+
+1. ☠ **标识文件放 AC 元数据侧，不要写进游戏目录**。
+   建议 `data/instances/<id>/ac-layout.json`（与 `<id>.json` 同级），**不碰
+   `.minecraft/`**。理由：写进用户外部实例的真实游戏目录是对外操作，PCL2/HMCL
+   的「清理无效文件」或整合包覆盖可能删掉它，迁移时还会跟着走被别的启动器看见；
+   放元数据侧则「只对我们生效」最彻底、零污染。代价是用户手动复制 `.minecraft`
+   迁移后标识不跟随 → 降级到特征探测，这正是方案里的「没查到就看特征」分支。
+2. ☠ **标识内容不能只是「格式 ID」，得是路径映射表**。
+   一个 `ac|vanilla|iso` 枚举表达不了用户 22:06 举的「游戏拆成多个文件夹混着叠」
+   的极端布局，光存 ID 之后还是靠猜。建议 schema：
+   `{"schema":1,"fmt":"...","confidence":"high|low","paths":{"versions_root":"...",
+   "install_dir":"...","mods_dir":"...","saves_dir":"...","assets_dir":"..."},
+   "fingerprint":"...","created_at":...}`。「查漏补缺」= 按这张表逐项验证路径存在，
+   缺哪个补哪个，不再每次重新探测。
+3. ☠ **「没查到就自动补写标识」必须收窄**：只在探测置信度高时落盘；低置信度
+   写 `confidence:low` 且不参与补全，或直接不写并提示。否则探测本身就不可靠时
+   写死一张错表，之后会一直按错的补 —— 反而放大用户想消灭的「识别错误乱补全」。
+   只读目录（Program Files / 别的启动器目录）写失败要静默降级，不能弹错。
+
+**实施分两批（避免一次改动波及启动主链路）**
+
+- 批次 1（零回归风险，纯增量）：新建 `core/instance_marker.py` 负责标识的
+  读 / 校验 / 原子写 / 指纹 / 置信度 / 降级；补单测。**不接任何现有逻辑**，
+  并且顺手修 `:779` 丢弃 format 的 bug。
+- 批次 2（需确认后动）：把 `detect_format()` 的「AC 无条件优先」降级为
+  「先查标识 → 命中按映射查验 → 未命中按现有 `_probe_format()` 探测 →
+  高置信度才补写标识」；`layout_of()` 消费标识路径表；加「不查验完整性」开关。
+  这批改 `layout_of` 会同时影响启动 / 补全 / 重建 / 体检，**必须真机双轨验收**。
+
+**状态：已按用户拍板实现（round-179，22:41 之后）**
+
+用户选择：① 标识**写进 `.minecraft`**（不是我推荐的元数据侧）；② **一次做到
+自动查验**（批次 1+2 一起）。据此落地：
+
+| 用户方案 | 实现 | 与评审建议的差异 |
+|---|---|---|
+| 给格式加标识码 | `<mc_dir>/.ac-layout.json`，点开头未知 JSON；内容是**逐项路径映射**而非格式 ID | 按用户选择写进游戏目录；用「点开头 + 其它启动器不读」满足「只对我们生效」。⚠ 代价：外部实例的 `.minecraft` 里会多一个文件，整合包覆盖/清理工具可能删掉它 → 删了就自动降级重探，不影响使用 |
+| 先找识别码 → 命中按格式查漏补缺 | `_resolve_layout()` 先 `im.read()`，命中且指纹/身份有效则直接用记录路径；`im.verify()` 返回缺失目录清单（**只读不创建**，真补全仍归 `install_instance`） | 「查漏补缺」实现为可见的完整性报告，不擅自往外部实例建目录 |
+| 没查到（或不查验）就跳过 | 设置 → 行为「查验启动格式完整性」开关，关闭后不读不写不查验 | 关闭开关仍保留 AC 自动查验（防错补核心） |
+| 没识别码就看特征并补写 | 无标识 → 实时特征探测 → **仅高置信度**写标识；身份/指纹校验保证后续变化自动作废 | 低置信度（特征全 miss 兜底 vanilla）**不写**，避免把一次猜错固化成常驻错误 |
+| 默认 AC 识别改自动查验 | `_is_ac_owned()` 不再直接返回 `ac`；目录里出现 mmc-pack.json / minecraftinstance.json / profile.json / instance.cfg 时降级探测 | 保留 round-164「AC 扁平 json 不切根」保护（回归真实抓到过破坏并修回） |
+
+**同批修掉的两个真 bug**：`instances.py:779` `add()` 在 `base` 空时丢弃向导选的
+format（「自定义格式没作用」根因）；`core/instance_rebuild.py:146` 把点开头的
+`.ac-layout.json` 当版本文件（「无版本文件」误判）。
+
+判据 `tests/test_round179_instance_marker.py`（27 条）已登记 `regress.py`。
+**双轨验收仍欠**：真机目检标识生成、外来特征降级、开关关闭、以及把该
+`.minecraft` 交给别的启动器仍能启动 —— 详见 CHANGELOG round-179。
+
+
+---
+
+## 十、加载器选择与版本展示（2026-11-06 23:01 用户提出，待实现）
+
+> 用户原话要点：①「每次选择一个都会导致页面重构？还是什么情况，然后位置就有一些奇怪」；
+> ②「下载加载器，看看其他启动器是怎么做的，我们的可以用，但是和其他启动器比差距很大，
+> 比如说图标不是公共的那种对应加载器官方样式」；③「默认最高版本你不说版本玩家不知道的」；
+> ④「加载器版本你没有区分测试版等」。
+
+### 逐条核实（均已读到代码，非推测）
+
+| # | 位置 | 现状 / 原因 |
+|---|---|---|
+| 1 | `src/pages_instances.py:1092` `_select_loader` | 每次点加载器卡片都会 `ldver_box.setVisible(show_ldver)`（布局高度突变）+ `_load_loader_versions()`（**无条件重新发 Worker 请求**，即使重复点同一个加载器）+ `_update_path()`；异步回来 `_on_loader_versions()` 再 `clear()` 重建整个 combo。三次布局变化叠加 = 用户说的「页面重构 / 位置奇怪」。另外 `card.set_selected(lid == loader_id and card.isVisible())` 依赖 `isVisible()`，刚 show 的卡片可能状态不对 |
+| 2 | `assets/icons/loader_*.svg`（10 个）+ `src/icons.py:62` `_KEEP_COLOR` 白名单 | 图标是**自绘近似 SVG**（如 `loader_fabric.svg` 是手写 path 的绿色方块），不是各加载器官方 logo / 社区通用图标包。`_LoaderCard.__init__` 用 `_pix(f"loader_{lid}", 40)`，缺资源时回退中性色块。smoke 日志出现过 `Cannot open file :/icons/loader_labymod.svg`（QRC 注册与文件清单要一并核） |
+| 3 | `src/pages_instances.py:873` `ldver_combo.addItem(t("new_instance.ldver_latest"))` | 第一项只有「最新版」文案、**不带 data**；`selected_loader_version()` 读 `currentData()` 得到空串 → 安装时取最新。玩家完全不知道会装哪个具体版本，也没法确认/复现 |
+| 4 | `src/pages_instances.py:150` `_fetch_loader_versions` / `:1167` `_on_loader_versions` | 统一返回 `[{title, meta}]`，**没有 stable / beta / snapshot / preview 字段**，UI 也不分组。Forge 的 recommended vs latest、Fabric loader 稳定版、NeoForge beta、OptiFine preview 全混在一个平铺下拉里。`net_api.py:734` 的 `order={release,snapshot,...}` 只用于 **Minecraft 版本**，别误以为加载器版本已分类 |
+
+### 主流启动器做法（待联网调研后补实证，不要凭印象写）
+
+- PCL2 / HMCL / Prism / Modrinth App 的加载器选择页：官方 logo 资源来源、版本列表是否标注
+  `稳定版 / 测试版 / 推荐`、默认项是否显示具体版本号、切换加载器时是否保留滚动位置。
+- 需要确认各加载器上游 API 是否直接给稳定标记：Forge `promos` / `recommended`、
+  Fabric `meta.fabricmc.net/v2/versions/loader`、NeoForge maven、Quilt、OptiFine preview。
+
+### 建议分组（等用户确认后开干）
+
+- **① 位置跳动**：切换时不再 `clear()` 整个 combo、同一加载器重复点直接复用缓存、
+  `ldver_box` 用固定占位高度（隐藏时保留空间）避免布局跳；`_ldver_gen` 已有竞态守卫可复用。
+- **② 图标**：换成官方 / 社区通用 logo 资源，核对 QRC 注册与 `labymod` 缺图告警；
+  别继续手绘近似 path。
+- **③④ 版本展示**：默认项显示解析出的具体版本号（如「最新稳定版 0.16.10」），
+  数据源给每个版本加 `channel`，UI 分组或加角标，并允许玩家显式选择测试版。
+
+**状态：✅ 已在 round-180 实现（2026-11-06 23:40）**
+
+| 项 | 实现 |
+|---|---|
+| ① 页面重构 / 位置跳 | `_select_loader` 加重复点守卫 + 版本结果缓存 + `ldver_box` 高度占位；`selected_loader_version` 改显式标志；选中态去掉 `isVisible()` 依赖 |
+| ② 官方图标 | 9 个 `loader_*` 全换上游官方原文件（PNG/SVG/ICO），`icons.py` 支持三种扩展名、QRC 重新生成；Cleanroom 官方无 logo → 删自绘占位；来源/许可见 `assets/icons/LOADER_LOGOS.md`。**主流启动器做法**（Prism 图标主题 / HMCL PNG@2x / PCL2 WPF PNG）已实证写入该文档 |
+| ③ 默认最高版本不显示号 | 默认项改为「最新版本 {ver}（推荐）」，data 仍为空（安装取最新） |
+| ④ 不区分测试版 | `version_channel()` 从标题识别 beta/preview/snapshot/recommended 并加角标；**纯版本号标 unknown 不加角标**，不假造稳定性 |
+
+**同批额外修**：`async_image.ImageLoader` 重写（原图单缓存 / 去重 / HTTP
+状态码检查 / 失败负缓存+退避 / 限并发 / 坏缓存删除 / bump 不吞图），解决
+「资源中心有缓存却没图片」；列表描述单行省略、来源标签、下载量人读格式，
+详情页封面 88px + `big` 标题类，全部走现有 token 与 `ui_kit` 组件。
+
+判据 `tests/test_round180_ui.py` / `test_round180_icon_cache.py` 已登记
+`regress.py`。⚠ 双轨验收仍欠真机目检（切换不跳、版本号、角标、滚动图标
+补全率、详情页观感）。
+
+
+---
+
+## 十一、加载器复用 / PCL 式实例编辑 / 下载页格式选项（2026-11-07 用户提出）
+
+> 用户原话要点：①「加载器你看看其他启动器是什么样的，基本上是一样的，
+> 可以复用他们的，不要自己乱找」；②「像PCL一样的实例/版本修改功能呢？
+> 就是可以随便加或去除加载器mod等更换」；③「为什么下载时只有选择隔离和
+> 目录？为啥看不到启动方式里的各种格式在下载中选择？」
+
+### ① 加载器复用 ✅ round-181 已实现
+
+不再逐个溯源上游官方原图（round-180 的做法被用户纠正）。直接采用 HMCL
+`assets/img/*@2x.png` 现成集，8 张 + 2 张官网 favicon；Cleanroom 补齐。
+主流做法实证与许可见 `assets/icons/LOADER_LOGOS.md`。
+
+### ② PCL 式实例 / 版本随意编辑 — 现状核实（未授权改动）
+
+| 位置 | 现状 |
+|---|---|
+| `pages_instances.py:2284` 实例设置 | **已有**但分散：可改名称、游戏版本、加载器、加载器版本、内存、JVM 参数/预设、渲染器、游戏附加参数、版本隔离、自定义目录、分组、Java 强制、启动/退出命令、启动格式 |
+| `:2539` 版本变更 | 只置 `version_id=""` + 后台 `_start_instance_download()` 补游戏文件（幂等、保留存档模组），**并没有真正安装/卸载加载器**；`install_loader` 仅存在于 `core/instance_health.py:638` 体检修复 |
+| `:2339` `_editable` | 导入实例禁改版本 / 加载器 / 加载器版本三项 |
+| `modules_page.py` | 模组禁用 / 删除在这里；实例详情的 Mods / 资源包 / 光影 / 存档四个按钮只是跳转页，不是「在同一面板里勾选加载器 + 加删 mod」 |
+| `:1940-1960` 右键 | 有体检、补装依赖、崩溃分析，无「管理加载器」「添加模组」独立项 |
+
+**结论：能力碎片化，且「换加载器」是改字段不是真换**，与 PCL 的整页式编辑差距在
+交互聚合与加载器真实安装/卸载，不在字段数量。属功能增强，等用户拍板范围。
+
+### ③ 下载 / 新建时看不到各种启动格式 — 真缺口（未授权改动）
+
+| 位置 | 现状 |
+|---|---|
+| `pages_instances.py:1352` `current_layout()` | 新建向导的 `dir_combo` 只有 `ac / vanilla / iso / custom` **4 项**，语义是「游戏目录布局」，不是启动格式 |
+| `instances.py:311` `INSTANCE_FORMATS` | 9 种：`ac / vanilla / iso / multimc / curseforge / modrinth / custom / auto …`，**只在已建实例的「实例设置」** `pages_instances.py:2394` `fmt_combo` 里出现 |
+| `pages_instances.py:2466` | 「隔离 / 目录」是另一组控件（isolation + game_dir_override），与格式无关 |
+
+所以用户在下载/新建阶段只看到隔离和目录，是**格式枚举从未接进新建向导**；
+round-179 之前 `instances.py:779 add()` 还会把向导选的 format 直接丢掉（已修）。
+另外枚举里**没有 `pcl` 这一项**，用户说的「PCL 等启动器的不同实例」目前只能
+落到 `vanilla` / `iso` / `multimc` 近似表达。
+
+**建议（等授权）**：新建向导增加「启动格式」下拉，复用 `INSTANCE_FORMATS` +
+`_fmt_keys` 文案，选中结果随 `result_data()` 落到 `add()`；补 `pcl` 枚举与对应
+`detect_format` 特征（PCL2 的版本隔离目录 / `.minecraft` 布局）；与 round-179 的
+`.ac-layout.json` 标识联动，避免选了格式又被自动探测覆盖。
+
+**状态：②③ 仅登记，未改代码。** 涉及新建向导与实例主链路，按项目约定先问再动。
+
+> **2026-11-07 00:56 用户拍板**：采用**完整版**——新建整页编辑面板，左侧分组导航
+> （基础 / 启动 / Java / 目录格式 / 模组 / 资源包 / 存档 / 高级），加载器**真装真卸**，
+> 模组增删启停内嵌不跳页。下次开工直接照此实现，无需再确认范围。
+> ③（新建向导补「启动格式」下拉 + `pcl` 枚举）同批做。
+
+### ✅ round-183 已实现（2026-11-07 12:xx）
+
+| 项 | 落地方式 |
+|---|---|
+| 整页编辑面板 | `src/instance_editor.py` · `InstanceEditorDialog`，7 页左侧导航 + `QStackedWidget`；右键「编辑实例」与详情齿轮共用 |
+| 加载器真装真卸 | `src/core/loader_swap.py` · `swap_loader`（幂等装 + 清理旧版本目录 + 失败回滚字段）/ `uninstall_loader`（删 `versions/<id>` 退回原版） |
+| 模组内嵌 | 面板「模组」页复用 `ModCard`，增 / 删 / 启停 / 打开目录都在面板内 |
+| 资源包 / 光影 / 存档 | 面板「内容」页三个列表 + 打开目录 + 删除所选 |
+| `pcl` 枚举 | `INSTANCE_FORMATS` 补 `pcl`；`_probe_format` 认 `<mc>/PCL/Setup.ini`；徽章 `#0EA5E9` |
+| 新建向导格式 | 目录下拉补 `pcl`，另加一行「启动格式将标记为：…」显式展示结果 |
+
+**未做（有意，非遗漏）**：新建向导不提供 `multimc / curseforge / modrinth` 选项。
+这三种是「导入别人已建好的实例」才有的目录特征，新建一个空目录再标成 CurseForge
+只会让补全走错分支。需要时走导入或建好后在编辑面板里手选格式。
+
+### ✅ round-183 收尾：真机截图逐页目检后修的六处（2026-11-07 12:5x）
+
+面板能开 ≠ 画得对。用部署目录的两个真实实例 offscreen 渲染七页截图
+（`_probe_editor_shot.py` → `_shots_r183/page_0..6.png`）后查出：
+
+| 现象（截图实测） | 根因 | 修法 |
+|---|---|---|
+| 紫色按钮上的图标只剩一团暗影（放大 4× 才看出是下载箭头） | `make_button` 一律用主题文字色 tint 图标 → 近黑压紫底 | `kind ∈ accent/play/danger` 改用 `on_accent()`（跟随 `text_on_accent`，浅色 accent 自动转深） |
+| 「＋ ＋ 添加模组」两个加号 | 文案 `mods.add` 自带「+」，与 `icon_key="add"` 重复 | 新增 `inst.mods_add`（无「+」） |
+| 模组空态标题写「暂无可用实例」 | 借用实例列表的空态键 | 新增 `inst.mods_empty_title`「还没有模组」 |
+| 高级页游戏目录显示成「\Appdata\AC_Launcher\…」（盘符被吃掉） | 只读 `QLineEdit` 设值后光标停在末尾 → 视图滚到尾部 | `setCursorPosition(0)` |
+| `QSpinBox` 右侧多出一根怪线 | 自定义 QSS 没定义 `::up-button`，原生箭头画到框外 | `setButtonSymbols(NoButtons)` + `ui_kit` 全局补 `QSpinBox.wheelEvent`（滚动区里滚轮不再静默改内存值） |
+| 「当前状态」拉出半屏灰字墙 | 标签换行 + 值堆叠 | 改两列表格；路径单独段落，字号 11px |
+
+> ☠ **探针陷阱（已踩）**：用 `QTest.qWait` 等后台 `Worker` 会**饿死工作线程** ——
+> 等满 12s 后台函数一次都没跑，Java 页恒显「尚未判定」，极易误判成「功能没做」。
+> 正确写法是 `time.sleep()` + `app.processEvents()` 循环；换成它之后 0.4s 就填出
+> `需要：Java 25 / 将使用：Java 25 · …javaw.exe`。
+
+### ✅ round-183 收尾二：大尺寸图标描边（用户实拍指出「四方圆角图标被遮挡」）
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 空态 56px 的四宫格图标看起来四块粘成一块、「被遮挡」 | 24px 设计的字形（`stroke-width="2"`）放大 2.33× → 描边 4.7px，而方块间隙只有 4 个单位 → 只剩 4px（gap/stroke = 0.67） | 新增 `icons.pixmap_large()`：按目标**物理像素**反推 SVG 单位描边（只减不增），描边 = `size × 0.06` 夹 [2.6, 5.0]；`empty_state` 与登录页 56px 头像回退改走它 |
+
+**判据**：`tests/test_round183_editor.py` ⑩ 量 56px 渲染的「中缝/描边」比值 ≥ 1.2，
+并**先断言旧实现 < 1.0**（证明判据能抓到问题，而不是没数据就通过）。实测 0.67 → 1.50。
+
+**边界**：`_KEEP_COLOR` 里的品牌/状态图（加载器 logo、绿勾、警告三角、太阳）
+不参与收细 —— 它们自带配色，重着色会毁掉含义。
+
+> ☠ 教训：检查「图标有没有问题」不能只看**有没有被裁切**，还要看**描边配重**。
+> 同一张 SVG 在 18/24px 好看，放大到 48/56px 就会因为描边同比变粗而糊成团 ——
+> 大尺寸必须单独渲染，不能把小尺寸位图拉大、也不能让矢量等比放大。
+
+### ✅ round-189：修改页重做（2026-11-07 16:2x）
+
+用户实拍：「我们整个修改太简陋了，而且内容和细节完善度不全面」。差距不在配色，
+在**信息形态**：加载器是光秃秃的下拉（logo/说明全藏着）、游戏版本是自由文本框
+（能打进不存在的版本）、危险区只有一句 hint。
+
+- 加载器 → **带 logo 的卡片选择器**（新 `src/loader_picker.py`，logo 复用 HMCL
+  已整理好的 `loader_*.png`）；过滤后重排，网格不留空洞。
+- 游戏版本 → **可编辑下拉 + 「选版本」按钮**（后台拉官方版本列表，走缓存）。
+- 加载器版本 → 第一条标「最新」。
+- 危险区 → 红字「会删除…」+ 灰字「会保留…」，按钮改 danger 样式。
+- 当前加载器卡 → 加 loader logo。
+
+**顺带修的真 bug**：`LoaderPicker.current()` 曾返回「第一个可用的卡」而不是
+「选中的卡」——点了 Quilt 程序按原版走。已由新判据钉死。
+
+### ✅ round-190：实例图标 + 收藏夹（2026-11-07 16:3x）
+
+PCL 概览「个性化」卡的两项：**图标**与**收藏夹**。
+
+- `instance.favorite`：`sorted_instances()` 统一「收藏置顶 → 分组 → 名称」，
+  实例列表与首页网格共用一套顺序；卡片带 ★；概览页切换即落盘。
+- `instance.icon_path` + `src/instance_art.py`：图片**复制**进
+  `data/instance_icons/<id>.<ext>`（不动原文件），换格式清旧缓存；
+  4 MB / png·jpg·webp·bmp 限制，非图片或超限显式报错。
+- 卡片（列表 44px / 首页 26px）与概览预览共用 `instance_art.icon_pixmap()`。
+
+**踩到的坑**：dev 模式下 `get_data_dir()` 是 cwd 相对的，测试把实例写进了项目
+自己的 `data/`（已清理，测试改为先 chdir 到临时目录）。
+
+**仍未做**：窗口标题/自定义信息（要 launch.py 配合）、登录方式限制（要接登录链路）、
+内存「自动配置」全局档。
+
+### ✅ round-188：GC 模式 + 启动前内存优化（2026-11-07 16:0x）
+
+用户补刀：「启动前内存优化呢」。PCL「内存分配」卡还差这一项，补上：
+
+- **内存管理（GC）下拉**：ZGC / 分代 ZGC / 标准 G1GC / 调优 G1GC / 不指定；
+  ☠ **显式选 GC 时必须跳过原来的 G1GC 参数组** —— ZGC 与 G1GC 互斥，同时下发
+  JVM 起不来。面板上同步把「G1GC 优化参数」复选框置灰。
+- **启动前内存优化**：实例 on/off/跟随全局 + 全局开关；启动前
+  `EmptyWorkingSet` 裁工作集 + `gc.collect()`，释放 >32 MB 时提示。
+  清 standby list 要管理员权限，**不做**（别假装能做全局的）。
+
+### ✅ round-187：编辑面板 8 页重排 5 页 + 功能补齐（2026-11-07 15:3x）
+
+用户：「实例修改页面很难受」「主要不是空，是功能和便捷性和完整性」。
+
+**结构**：概览（名称/状态/ID/快捷方式/导出+补全）· 设置（隔离/格式/Java/内存/参数/
+服务器/命令）· 修改 · 模组 · 内容。旧 basic/launch/java/dir/adv 五个页函数退役，
+字段一个没丢（`_collect` 读同一批属性）。
+
+**功能补齐**（对着 PCL 设置页逐项核）：
+1. 内存可视化条（三段色块）+ 分配超 85% 红字护栏（ctypes 读内存，
+   psutil 在本机 venv 是坏的）；
+2. 自动进入服务器（`instance.auto_server` → 启动自动追加 --server/--port；
+   收藏直连 > 实例字段 > 全局参数）；
+3. 补全文件按钮（概览·高级管理，幂等校验 + 重下缺失）。
+
+**仍未做（PCL 有、AC 暂缺，按价值排序）**：游戏窗口标题/自定义信息（要 launch.py
+配合，单独一轮）、登录方式限制（仅正版/仅离线，要接登录链路）、实例图标与收藏
+（要动首页排序）、GC 显式下拉（ZGC/分代 ZGC，现用 jvm_preset 覆盖）、
+内存「自动配置」档（全局已是固定值，要先做全局自动档）。
+
+### ✅ round-186：修改页按版本过滤 + Fabric API 随装（2026-11-07 15:xx）
+
+用户：「下加载器不下配套 fabric api」「修改的选项中会出现不存在的加载器与版本，
+而且功能不全，建议仿照 PCL」。
+
+| 项 | 根因 | 修法 |
+|---|---|---|
+| 加载器下拉出现不存在的加载器 | 直接列 `LOADERS` 全表，从不按 MC 版本筛 | 新增 `core/loader_catalog.py` 可用性目录；修改页按当前 MC 版本重建下拉；**当前加载器永远保留**（否则自己的加载器会"消失"） |
+| Fabric 版本列表混进全历史版本 | `mll.fabric.get_all_loader_versions()` 不带 MC | 改走官方 meta 的按版本接口 `net_api.fetch_loader_builds` |
+| NeoForge 版本混进别的 MC 版本 | `mll.Neoforge.get_loader_versions()` 是全 MC 大表 | 按版本号前缀裁（20.1.x ↔ 1.20.1）+ 卡「NeoForge 无 19.x」下限 |
+| 空列表被当成网络失败 | 只显示「拉取失败」 | 改说「{mc} 没有这个加载器的可用版本」并**禁用安装按钮** |
+| 装完加载器没有 Fabric API | 从来没装过 | 修改页加「同时安装 Fabric API」勾选（默认勾，fabric/quilt 时才出现）；装完自动拉对应 MC 版本的 Fabric API 进 mods 目录 |
+
+**边界**：Fabric API 装失败**不会**把「加载器已装好」说成失败 —— 两件事分开提示。
+
+**未做（有意）**：新建向导的加载器卡片沿用它自己的 `_compatible_loaders`（已能按
+版本过滤），没改成共用 catalog —— 两套规则目前只在 Quilt/NeoForge 的边界版本上
+略有差异（向导略松），改动向导有回归风险，单独排一轮。
+
+### ✅ round-185：模组页重做（2026-11-07 14:xx）
+
+用户：「mod 功能太难用了，建议整个重做，学其他启动器的」。诊断结论：难在
+**根本不知道装了什么** —— 名字取文件名、加载器徽章靠文件名子串猜、jar 里的
+清单完全不读。
+
+| 项 | 落地 |
+|---|---|
+| 真实元数据 | 新增 `core/modmeta.py`：fabric.mod.json / quilt.mod.json / META-INF/(neo)forge.mods.toml / mcmod.info → id·名称·版本·描述·作者·图标字节；读不出返回 None 不抛异常 |
+| 列表 | 新增 `mod_list.py`：搜索 + 全部/已启用/已禁用/可更新四筛选 + 紧凑行 + 批量条（启用/禁用/更新/删除所选）+ 空态三条路 |
+| 选中表达 | 勾选框外加**整行高亮 + 左侧紫条**；复选框本身改成白底 + 紫色对勾（全局 QSS） |
+
+**仍未做**：模组页的「拖 .jar 进窗口即装」、依赖缺失的自动修复提示
+（`core/mod_check` 有数据但没接到这个页面）、按 Modrinth 项目对本地 jar 做
+「可更新」判定目前仍靠文件名猜 slug（`mod_updater.parse_mod_slug`）。
+
+### ✅ round-184：「修改」页 + 导出 .mrpack（2026-11-07 13:xx）
+
+用户两问：「这里为什么有一个下拉还有 3 个点的省略？」「去看看 PCL 的修改版本
+到底是什么再来改」。第一问是缺陷，第二问查证后是**结构问题**。
+
+| 项 | 查证 / 落地 |
+|---|---|
+| 「⋯⌄」双符号 | `QPushButton("⋯") + setMenu()` 会让 Qt 另画 `menu-indicator`；且 U+22EF 常缺字。改为 `more.svg` 图标 + 全局 `::menu-indicator { image:none; width:0 }` |
+| PCL「修改」到底是什么 | 源码 `PageInstanceLeft.xaml`：左侧是 **概览/设置/修改/Mod管理/导出**；「修改」= `PageDownloadModify`，**装/换 Mod 加载器**，不是字段表单 |
+| AC 面板 | 新增第 3 页「修改」，游戏版本 / 加载器 / 安装更新 / 退回原版全部搬过去；「启动」页只留内存·JVM·渲染器·性能 |
+| 导出整合包 | 新增 `core/mrpack_export.py` + `export_pack_dialog.py`；入口：实例「⋯」菜单、编辑面板「高级」页 |
+
+**格式取舍（重要，别当 bug 修）**：导出的 `.mrpack` 里 `files` 恒为空、内容全部
+在 `overrides/`。因为 `files` 每项必须带可直链 `downloads` 与 sha1/sha512，而本地
+jar 反查不到 CDN 地址；编假 URL 会让对方导入失败。代价是包体没有 CDN 去重。
+
+**判据**：`tests/test_round184_export.py` 33 条，含**第三方往返**（用
+`minecraft_launcher_lib.mrpack` 读回自己写的包，避免「自己读自己」掩盖格式错）。
+regress **54/54**；i18n **1807 = 1807**。
+
+**仍未做（有意）**：PCL 的「导出启动脚本 / 补全文件 / 删除版本」三个概览页按钮没搬
+（AC 在别处已有等价入口：崩溃分析、重建实例、删除实例）；PCL「设置」页的服务器
+填表（认证服务器 / 自动进服）AC 没有对应能力，不硬抄。
+
+**未做（待确认）**：`libraries/` 清理。卸载加载器只删 `versions/<id>`，共享库
+原样保留（PCL2 / HMCL 同样不删）——理由是多实例共用同一份库，删了会连带别的
+实例；代价是磁盘不会立刻回收。要做成可选「深度清理」需先拿到用户授权。
+
+---
+
+## 十二、客户端增强包与 Java 25 识别（2026-11-07 round-182）
+
+### ① 「不加 mod 直接在游戏里用鼠标手势」——查证结论
+
+用户问的是 Mouse Tweaks（YaLTeR，BSD-3，Modrinth `mouse-tweaks`）。它 hook 容器
+界面的 `mouseClicked / mouseDragged / mouseScrolled`，必须知道「光标下是哪个
+slot、手里拿着什么、对面是什么容器」。启动器在进程外只有像素，按坐标盲点最坏
+**会把物品丢到地上**。→ **启动器层面做不了，只能装 mod**。
+
+已落地为一键装 / 卸（`src/core/enhance.py` + `src/enhance_dialog.py`，实例右键
+→「客户端增强」）。清单 14 项分 5 组，Modrinth slug 全部逐个实测存在。
+
+**仍未做（等授权）**：启动器级手势（GestureKeys 式：低级鼠标钩子采笔迹 →
+`SendInput` 发按键/命令）。它只能触发按键与命令，不能直接操作 GUI，且要独占
+一个触发键——收益与 Mouse Tweaks 不重叠，属另一条产品线。
+
+### ② 为什么「识别不到启动器自己下的 Java 25」——根因已修
+
+两套口径不一致：
+
+| 入口 | 数据来源 | 能否看到自装 JRE |
+|---|---|---|
+| Java 管理页下拉（round-177 修过） | `java_install.installed_majors()` 读安装记录 | 能 |
+| 自动选择 / 启动判定 / 体检 / Cleanroom 安装器 | `core.java.scan_javas()` | **不能**（扫描根里没有 `<data>/java`） |
+
+所以表现为：管理页里看得见、手选能用，但 `java25_path()` 是 None、
+`select_java(need=25)` 返回 None → 判「没有兼容 Java」；Cleanroom 安装器退回
+「最高的现代 JVM」抓到系统 Java 26。
+
+round-182 已把 `installed_majors()` 并进 `scan_javas()` 且排最前。探针复验：
+`java25_path()` 命中、`cleanroom_installer_java()` = Java 25、
+`select_java(need=25)` 命中。
+
+**遗留（未修）**：`scan_javas` 有 deep/fast 两档缓存，`install_java()` 装完新
+JRE 后**没有主动失效缓存**，最长要等 TTL 过期才出现在自动选择里（管理页下拉
+走 installed_majors 所以是即时可见的）。属体验毛刺，登记待办。
+
+### ③ 仍挂着的待办（本轮未动）
+
+- 设置 → 基础的两项新开关（窗口模式 / Gamma）只在**启动前**写 `options.txt`，
+  实例自定义 `game_dir` 与版本隔离目录的取值已核对一致，但「同一实例换目录后
+  旧 options.txt 残留」未处理。
+- `neoforge` 与 `forge` 的 mod 兼容判断只按加载器精确匹配，未处理同时发布两版
+  的 mod（如部分 ModernFix 构建）在 neoforge 上找不到 forge-only 依赖的情况。

@@ -91,6 +91,7 @@ SUITES = [
     ("加载器可用性/Fabric API", "test_round186_loader.py", "script"),
     ("GC 模式/启动前内存优化", "test_round188_memory.py", "script"),
     ("修改页重做/加载器卡片", "test_round189_modify.py", "script"),
+    ("实例图标/收藏夹", "test_round190_icon_fav.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

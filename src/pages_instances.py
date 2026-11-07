@@ -30,7 +30,9 @@ from .icons import icon, on_accent
 from .frameless import FramelessHelper, TitleBar
 from .win_rounded import confirm, pick_files, info, warn, toast
 from .i18n import t, loader_name
-from .instances import (manager, Instance, LOADERS, INSTANCE_FORMATS,
+from . import instance_art
+from .instances import (sorted_instances, manager, Instance, LOADERS,
+                        INSTANCE_FORMATS,
                        detect_format, launcher_label)
 from .net_api import fetch_versions
 from .settings_dialog import load_config
@@ -295,15 +297,29 @@ class InstanceCard(LightTrailCard):
         icon_box.setFixedSize(44, 44)
         icon_box.setAlignment(Qt.AlignCenter)
         icon_box.setProperty("cls", "tile")
-        icon_box.setPixmap(icon("instances").pixmap(24, 24))
+        # round-190：自定义图标优先（圆角），没有再用默认字形
+        _pm = instance_art.icon_pixmap(getattr(inst, "icon_path", ""), 40,
+                                       radius=9)
+        icon_box.setPixmap(_pm if _pm is not None
+                           else icon("instances").pixmap(24, 24))
         lay.addWidget(icon_box)
 
         # ── info column: name + (version pill · loader badge) ──
         info = QVBoxLayout()
         info.setSpacing(6)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(6)
         name = QLabel(inst.name)
         name.setProperty("cls", "title")
-        info.addWidget(name)
+        name_row.addWidget(name)
+        if getattr(inst, "favorite", False):
+            star = QLabel("★")
+            star.setStyleSheet("color:%s;font-size:13px;"
+                               % COLORS["accent"])
+            star.setToolTip(t("inst.favorite"))
+            name_row.addWidget(star)
+        name_row.addStretch(1)
+        info.addLayout(name_row)
 
         meta = QHBoxLayout()
         meta.setSpacing(8)
@@ -1636,8 +1652,8 @@ class InstancesPage(QWidget):
 
         cur = self.mgr.current_id
         # round-42 分组：同组连续显示（未分组排最后），视觉上形成分组
-        insts = sorted(self.mgr.list(),
-                       key=lambda i: ((i.group or "~").lower(), i.name.lower()))
+        # round-190：收藏的排最前面（sorted_instances 里统一这条规则）
+        insts = sorted_instances(self.mgr.list())
         if not insts:
             # 全部清空（含删除所有行）
             for rid in list(self._rows.keys()):

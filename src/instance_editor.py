@@ -318,6 +318,31 @@ class InstanceEditorDialog(QDialog):
         self.group_edit.setText(inst.group or "")
         self.group_edit.setPlaceholderText(t("instances.group_hint"))
 
+        # 个性化（PCL 概览同名卡片）：换图标 + 加入收藏夹
+        p.section(t("inst.personalize_section"))
+        prow = QHBoxLayout()
+        prow.setSpacing(10)
+        self.icon_preview = QLabel()
+        self.icon_preview.setFixedSize(40, 40)
+        self.icon_preview.setAlignment(Qt.AlignCenter)
+        self.icon_preview.setStyleSheet("background:%s;border-radius:9px;"
+                                        % COLORS["bg_frost"])
+        prow.addWidget(self.icon_preview)
+        prow.addWidget(ui_kit.make_button(
+            t("inst.pick_icon"), kind="secondary", icon_key="folder",
+            on_click=self._pick_icon, min_h=32))
+        prow.addWidget(ui_kit.make_button(
+            t("inst.reset_icon"), kind="secondary", icon_key="refresh",
+            on_click=self._reset_icon, min_h=32))
+        prow.addStretch(1)
+        self.fav_btn = ui_kit.make_button(
+            t("inst.favorite_add"), kind="secondary", icon_key="check",
+            on_click=self._toggle_favorite, min_h=32)
+        prow.addWidget(self.fav_btn)
+        p.add_layout(prow)
+        self._refresh_icon_preview()
+        self._refresh_fav_btn()
+
         p.section(t("inst.status_section"))
         self.status_box = QLabel("")
         self.status_box.setWordWrap(True)
@@ -1064,6 +1089,53 @@ class InstanceEditorDialog(QDialog):
     def _on_repair_failed(self, err: str) -> None:
         self._set_busy(False, "")
         warn(self, t("inst.repair_files"), t("inst.repair_failed", e=str(err)))
+
+    def _refresh_icon_preview(self) -> None:
+        from . import instance_art
+        pm = instance_art.icon_pixmap(
+            getattr(self._inst, "icon_path", ""), 36, radius=8)
+        if pm is None:
+            pm = icon("instances").pixmap(22, 22)
+        self.icon_preview.setPixmap(pm)
+
+    def _refresh_fav_btn(self) -> None:
+        fav = bool(getattr(self._inst, "favorite", False))
+        self.fav_btn.setText(t("inst.favorite_remove" if fav
+                               else "inst.favorite_add"))
+        self.fav_btn.setProperty("cls", "accent" if fav else "secondary")
+        self.fav_btn.style().unpolish(self.fav_btn)
+        self.fav_btn.style().polish(self.fav_btn)
+
+    def _toggle_favorite(self) -> None:
+        self._inst.favorite = not bool(getattr(self._inst, "favorite", False))
+        self._refresh_fav_btn()
+        # 收藏影响列表/首页顺序，立刻落盘（不必等「保存」）
+        manager().save(self._inst)
+        # 列表顺序（收藏置顶）由外层在对话框关闭时统一刷新（dlg.exec() 之后）
+
+    def _pick_icon(self) -> None:
+        from . import instance_art
+        path, _f = QFileDialog.getOpenFileName(
+            self, t("inst.pick_icon"), "", t("inst.icon_filter"))
+        if not path:
+            return
+        try:
+            self._inst.icon_path = instance_art.set_instance_icon(
+                self._inst, path)
+        except ValueError as exc:
+            msg = (t("inst.icon_too_big") if "large" in str(exc)
+                   else t("inst.icon_bad"))
+            warn(self, t("inst.pick_icon"), msg)
+            return
+        manager().save(self._inst)
+        self._refresh_icon_preview()
+
+    def _reset_icon(self) -> None:
+        from . import instance_art
+        instance_art.clear_instance_icon(self._inst)
+        self._inst.icon_path = ""
+        manager().save(self._inst)
+        self._refresh_icon_preview()
 
     def _export_pack(self) -> None:
         """导出整合包（概览页「高级管理」入口）。"""

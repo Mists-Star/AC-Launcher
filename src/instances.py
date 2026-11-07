@@ -95,6 +95,10 @@ class Instance:
     gc_mode: str = ""
     # round-188 启动前内存优化："" 跟随全局 / on / off。
     mem_optimize: str = ""
+    # round-190 收藏夹：收藏的实例在列表/首页置顶（PCL「加入收藏夹」同款）
+    favorite: bool = False
+    # round-190 自定义图标：磁盘上的图片路径；空 = 用默认图标
+    icon_path: str = ""
     post_launch_cmd: str = ""    # 游戏进程启动后执行的命令，空 = 跟随全局
     exit_cmd: str = ""           # 游戏进程退出后执行的命令，空 = 跟随全局
     # round-42 实例分组（对齐主流分组/筛选）：空 = 未分组
@@ -569,6 +573,18 @@ def layout_of(inst, version: str = "") -> dict:
     return out
 
 
+def sorted_instances(items):
+    """展示顺序：**收藏优先**，然后按分组、名称（round-190）。
+
+    只在「给人看」的地方用（实例列表 / 首页网格）；``manager.list()`` 本身
+    保持插入序，免得有调用方依赖顺序。
+    """
+    return sorted(items or (),
+                  key=lambda i: (not bool(getattr(i, "favorite", False)),
+                                 (getattr(i, "group", "") or "~").lower(),
+                                 (getattr(i, "name", "") or "").lower()))
+
+
 class InstancesManager:
     # round-78 存储升级：单文件 data/instances.json → 拆分
     #   data/instances/<id>.json     每实例全量（真理源，独占文件，原子写）
@@ -758,6 +774,8 @@ class InstancesManager:
             auto_server=raw.get("auto_server", "") or "",
             gc_mode=raw.get("gc_mode", "") or "",
             mem_optimize=raw.get("mem_optimize", "") or "",
+            favorite=bool(raw.get("favorite", False)),
+            icon_path=raw.get("icon_path", "") or "",
             post_launch_cmd=raw.get("post_launch_cmd", "") or "",
             exit_cmd=raw.get("exit_cmd", "") or "",
             group=raw.get("group", "") or "",

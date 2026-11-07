@@ -44,6 +44,7 @@ from .skins import manager as skin_manager
 from .skin_render import render_head, render_skin_frames, skin_model
 from .brand import APP_DISPLAY, APP_VERSION
 from . import brand_custom
+from . import instance_art
 from . import features
 from . import slim
 from .win_rounded import enable_win11_round_corners
@@ -230,12 +231,20 @@ class _InstanceCard(LightTrailCard):
         top = QHBoxLayout()
         top.setSpacing(10)
         ic = QLabel()
-        ic.setPixmap(icon("instances").pixmap(22, 22))
+        _pm = instance_art.icon_pixmap(getattr(inst, "icon_path", ""), 26,
+                                       radius=7)
+        ic.setPixmap(_pm if _pm is not None
+                     else icon("instances").pixmap(22, 22))
         top.addWidget(ic)
         name = QLabel(inst.name or "—")
         name.setProperty("cls", "big")
         name.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         top.addWidget(name, stretch=1)
+        if getattr(inst, "favorite", False):
+            star = QLabel("★")
+            star.setStyleSheet("color:%s;font-size:13px;" % COLORS["accent"])
+            star.setToolTip(t("inst.favorite"))
+            top.addWidget(star)
         src = getattr(inst, "launcher", "AC") or "AC"
         if src != "AC":
             from .instances import launcher_label
@@ -1095,7 +1104,9 @@ class HomePage(QWidget):
 
     def _refresh(self) -> None:
         inst = self.get_current_instance()
-        instances = self.list_instances()
+        # round-190：收藏置顶（与实例列表同一套排序）
+        from .instances import sorted_instances
+        instances = sorted_instances(self.list_instances())
 
         # 角色卡：账号/皮肤/披风可能在首页未重建时变化（见 _refresh_character）。
         self._refresh_character()
