@@ -14,13 +14,13 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QSize, Signal, QPointF, QRectF
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QSizePolicy,
-    QButtonGroup, QComboBox,
+    QButtonGroup, QComboBox, QSpinBox,
 )
 
 from .theme import COLORS, RoundedCard, R_CARD, F_SM, F_LG, with_alpha
 # ``screen_dpr`` 从 icons 转出：所有「按物理像素渲染」的自绘图标共用同一处
 # DPR 判定，避免各处各写一份（round-148）。
-from .icons import icon, pixmap as icon_pixmap, screen_dpr
+from .icons import icon, on_accent, pixmap as icon_pixmap, screen_dpr
 
 
 # ── 全局滚轮防误触（round-86）───────────────────────────────────────────
@@ -37,6 +37,10 @@ def _ignore_wheel(self, event):
 
 
 QComboBox.wheelEvent = _ignore_wheel
+# round-183：QSpinBox 同理。设置页/实例编辑面板都放在滚动区里，滚轮本意是
+# 滚页面，落在「内存」「Java 堆」这种数字框上却会直接把值改掉——不是误触
+# 一下，是静默改配置。数字仍然可以用键盘输入、上下键或点击取得焦点后滚。
+QSpinBox.wheelEvent = _ignore_wheel
 
 
 def accent_text() -> str:
@@ -208,7 +212,12 @@ def make_button(text: str, kind: str = None, icon_key: str = None,
     if kind:
         b.setProperty("cls", kind)
     if icon_key:
-        b.setIcon(icon(icon_key))
+        # ☠ 实心强调色按钮上的图标必须换成 text_on_accent：默认 tint 是主题
+        # 文字色（近黑），铺在紫底上几乎看不见 —— 截图放大 4 倍才看清那团
+        # 暗影是个下载箭头（round-183 实测）。浅色 accent 下 text_on_accent
+        # 是深色，所以这里不能写死白色。
+        b.setIcon(on_accent(icon_key) if kind in ("accent", "play", "danger")
+                 else icon(icon_key))
         b.setIconSize(QSize(16, 16))
     if checkable:
         b.setCheckable(True)

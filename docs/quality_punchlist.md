@@ -546,6 +546,44 @@ round-179 之前 `instances.py:779 add()` 还会把向导选的 format 直接丢
 > 模组增删启停内嵌不跳页。下次开工直接照此实现，无需再确认范围。
 > ③（新建向导补「启动格式」下拉 + `pcl` 枚举）同批做。
 
+### ✅ round-183 已实现（2026-11-07 12:xx）
+
+| 项 | 落地方式 |
+|---|---|
+| 整页编辑面板 | `src/instance_editor.py` · `InstanceEditorDialog`，7 页左侧导航 + `QStackedWidget`；右键「编辑实例」与详情齿轮共用 |
+| 加载器真装真卸 | `src/core/loader_swap.py` · `swap_loader`（幂等装 + 清理旧版本目录 + 失败回滚字段）/ `uninstall_loader`（删 `versions/<id>` 退回原版） |
+| 模组内嵌 | 面板「模组」页复用 `ModCard`，增 / 删 / 启停 / 打开目录都在面板内 |
+| 资源包 / 光影 / 存档 | 面板「内容」页三个列表 + 打开目录 + 删除所选 |
+| `pcl` 枚举 | `INSTANCE_FORMATS` 补 `pcl`；`_probe_format` 认 `<mc>/PCL/Setup.ini`；徽章 `#0EA5E9` |
+| 新建向导格式 | 目录下拉补 `pcl`，另加一行「启动格式将标记为：…」显式展示结果 |
+
+**未做（有意，非遗漏）**：新建向导不提供 `multimc / curseforge / modrinth` 选项。
+这三种是「导入别人已建好的实例」才有的目录特征，新建一个空目录再标成 CurseForge
+只会让补全走错分支。需要时走导入或建好后在编辑面板里手选格式。
+
+### ✅ round-183 收尾：真机截图逐页目检后修的六处（2026-11-07 12:5x）
+
+面板能开 ≠ 画得对。用部署目录的两个真实实例 offscreen 渲染七页截图
+（`_probe_editor_shot.py` → `_shots_r183/page_0..6.png`）后查出：
+
+| 现象（截图实测） | 根因 | 修法 |
+|---|---|---|
+| 紫色按钮上的图标只剩一团暗影（放大 4× 才看出是下载箭头） | `make_button` 一律用主题文字色 tint 图标 → 近黑压紫底 | `kind ∈ accent/play/danger` 改用 `on_accent()`（跟随 `text_on_accent`，浅色 accent 自动转深） |
+| 「＋ ＋ 添加模组」两个加号 | 文案 `mods.add` 自带「+」，与 `icon_key="add"` 重复 | 新增 `inst.mods_add`（无「+」） |
+| 模组空态标题写「暂无可用实例」 | 借用实例列表的空态键 | 新增 `inst.mods_empty_title`「还没有模组」 |
+| 高级页游戏目录显示成「\Appdata\AC_Launcher\…」（盘符被吃掉） | 只读 `QLineEdit` 设值后光标停在末尾 → 视图滚到尾部 | `setCursorPosition(0)` |
+| `QSpinBox` 右侧多出一根怪线 | 自定义 QSS 没定义 `::up-button`，原生箭头画到框外 | `setButtonSymbols(NoButtons)` + `ui_kit` 全局补 `QSpinBox.wheelEvent`（滚动区里滚轮不再静默改内存值） |
+| 「当前状态」拉出半屏灰字墙 | 标签换行 + 值堆叠 | 改两列表格；路径单独段落，字号 11px |
+
+> ☠ **探针陷阱（已踩）**：用 `QTest.qWait` 等后台 `Worker` 会**饿死工作线程** ——
+> 等满 12s 后台函数一次都没跑，Java 页恒显「尚未判定」，极易误判成「功能没做」。
+> 正确写法是 `time.sleep()` + `app.processEvents()` 循环；换成它之后 0.4s 就填出
+> `需要：Java 25 / 将使用：Java 25 · …javaw.exe`。
+
+**未做（待确认）**：`libraries/` 清理。卸载加载器只删 `versions/<id>`，共享库
+原样保留（PCL2 / HMCL 同样不删）——理由是多实例共用同一份库，删了会连带别的
+实例；代价是磁盘不会立刻回收。要做成可选「深度清理」需先拿到用户授权。
+
 ---
 
 ## 十二、客户端增强包与 Java 25 识别（2026-11-07 round-182）

@@ -85,6 +85,7 @@ SUITES = [
     ("图标性能/详情缓存/HMCL 图标", "test_round181_perf.py", "script"),
     ("Cleanroom Java/亮度覆盖", "test_round182_cleanroom_java.py", "script"),
     ("客户端增强包装/卸", "test_round182_enhance.py", "script"),
+    ("PCL 式编辑面板/加载器真装真卸/pcl 格式", "test_round183_editor.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

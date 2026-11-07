@@ -117,6 +117,7 @@ FORMAT_BADGE = {
     "multimc":   "#3B82F6",   # 整合蓝
     "curseforge": "#EC4899",  # CurseForge 粉
     "modrinth":  "#14B8A6",   # Modrinth 青
+    "pcl":       "#0EA5E9",   # PCL2 天蓝（round-183）
     "custom":    "#6B7280",   # 自定义灰
 }
 
@@ -128,6 +129,7 @@ _fmt_keys = {  # format 值 → i18n key（label/tooltip 共用前缀）
     "multimc": "instances.fmt_multimc",
     "curseforge": "instances.fmt_curseforge",
     "modrinth": "instances.fmt_modrinth",
+    "pcl": "instances.fmt_pcl",
     "custom": "instances.fmt_custom",
 }
 
@@ -931,11 +933,13 @@ class NewInstanceDialog(QDialog):
         # round-165：下载实例允许玩家自选布局（写盘位置）。
         # AC 独立目录 = 原行为；其余选项写入玩家指选的已有游戏目录
         # （external 实例，删除实例不会动真实文件）。
+        # round-183：补 "pcl" —— 直接写进 PCL2 的 .minecraft，格式标成 pcl，
+        # 这样「各种启动器的实例」在新建阶段就选得出来、看得见。
         dir_title = ui_kit.group_label(t("new_instance.dir_section"))
         lay.addWidget(dir_title)
         self.dir_combo = QComboBox()
         self.dir_combo.setMinimumHeight(36)
-        for _k in ("ac", "vanilla", "iso", "custom"):
+        for _k in ("ac", "vanilla", "iso", "pcl", "custom"):
             self.dir_combo.addItem(t(f"new_instance.dir_{_k}"), _k)
         self.dir_combo.currentIndexChanged.connect(self._on_dir_changed)
         lay.addWidget(self.dir_combo)
@@ -943,6 +947,13 @@ class NewInstanceDialog(QDialog):
         self.dir_hint.setProperty("cls", "sub")
         self.dir_hint.setWordWrap(True)
         lay.addWidget(self.dir_hint)
+        # round-183：把「这个选择会标成哪种启动格式」显式写出来——玩家抱怨
+        # 「新建时看不到各种格式」，此前确实一处都没显示。
+        self.fmt_lbl = QLabel(t("new_instance.fmt_preview",
+                                name=t("instances.fmt_ac")))
+        self.fmt_lbl.setProperty("cls", "sub")
+        self.fmt_lbl.setWordWrap(True)
+        lay.addWidget(self.fmt_lbl)
         self.dir_row = QHBoxLayout()
         self.dir_edit = QLineEdit()
         self.dir_edit.setMinimumHeight(36)
@@ -1339,6 +1350,9 @@ class NewInstanceDialog(QDialog):
         key = self.dir_combo.currentData() or "ac"
         self.dir_row_w.setVisible(key != "ac")
         self.dir_hint.setText(t(f"new_instance.dir_hint_{key}"))
+        # round-183：显式展示「这次新建会标成哪种启动格式」
+        self.fmt_lbl.setText(t(
+            "new_instance.fmt_preview", name=t(f"instances.fmt_{key}")))
         self._update_path()
 
     def _pick_dir(self):
@@ -1353,7 +1367,8 @@ class NewInstanceDialog(QDialog):
         """当前选择的 (format, base)。base 为空 ⇒ 走 AC 自有布局。
 
         vanilla = 玩家指选的已有 .minecraft；iso = 指选 .minecraft，实例目录
-        自动定位到 versions/<版本>；custom = 指选的游戏目录本体。
+        自动定位到 versions/<版本>；pcl = 指选 PCL2 的 .minecraft（格式标 pcl）；
+        custom = 指选的游戏目录本体。
         """
         fmt = self.dir_combo.currentData() or "ac"
         if fmt == "ac":
@@ -1929,6 +1944,9 @@ class InstancesPage(QWidget):
         m = QMenu(self)
         m.addAction(t("instances.set_current"),
                     lambda: self._set_current(inst.id))
+        # round-183：PCL 式整页编辑（加载器真装真卸 / 模组内嵌增删）
+        m.addAction(t("instances.edit_instance"),
+                    lambda: self._edit_instance_settings(inst))
         m.addAction(t("instances.duplicate"),
                     lambda: self._duplicate(inst))
         m.addSeparator()
@@ -2287,291 +2305,38 @@ class InstancesPage(QWidget):
                  t("instances.rebuild_same"))
 
     def _edit_instance_settings(self, inst: Instance):
-        """实例级覆盖设置：内存 / JVM / 渲染器 / GC / 启动高级设置（round-42/53/55）。
+        """round-183：改为打开 PCL 式整页编辑面板。
 
-        round-55 新增：游戏附加参数、JVM 预设、版本隔离（含自定义目录）、
-        启动后/退出后命令——全部「空值 = 跟随全局」。
+        原来这里是 480x620 的一条长滚动框，字段虽全但「换加载器」只是改字段、
+        加删 mod 要跳页。现在整页化（左侧导航 + 加载器真装真卸 + 模组内嵌），
+        本函数只负责两件收尾：版本/加载器变了触发后台补全、以及刷新列表。
         """
-        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
-                                       QLabel, QSpinBox, QLineEdit, QPushButton,
-                                       QComboBox, QCheckBox, QScrollArea,
-                                       QWidget, QFrame)
-        from .i18n import t as _t
-        dlg = QDialog(self)
-        dlg.setWindowTitle(_t("instances.instance_settings"))
-        dlg.resize(480, 620)
-        dlg.setMinimumWidth(360)
-        root = QVBoxLayout(dlg)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        # round-107：禁止底部横向滑条（用户明确不允许横向滚动）——内容强制
-        # 收缩到视口宽度，长文本由 Qt 自动省略/换行，永远不会被挤成两列。
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        root.addWidget(scroll, stretch=1)
-        content = QWidget()
-        content.setMinimumWidth(0)
-        content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        lay = QVBoxLayout(content)
-        lay.setSpacing(12)
-        # round-166 修改实例：基本信息可编辑（名称 / 游戏版本 / 加载器）。
-        # 导入实例的游戏文件属于来源启动器 → 版本/加载器不可改，避免弄坏
-        # 对方目录；名称仍可改。
-        _editable = not bool(getattr(inst, "external", False))
-        name_row = QHBoxLayout()
-        name_row.addWidget(QLabel(_t("instances.setting_name")))
-        name_edit = QLineEdit(inst.name or "")
-        name_row.addWidget(name_edit, stretch=1)
-        lay.addLayout(name_row)
-        ver_row = QHBoxLayout()
-        ver_row.addWidget(QLabel(_t("instances.setting_game_version")))
-        ver_edit = QLineEdit(inst.game_version or "")
-        ver_row.addWidget(ver_edit, stretch=1)
-        lay.addLayout(ver_row)
-        ld_row = QHBoxLayout()
-        ld_row.addWidget(QLabel(_t("instances.setting_loader")))
-        loader_combo = QComboBox()
-        for _lid in LOADERS:
-            loader_combo.addItem(loader_name(_lid), _lid)
-        _li = loader_combo.findData((inst.loader or "vanilla"))
-        loader_combo.setCurrentIndex(_li if _li >= 0 else 0)
-        ld_row.addWidget(loader_combo, stretch=1)
-        lay.addLayout(ld_row)
-        ldver_row = QHBoxLayout()
-        ldver_row.addWidget(QLabel(_t("instances.setting_loader_version")))
-        ldver_edit = QLineEdit(inst.loader_version or "")
-        ldver_edit.setPlaceholderText(
-            _t("instances.setting_loader_version_hint"))
-        ldver_row.addWidget(ldver_edit, stretch=1)
-        lay.addLayout(ldver_row)
-        for _w in (ver_edit, loader_combo, ldver_edit):
-            _w.setEnabled(_editable)
-        if not _editable:
-            _ext_hint = QLabel(_t("instances.setting_external_hint"))
-            _ext_hint.setWordWrap(True)
-            _ext_hint.setProperty("cls", "sub")
-            lay.addWidget(_ext_hint)
-        # 内存
-        mem_row = QHBoxLayout()
-        mem_row.addWidget(QLabel(_t("instances.setting_mem")))
-        mem = QSpinBox()
-        mem.setRange(0, 32768)
-        mem.setSingleStep(512)
-        mem.setValue(inst.ram_mb or 0)
-        mem.setSuffix(" MB（0=全局）")
-        mem_row.addWidget(mem, stretch=1)
-        lay.addLayout(mem_row)
-        # JVM 参数
-        lay.addWidget(QLabel(_t("instances.setting_jvm")))
-        jvm = QLineEdit(inst.jvm_args or "")
-        jvm.setPlaceholderText(_t("instances.setting_jvm_hint"))
-        lay.addWidget(jvm)
-        # round-55 JVM 预设（对齐主流「JVM 参数」预设；空 = 跟随全局）
-        preset_row = QHBoxLayout()
-        preset_row.addWidget(QLabel(_t("instances.jvm_preset")))
-        jvm_preset = QComboBox()
-        jvm_preset.addItem(_t("instances.jvm_preset_follow"), "")
-        jvm_preset.addItem(_t("instances.jvm_preset_default"), "default")
-        jvm_preset.addItem(_t("instances.jvm_preset_auto"), "auto")
-        jvm_preset.addItem(_t("instances.jvm_preset_aikar"), "aikar")
-        jvm_preset.addItem(_t("instances.jvm_preset_custom"), "custom")
-        idx = jvm_preset.findData((inst.jvm_preset or ""))
-        jvm_preset.setCurrentIndex(idx if idx >= 0 else 0)
-        preset_row.addWidget(jvm_preset, stretch=1)
-        lay.addLayout(preset_row)
-        # round-53 渲染器（对齐主流版本设置→渲染器 / 启动设置）
-        renderer_row = QHBoxLayout()
-        renderer_row.addWidget(QLabel(_t("instances.setting_renderer_title")))
-        renderer = QComboBox()
-        renderer.addItem(_t("instances.renderer_auto"), "auto")
-        renderer.addItem(_t("instances.renderer_software"), "software")
-        renderer.addItem(_t("instances.renderer_legacy"), "legacy")
-        idx = renderer.findData((inst.renderer or "auto"))
-        renderer.setCurrentIndex(idx if idx >= 0 else 0)
-        renderer.setToolTip(_t("instances.renderer_hint"))
-        renderer_row.addWidget(renderer, stretch=1)
-        lay.addLayout(renderer_row)
-        # round-55 游戏附加参数（--server 直连等；空 = 跟随全局）
-        ga_row = QHBoxLayout()
-        ga_row.addWidget(QLabel(_t("instances.game_args")))
-        game_args = QLineEdit((inst.game_args or "").strip())
-        game_args.setPlaceholderText(_t("instances.game_args_hint"))
-        ga_row.addWidget(game_args, stretch=1)
-        lay.addLayout(ga_row)
-        # round-82 启动格式（磁盘布局）：自适应默认，可手动覆盖/强制
-        # round-135：改为遍历 INSTANCE_FORMATS，新增格式不再漏改 UI。
-        fmt_row = QHBoxLayout()
-        fmt_row.addWidget(QLabel(_t("instances.fmt_title")))
-        fmt_combo = QComboBox()
-        for _k in INSTANCE_FORMATS:
-            fmt_combo.addItem(_t(f"instances.fmt_{_k}"), _k)
-        _cur_fmt = (inst.format or "auto").strip()
-        _idx = fmt_combo.findData(_cur_fmt if _cur_fmt in INSTANCE_FORMATS else "auto")
-        fmt_combo.setCurrentIndex(_idx if _idx >= 0 else 0)
-        fmt_hint = QLabel()
-        fmt_hint.setWordWrap(True)
-        fmt_hint.setStyleSheet(
-            f"color: {COLORS['text_sub']}; font-size: 11px; margin-left: 6px;")
-
-        def _update_fmt_hint(data: str) -> None:
-            try:
-                _det = detect_format(inst)
-                if (data or "auto") == "auto":
-                    fmt_hint.setText(_t("instances.fmt_detected",
-                                        name=_t(f"instances.fmt_{_det}")))
-                else:
-                    _txt = _t("instances.fmt_forced", name=_t(f"instances.fmt_{data}"))
-                    if _det != data:
-                        _txt += "\n" + _t(
-                            "instances.fmt_mismatch_hint",
-                            selected=_t(f"instances.fmt_{data}"),
-                            detected=_t(f"instances.fmt_{_det}"))
-                    fmt_hint.setText(_txt)
-            except Exception:  # noqa: BLE001
-                fmt_hint.setText("")
-
-        fmt_combo.currentIndexChanged.connect(
-            lambda _i: _update_fmt_hint(fmt_combo.currentData()))
-        fmt_row.addWidget(fmt_combo)
-        fmt_row.addWidget(fmt_hint, stretch=1)
-        lay.addLayout(fmt_row)
-        # round-163 Java 卡片：展示该实例要求的 Java / 实际将使用的 Java，
-        # 并提供实例级「强制使用所选 Java」开关。改动只在点「确定」后写回。
-        # 计算放后台线程：无可用 Java 时 java_plan 会做一次深扫，避免卡设置页。
-        cfg = load_config()
-        java_need_lbl = QLabel(_t("instances.java_none"))
-        java_need_lbl.setWordWrap(True)
-        java_need_lbl.setProperty("cls", "sub")
-        lay.addWidget(java_need_lbl)
-        java_use_lbl = QLabel(_t("instances.java_none"))
-        java_use_lbl.setWordWrap(True)
-        java_use_lbl.setProperty("cls", "sub")
-        lay.addWidget(java_use_lbl)
-        java_force_chk = QCheckBox(_t("instances.java_force_label"))
-        java_force_chk.setChecked(bool(getattr(inst, "java_force", False)))
-        lay.addWidget(java_force_chk)
-
-        from .core.java import java_plan as _java_plan
-        _jworker = Worker(_java_plan, inst, cfg)
-
-        def _on_java_plan(plan: dict) -> None:
-            try:
-                java_need_lbl.setText(
-                    _t("instances.java_need", need=int(plan.get("need") or 0)))
-                _p = plan.get("path") or ""
-                if _p:
-                    java_use_lbl.setText(_t("instances.java_will_use",
-                                            major=int(plan.get("major") or 0),
-                                            path=_p))
-                else:
-                    java_use_lbl.setText(_t("instances.java_none"))
-            except Exception:  # noqa: BLE001
-                pass
-
-        _jworker.finished.connect(_on_java_plan)
-        dlg._java_plan_worker = _jworker   # 持有引用防回收
-        _jworker.start()
-        # round-55 版本隔离（空 = 跟随全局；custom 时填自定义目录）
-        iso_row = QHBoxLayout()
-        iso_row.addWidget(QLabel(_t("instances.isolation")))
-        iso_combo = QComboBox()
-        iso_combo.addItem(_t("instances.isolation_follow"), "")
-        iso_combo.addItem(_t("instances.isolation_isolated"), "isolated")
-        iso_combo.addItem(_t("instances.isolation_custom"), "custom")
-        idx = iso_combo.findData((inst.isolation or ""))
-        iso_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        iso_row.addWidget(iso_combo, stretch=1)
-        lay.addLayout(iso_row)
-        game_dir_edit = QLineEdit((inst.game_dir_override or "").strip())
-        game_dir_edit.setPlaceholderText(_t("instances.game_dir_override_hint"))
-        game_dir_edit.setVisible(iso_combo.currentData() == "custom")
-        iso_combo.currentIndexChanged.connect(
-            lambda _i: game_dir_edit.setVisible(iso_combo.currentData() == "custom"))
-        lay.addWidget(game_dir_edit)
-        # round-53 实验性性能（对齐主流性能高级设置）
-        lay.addWidget(QLabel(_t("instances.setting_perf_title")))
-        g1gc = QCheckBox(_t("instances.perf_g1gc"))
-        g1gc.setChecked(bool(getattr(inst, "perf_g1gc", True)))
-        g1gc.setToolTip(_t("instances.perf_g1gc_hint"))
-        lay.addWidget(g1gc)
-        noexgc = QCheckBox(_t("instances.perf_disable_explicit_gc"))
-        noexgc.setChecked(bool(getattr(inst, "perf_disable_explicit_gc", False)))
-        noexgc.setToolTip(_t("instances.perf_disable_explicit_gc_hint"))
-        lay.addWidget(noexgc)
-        # round-55 启动后 / 退出后命令（空 = 跟随全局）
-        lay.addWidget(QLabel(_t("instances.post_launch_cmd")))
-        post_cmd = QLineEdit((inst.post_launch_cmd or "").strip())
-        post_cmd.setPlaceholderText(_t("instances.hook_ph"))
-        lay.addWidget(post_cmd)
-        lay.addWidget(QLabel(_t("instances.exit_cmd")))
-        exit_cmd = QLineEdit((inst.exit_cmd or "").strip())
-        exit_cmd.setPlaceholderText(_t("instances.hook_ph"))
-        lay.addWidget(exit_cmd)
-        # 分组
-        grp_row = QHBoxLayout()
-        grp_row.addWidget(QLabel(_t("instances.group_title")))
-        grp = QLineEdit(inst.group or "")
-        grp.setPlaceholderText(_t("instances.group_hint"))
-        grp_row.addWidget(grp, stretch=1)
-        lay.addLayout(grp_row)
-        scroll.setWidget(content)
-        # 按钮（滚动区外，始终可见）
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        cancel = QPushButton(_t("common.cancel"))
-        cancel.clicked.connect(dlg.reject)
-        ok = QPushButton(_t("common.ok"))
-        ok.setProperty("cls", "accent")
-        ok.clicked.connect(dlg.accept)
-        btn_row.addWidget(cancel)
-        btn_row.addWidget(ok)
-        root.addLayout(btn_row)
-        _update_fmt_hint(fmt_combo.currentData())  # 打开即显示当前识别
-        if dlg.exec() != 1:
-            return
-        _old_ver = inst.game_version
-        _old_loader = inst.loader
-        _old_ldver = inst.loader_version
-        inst.name = name_edit.text().strip() or inst.name
-        if _editable:
-            inst.game_version = ver_edit.text().strip() or _old_ver
-            inst.loader = loader_combo.currentData() or "vanilla"
-            inst.loader_version = ("" if inst.loader == "vanilla"
-                                   else ldver_edit.text().strip())
-        _ver_changed = (inst.game_version != _old_ver
-                        or inst.loader != _old_loader
-                        or inst.loader_version != _old_ldver)
-        if _ver_changed:
-            # 版本/加载器变了 → 旧的启动版本 id 失效，交给 install 重新解析
-            inst.version_id = ""
-            inst.needs_convert = False
-        inst.ram_mb = mem.value()
-        inst.jvm_args = jvm.text().strip()
-        inst.jvm_preset = jvm_preset.currentData() or ""
-        inst.renderer = renderer.currentData() or "auto"
-        inst.format = fmt_combo.currentData() or ""   # round-82 格式（auto → 存空）
-        inst.java_force = java_force_chk.isChecked()  # round-163 实例级强制 Java
-        inst.game_args = game_args.text().strip()
-        inst.isolation = iso_combo.currentData() or ""
-        inst.game_dir_override = game_dir_edit.text().strip()
-        inst.perf_g1gc = g1gc.isChecked()
-        inst.perf_disable_explicit_gc = noexgc.isChecked()
-        inst.post_launch_cmd = post_cmd.text().strip()
-        inst.exit_cmd = exit_cmd.text().strip()
-        inst.group = grp.text().strip()
-        self.mgr.save(inst)
+        from .instance_editor import InstanceEditorDialog
+        dlg = InstanceEditorDialog(self, inst)
+        dlg.saved.connect(lambda _id: self._refresh())
+        dlg.loaderChanged.connect(lambda _id: self._refresh())
+        dlg.versionChanged.connect(self._on_editor_version_changed)
+        dlg.exec()
         self._refresh()
-        if _ver_changed:
-            # round-166：改版本/加载器后立刻后台补全游戏文件（幂等，保留存档
-            # 与模组）；启动时也会再校验一次，失败不阻塞设置保存。
-            info(self, _t("instances.setting_modified_title"),
-                 _t("instances.version_changed"))
-            mw = self.window()
-            if hasattr(mw, "_start_instance_download"):
-                try:
-                    mw._start_instance_download(inst.id)
-                except Exception:  # noqa: BLE001 - 补全失败不影响已保存的设置
-                    pass
+
+    def _on_editor_version_changed(self, inst_id: str) -> None:
+        """编辑面板里版本/加载器字段变了 → 后台补全游戏文件。
+
+        与 round-166 一致：幂等补全，保留存档与模组，失败不阻塞已保存的字段。
+        """
+        inst = self.mgr.get(inst_id)
+        if inst is None:
+            self._refresh()
+            return
+        self._refresh()
+        info(self, t("instances.setting_modified_title"),
+             t("instances.version_changed"))
+        mw = self.window()
+        if hasattr(mw, "_start_instance_download"):
+            try:
+                mw._start_instance_download(inst.id)
+            except Exception:  # noqa: BLE001 - 补全失败不影响已保存的设置
+                pass
 
     # ── 整合包应用到已有实例（round-38 中轴：二次安装/升级）──
     def _apply_mrpack_to(self, inst: Instance):

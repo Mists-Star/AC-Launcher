@@ -309,8 +309,12 @@ def _copied_with_progress(
 # - "iso" = 外来版本隔离：mc_dir 本身就是 versions/<id> 目录，真实版本 json
 #   扁平躺在 <mc_dir>/<version>.json。
 INSTANCE_FORMATS = (
-    "auto", "ac", "vanilla", "iso", "multimc", "curseforge", "modrinth", "custom",
+    "auto", "ac", "vanilla", "iso", "multimc", "curseforge", "modrinth",
+    "pcl", "custom",
 )
+# round-183：补 "pcl" —— 玩家嘴里「PCL 那种实例」此前只能落到 vanilla / iso
+# 近似表达，选不出来也标不出来。PCL2 的磁盘特征很明确：游戏目录下有
+# ``PCL/`` 工作目录（Setup.ini / Cache），版本仍是标准的 ``versions/<id>/``。
 
 # kind（导入时按权威文件判定的布局）→ 启动格式。
 # 特征探测全 miss 时的兜底：目录被改名/移动/元数据文件缺失时仍能认出来源。
@@ -475,6 +479,16 @@ def _probe_format(inst) -> str:
                  os.path.join(parent, "mmc-pack.json")):
         if os.path.isfile(cand):
             return "multimc"
+    # 1b) PCL2：游戏目录下有它自己的工作目录 ``PCL/``（Setup.ini / Cache /
+    #     Latest.ini）。round-183 新增，用于「启动格式」里选得出、标得出。
+    #     PCL2 的版本仍是标准 versions/<id>/，所以这条必须排在 iso 判断之前
+    #     会误伤的只有「mc_dir 本身就是 versions/<id>」那种导入形态——那种
+    #     目录里不会有 PCL/。
+    pcl_dir = os.path.join(mc, "PCL")
+    if os.path.isdir(pcl_dir) and any(
+            os.path.isfile(os.path.join(pcl_dir, n))
+            for n in ("Setup.ini", "Latest.ini", "PCL.ini")):
+        return "pcl"
     # 2) 外来版本隔离（其他启动器隔离导入）：mc_dir 就是 versions/<id> 目录
     #    本身，真实 json 扁平躺在 <mc>/<version>.json（而非 versions/<v>/<v>.json）
     version = (getattr(inst, "version_id", "") or getattr(inst, "game_version", ""))
@@ -501,7 +515,7 @@ def _probe_format(inst) -> str:
 # AC 自有布局绝不可能属于这些外来格式：读到这样的组合说明是旧导入标签
 # 残留（round-164）。只纠正「结构上确定」的 AC 实例，外来实例保留手选。
 _ADAPT_STALE_FORMATS = ("vanilla", "iso", "multimc", "curseforge", "modrinth",
-                        "custom")
+                        "pcl", "custom")
 
 
 def adapt_format(inst) -> bool:

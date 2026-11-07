@@ -108,6 +108,71 @@ CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash
 
 ---
 
+## round-183（2026-11-07）— PCL 式整页编辑面板 / 加载器真装真卸 / pcl 格式
+
+> 用户拍板（2026-11-07 00:56）：「新建整页编辑面板，左侧分组导航，加载器
+> 真装真卸，模组增删启停内嵌不跳页；新建向导补启动格式下拉与 pcl 枚举」。
+> 对应 `docs/quality_punchlist.md` 第十一章 ②③。
+
+### 新增
+
+* **`src/instance_editor.py` — `InstanceEditorDialog`**：把原来 480×620 的
+  一条长滚动框换成整页式编辑，左侧竖排导航（基础 / 启动 / Java / 目录与格式 /
+  模组 / 内容 / 高级），右侧单页内容。同一面板内直接增删启停 mod、删资源包与
+  存档、装卸加载器，不再跳页。
+* **`src/core/loader_swap.py` — 加载器真装真卸**：
+  * `swap_loader()` 走 `core.install.install_instance`（幂等补全）真装，成功
+    后清理不再被引用的旧加载器版本目录——这才是「换」而不是「叠一层」；
+    失败**回滚字段**，不把实例留在半个加载器的状态。
+  * `uninstall_loader()` 删实例自己 `versions/<loader-id>/` 退回原版，mods 与
+    存档保留；`external` 实例（导入的外部游戏目录）**拒绝卸载**，避免把别的
+    启动器弄坏；路径越界（`..` 跳出 versions）一律拒绝；`libraries/` 永不删。
+* **启动格式 `pcl`**：`INSTANCE_FORMATS` 补 `pcl`，`_probe_format` 用 PCL2 的
+  工作目录特征（`<mc>/PCL/Setup.ini|Latest.ini|PCL.ini`）识别；徽章色 `#0EA5E9`，
+  文案 zh/en 各一份。
+* **新建向导**：目录下拉补 `pcl`（选 PCL2 的 `.minecraft`），并新增一行
+  「启动格式将标记为：…（建好后可在「编辑实例」里改）」——此前新建全程
+  一处都不显示格式，玩家自然觉得「看不到各种格式」。
+
+### 变更
+
+* 实例右键新增「编辑实例」；详情面板齿轮与右键都打开新面板。
+* `pages_instances._edit_instance_settings` 由 280 行内联对话框改为薄封装：
+  只保留「版本变了触发后台补全」与刷新列表两件收尾。
+
+### 收尾：按七页真机截图修排版（12:5x）
+
+面板能开 ≠ 画得对。用部署目录的两个真实实例 offscreen 渲染七页截图逐页目检，
+查出并修掉六处：
+
+* **实心按钮上的图标是一团暗影**（放大 4× 才认出是下载箭头）：`make_button`
+  一律拿主题文字色 tint 图标，近黑压紫底。改为 `kind ∈ accent/play/danger` 走
+  `on_accent()`，跟随 `text_on_accent`（浅色 accent 下自动转深，不写死白色）。
+  全项目 4 处 accent+icon 按钮同时受益（「新建实例」「添加模组」「安装 / 更新」）。
+* 「＋ ＋ 添加模组」两个加号：文案键 `mods.add` 自带「+」，与图标重复 →
+  新增 `inst.mods_add`。
+* 模组空态标题写着「暂无可用实例」（借用实例列表的空态键）→ 新增
+  `inst.mods_empty_title`。
+* 高级页游戏目录显示成 `\Appdata\AC_Launcher\…`（盘符被吃掉）：只读 QLineEdit
+  设值后光标停在末尾 → `setCursorPosition(0)`。
+* `QSpinBox` 右侧怪线 + 滚动区滚轮静默改内存值 → `NoButtons` + 全局
+  `wheelEvent` 补丁。
+* 「当前状态」半屏灰字墙 → 两列表格 + 路径独立段落。
+
+> ☠ 探针陷阱：`QTest.qWait` 会饿死后台 `Worker`（等满 12s 后台函数一次没跑，
+> Java 页恒显「尚未判定」）→ 必须用 `time.sleep()` + `processEvents()` 循环。
+
+### 验证
+
+* 新增 `tests/test_round183_editor.py`（62 条）：结构 / 文案漏键 / 格式枚举 /
+  卸载边界（误删、外来实例、越界）/ 装失败回滚 / PCL2 识别 / offscreen 真开
+  面板并保存 / UI 标签不污染字段 / 端到端落盘。
+* `regress.py` **53/53 exit 0**；i18n **1772 = 1772**；文案门禁与 PII 门禁全过。
+* 产物反查（dist_beta 与部署 exe 各一次）`ALL IN PRODUCT`：6 个模块逐个查名字与
+  字面量，含新文案键与 `ui_kit.on_accent`。
+* 体积：裁掉 68 个非 zh_CN/en 的 Qt 翻译后 **116.8 MB / 4098 文件**；
+  部署冒烟 pid 存活、206 MB、`crash.log` 未生成。
+
 ## round-182（2026-11-07）— Cleanroom 拿错 Java / 黑窗 / 亮度与窗口模式 / 客户端增强包
 
 > 用户报：「cleanroom 的 1.12.2 我用 java25 他启动不了，而且还拉起我 D 盘
