@@ -3,7 +3,8 @@
 > **决策来源**：主理人「这样，我们直接仿照其他启动器学一遍吧」→ 选择「整套对齐含整页重做」→ 追加
 > 「注意是 99% 的代码参考学习」。
 > **本文件性质**：Task #353 的交付物。逐条写清「上游怎么做（含 `repo:path:line` 与代码片段）→
-> AC 落到哪个文件/函数 → 用哪条回归断言证明落地」。**规格拍板前不动 UI 源码**。
+> AC 落到哪个文件/函数 → 用哪条回归断言证明落地」。
+> **状态**：2026-11-07 主理人已拍板 3 个 IA 分歧（§4），阶段二按拍板结果实施；规格已按拍板修订，**拍板结果与推荐项不一致处以拍板为准**。
 > **日期**：2026-11-07 ｜ 关联：`docs/quality_punchlist.md` §十四、`CHANGELOG.md` round-207。
 
 ---
@@ -66,14 +67,17 @@ AC 计划以 GPL-3.0 开源，仍不做整段搬运。既有红线不变：不�
 | 缓存 | `metacache` 落盘 + 内存 pixmap | ETag / Last-Modified + 304 + TTL | 下载源候选回退 | 内存 30min / 磁盘 24h，过期即等网络 |
 
 **结论**：三家在「服务端过滤 + 立即渲染 + 缓存」上完全一致，分歧只在 **版式与分页**。
-本规格采用 **Prism 的骨架与状态机 + PCL-CE 的筛选项与双源游标 + HMCL/Prism 的 URL 参数**，
-即 §2 的 12 条。版式分歧见 §4，需主理人拍板。
+按主理人拍板，本规格采用 **筛选侧栏 / 结果区两栏 + 详情保留整页切换 + PCL-CE 页码器与
+双源游标 + HMCL/Prism 的 URL 参数**，即 §2 的 12 条。详见 §4。
+> ⚠ 上游 Prism 是三栏（详情也在同屏），主理人明确选择**保留现有整页切换**，
+> 因此本轮的「整页重做」= 筛选侧栏 + 结果区 + 页码器 + 卡片/徽章/缓存重做，
+> **详情形态不动**（这正是 1% 偏离之一，登记在 §0.3）。
 
 ---
 
 ## 2. 逐条对照规格
 
-### 2.1 三栏骨架（筛选 / 结果 / 详情同屏）
+### 2.1 两栏骨架（筛选 / 结果同屏，详情保留整页切换）
 
 **上游证据** `prism:launcher/ui/pages/modplatform/ResourcePage.ui:29-62`
 
@@ -92,10 +96,11 @@ AC 计划以 GPL-3.0 开源，仍不做整段搬运。既有红线不变：不�
 `prism:…/ModPage.cpp:103-121` 的 `splitter->replaceWidget(0, widget)`，并把
 `filterChanged` 直接接到 `triggerSearch`。
 
-- **AC 落地点**：`src/pages_browse.py:433-529` 的 `StorePage` 根布局 → 换成 `QSplitter`；
-  `self._stack`（`:527-529`）不再承载「列表 ↔ 详情」整页切换，详情改为第三格。
-- **断言点**：`StorePage` 存在 `QSplitter`，且 `count() == 3`；`_open_detail()` 不切换
-  `QStackedWidget` 的当前页，而是写入第三格。
+- **AC 落地点**：`src/pages_browse.py:433-529` 的 `StorePage` 根布局 → 换成 `QSplitter`，
+  两格 = `StoreFilterPanel` / 结果区（列表 + 页码器）。筛选面板复用 Prism 的
+  `replaceWidget` 可折叠思路；**`self._stack`（`:527-529`）保留**，详情继续整页切换。
+- **断言点**：`StorePage` 存在 `QSplitter` 且 `count() == 2`；`_open_detail()` 仍切
+  `QStackedWidget` 到详情、`_close_detail()` 切回列表，**不新开窗口 / 不新建 QDialog**。
 
 ### 2.2 筛选侧栏字段（不新造筛选项）
 
@@ -241,7 +246,7 @@ Prism 则用 `prism:…/ResourceModel.cpp:455-460` 的「本页条数 < 25 → F
   `search_all_paged()`），`StorePage` 用 `{mr:{offset,total}, cf:{offset,total}}` 管状态。
 - **断言点**：两源各自推进、互不覆盖；`total` 到顶后不再发请求；单源失败不影响另一源游标。
 
-### 2.6 分页模型 — **待拍板，见 §4-A**
+### 2.6 分页模型 — **已拍板：真页码器（PCL-CE 口径）**
 
 Prism：`prism:…/ResourceModel.cpp:162-169` `fetchMore()` → `search()`，
 `:435-470` 到手即 `beginInsertRows` 增量 append；`prism:…/modrinth/ModrinthModel.cpp:81-91`
@@ -249,7 +254,11 @@ Prism：`prism:…/ResourceModel.cpp:162-169` `fetchMore()` → `search()`，
 PCL-CE：`pclce:…/PageComp.xaml.cs:15` `PageSize = 40`、`:34-48` 按页切片、
 `:295-297` `targetResultCount = (page + 1) * PageSize`；
 `pclce:…/PageCompViewModel.cs:55-69` 页码器依据双源 `offset < total` 决定可否翻页。
-**两家相反**，不能同时「99% 对齐」，必须由主理人选一个（§4-A）。
+**拍板结果：采用 B（PCL-CE 真页码器）**。落地 `PageSize=40` 口径、
+`targetResultCount=(page+1)*PageSize`、双源 `offset<total` 决定可否翻页、
+`ReplaceProjects()` 整体替换只触发一次布局。round-207 的 **按源渐进渲染保留**：
+它负责「同一页内两源先后到达时的首屏出卡」，与页码器不冲突；被替换的只是
+无限滚动 `_more()` / `_has_more` 闸门。
 
 ### 2.7 搜索防抖与请求去重
 
@@ -319,7 +328,7 @@ await _cacheService.SetAsync(cacheKey, body, new CachePolicy{ AbsoluteExpiration
   `StorePage._on_loaded()` 对 stale 结果显示「正在更新」并在后台刷新完成后局部替换。
 - **断言点**：过期缓存存在时首帧渲染**不等待网络**；刷新失败保留旧数据并提示，不清空页面。
 
-### 2.10 详情页：同屏、版本/前置预取
+### 2.10 详情页：保留整页切换、版本/前置预取
 
 - `prism:…/ResourcePage.cpp:223-306` `updateUi(index)` 在选中项变化时更新第三格详情；
   `:333-357` `refreshVersionComboBox()` 与 `:381-441` `versionListUpdated()` 拉版本；
@@ -328,9 +337,11 @@ await _cacheService.SetAsync(cacheKey, body, new CachePolicy{ AbsoluteExpiration
   `pclce:PCL.Core/Minecraft/ResourceProject/ModDependencyResolver.cs` 负责前置依赖。
 - **AC 现状**：`src/pages_browse.py:984-1014` 用 `_stack` 整页切到 `src/store_detail.py`；
   版本 / 前置 / 中文简介在点开后串行请求。
-- **AC 落地点**：详情改第三格（§2.1）；`store_detail.py` 的 `StoreDetailPanel` 保持
-  `QWidget` 以便嵌入；对可见卡片预取版本列表（限 3 条，避免请求风暴）。
-- **断言点**：选中卡片不改变页面栈；预取并发有上限；详情面板可独立构造（页内/窗口两态同实现）。
+- **AC 落地点**：**详情形态不动**（主理人拍板），`self._stack` 继续承载
+  「列表 ↔ 详情」整页切换；`store_detail.py` 的 `StoreDetailPanel` 保持 `QWidget`；
+  只补「可见卡片预取版本列表（限 3 条）」以降低点开后的串行等待。
+- **断言点**：选中卡片切到详情、返回回列表，全程不新开窗口；预取并发有上限；
+  详情面板可独立构造（页内 / 窗口两态同实现）。
 
 ### 2.11 徽章与列表字段
 
@@ -363,7 +374,7 @@ await _cacheService.SetAsync(cacheKey, body, new CachePolicy{ AbsoluteExpiration
 
 | # | 差距 | 现状位置 | 对应规格 |
 |---|---|---|---|
-| 1 | 无筛选侧栏，详情整页切走 | `src/pages_browse.py:433-529`、`:984-1014` | §2.1 / §2.10 |
+| 1 | 无筛选侧栏（**详情整页切换是主理人保留项，不算差距**） | `src/pages_browse.py:433-529` | §2.1 / §2.10 |
 | 2 | CF 请求缺版本/加载器/分类参数 | `src/net_api.py:1564-1572` | §2.3 |
 | 3 | MR 请求缺版本/加载器 facets | `src/net_api.py:2579` | §2.3 |
 | 4 | 排序写死 `sortField=1` | `src/net_api.py:1570` | §2.4 |
@@ -377,25 +388,23 @@ await _cacheService.SetAsync(cacheKey, body, new CachePolicy{ AbsoluteExpiration
 
 ---
 
-## 4. 需要主理人拍板的 3 个分歧（**拍板前不动 UI 源码**）
+## 4. 主理人拍板结果（2026-11-07，已定）
 
-| 分歧 | 选项 A（上游代码） | 选项 B（上游代码） | 默认建议 |
-|---|---|---|---|
-| **A. 分页模式** | Prism 无限滚动：`ResourceModel.cpp:162-169,435-470`、`ModrinthModel.cpp:81-91` | PCL-CE 真页码器：`PageComp.xaml.cs:15,34-48`、`PageCompViewModel.cs:55-69` | **B**：§十四 P0-3 明确写了「真分页」，且双源游标（§2.5）天然适合页码器；代价是放弃 round-207 刚做的无限滚动增量 append |
-| **B. 默认来源** | §十四 P0-2 建议「默认单源 + 显式切换」 | round-140 主理人拍板「默认全部双源」 | **保持 B**：round-140 是明确拍板，不为了像别人悄悄改；只在侧栏把「来源」提升为一级控件 |
-| **C. 详情形态** | Prism 第三栏抽屉（同屏） | PCL-CE 独立详情页 / AC 现状整页栈 | **A**：用户最初吐槽「功能相同却页面不一样」「不要不断开窗口」，第三栏最贴合整页重做的目标 |
+| 分歧 | 拍板 | 依据 / 影响 |
+|---|---|---|
+| **A. 分页模式** | ✅ **真页码器（PCL-CE）** | 与 §十四 P0-3「真分页」一致；双源 `offset/total` 游标天然适配。代价：替换 round-207 的无限滚动 `_more()` 闸门，但按源渐进渲染保留 |
+| **B. 详情形态** | ✅ **保留整页切换**（**否决了推荐的三栏同屏**） | 主理人选择现有 `_stack` 列表↔详情整页切换；不开窗口、不新建 QDialog。骨架因此是**两栏**而非三栏 |
+| **C. 默认来源** | ✅ **保持「全部」双源** | 维持 round-140 拍板；只把「来源」提升为筛选侧栏一级控件，不悄悄改后端 |
 
-> 这三条决定 `src/pages_browse.py` 的骨架写法，改错要整页返工，因此先问再写。
-> A/B/C 之外的 12 条规格无分歧，拍板后按 §5 直接落地。
-
----
+> 拍板后 §2.1 / §2.6 / §2.10 / §3 / §5 / §6 / §7 已全部按结果修订。
+> 规格与推荐项冲突处一律以本表为准；阶段二（Task #354）直接按此实现，不再二次确认。
 
 ## 5. 落地映射表（Task #354 用）
 
 | 文件 | 改动 | 规格条目 |
 |---|---|---|
 | `src/store_filter.py`（新增） | `StoreFilterPanel(QWidget)`：筛选字段 / `filterChanged` / `get_filter()` | §2.1 / §2.2 |
-| `src/pages_browse.py` | `QSplitter` 三栏、页码器或无限滚动、双源游标、350ms 防抖、占位图、SWR 状态、徽章 | §2.1 / §2.5-2.11 |
+| `src/pages_browse.py` | `QSplitter` 两栏（筛选 / 结果）、**真页码器**、双源游标、350ms 防抖、占位图、SWR 状态、徽章；详情保留 `_stack` | §2.1 / §2.5-2.11 |
 | `src/net_api.py` | `_cf_page()` / `search_mods()` 增服务端过滤与排序参数；`search_all()` 出参带双源游标；`_cached(allow_stale=True)` | §2.3-2.5 / §2.9 |
 | `src/async_image.py` | 视口内才 `load()`；成功只换图标不重建卡片 | §2.8 |
 | `src/store_detail.py` | `StoreDetailPanel` 可嵌第三格；可见卡片预取（限 3） | §2.10 |
@@ -407,14 +416,14 @@ await _cacheService.SetAsync(cacheKey, body, new CachePolicy{ AbsoluteExpiration
 
 ## 6. 回归断言清单（每项一条，沿用 round-206/207 做法）
 
-1. 三栏 `QSplitter.count() == 3`；详情不切栈。
+1. 两栏 `QSplitter.count() == 2`；详情仍走 `_stack` 整页切换且不新开窗口。
 2. 筛选字段集合与 §2.2 表格一致，且 `filterChanged` 触发恰好一次重搜。
 3. CF 请求参数含 `gameVersion` / `modLoaderType(s)` / `categoryId` / `sortField` / `index` / `pageSize`。
 4. MR 请求 `facets` 含 `versions` / `categories` / `project_type`，`offset` 与 `limit` 成对。
 5. 无 `_cf_pool` / 本地 N 条重排回退；保持一次搜索一次请求。
 6. 排序每档映射到非空服务端参数，且排序进入缓存 key。
 7. 双源 `{offset,total}` 各自推进；到顶不发请求；单源失败不影响另一源。
-8. 分页模式与拍板结果一致（页码器状态机或 `fetchMore` 状态机，二选一断言）。
+8. 真页码器：页码 / 上一页 / 下一页 / 首页状态由双源 `offset<total` 推导；不再有 `_more()` / `_has_more` 无限滚动触发。
 9. 防抖 350ms；相同筛选不重复发请求；旧 gen 迟到结果被丢弃。
 10. 占位图立即上屏；同 URL 不重复请求；图标回来不重建卡片。
 11. 过期缓存存在时首帧不等网络；刷新失败保留旧数据。
@@ -433,3 +442,4 @@ await _cacheService.SetAsync(cacheKey, body, new CachePolicy{ AbsoluteExpiration
 - ❌ 不把 PCL-CE 的 `sortField` 取值直接套到 MCIM 镜像（§2.4 复核纪律）。
 - ❌ 不改 `Worker` / `TrackedThread` / 打包链路；不碰 `D:\Appdata\AC_Launcher` 直到 Task #356。
 - ❌ 不因为「像别人」推翻主理人已拍板的 round-140 默认源与 round-207 实测排序值。
+- ❌ **不把详情改成 Prism 式第三栏**：主理人 2026-11-07 明确选择保留整页切换。
