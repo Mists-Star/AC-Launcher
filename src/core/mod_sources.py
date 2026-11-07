@@ -69,14 +69,22 @@ def record(inst, entries) -> int:
     for e in entries:
         fn = os.path.basename(str(e.get("filename") or ""))
         pid = str(e.get("project_id") or "")
-        if not fn or not pid:
+        slug = str(e.get("slug") or "")
+        title = str(e.get("title") or "")
+        src = str(e.get("source") or "modrinth")
+        if not fn:
+            continue
+        # ☠ round-197：project_id 不再是必需 —— **整合包 / 导入**的 jar 本来就
+        # 没有可靠的 project_id（整合包只声明"要下哪些文件"，玩家还能用
+        # overrides 覆盖），但它们同样该被标记出来，不能混在"手动放入"里。
+        if not pid and not slug and not title:
             continue
         mapping[fn] = {
             "project_id": pid,
-            "slug": str(e.get("slug") or ""),
-            "title": str(e.get("title") or ""),
+            "slug": slug,
+            "title": title,
             "version": str(e.get("version") or ""),
-            "source": str(e.get("source") or "modrinth"),
+            "source": src,
             "ts": now,
         }
         n += 1
@@ -103,3 +111,12 @@ def slug_map(inst) -> dict:
     """``{文件名: slug}`` —— 给更新检测用（优先真 slug，别再猜文件名）。"""
     return {fn: str(v.get("slug") or "") for fn, v in load(inst).items()
             if v.get("slug")}
+
+
+def source_of(inst, filename: str) -> str:
+    """某个 jar 的来源：``modrinth`` / ``curseforge`` / ``modpack`` /
+    ``imported`` / ``""``（无记录 = 手动放入）。"""
+    rec = load(inst).get(os.path.basename(filename))
+    if not rec:
+        return ""
+    return str(rec.get("source") or "")

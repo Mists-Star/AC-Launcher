@@ -97,6 +97,7 @@ SUITES = [
     ("一键修复反馈", "test_round194_fix_all.py", "script"),
     ("功能统一/页面化", "test_round195_unify.py", "script"),
     ("全面审计补漏", "test_round196_audit.py", "script"),
+    ("崩溃页内/Java合一/来源", "test_round197_inline_java.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

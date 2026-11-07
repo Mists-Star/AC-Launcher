@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QProgressBar, QWidget,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from .theme import COLORS, RoundedCard
 from .icons import icon
@@ -112,25 +112,31 @@ class _FindingCard(RoundedCard):
         lay.addLayout(acts)
 
 
-class CrashAnalyzerDialog(QDialog):
-    """Analyze + repair UI for a single instance's crash."""
+class CrashAnalyzerPanel(QWidget):
+    """崩溃分析面板（**页内**，round-197）。
+
+    原来�� QDialog 弹窗。它是**实例相关**的分析（崩溃日志、缺前置修复），
+    应该在实例页里换页打开，而不是另开窗口 —— round-195 起编辑 / 体检 /
+    增强包 / 导出都已经页内化了，崩溃分析是最后一个还在弹窗的实例功能。
+    窗口壳 :class:`CrashAnalyzerDialog` 保留给历史调用点。
+    """
+
+    closed = Signal()
 
     def __init__(self, inst=None, parent=None):
         super().__init__(parent)
         self.inst = inst or manager().current()
         self._inst_name = getattr(self.inst, "name", "")
         self._findings: list[crash.CrashFinding] = []
-        self.setWindowTitle(t("crash.title"))
-        self.resize(720, 620)
-        self.setMinimumSize(640, 480)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # frameless shell (same pattern as ScanDialog)
-        from .frameless import FramelessHelper, TitleBar
+        # 页内模式不要 frameless 标题栏（页面自己有标题）→ 普通标题标签
+        from .frameless import TitleBar
         self.titlebar = TitleBar(self, title=t("crash.title"), height=38)
+        self.titlebar.setVisible(False)      # 页内隐藏；窗口模式再显示
         root.addWidget(self.titlebar)
 
         # ── head: instance label + analyze button ──
@@ -181,17 +187,32 @@ class CrashAnalyzerDialog(QDialog):
         foot.addStretch(1)
         close_btn = QPushButton(t("common.close"))
         close_btn.setMinimumHeight(34)
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self._on_close)
         foot.addWidget(close_btn)
+
         root.addLayout(foot)
 
-        self._frameless = FramelessHelper(self)
-        self._frameless.set_titlebar(self.titlebar)
-        from .win_rounded import enable_win11_round_corners
-        enable_win11_round_corners(self)
+        # ☠ round-197：frameless 只在**窗口模式**启用 —— 页内面板套 frameless
+        # 会把控件当成窗口处理（标题栏、圆角、拖拽），在页面里表现为布局跑偏。
+        self._frameless = None
 
         self._update_header()
         self._run_analyze()
+
+    def enable_window_chrome(self) -> None:
+        """窗口模式：补上 frameless 标题栏与圆角（页内模式不需要）。"""
+        if self._frameless is not None:
+            return
+        from .frameless import FramelessHelper
+        from .win_rounded import enable_win11_round_corners
+        self.titlebar.setVisible(True)
+        self._frameless = FramelessHelper(self)
+        self._frameless.set_titlebar(self.titlebar)
+        enable_win11_round_corners(self)
+
+    def _on_close(self) -> None:
+        """关闭：页内模式通知外层返回。"""
+        self.closed.emit()
 
     # ------------------------------------------------------------- analyze
     def _update_header(self):
@@ -325,9 +346,22 @@ class CrashAnalyzerDialog(QDialog):
                  detail="\n".join(failed_lines(result)))
 
     def _fix_java(self):
+        """去管理 Java（round-197）。
+
+        原来这里弹 Java 管理器，而**设置页里也有同一个管理器**（两个入口）。
+        现在统一：跳到设置页的 Java 分区（主窗口本来就有
+        ``_select_settings_section``）；拿不到主窗口时回退到窗口壳。
+        """
+        win = self.window() if self is not None else None
+        jump = getattr(win, "_select_settings_section", None)
+        if callable(jump):
+            try:
+                jump("java")
+                return
+            except Exception:  # noqa: BLE001 - 跳不过去就退回弹窗
+                pass
         from .java_manager_dialog import JavaManagerDialog
-        dlg = JavaManagerDialog(self)
-        dlg.exec()
+        JavaManagerDialog(self).exec()
 
     def _fix_ram(self):
         info(self, t("crash.title"), t("crash.ram_hint"))
@@ -346,3 +380,52 @@ class CrashAnalyzerDialog(QDialog):
                               "loader_mismatch") if k in kinds]
         if manual:
             self.status.setText(t("crash.repair_all_note", n=len(manual)))
+
+
+class CrashAnalyzerDialog(QDialog):
+    """**兼容壳**：窗口模式（历史调用点）。内部就是 :class:`CrashAnalyzerPanel`。"""
+
+    def __init__(self, inst=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("crash.title"))
+        self.resize(720, 620)
+        self.setMinimumSize(640, 480)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.panel = CrashAnalyzerPanel(inst, parent=self)
+        self.panel.enable_window_chrome()
+        lay.addWidget(self.panel)
+        self.panel.closed.connect(self.accept)
+
+    def __getattr__(self, name):
+        if name == "panel":
+            raise AttributeError(name)
+        return getattr(self.panel, name)
+
+    def __setattr__(self, name, value):
+        """属性写入转发给内部面板。
+
+        ☠ 只转发**读取**是不够的：``dlg._dl_phase = "download"`` 会把值设在
+        壳上，而面板读的是自己的 ``_dl_phase`` → 状态行永远停在旧状态
+        （round-197 Java 下载测试当场抓出来）。
+        """
+        if name in ("panel",):
+            object.__setattr__(self, name, value)
+            return
+        panel = self.__dict__.get("panel")
+        if panel is not None and hasattr(panel, name):
+            setattr(panel, name, value)
+            return
+        object.__setattr__(self, name, value)
+
+    def closeEvent(self, ev):  # noqa: N802 - Qt 命名
+        """关闭事件转发给面板（面板里可能有后台线程要收）。"""
+        panel = self.__dict__.get("panel")
+        if panel is not None:
+            try:
+                panel.closeEvent(ev)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        super().closeEvent(ev)

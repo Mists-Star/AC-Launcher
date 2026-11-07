@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar,
     QScrollArea, QWidget, QFrame, QComboBox, QLineEdit,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 
 from .i18n import t
 from .theme import COLORS, RoundedCard, with_alpha
@@ -153,19 +153,23 @@ class _JavaDetectedRow(RoundedCard):
             self.dlg.refresh_all()
 
 
-class JavaManagerDialog(QDialog):
-    """Scan / pick / delete / download Java runtimes of ANY version.
+class JavaManagerPanel(QWidget):
+    """扫描 / 选择 / 删除 / 下载任意版本 Java 运行时（**页内**，round-197）。
 
-    ``selected_path`` is set when the user clicks "use this Java" (or after a
-    successful download auto-selects it) so the caller (Settings) can write it
-    into config.
+    原来是个 QDialog 弹窗，而且**三个入口**都能打开它（实例页 / 设置页 /
+    崩溃分析里）—— 同一功能三个入口 + 都是弹窗。
+    现在：面板化，设置页里内嵌它当一个分区，实例页与崩溃分析里的入口改为
+    **跳到设置页的 Java 分区**（主窗口本来就有 ``_select_settings_section``）。
+
+    ``selected_path`` 在用户点「使用这个 Java」（或下载成功后自动选中）时
+    写入，供调用方（设置页）写回配置。
     """
+
+    closed = Signal()
+    selectedChanged = Signal(str)   # round-197：选中运行时 → 写回路径
 
     def __init__(self, parent=None, current_path: str = ""):
         super().__init__(parent)
-        self.setWindowTitle(t("javamgr.title"))
-        self.resize(720, 600)
-        self.setMinimumSize(620, 460)
         self.current_path = current_path or ""
         self.selected_path: str | None = None
         self._scan_worker = None
@@ -178,12 +182,13 @@ class JavaManagerDialog(QDialog):
         self._rows: list[_JavaDetectedRow] = []
         self._last_javas: list[dict] | None = []
 
-        # ── AC 无边框窗口：自定义标题栏 + 圆角 ──
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        # 页内模式不要 frameless 标题栏（设置页自己有分区标题）
         self.titlebar = TitleBar(
             self, title=t("javamgr.title"), height=38, controls="close")
+        self.titlebar.setVisible(False)
         root.addWidget(self.titlebar)
 
         body = QWidget()
@@ -295,21 +300,32 @@ class JavaManagerDialog(QDialog):
         btns.addStretch(1)
         close_btn = QPushButton(t("common.close"))
         close_btn.setMinimumHeight(32)
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self._on_close)
         btns.addWidget(close_btn)
         lay.addLayout(btns)
 
         root.addWidget(body, stretch=1)
 
-        # ── frameless + DWM shadow + win11 rounded corners ──
-        self._frameless = FramelessHelper(self)
-        self._frameless.set_titlebar(self.titlebar)
-        enable_win11_round_corners(self)
+        # ── frameless 只在**窗口模式**启用（页内嵌进设置页时不需要）──
+        self._frameless = None
 
         # fill the version combo (network best-effort)
         self._populate_majors()
         # auto-scan on open, like the old instance scanner did
         QTimer.singleShot(50, self._run_scan)
+
+    def enable_window_chrome(self) -> None:
+        """窗口模式：补上 frameless 标题栏与圆角（页内模式不需要）。"""
+        if getattr(self, "_frameless", None) is not None:
+            return
+        self.titlebar.setVisible(True)
+        self._frameless = FramelessHelper(self)
+        self._frameless.set_titlebar(self.titlebar)
+        enable_win11_round_corners(self)
+
+    def _on_close(self) -> None:
+        """关闭：页内模式通知外层返回。"""
+        self.closed.emit()
 
     # ---------- version combo ----------
     def _populate_majors(self):
@@ -494,6 +510,7 @@ class JavaManagerDialog(QDialog):
     def select_java(self, path, quiet=False):
         self.current_path = path
         self.selected_path = path
+        self.selectedChanged.emit(path or "")
         self.cur_lbl.setText(
             t("javamgr.current", path=path) if path else t("javamgr.none_system"))
         self.refresh_all()
@@ -511,14 +528,17 @@ class JavaManagerDialog(QDialog):
         self._build_rows(self._last_javas)
 
     def done(self, r):
-        # round-173：无论点标题栏关闭还是底部「关闭」按钮，先把下载线程停下来，
-        # 否则对话框没了、线程还在后台拉几 MB 的包（用户反馈过这种「关了还在下」）。
+        """下载线程收尾 + 请求关闭（round-197：面板是 QWidget，没有 done()）。
+
+        round-173：无论点标题栏关闭还是底部「关闭」按钮，先把下载线程停下来，
+        否则对话框没了、线程还在后台拉几 MB 的包（用户反馈过这种「关了还在下」）。
+        """
         thr = self._dl_thread
         if thr is not None:
             thr.cancel()
             thr.wait(2000)
             self._dl_thread = None
-        super().done(r)
+        self.closed.emit()
 
     def closeEvent(self, e):
         busy = self._dl_thread is not None
@@ -528,3 +548,69 @@ class JavaManagerDialog(QDialog):
             e.ignore()
             return
         super().closeEvent(e)
+
+
+class JavaManagerDialog(QDialog):
+    """**兼容壳**：窗口模式（历史调用点）。内部就是 :class:`JavaManagerPanel`。"""
+
+    def __init__(self, parent=None, current_path: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(t("javamgr.title"))
+        self.resize(720, 600)
+        self.setMinimumSize(620, 460)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.panel = JavaManagerPanel(self, current_path=current_path)
+        self.panel.enable_window_chrome()
+        lay.addWidget(self.panel)
+        self.panel.closed.connect(self.accept)
+
+    def __getattr__(self, name):
+        if name == "panel":
+            raise AttributeError(name)
+        return getattr(self.panel, name)
+
+    def done(self, r):
+        """⚠ QDialog 自带 done()，会**遮蔽**面板的同名方法 → 显式转发。
+
+        不转发的话，"下载收尾"那段逻辑（停线程 + 等 2 秒）根本不会跑。
+
+        ☠ 必须有递归守卫：面板 done() 会 emit closed → 壳 accept() → 壳 done()
+        → 又转发给面板 → **无限递归**（现场表现就是 done() 之后卡死）。
+        """
+        if getattr(self, "_in_done", False):
+            return super().done(r)
+        self._in_done = True
+        try:
+            self.panel.done(r)
+        finally:
+            self._in_done = False
+        super().done(r)
+
+    def __setattr__(self, name, value):
+        """属性写入转发给内部面板。
+
+        ☠ 只转发**读取**是不够的：``dlg._dl_phase = "download"`` 会把值设在
+        壳上，而面板读的是自己的 ``_dl_phase`` → 状态行永远停在旧状态
+        （round-197 Java 下载测试当场抓出来）。
+        """
+        if name in ("panel",):
+            object.__setattr__(self, name, value)
+            return
+        panel = self.__dict__.get("panel")
+        if panel is not None and hasattr(panel, name):
+            setattr(panel, name, value)
+            return
+        object.__setattr__(self, name, value)
+
+    def closeEvent(self, ev):  # noqa: N802 - Qt 命名
+        """关闭事件转发给面板（面板里可能有后台线程要收）。"""
+        panel = self.__dict__.get("panel")
+        if panel is not None:
+            try:
+                panel.closeEvent(ev)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        super().closeEvent(ev)

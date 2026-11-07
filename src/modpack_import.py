@@ -138,7 +138,43 @@ def import_mrpack(path: str, mgr, mirror: str = "official") -> object:
     inst.version_id = launch_version or ""
     mgr._persist(inst)
     install.install_mrpack(path, inst.mc_dir, mirror=mirror)
+    # round-197：登记模组来源（整合包里的 jar 本来没有可靠的 project_id，
+    # 但至少要让玩家在模组列表里看得出"这是整合包带来的"）
+    _record_pack_sources(inst, source="modpack", title=name)
     return inst
+
+
+def _record_pack_sources(inst, source: str, title: str = "",
+                         project_ids: dict | None = None) -> int:
+    """登记「整合包 / 导入」带来的模组来源（round-197）。
+
+    这些 jar 没有可靠的 project_id（整合包只声明"要下哪些文件"，玩家还能
+    overrides 覆盖），但**来源要标出来** —— 否则它们和玩家手动放进来的在
+    模组列表里长得一模一样，更新检测也认不出。
+
+    ``project_ids``: ``{project_id: 文件名}``（CF 整合包有，能精确登记）。
+    """
+    mods_dir = getattr(inst, "mods_dir", "") or ""
+    if not mods_dir or not os.path.isdir(mods_dir):
+        return 0
+    names = [n for n in os.listdir(mods_dir)
+             if n.lower().endswith((".jar", ".jar.disabled"))]
+    if not names:
+        return 0
+    entries = []
+    for n in names:
+        entries.append({
+            "filename": n,
+            "project_id": "",
+            "slug": "",
+            "title": title or "",
+            "source": source,
+        })
+    try:
+        from .core import mod_sources
+        return mod_sources.record(inst, entries)
+    except Exception:  # noqa: BLE001 - 登记失败不影响导入本身
+        return 0
 
 
 def _launcher_settings() -> dict:
@@ -286,6 +322,11 @@ def import_curseforge_zip(
         ) from None
     # 先落盘再安装：安装失败也不至于丢掉已下载的整合包内容（round-150）。
     mgr._persist(inst)
+    # round-197：CF 整合包的文件**带 projectID** → 可以精确登记来源
+    _record_pack_sources(inst, source="curseforge", title=inst.name,
+                         project_ids={str(f.get("projectID", "")): f
+                                      for f in info.get("files", [])
+                                      if f.get("projectID")})
     if progress is not None:
         progress(t("modpack.installing_loader"), -1, 0)
     _install_after_import(inst, progress)
@@ -348,6 +389,8 @@ def import_folder_as_instance(folder: str, mgr) -> object:
     inst = mgr.add(name=name, game_version=game_version, loader=loader)
     _copy_tree(folder, inst.mc_dir)
     mgr._persist(inst)
+    # round-197：导入的实例里那些 jar 标成「导入」来源（区别于手动放入）
+    _record_pack_sources(inst, source="imported", title=name)
     return inst
 
 

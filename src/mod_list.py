@@ -173,13 +173,22 @@ class ModRow(QFrame):
         ldr = (self.meta.get("loader") or "").strip()
         if ldr:
             top.addWidget(self._pill(loader_name(ldr), dim=True))
-        # round-191：区分「资源中心下的」与「手动放进来的」—— 前者带来源标记，
-        # 点上去能看到它属于哪个 Modrinth 项目。
-        if self.source.get("project_id"):
+        # round-191/197：区分来源 —— 「资源中心 / 整合包 / 导入 / 手动放入」。
+        # round-197：整合包与导入带来的 jar 也要标出来（它们本来没有可靠的
+        # project_id，但玩家需要知道"这不是我手动放的"）。
+        _src = str(self.source.get("source") or "")
+        if _src in ("modrinth", "curseforge"):
             src_pill = self._pill(t("mods.from_store"), dim=True)
             src_pill.setToolTip(
                 t("mods.from_store_tip",
                   slug=self.source.get("slug") or self.source.get("title", "")))
+            top.addWidget(src_pill)
+        elif _src in ("modpack", "imported"):
+            key = ("mods.from_pack" if _src == "modpack"
+                   else "mods.from_import")
+            src_pill = self._pill(t(key), dim=True)
+            src_pill.setToolTip(
+                t("mods.from_pack_tip", name=self.source.get("title", "")))
             top.addWidget(src_pill)
         top.addStretch(1)
         col.addLayout(top)

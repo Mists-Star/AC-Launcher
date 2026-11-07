@@ -1109,6 +1109,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "new_instance.java_use_default": "使用默认 Java",
         "new_instance.java_choose": "选择 Java…",
         "new_instance.java_selected": "已选：{path}",
+        "new_instance.java_pick_title": "选择 Java 可执行文件",
         # round-165 下载位置 / 启动格式自选
         "new_instance.dir_section": "游戏目录",
         "new_instance.dir_ac": "AC 独立目录（推荐）",
@@ -1217,6 +1218,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         # round-191：模组来源（资源中心下载 vs 手动放入）
         "mods.from_store": "资源中心",
         "mods.from_store_tip": "从资源中心下载 · {slug}",
+        "mods.from_pack": "整合包",
+        "mods.from_import": "导入",
+        "mods.from_pack_tip": "来自 {name}",
         "mods.instance_label": "实例：{name}  ·  {version}",
 
         # ---- versions page ----
@@ -3160,6 +3164,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "new_instance.java_use_default": "Use default Java",
         "new_instance.java_choose": "Choose Java…",
         "new_instance.java_selected": "Selected: {path}",
+        "new_instance.java_pick_title": "Pick a Java executable",
         # round-165 download location / launch format
         "new_instance.dir_section": "Game directory",
         "new_instance.dir_ac": "AC private directory (recommended)",
@@ -3268,6 +3273,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         # round-191: mod provenance
         "mods.from_store": "From store",
         "mods.from_store_tip": "Downloaded from the store · {slug}",
+        "mods.from_pack": "Modpack",
+        "mods.from_import": "Imported",
+        "mods.from_pack_tip": "From {name}",
         "mods.instance_label": "Instance: {name}  ·  {version}",
 
         # ---- versions page ----

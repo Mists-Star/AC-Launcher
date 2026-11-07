@@ -2147,15 +2147,23 @@ class SettingsPage(QWidget):
         self._java_scan_worker.start()
         vl.addWidget(card_list, stretch=1)
 
-        # 底部：管理按钮
+        # 底部：管理按钮（round-197：内嵌展开，不再弹窗）
         manage_row = QHBoxLayout()
         manage_btn = QPushButton(t("settings.java_manage"))
         manage_btn.setProperty("cls", "accent")
         manage_btn.setMinimumHeight(34)
         manage_btn.clicked.connect(self._open_java_manager)
+        self._java_toggle_btn = manage_btn
         manage_row.addStretch(1)
         manage_row.addWidget(manage_btn)
         vl.addLayout(manage_row)
+
+        # 内嵌 Java 管理面板的宿主（默认空，点了按钮才放面板进去）
+        self._java_host = QWidget()
+        self._java_host.setLayout(QVBoxLayout())
+        self._java_host.layout().setContentsMargins(0, 0, 0, 0)
+        vl.addWidget(self._java_host)
+        self._java_panel = None
 
         return wrap
 
@@ -2521,13 +2529,51 @@ class SettingsPage(QWidget):
         self._open_java_manager()
 
     def _open_java_manager(self):
-        from .java_manager_dialog import JavaManagerDialog
-        dlg = JavaManagerDialog(self, current_path=self.java_path.text().strip())
-        dlg.exec()
-        # If the user picked a runtime, adopt it as the explicit java path.
-        if dlg.selected_path is not None:
-            self.java_path.setText(dlg.selected_path)
-            self.java_auto.setChecked(not dlg.selected_path)
+        """展开/收起内嵌的 Java 管理面板（round-197）。
+
+        原来这里是弹窗，而且**三个入口**都能打开它（实例页 / 设置页 / 崩溃分析
+        里）—— 同一功能三个入口 + 都是窗口。现在：
+        * 设置页：内嵌 JavaManagerPanel，就地展开；
+        * 实例页 / 崩溃分析：改为跳到设置页的 Java 分区
+          （主窗口本来就有 ``_select_settings_section``）。
+        """
+        panel = getattr(self, "_java_panel", None)
+        if panel is not None:
+            # 已展开 → 收起
+            panel.setVisible(False)
+            self._java_toggle_btn.setText(t("settings.java_manage"))
+            return
+        from .java_manager_dialog import JavaManagerPanel
+        panel = JavaManagerPanel(self,
+                                current_path=self.java_path.text().strip())
+        panel.closed.connect(self._on_java_panel_closed)
+        # 选中一个运行时 → 写回路径
+        panel.selectedChanged.connect(self._on_java_selected)
+        self._java_panel = panel
+        host = getattr(self, "_java_host", None)
+        if host is not None:
+            lay = host.layout()
+            if lay is None:
+                lay = QVBoxLayout(host)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.setSpacing(8)
+            lay.addWidget(panel)
+        panel.setVisible(True)
+        self._java_toggle_btn.setText(t("common.close"))
+
+    def _on_java_panel_closed(self) -> None:
+        panel = getattr(self, "_java_panel", None)
+        if panel is not None:
+            panel.setVisible(False)
+        btn = getattr(self, "_java_toggle_btn", None)
+        if btn is not None:
+            btn.setText(t("settings.java_manage"))
+
+    def _on_java_selected(self, path: str) -> None:
+        """Java 管理里选了运行时 → 写回路径框。"""
+        if path:
+            self.java_path.setText(path)
+            self.java_auto.setChecked(False)
 
     def _download_authlib(self):
         self.authlib_dl.setEnabled(False)

@@ -1228,10 +1228,17 @@ class NewInstanceDialog(QDialog):
             self.java_path_lbl.setText("")
 
     def _choose_java(self):
-        from .java_manager_dialog import JavaManagerDialog
-        dlg = JavaManagerDialog(self, current_path=self._java_path)
-        if dlg.exec() == QDialog.Accepted and dlg.selected_path:
-            self._java_path = dlg.selected_path
+        """选 Java 可执行文件（round-197）。
+
+        原来这里弹的是**完整的 Java 管理器**（扫描/下载/删除一整套）—— 但向导
+        只需要"选一个 java.exe"。而 Java 管理器在设置页里（唯一入口）。
+        这里改成**文件选择器**：场景对、重量轻，也消掉了一个重复入口。
+        """
+        from .win_rounded import pick_files
+        path = pick_files(self, t("new_instance.java_pick_title"), "",
+                          "Java (*.exe)")
+        if path:
+            self._java_path = path
             self.java_path_lbl.setText(
                 t("new_instance.java_selected", path=self._java_path))
 
@@ -2140,8 +2147,10 @@ class InstancesPage(QWidget):
         self._refresh()
 
     def _show_crash(self, inst: Instance):
-        from .crash_dialog import CrashDialog
-        CrashDialog(inst, parent=self).exec()
+        from .crash_dialog import CrashAnalyzerPanel
+        panel = CrashAnalyzerPanel(inst, parent=self)
+        panel.closed.connect(self._close_feature)
+        self._push_feature(panel)
 
     # ia[instances]: 「⋯ → 体检」 | 详情更多菜单 | 打开实例体检对话框（静态扫描 + 本地修复）
     # ── 页内功能栈（round-195）：编辑 / 体检 / 增强包都是"页面"，不是窗口 ──

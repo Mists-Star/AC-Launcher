@@ -429,6 +429,33 @@ class HealthDialog(QDialog):
             raise AttributeError(name)
         return getattr(self.panel, name)
 
+    def __setattr__(self, name, value):
+        """属性写入转发给内部面板。
+
+        ☠ 只转发**读取**是不够的：``dlg._dl_phase = "download"`` 会把值设在
+        壳上，而面板读的是自己的 ``_dl_phase`` → 状态行永远停在旧状态
+        （round-197 Java 下载测试当场抓出来）。
+        """
+        if name in ("panel",):
+            object.__setattr__(self, name, value)
+            return
+        panel = self.__dict__.get("panel")
+        if panel is not None and hasattr(panel, name):
+            setattr(panel, name, value)
+            return
+        object.__setattr__(self, name, value)
+
+    def closeEvent(self, ev):  # noqa: N802 - Qt 命名
+        """关闭事件转发给面板（面板里可能有后台线程要收）。"""
+        panel = self.__dict__.get("panel")
+        if panel is not None:
+            try:
+                panel.closeEvent(ev)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        super().closeEvent(ev)
+
 
 # 兼容别名（放在壳类之后，避免前向引用）
 ModCheckDialog = HealthDialog
