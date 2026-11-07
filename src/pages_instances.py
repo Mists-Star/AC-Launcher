@@ -1495,6 +1495,8 @@ class InstancesPage(QWidget):
         self._closing_scan = False
         self._empty_btn = None
         self._list_panel_visible = True
+        # round-195：页内功能栈（编辑 / 体检 / 增强包）的当前页索引
+        self._feature_idx = None
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
@@ -1510,6 +1512,7 @@ class InstancesPage(QWidget):
         self.mrpack_btn = self._mk_header_btn(
             t("instances.import_pack"), "download", self._import_mrpack, w=120)
         head_actions = QWidget()
+        self._head_actions = head_actions   # round-195：功能页时隐藏（新建/扫描/导入包会跳走）
         head_actions.setStyleSheet("background: transparent;")
         hl = QHBoxLayout(head_actions)
         hl.setContentsMargins(0, 0, 0, 0)
@@ -2023,9 +2026,14 @@ class InstancesPage(QWidget):
         m.exec(pos)
 
     def _open_enhance(self, inst: Instance):
-        """round-182：右键「客户端增强」→ 一键装 / 卸客户端体验类 mod。"""
-        from .enhance_dialog import EnhanceDialog
-        EnhanceDialog(self, inst).exec()
+        """round-182：右键「客户端增强」→ 一键装 / 卸客户端体验类 mod。
+
+        round-195：改成**页内**（与编辑面板、体检同一套栈）。
+        """
+        from .enhance_dialog import EnhancePanel
+        panel = EnhancePanel(self, inst)
+        panel.closed.connect(self._close_feature)
+        self._push_feature(panel)
 
     def _repair_mod_deps(self, inst: Instance):
         """round-178：右键「补装缺失依赖」→ 统一走 core.mod_repair。
@@ -2183,13 +2191,75 @@ class InstancesPage(QWidget):
         CrashDialog(inst, parent=self).exec()
 
     # ia[instances]: 「⋯ → 体检」 | 详情更多菜单 | 打开实例体检对话框（静态扫描 + 本地修复）
-    def _health_check(self, inst: Instance):
-        """实例体检（N5 冲突预检的升级）：静态扫描 + 弹报告 + 一键本地修复。
+    # ── 页内功能栈（round-195）：编辑 / 体检 / 增强包都是"页面"，不是窗口 ──
+    def _push_feature(self, panel) -> None:
+        """把一个功能面板压到实例页上方（页内切换，不是新开窗口）。"""
+        self._close_feature()
+        idx = self._body_stack.addWidget(panel)
+        self._feature_idx = idx
+        self._body_stack.setCurrentIndex(idx)
+        # 页头动作（新建/扫描/导入包）在功能页里会跳走 → 先收起来
+        head = getattr(self, "_head_actions", None)
+        if head is not None:
+            head.setVisible(False)
 
+    def _close_feature(self) -> None:
+        """收起当前功能面板，回到实例列表。"""
+        idx = getattr(self, "_feature_idx", None)
+        if idx is None:
+            return
+        self._feature_idx = None
+        w = self._body_stack.widget(idx)
+        if w is not None:
+            self._body_stack.removeWidget(w)
+            w.setParent(None)
+            try:
+                from shiboken6 import delete as _shib_delete
+                _shib_delete(w)
+            except Exception:
+                w.deleteLater()
+        self._body_stack.setCurrentIndex(1)
+        head = getattr(self, "_head_actions", None)
+        if head is not None:
+            head.setVisible(True)
+
+    def _open_instance_editor(self, inst: Instance) -> None:
+        """实例编辑：**页内**打开（不再弹窗）。"""
+        from .instance_editor import InstanceEditorPanel
+        panel = InstanceEditorPanel(self, inst)
+        panel.set_page_mode(True)
+        panel.saved.connect(self._on_editor_saved)
+        panel.versionChanged.connect(self._on_editor_version_changed)
+        panel.loaderChanged.connect(lambda _i: self._refresh())
+        panel.closed.connect(self._close_feature)
+        self._push_feature(panel)
+
+    def _on_editor_saved(self, _inst_id: str) -> None:
+        self._refresh()
+        self._close_feature()
+
+    def _health_check(self, inst: Instance):
+        """实例体检（N5 冲突预检的升级）：静态扫描 + **页内**报告 + 一键本地修复。
+
+        round-195：原来是弹窗。体检是实例相关的信息，页内打开能一直看到
+        "在给哪个实例体检"，也不会挡住下面的实例列表。
         修复只改实例字段并落盘保存，不联网、不动用户游戏文件。
         """
-        from .mod_check_dialog import open_health_dialog
-        open_health_dialog(self, inst, self.mgr)
+        from .core import instance_health
+        from .mod_check_dialog import HealthPanel
+        try:
+            from .settings_dialog import load_config
+            cfg = load_config()
+        except Exception:  # noqa: BLE001
+            cfg = None
+        try:
+            result = instance_health.scan_health(inst, cfg)
+        except Exception as exc:  # noqa: BLE001
+            warn(self, t("health.title"), str(exc))
+            return
+        panel = HealthPanel(self, result, mgr=self.mgr)
+        panel.closed.connect(self._close_feature)
+        self._push_feature(panel)
 
     def _mod_check(self, inst: Instance):
         """旧入口（模组冲突预检）→ 转调体检，保持兼容。"""
@@ -2351,19 +2421,13 @@ class InstancesPage(QWidget):
                  t("instances.rebuild_same"))
 
     def _edit_instance_settings(self, inst: Instance):
-        """round-183：改为打开 PCL 式整页编辑面板。
+        """打开 PCL 式整页编辑面板（**页内**，round-195）。
 
         原来这里是 480x620 的一条长滚动框，字段虽全但「换加载器」只是改字段、
-        加删 mod 要跳页。现在整页化（左侧导航 + 加载器真装真卸 + 模组内嵌），
-        本函数只负责两件收尾：版本/加载器变了触发后台补全、以及刷新列表。
+        加删 mod 要跳页；round-183 整页化后仍是**弹窗**，round-195 改成页内切换
+        —— 换页而不是另开窗口，实例列表始终在下面，编辑完直接回去。
         """
-        from .instance_editor import InstanceEditorDialog
-        dlg = InstanceEditorDialog(self, inst)
-        dlg.saved.connect(lambda _id: self._refresh())
-        dlg.loaderChanged.connect(lambda _id: self._refresh())
-        dlg.versionChanged.connect(self._on_editor_version_changed)
-        dlg.exec()
-        self._refresh()
+        self._open_instance_editor(inst)
 
     def _on_editor_version_changed(self, inst_id: str) -> None:
         """编辑面板里版本/加载器字段变了 → 后台补全游戏文件。
@@ -3056,9 +3120,9 @@ class ModsPage(QWidget):
         self.add_btn = ui_kit.make_button(
             t("mods.add"), kind="accent", icon_key="add",
             on_click=self._add, min_h=38)
-        self.update_btn = ui_kit.make_button(
-            t("mods.check_updates"), kind="secondary", icon_key="download",
-            on_click=self._check_updates, min_h=38)
+        # round-195：旧的「检查更新」按钮去掉 —— ModListPanel 自带「可更新」
+        # 筛选（点它就查），两处都留着又是「同一个功能两个入口」。
+        self.update_btn = None
 
         self._header = ui_kit.page_header(
             t("mods.title"), icon_key="mods")
@@ -3078,18 +3142,18 @@ class ModsPage(QWidget):
         al.addWidget(self.target_lbl)
         al.addWidget(self.inst_combo, stretch=1)
         al.addWidget(self.add_btn)
-        al.addWidget(self.update_btn)
         root.addWidget(action_widget)
 
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        self._content = QWidget()
-        self._vbox = QVBoxLayout(self._content)
-        self._vbox.setContentsMargins(0, 0, 0, 0)
-        self._vbox.setSpacing(12)
-        self.scroll.setWidget(self._content)
-        root.addWidget(self.scroll, stretch=1)
+        # round-195：模组管理**只有一套**。
+        # 原来这里是一套独立实现（大卡片 + 启用/删除按钮），实例编辑面板里又
+        # 是另一套（紧凑行 + 搜索 + 批量）—— 同一功能两个页面两套逻辑，玩家
+        # 看到的就是「长得不一样、功能不一样」。现在两处都用 ModListPanel。
+        self._panel_host = QWidget()
+        self._panel_lay = QVBoxLayout(self._panel_host)
+        self._panel_lay.setContentsMargins(0, 0, 0, 0)
+        self._panel_lay.setSpacing(10)
+        root.addWidget(self._panel_host, stretch=1)
+        self._mod_panel = None
 
         QTimer.singleShot(0, self.refresh)
 
@@ -3108,68 +3172,6 @@ class ModsPage(QWidget):
         self._render_mods()
 
     # ── 检查更新 / 批量更新（round-41，对齐主流/CF App）──
-    def _check_updates(self):
-        inst = self._target()
-        if inst is None:
-            toast(self, t("common.hint"), t("mods.no_instance"))
-            return
-        self.update_btn.setEnabled(False)
-        self.update_btn.setText(t("mods.checking_updates"))
-        from .worker import Worker
-        from .mod_updater import check_updates
-        self._check_worker = Worker(
-            check_updates, inst,
-            mc_version=getattr(inst, "game_version", "") or "",
-            loader=getattr(inst, "loader", "") or "",
-        )
-        self._check_worker.finished.connect(self._on_updates_checked)
-        self._check_worker.error.connect(self._on_updates_error)
-        self._check_worker.start()
-
-    def _on_updates_checked(self, result):
-        self.update_btn.setEnabled(True)
-        self.update_btn.setText(t("mods.check_updates"))
-        updates = result.get("updates", [])
-        unknown = result.get("unknown", [])
-        if not updates:
-            msg = t("mods.up_to_date")
-            if unknown:
-                msg = t("mods.up_to_date_unknown", n=len(unknown))
-            toast(self, t("mods.check_updates"), msg)
-            return
-        detail = "\n".join(
-            f"• {u['title']}: {u['local_version']} → {u['latest_version']}" for u in updates[:30])
-        if len(updates) > 30:
-            detail += f"\n… 共 {len(updates)} 个"
-        if unknown:
-            detail += f"\n\n（{len(unknown)} 个 mod 无法识别来源，已跳过）"
-        from .win_rounded import confirm
-        if not confirm(
-            self, t("mods.update_found_title"),
-            t("mods.update_found_body", n=len(updates)),
-            detail=detail,
-        ):
-            return
-        self.update_btn.setEnabled(False)
-        self.update_btn.setText(t("mods.updating"))
-        from .mod_updater import update_mods
-        self._update_worker = Worker(update_mods, self._target(), updates)
-        self._update_worker.finished.connect(self._on_updates_done)
-        self._update_worker.error.connect(self._on_updates_error)
-        self._update_worker.start()
-
-    def _on_updates_done(self, ok_count):
-        self.update_btn.setEnabled(True)
-        self.update_btn.setText(t("mods.check_updates"))
-        toast(self, t("mods.check_updates"),
-              t("mods.update_done", n=ok_count or 0))
-        self._render_mods()
-
-    def _on_updates_error(self, msg: str):
-        self.update_btn.setEnabled(True)
-        self.update_btn.setText(t("mods.check_updates"))
-        warn(self, t("mods.check_updates"), t("mods.update_fail", err=msg))
-
     def refresh(self):
         if not hasattr(self, "inst_combo"):
             return
@@ -3202,12 +3204,11 @@ class ModsPage(QWidget):
             self._rendering = False
 
     def _render_mods_inner(self):
-        # Synchronously destroy old cards: deleteLater() leaves them alive
-        # until the event loop turns, so a rapid second call (instance combo
-        # spam, refresh during animation) would addWidget over still-alive
-        # C++ objects → layout corruption / crash.
-        while self._vbox.count():
-            item = self._vbox.takeAt(0)
+        # round-195：换成 ModListPanel（与实例编辑面板的模组页同一组件）。
+        # 旧卡片同步销毁：deleteLater() 会让控件活到事件循环转圈，快速切换
+        # 实例时会在还活着的 C++ 对象上 addWidget → 布局损坏。
+        while self._panel_lay.count():
+            item = self._panel_lay.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.setParent(None)
@@ -3221,45 +3222,13 @@ class ModsPage(QWidget):
             empty = ui_kit.empty_state(
                 "mods", t("mods.empty_title"), t("mods.select_instance"),
                 icon_size=72)
-            self._vbox.addWidget(empty)
+            self._panel_lay.addWidget(empty)
+            self._mod_panel = None
             return
-        mods_dir = inst.mods_dir
-        os.makedirs(mods_dir, exist_ok=True)
-        jars = sorted(os.listdir(mods_dir))
-        if not jars:
-            empty = QLabel(t("mods.empty"))
-            empty.setProperty("cls", "sub")
-            empty.setAlignment(Qt.AlignCenter)
-            self._vbox.addWidget(empty)
-            return
-        for f in jars:
-            path = os.path.join(mods_dir, f)
-            enabled = not f.endswith(".disabled")
-            card = ModCard(path, enabled)
-            card.toggled.connect(self._toggle)
-            card.removed.connect(self._remove)
-            card.open_folder.connect(self._open_mods_folder)
-            card.copy_name.connect(self._copy_mod_name)
-            self._vbox.addWidget(card)
-
-    def _toggle(self, path: str, enabled: bool):
-        try:
-            new_path = path
-            if path.endswith(".disabled"):
-                new_path = path[: -len(".disabled")]
-            elif path.endswith(".jar"):
-                new_path = path + ".disabled"
-            shutil.move(path, new_path)
-            self._render_mods()
-        except OSError as e:
-            warn(self, t("mods.fail_title"), str(e))
-
-    def _remove(self, path: str):
-        try:
-            os.remove(path)
-            self._render_mods()
-        except OSError as e:
-            warn(self, t("mods.fail_title"), str(e))
+        from .mod_list import ModListPanel
+        self._mod_panel = ModListPanel(
+            self._panel_host, inst, on_open_folder=self._open_mods_folder)
+        self._panel_lay.addWidget(self._mod_panel)
 
     def _open_mods_folder(self, path: str):
         """资源管理器定位到该 mod 文件（explorer /select）——排查冲突定位更快。"""
@@ -3301,11 +3270,10 @@ class ModsPage(QWidget):
     def retranslate_ui(self):
         self.title_lbl.setText(t("mods.title"))
         self.target_lbl.setText(t("mods.target_label"))
-        # round-44 补全：add_btn / update_btn 文本刷新
+        # round-44 补全：add_btn 文本刷新（round-195：update_btn 已移除，
+        # 「检查更新」由 ModListPanel 的「可更新」筛选承担）
         if hasattr(self, "add_btn"):
             self.add_btn.setText(t("mods.add"))
-        if hasattr(self, "update_btn"):
-            self.update_btn.setText(t("mods.check_updates"))
         self.refresh()
 
 

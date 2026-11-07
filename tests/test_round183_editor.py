@@ -73,8 +73,12 @@ check("旧三页函数已退役",
 
 check("旧 480x620 长条已退役（不再 resize(480, 620)）",
       "resize(480, 620)" not in pages_src)
-check("_edit_instance_settings 改开新面板",
-      "from .instance_editor import InstanceEditorDialog" in pages_src)
+# round-195：编辑面板改成**页内**（InstanceEditorPanel），不再弹窗
+check("_edit_instance_settings 改开页内面板",
+      "from .instance_editor import InstanceEditorPanel" in pages_src
+      and "InstanceEditorDialog(self, inst)" not in pages_src)
+check("编辑面板是 QWidget 而不是 QDialog",
+      "class InstanceEditorPanel(QWidget)" in editor_src)
 check("右键菜单有「编辑实例」",
       't("instances.edit_instance")' in pages_src)
 # round-185：模组页改用 ModListPanel（不再是 ModCard 大卡片列表）

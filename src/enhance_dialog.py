@@ -17,7 +17,7 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy,
     QVBoxLayout, QWidget,
@@ -45,6 +45,26 @@ _STATE_COLOR = {
 }
 
 
+class EnhanceDialog(QDialog):
+    """**兼容壳**：窗口模式（历史调用点）。内部就是 :class:`EnhancePanel`。"""
+
+    def __init__(self, parent, inst):
+        super().__init__(parent)
+        self.setWindowTitle(t("enhance.title"))
+        self.resize(780, 640)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.panel = EnhancePanel(self, inst)
+        lay.addWidget(self.panel)
+        self.panel.closed.connect(self.accept)
+
+    def __getattr__(self, name):
+        if name == "panel":
+            raise AttributeError(name)
+        return getattr(self.panel, name)
+
+
 def _mk_label(text: str, *, pt: int = 9, bold: bool = False,
               color_key: str = "text_sub") -> QLabel:
     lb = QLabel(text)
@@ -57,8 +77,14 @@ def _mk_label(text: str, *, pt: int = 9, bold: bool = False,
     return lb
 
 
-class EnhanceDialog(QDialog):
-    """实例的客户端增强包面板。"""
+class EnhancePanel(QWidget):
+    """实例的客户端增强包面板（**页内**，round-195）。
+
+    原来是 QDialog 弹窗 —— 它与"实例编辑""实例体检"一样是实例相关页面，
+    不该另开窗口。窗口壳 :class:`EnhanceDialog` 保留给历史调用点。
+    """
+
+    closed = Signal()
 
     def __init__(self, parent, inst):
         super().__init__(parent)
@@ -68,10 +94,9 @@ class EnhanceDialog(QDialog):
         self._worker = None
         self._busy: set[str] = set()
 
-        self.setWindowTitle(t("enhance.title"))
-        self.resize(780, 640)
+        self.setObjectName("enhRoot")
         self.setStyleSheet(
-            f"QDialog{{background:{COLORS['bg_app']};}}"
+            f"QWidget#enhRoot{{background:{COLORS['bg_app']};}}"
             f"QScrollArea{{background:transparent;border:none;}}"
             f"QWidget#enhBody{{background:transparent;}}")
 
@@ -115,7 +140,7 @@ class EnhanceDialog(QDialog):
         foot.addStretch(1)
         btn_close = QPushButton(t("enhance.btn_close"))
         btn_close.setFixedWidth(_BTN_W)
-        btn_close.clicked.connect(self.accept)
+        btn_close.clicked.connect(self._on_close)
         foot.addWidget(btn_close)
         root.addLayout(foot)
 
@@ -125,6 +150,10 @@ class EnhanceDialog(QDialog):
     # ------------------------------------------------------------------ #
     # 数据加载
     # ------------------------------------------------------------------ #
+    def _on_close(self) -> None:
+        """关闭：页内模式通知外层返回。"""
+        self.closed.emit()
+
     def reload(self):
         from .core import enhance as EH
 

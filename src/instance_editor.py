@@ -209,12 +209,20 @@ class _Page(QWidget):
         return edit
 
 
-class InstanceEditorDialog(QDialog):
-    """实例整页编辑器。"""
+class InstanceEditorPanel(QWidget):
+    """实例整页编辑器（**页内面板**）。
+
+    round-195：原来它是 QDialog（弹窗）。用户诉求：「为什么这么多实用功能的
+    页面你不直接换页而是用窗口？」—— 实例编辑是最典型的"页面"，弹窗既割裂
+    上下文（看不到自己正在改哪个实例），又和旁边的实例列表长得不一样。
+
+    本类只管内容；窗口壳见 :class:`InstanceEditorDialog`（历史调用点仍可用）。
+    """
 
     saved = Signal(str)          # 实例 id：字段已写盘
     versionChanged = Signal(str)  # 实例 id：版本/加载器字段变了，外层触发补全
     loaderChanged = Signal(str)   # 实例 id：加载器真装/真卸完成
+    closed = Signal()             # 页内模式：请求返回上一层
 
     def __init__(self, parent, inst):
         super().__init__(parent)
@@ -227,9 +235,6 @@ class InstanceEditorDialog(QDialog):
         self._ldver_worker = None
         self._pages: dict[str, _Page] = {}
 
-        self.setWindowTitle(t("inst.edit_title", name=inst.name or ""))
-        self.resize(900, 660)
-        self.setMinimumSize(780, 540)
         self._build()
         self._load_java_plan()
         self._load_loader_versions(initial=True)
@@ -292,13 +297,29 @@ class InstanceEditorDialog(QDialog):
         self.foot_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         foot.addWidget(self.foot_lbl, stretch=1)
         cancel = QPushButton(t("common.cancel"))
-        cancel.clicked.connect(self.reject)
+        cancel.clicked.connect(self._on_cancel)
+        self.cancel_btn = cancel
         self.save_btn = QPushButton(t("common.save"))
         self.save_btn.setProperty("cls", "accent")
         self.save_btn.clicked.connect(self._on_save)
         foot.addWidget(cancel)
         foot.addWidget(self.save_btn)
         root.addLayout(foot)
+
+    def set_page_mode(self, on: bool = True) -> None:
+        """页内模式：底部按钮从「取消」改成「返回」，标题旁标出实例名。
+
+        页内打开时玩家看到的是「实例列表 → 这个面板」，不是新开了一个窗口，
+        按钮语义必须跟着变（"取消"像在撤销编辑，"返回"才是换页）。
+        """
+        self._page_mode = on
+        btn = getattr(self, "cancel_btn", None)
+        if btn is not None:
+            btn.setText(t("common.back") if on else t("common.cancel"))
+
+    def _on_cancel(self) -> None:
+        """取消 / 返回：页内模式通知外层返回；窗口壳由 reject 接管。"""
+        self.closed.emit()
 
     # ── ① 基础 ──────────────────────────────────────────────
     def _page_overview(self) -> _Page:
@@ -1511,7 +1532,8 @@ class InstanceEditorDialog(QDialog):
         self.saved.emit(self._inst.id)
         if changed:
             self.versionChanged.emit(self._inst.id)
-        self.accept()
+        # 页内模式：通知外层返回（窗口壳的 accept 由壳自己处理）
+        self.closed.emit()
 
     def _collect(self, trigger: bool = False) -> bool:
         """把表单写回实例。返回「版本/加载器是否变了」。"""
@@ -1592,6 +1614,55 @@ def _open_path(parent, path: str) -> None:
             subprocess.Popen(["xdg-open", path])
     except OSError as exc:
         warn(parent, t("inst.open_folder"), str(exc))
+
+
+class InstanceEditorDialog(QDialog):
+    """**兼容壳**：仍以模态窗口使用（历史调用点）。
+
+    内部就是 :class:`InstanceEditorPanel` —— 页内与弹窗**同一套实现**，
+    不会出现"两个页面两套逻辑"。round-195 起新入口一律走页内面板。
+    """
+
+    saved = Signal(str)
+    versionChanged = Signal(str)
+    loaderChanged = Signal(str)
+
+    def __init__(self, parent, inst):
+        super().__init__(parent)
+        self.setWindowTitle(t("inst.edit_title", name=inst.name or ""))
+        self.resize(900, 660)
+        self.setMinimumSize(780, 540)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.panel = InstanceEditorPanel(self, inst)
+        lay.addWidget(self.panel)
+        # 转发常用属性，老代码/测试不用改
+        self.stack = self.panel.stack
+        self.nav = self.panel.nav
+        self.panel.saved.connect(self.saved)
+        self.panel.versionChanged.connect(self.versionChanged)
+        self.panel.loaderChanged.connect(self.loaderChanged)
+        self._closing = False
+        self.panel.closed.connect(self._on_panel_closed)
+
+    def _on_panel_closed(self) -> None:
+        """面板内部请求关闭 → 窗口壳随之关闭（页内模式则由外层接管）。"""
+        if self._closing:
+            return
+        self._closing = True
+        self.accept()
+
+    def reject(self) -> None:
+        self._closing = True
+        self.panel.closed.emit()
+        super().reject()
+
+    def __getattr__(self, name):
+        """壳上没定义的属性一律转发给内部面板（老代码不用改）。"""
+        if name == "panel":
+            raise AttributeError(name)
+        return getattr(self.panel, name)
 
 
 def _reveal_path(parent, path: str) -> None:

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -75,6 +75,42 @@ def mod_icon(meta: dict | None, size: int = _ICON) -> QPixmap:
 def _elide(text: str, limit: int) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _wrap_by_width(text: str, fm, width: int, max_lines: int = 2) -> str:
+    """按**像素宽度**折行，最多 *max_lines* 行；放不下的部分在末行省略。
+
+    round-195：原来描述是按**字符数**砍到 78（``_elide(desc, 78)``），
+    「Fabric API」的描述被砍成 "FabricMC · Core API module providing key ho" ——
+    玩家看到的是半句话。加上一句 "Core API module providing key hooks…" 这种
+    断法还不如直接显示两行完整。
+    """
+    text = " ".join((text or "").split())
+    if not text or width <= 40:
+        return text
+    lines: list[str] = []
+    cur = ""
+    for word in text.split(" "):
+        trial = (cur + " " + word).strip()
+        if fm.horizontalAdvance(trial) <= width or not cur:
+            cur = trial
+            continue
+        lines.append(cur)
+        cur = word
+        if len(lines) >= max_lines:
+            break
+    if len(lines) < max_lines and cur:
+        lines.append(cur)
+    if not lines:
+        return text
+    if len(lines) == max_lines:
+        # 最后一行可能还有被截掉的尾巴 → 用 elidedText 收尾
+        consumed = " ".join(lines)
+        rest = text[len(consumed):].strip()
+        if rest:
+            lines[-1] = fm.elidedText(lines[-1] + " " + rest,
+                                      Qt.ElideRight, width)
+    return "\n".join(lines)
 
 
 class ModRow(QFrame):
@@ -148,20 +184,28 @@ class ModRow(QFrame):
         top.addStretch(1)
         col.addLayout(top)
 
-        sub = []
         authors = list(self.meta.get("authors") or [])
-        if authors:
-            sub.append(_elide(", ".join(authors[:3]), 40))
-        desc = _elide(self.meta.get("description") or "", 78)
-        if desc:
-            sub.append(desc)
-        if not sub:
-            sub.append(os.path.basename(path))
-        self.sub_lbl = QLabel(" · ".join(sub))
-        self.sub_lbl.setStyleSheet("font-size:11px;color:%s;"
-                                   % COLORS["text_sub"])
-        self.sub_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        col.addWidget(self.sub_lbl)
+        self._authors_txt = ", ".join(authors[:3])
+        self._desc_full = (self.meta.get("description") or "").strip()
+        self._fallback = os.path.basename(path)
+
+        head2 = QLabel(self._authors_txt or self._fallback)
+        head2.setStyleSheet("font-size:11px;color:%s;" % COLORS["text_sub"])
+        if self._authors_txt:
+            head2.setToolTip(self._authors_txt)
+        col.addWidget(head2)
+
+        # 描述：按像素宽度折成最多两行，随窗口宽度重排；悬停给全文。
+        self.desc_lbl = QLabel("")
+        self.desc_lbl.setWordWrap(True)
+        self.desc_lbl.setStyleSheet("font-size:11px;color:%s;"
+                                    % COLORS["text_sub"])
+        if self._desc_full:
+            self.desc_lbl.setToolTip(self._desc_full)
+            col.addWidget(self.desc_lbl)
+        self._desc_width = 0
+        self._relayout_desc()
+        QTimer.singleShot(0, self._relayout_desc)
         lay.addLayout(col, 1)
 
         self.toggle_btn = ui_kit.make_button(
@@ -182,6 +226,27 @@ class ModRow(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         self.selection_changed.emit()
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802 - Qt 命名
+        """窗口变宽变窄时，描述要按新宽度重新折行（不能只按旧宽度排一次）。"""
+        super().resizeEvent(ev)
+        self._relayout_desc()
+
+    def _relayout_desc(self) -> None:
+        """按当前可用宽度重排描述（最多两行）。
+
+        构造时行还没布局（width=0）→ 用默认宽度 620 排一次，等第一次
+        resizeEvent 再按真实宽度重排。
+        """
+        if not getattr(self, "_desc_full", ""):
+            return
+        fm = self.desc_lbl.fontMetrics()
+        w = self.width()
+        avail = max(160, (w - 210) if w > 400 else 620)
+        if abs(avail - getattr(self, "_desc_width", 0)) < 24:
+            return
+        self._desc_width = avail
+        self.desc_lbl.setText(_wrap_by_width(self._desc_full, fm, avail, 2))
 
     @staticmethod
     def _pill(text: str, dim: bool = False) -> QLabel:

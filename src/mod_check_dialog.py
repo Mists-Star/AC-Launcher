@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QWidget, QFrame,
 )
@@ -48,21 +49,30 @@ def _localize(f) -> tuple[str, str, str]:
     return title, reason, suggestion
 
 
-class HealthDialog(QDialog):
+class HealthPanel(QWidget):
+    """实例体检面板（**页内**）。
+
+    round-195：原来是 QDialog 弹窗。用户诉求「实用功能直接换页，别用窗口」——
+    体检是与实例强相关的信息，放进实例页里能一直看到"在给哪个实例体检"。
+    窗口壳 :class:`HealthDialog` 保留给历史调用点。
+    """
+
+    closed = Signal()      # 页内：请求返回
+
     def __init__(self, inst, result: dict, mgr=None, parent=None):
         super().__init__(parent)
         self.inst = inst
         self.mgr = mgr
         self._result = result or {}
         self._first_render = True
-        self.setWindowTitle(t("health.dialog_title"))
-        self.setMinimumSize(600, 520)
+        self._as_window = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── AC 无边框窗口：自定义标题栏 + 圆角 ──
+        # ── 标题栏：页内模式用普通标题（返回按钮由外层提供）；窗口模式用
+        #    frameless TitleBar。两者共用同一份内容。
         self.titlebar = TitleBar(self, title=t("health.dialog_title"), height=38)
         root.addWidget(self.titlebar)
 
@@ -72,10 +82,8 @@ class HealthDialog(QDialog):
         bl.setSpacing(12)
         root.addWidget(body, stretch=1)
 
-        # ── frameless + DWM shadow + win11 rounded corners ──
-        self._frameless = FramelessHelper(self)
-        self._frameless.set_titlebar(self.titlebar)
-        enable_win11_round_corners(self)
+        # ── frameless + DWM shadow + win11 rounded corners（仅窗口模式）──
+        self._frameless = None
 
         # header（desc 随体检结果刷新）
         self.header = ui_kit.page_header(t("health.title"), "")
@@ -99,7 +107,7 @@ class HealthDialog(QDialog):
         self.fixall_btn = ui_kit.make_button(
             t("health.fix_all"), kind="accent", on_click=self._fix_all, min_h=36)
         self.close_btn = ui_kit.make_button(
-            t("common.close"), on_click=self.accept, min_h=36)
+            t("common.close"), on_click=self._on_close, min_h=36)
         row.addWidget(self.rescan_btn)
         row.addStretch(1)
         row.addWidget(self.fixall_btn)
@@ -122,6 +130,18 @@ class HealthDialog(QDialog):
         bl.addWidget(self.note_lbl)
 
         self._render(self._result)
+
+    def _on_close(self) -> None:
+        """关闭：页内模式通知外层返回。"""
+        self.closed.emit()
+
+    def enable_window_chrome(self) -> None:
+        """窗口模式：补上 frameless 标题栏与圆角（页内模式不需要）。"""
+        if self._frameless is not None:
+            return
+        self._frameless = FramelessHelper(self)
+        self._frameless.set_titlebar(self.titlebar)
+        enable_win11_round_corners(self)
 
     # ── 渲染 ──────────────────────────────────────────────────────────────
     def _clear_list(self) -> None:
@@ -387,6 +407,30 @@ class _FindingCard(QFrame):
 
 
 # 兼容别名：既有调用点继续可用。
+
+
+class HealthDialog(QDialog):
+    """**兼容壳**：窗口模式（历史调用点）。内部就是 :class:`HealthPanel`。"""
+
+    def __init__(self, inst, result: dict, mgr=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("health.dialog_title"))
+        self.setMinimumSize(600, 520)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.panel = HealthPanel(inst, result, mgr=mgr, parent=self)
+        self.panel.enable_window_chrome()
+        lay.addWidget(self.panel)
+        self.panel.closed.connect(self.accept)
+
+    def __getattr__(self, name):
+        if name == "panel":
+            raise AttributeError(name)
+        return getattr(self.panel, name)
+
+
+# 兼容别名（放在壳类之后，避免前向引用）
 ModCheckDialog = HealthDialog
 
 
