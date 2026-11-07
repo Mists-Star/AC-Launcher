@@ -108,6 +108,7 @@ SUITES = [
     ("资源中心（搜索/版本列表/翻译/百科）", "test_round205_store_polish.py", "script"),
     ("假死修复/占位页（round-206）", "test_round206_no_freeze.py", "script"),
     ("资源中心秒获取（round-207）", "test_round207_search_latency.py", "script"),
+    ("资源中心服务端过滤/真分页（round-208）", "test_round208_store_search.py", "script"),
 ]
 SHOTS = "shots_all.py"
 
