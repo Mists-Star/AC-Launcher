@@ -265,16 +265,18 @@ def pixmap(name: str, size: int = _SIZE, color: str | None = None,
     return pm
 
 
-# 大尺寸渲染时描边该有多粗（**物理像素**，不是 SVG 单位）。
-# 3.4 是实拍对比出来的：2.8 偏单薄、4.2 又回到「四块粘连」的老问题。
-_LARGE_GLYPH_PX = 3.4
-_LARGE_GLYPH_MIN = 34
+# 大尺寸渲染时描边该有多粗。用**比例**而不是固定值：56px 时 3.36px、
+# 80px 时 4.8px，视觉配重才跟得上字号；固定 3.4 在 80px 上会显得单薄。
+# 上下夹住 [2.6, 5.0]：小图不至于太细，超大图不至于又糊成块。
+_LARGE_GLYPH_RATIO = 0.06
+_LARGE_GLYPH_MIN = 2.6
+_LARGE_GLYPH_MAX = 5.0
 
 _STROKE_RE = re.compile(rb'(stroke-width\s*=\s*")([\d.]+)(")')
 
 
 def pixmap_large(name: str, size: int = 56, color: str | None = None,
-                 stroke_px: float = _LARGE_GLYPH_PX,
+                 stroke_px: float | None = None,
                  dpr: float | None = None) -> QPixmap:
     """大尺寸字形（空态图标等）：**把描边按绝对像素收细**再渲染。
 
@@ -295,6 +297,9 @@ def pixmap_large(name: str, size: int = 56, color: str | None = None,
         return pixmap(name, size, color=color, dpr=dpr)
 
     dpr = screen_dpr() if dpr is None else max(1.0, float(dpr or 1.0))
+    if stroke_px is None:
+        stroke_px = min(_LARGE_GLYPH_MAX,
+                        max(_LARGE_GLYPH_MIN, size * _LARGE_GLYPH_RATIO))
     data = _svg_bytes(name)
     tint = QColor(color or _default_tint(name))
     px = max(1, int(round(size * dpr)))
