@@ -36,15 +36,78 @@ from .win_rounded import confirm, info, toast, warn
 from .worker import Worker
 
 # 导航项：(key, 标题键, 图标键)
+
+
+def _sys_memory_bytes():
+    """(总内存, 可用内存) 字节。用 ctypes 读 GlobalMemoryStatusEx ——
+    psutil 在本机 venv 里是坏的（缺 _psutil_windows），不要引。"""
+    import ctypes
+
+    class _MSE(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    st = _MSE()
+    st.dwLength = ctypes.sizeof(_MSE)
+    try:
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return int(st.ullTotalPhys), int(st.ullAvailPhys)
+    except Exception:  # noqa: BLE001 - API 失败/非 Windows
+        pass
+    return 0, 0
+
+
+class _MemBar(QWidget):
+    """PCL 同款三段内存条：其他程序已用 | 本实例分配 | 剩余。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(18)
+        self._total = 0      # 字节
+        self._other = 0      # 其他程序占用
+        self._game = 0       # 本实例分配
+
+    def set_values(self, game_mb: int) -> None:
+        total, avail = _sys_memory_bytes()
+        self._total = total
+        self._game = max(0, int(game_mb)) * 1024 * 1024
+        self._other = max(0, total - avail - self._game)
+        self.update()
+
+    def paintEvent(self, ev) -> None:  # noqa: N802 - Qt 命名
+        from PySide6.QtGui import QColor, QPainter
+        pt = QPainter(self)
+        pt.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        pt.setPen(Qt.NoPen)
+        pt.setBrush(QColor(COLORS["bg_frost"]))
+        pt.drawRoundedRect(0, 0, w, h, 6, 6)
+        total = max(1, self._total)
+        seg_used = min(w, int(w * self._other / total))
+        seg_game = min(w - seg_used, int(w * self._game / total))
+        if seg_used:
+            pt.setBrush(QColor(COLORS["border_light"]))
+            pt.drawRoundedRect(0, 0, seg_used, h, 6, 6)
+        if seg_game:
+            pt.setBrush(QColor(COLORS["accent"]))
+            pt.drawRoundedRect(seg_used, 0, seg_game, h, 6, 6)
+        pt.end()
+
 _NAV = (
-    ("basic", "inst.tab_basic", "instances"),
-    ("launch", "inst.tab_launch", "play"),
+    ("overview", "inst.tab_overview", "instances"),
+    ("setup", "inst.tab_setup", "settings"),
     ("modify", "inst.tab_modify", "repair"),
-    ("java", "inst.tab_java", "java"),
-    ("dir", "inst.tab_dir", "folder"),
     ("mods", "inst.tab_mods", "mods"),
     ("content", "inst.tab_content", "resourcepack"),
-    ("adv", "inst.tab_adv", "tools"),
 )
 
 _SUB_STYLE = "color:%s;font-size:11px;" % COLORS["text_sub"]
@@ -207,14 +270,11 @@ class InstanceEditorDialog(QDialog):
         root.addLayout(body, stretch=1)
 
         builders = {
-            "basic": self._page_basic,
-            "launch": self._page_launch,
+            "overview": self._page_overview,
+            "setup": self._page_setup,
             "modify": self._page_modify,
-            "java": self._page_java,
-            "dir": self._page_dir,
             "mods": self._page_mods,
             "content": self._page_content,
-            "adv": self._page_adv,
         }
         for key, title_key, icon_key in _NAV:
             item = QListWidgetItem(icon(icon_key), t(title_key))
@@ -241,13 +301,21 @@ class InstanceEditorDialog(QDialog):
         root.addLayout(foot)
 
     # ── ① 基础 ──────────────────────────────────────────────
-    def _page_basic(self) -> _Page:
+    def _page_overview(self) -> _Page:
+        """对齐 PCL 的「概览」页：改名 + 只读信息 + 快捷方式 + 高级管理。
+
+        round-187 重排：原来这页叫「基础」，只有两个输入框半屏空白；PCL 的
+        概览页是「打开面板第一眼就该看完所有信息」的一页，我们把 ID/来源、
+        目录快捷方式、导出整合包全部收进来。
+        """
         p = _Page(self)
+        inst = self._inst
+
         p.section(t("inst.basic_section"))
         self.name_edit = p.field(t("instances.setting_name"))
-        self.name_edit.setText(self._inst.name or "")
+        self.name_edit.setText(inst.name or "")
         self.group_edit = p.field(t("instances.group_title"))
-        self.group_edit.setText(self._inst.group or "")
+        self.group_edit.setText(inst.group or "")
         self.group_edit.setPlaceholderText(t("instances.group_hint"))
 
         p.section(t("inst.status_section"))
@@ -255,9 +323,56 @@ class InstanceEditorDialog(QDialog):
         self.status_box.setWordWrap(True)
         self.status_box.setTextFormat(Qt.RichText)
         p.add(self.status_box)
+        self._refresh_status()
+
+        # 实例 ID / 来源：平时不看，排查问题时发给支持的人
+        p.section(t("inst.meta_section"))
+        id_edit = QLineEdit(inst.id or "")
+        id_edit.setReadOnly(True)
+        p.row(t("inst.meta_id"), id_edit)
+        src_edit = QLineEdit(
+            "%s%s" % (loader_name(inst.loader or "vanilla"),
+                      (" · " + inst.kind) if inst.kind else ""))
+        src_edit.setReadOnly(True)
+        p.row(t("inst.meta_source"), src_edit)
+        p.hint(t("inst.meta_ro_hint"))
+
+        # 快捷方式（PCL 概览同名卡片：版本文件夹 / 存档 / Mod 文件夹）
+        p.section(t("inst.shortcuts_section"))
+        sc = QHBoxLayout()
+        sc.setSpacing(8)
+        sc.addWidget(ui_kit.make_button(
+            t("inst.sc_game_dir"), kind="secondary", icon_key="folder",
+            on_click=lambda: _open_path(self, inst.mc_dir), min_h=32))
+        sc.addWidget(ui_kit.make_button(
+            t("inst.sc_mods"), kind="secondary", icon_key="mods",
+            on_click=lambda: _open_path(self, inst.mods_dir), min_h=32))
+        try:
+            saves = os.path.join(inst.game_dir, "saves")
+        except Exception:  # noqa: BLE001
+            saves = os.path.join(inst.mc_dir, "saves")
+        sc.addWidget(ui_kit.make_button(
+            t("inst.sc_saves"), kind="secondary", icon_key="folder",
+            on_click=lambda: _open_path(self, saves), min_h=32))
+        sc.addStretch(1)
+        p.add_layout(sc)
+
+        # 高级管理（PCL 概览同名卡片）：导出整合包
+        p.section(t("inst.manage_section"))
+        p.hint(t("export.overrides_hint"))
+        mg = QHBoxLayout()
+        mg.setSpacing(8)
+        mg.addWidget(ui_kit.make_button(
+            t("instances.export_pack"), kind="secondary", icon_key="export",
+            on_click=self._export_pack, min_h=32))
+        # PCL「补全文件」同款：校验游戏文件完整性并重下缺失/损坏的
+        mg.addWidget(ui_kit.make_button(
+            t("inst.repair_files"), kind="secondary", icon_key="repair",
+            on_click=self._repair_files, min_h=32))
+        mg.addStretch(1)
+        p.add_layout(mg)
 
         p.stretch()
-        self._refresh_status()
         return p
 
     def _refresh_status(self) -> None:
@@ -303,14 +418,106 @@ class InstanceEditorDialog(QDialog):
         if hasattr(self, "foot_lbl"):
             self.foot_lbl.setText(inst.mc_dir or "")
 
-    # ── ② 启动 ──────────────────────────────────────────────
-    def _page_launch(self) -> _Page:
+    def _page_setup(self) -> _Page:
+        """对齐 PCL 的「设置」页：所有「改个数就生效」的字段收在一页。
+
+        round-187 重排：原来拆成 启动 / Java / 目录与格式 三个页签，每个
+        只有一张卡、大半屏空白（实测 Java 页一张卡下面 60% 空白）。PCL 的
+        设置页就是一页多卡片滚下去。
+        """
         p = _Page(self)
         inst = self._inst
+
+        # ── 启动格式 ──
+        p.section(t("instances.fmt_title"))
+        self.fmt_combo = QComboBox()
+        for k in INSTANCE_FORMATS:
+            self.fmt_combo.addItem(t("instances.fmt_" + k), k)
+        cur = (inst.format or "auto").strip()
+        idx = self.fmt_combo.findData(cur if cur in INSTANCE_FORMATS else "auto")
+        self.fmt_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        p.row(t("inst.fmt_current"), self.fmt_combo)
+        self.fmt_hint = p.hint("")
+        self.fmt_combo.currentIndexChanged.connect(
+            lambda _i: self._update_fmt_hint())
+        self._update_fmt_hint()
+
+        # ── 版本隔离 / 自定义游戏目录 ──
+        p.section(t("inst.isolation_section"))
+        self.iso_combo = QComboBox()
+        self.iso_combo.addItem(t("instances.isolation_follow"), "")
+        self.iso_combo.addItem(t("instances.isolation_isolated"), "isolated")
+        self.iso_combo.addItem(t("instances.isolation_custom"), "custom")
+        idx = self.iso_combo.findData(inst.isolation or "")
+        self.iso_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        p.row(t("instances.isolation"), self.iso_combo)
+
+        # 整行一起藏：只 hide 输入框会把「自定义目录」标签留在原地（实测）
+        self.game_dir_host = QWidget()
+        gd_row = QHBoxLayout(self.game_dir_host)
+        gd_row.setContentsMargins(0, 0, 0, 0)
+        gd_row.setSpacing(10)
+        gd_row.addWidget(p.label(t("inst.game_dir_label")))
+        self.game_dir_edit = QLineEdit((inst.game_dir_override or "").strip())
+        self.game_dir_edit.setPlaceholderText(
+            t("instances.game_dir_override_hint"))
+        gd_row.addWidget(self.game_dir_edit, 1)
+        gd_pick = ui_kit.make_button(
+            t("inst.java_browse"), kind="secondary", icon_key="folder",
+            on_click=self._pick_game_dir, min_h=30)
+        gd_row.addWidget(gd_pick)
+        p.add(self.game_dir_host)
+        self.game_dir_host.setVisible(self.iso_combo.currentData() == "custom")
+        self.iso_combo.currentIndexChanged.connect(
+            lambda _i: self.game_dir_host.setVisible(
+                self.iso_combo.currentData() == "custom"))
+
+        # ── 布局标识 ──
+        p.section(t("inst.marker_section"))
+        self.marker_lbl = QLabel("")
+        self.marker_lbl.setWordWrap(True)
+        self.marker_lbl.setTextFormat(Qt.RichText)
+        p.add(self.marker_lbl)
+        recheck = ui_kit.make_button(
+            t("inst.marker_recheck"), kind="secondary", icon_key="refresh",
+            on_click=self._recheck_marker, min_h=32)
+        rr = QHBoxLayout()
+        rr.addWidget(recheck)
+        rr.addStretch(1)
+        p.add_layout(rr)
+        self._refresh_marker()
+
+        # ── Java ──
+        p.section(t("inst.java_section"))
+        # 两行必须自带前缀：都写「未找到兼容的 Java」时分不清哪行是「需要」
+        # 哪行是「将使用」（第一版实测）。
+        self.java_need_lbl = QLabel(t("inst.java_need_unknown"))
+        self.java_need_lbl.setWordWrap(True)
+        self.java_need_lbl.setStyleSheet(_SUB_STYLE)
+        p.add(self.java_need_lbl)
+        self.java_use_lbl = QLabel(t("inst.java_use_none"))
+        self.java_use_lbl.setWordWrap(True)
+        self.java_use_lbl.setStyleSheet(_SUB_STYLE)
+        p.add(self.java_use_lbl)
+
+        self.java_combo = QComboBox()
+        self.java_combo.addItem(t("inst.java_follow_global"), "")
+        jrow = p.row(t("inst.java_pick"), self.java_combo)
+        browse = ui_kit.make_button(
+            t("inst.java_browse"), kind="secondary", icon_key="folder",
+            on_click=self._browse_java, min_h=30)
+        jrow.addWidget(browse)
+        p.hint(t("inst.java_hint"))
+
+        self.java_force_chk = QCheckBox(t("instances.java_force_label"))
+        self.java_force_chk.setChecked(bool(getattr(inst, "java_force", False)))
+        p.add(self.java_force_chk)
+
+        # ── 内存与性能 ──
         p.section(t("inst.performance_section"))
         self.mem_spin = QSpinBox()
-        # ☠ 全局 QSS 给 QSpinBox 定了 border/padding 但没定义 ::up-button，
-        # 原生箭头会画到框外（实测截图右侧那根怪线）→ 关掉步进按钮，靠输入。
+        # 全局 QSS 给 QSpinBox 定了 border/padding 但没定义 ::up-button，
+        # 原生箭头会画到框外（实测截图右侧那根怪线）→ 关掉步进按钮。
         # 滚轮误改由 ui_kit 的全局 QSpinBox 补丁负责（round-183）。
         self.mem_spin.setButtonSymbols(QSpinBox.NoButtons)
         self.mem_spin.setRange(0, 32768)
@@ -319,19 +526,17 @@ class InstanceEditorDialog(QDialog):
         self.mem_spin.setSuffix(t("inst.mem_suffix"))
         p.row(t("instances.setting_mem"), self.mem_spin)
 
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItem(t("instances.jvm_preset_follow"), "")
-        self.preset_combo.addItem(t("instances.jvm_preset_default"), "default")
-        self.preset_combo.addItem(t("instances.jvm_preset_auto"), "auto")
-        self.preset_combo.addItem(t("instances.jvm_preset_aikar"), "aikar")
-        self.preset_combo.addItem(t("instances.jvm_preset_custom"), "custom")
-        idx = self.preset_combo.findData(inst.jvm_preset or "")
-        self.preset_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        p.row(t("instances.jvm_preset"), self.preset_combo)
-
-        self.jvm_edit = p.field(t("inst.jvm_label"))
-        self.jvm_edit.setText(inst.jvm_args or "")
-        self.jvm_edit.setPlaceholderText(t("instances.setting_jvm_hint"))
+        # round-187 内存可视化条（PCL 同款）：其他程序已用 | 本实例分配 | 剩余。
+        # 有它才看得清「4 GB 到底够不够」—— 一个孤零零的数字没这个信息量。
+        self.mem_bar = _MemBar()
+        self.mem_bar.set_values(int(inst.ram_mb or 0))
+        p.add(self.mem_bar)
+        self.mem_info_lbl = QLabel("")
+        self.mem_info_lbl.setStyleSheet(_SUB_STYLE)
+        self.mem_info_lbl.setWordWrap(True)
+        p.add(self.mem_info_lbl)
+        self._refresh_mem_info()
+        self.mem_spin.valueChanged.connect(self._on_mem_changed)
 
         self.renderer_combo = QComboBox()
         self.renderer_combo.addItem(t("instances.renderer_auto"), "auto")
@@ -352,12 +557,44 @@ class InstanceEditorDialog(QDialog):
         self.noexgc_chk.setToolTip(t("instances.perf_disable_explicit_gc_hint"))
         p.add(self.noexgc_chk)
 
+        # ── JVM 与游戏参数 ──
         p.section(t("inst.game_section"))
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem(t("instances.jvm_preset_follow"), "")
+        self.preset_combo.addItem(t("instances.jvm_preset_default"), "default")
+        self.preset_combo.addItem(t("instances.jvm_preset_auto"), "auto")
+        self.preset_combo.addItem(t("instances.jvm_preset_aikar"), "aikar")
+        self.preset_combo.addItem(t("instances.jvm_preset_custom"), "custom")
+        idx = self.preset_combo.findData(inst.jvm_preset or "")
+        self.preset_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        p.row(t("instances.jvm_preset"), self.preset_combo)
+
+        self.jvm_edit = p.field(t("inst.jvm_label"))
+        self.jvm_edit.setText(inst.jvm_args or "")
+        self.jvm_edit.setPlaceholderText(t("instances.setting_jvm_hint"))
+
         self.game_args_edit = p.field(t("instances.game_args"))
         self.game_args_edit.setText((inst.game_args or "").strip())
         self.game_args_edit.setPlaceholderText(t("instances.game_args_hint"))
 
+        # ── 服务器 ──
+        p.section(t("inst.server_section"))
+        self.auto_server_edit = p.field(t("inst.auto_server_label"))
+        self.auto_server_edit.setText((inst.auto_server or "").strip())
+        self.auto_server_edit.setPlaceholderText(t("inst.auto_server_ph"))
+        p.hint(t("inst.auto_server_hint"))
+
+        # ── 启动前后命令 ──
+        p.section(t("inst.hooks_section"))
+        self.post_cmd_edit = p.field(t("inst.post_cmd_label"))
+        self.post_cmd_edit.setText((inst.post_launch_cmd or "").strip())
+        self.post_cmd_edit.setPlaceholderText(t("instances.hook_ph"))
+        self.exit_cmd_edit = p.field(t("inst.exit_cmd_label"))
+        self.exit_cmd_edit.setText((inst.exit_cmd or "").strip())
+        self.exit_cmd_edit.setPlaceholderText(t("instances.hook_ph"))
+
         p.stretch()
+        self._load_java_list()
         return p
 
     # ── ③ 修改（PCL 同名页：只管加载器装卸） ────────────────
@@ -440,38 +677,70 @@ class InstanceEditorDialog(QDialog):
         p.stretch()
         return p
 
-    # ── ④ Java ──────────────────────────────────────────────
-    def _page_java(self) -> _Page:
-        p = _Page(self)
+    def _update_fmt_hint(self) -> None:
+        data = self.fmt_combo.currentData() or "auto"
+        try:
+            det = detect_format(self._inst)
+            if data == "auto":
+                self.fmt_hint.setText(
+                    t("instances.fmt_detected", name=t("instances.fmt_" + det)))
+            else:
+                txt = t("instances.fmt_forced", name=t("instances.fmt_" + data))
+                if det != data:
+                    txt += "\n" + t("instances.fmt_mismatch_hint",
+                                    selected=t("instances.fmt_" + data),
+                                    detected=t("instances.fmt_" + det))
+                self.fmt_hint.setText(txt)
+        except Exception:  # noqa: BLE001
+            self.fmt_hint.setText("")
+
+    def _refresh_marker(self) -> None:
+        """展示 ``.ac-layout.json`` 是否存在、指纹是否还有效。"""
+        from .core import instance_marker
         inst = self._inst
-        p.section(t("inst.java_section"))
-        # 两行必须自带前缀：都写「未找到兼容的 Java」时分不清哪行是「需要」
-        # 哪行是「将使用」（第一版实测）。
-        self.java_need_lbl = QLabel(t("inst.java_need_unknown"))
-        self.java_need_lbl.setWordWrap(True)
-        self.java_need_lbl.setStyleSheet(_SUB_STYLE)
-        p.add(self.java_need_lbl)
-        self.java_use_lbl = QLabel(t("inst.java_use_none"))
-        self.java_use_lbl.setWordWrap(True)
-        self.java_use_lbl.setStyleSheet(_SUB_STYLE)
-        p.add(self.java_use_lbl)
+        data = {}
+        try:
+            data = instance_marker.read(inst) or {}
+        except Exception:  # noqa: BLE001
+            data = {}
+        ok = bool(data)
+        head = t("inst.marker_present") if ok else t("inst.marker_absent")
+        color = COLORS["success"] if ok else COLORS["text_sub"]
+        lines = ["<div style='color:%s;font-weight:600'>%s</div>"
+                 % (color, _esc(head))]
+        if ok:
+            # 用中文标签：直接显示 owner / declared_format 这类内部键名，
+            # 玩家看不懂（实测「标识有效」下面一堆英文字段）。
+            for k, key in (("owner", "inst.marker_k_owner"),
+                           ("kind", "inst.marker_k_kind"),
+                           ("launcher", "inst.marker_k_launcher"),
+                           ("game_version", "inst.marker_k_game_version"),
+                           ("declared_format", "inst.marker_k_format")):
+                if data.get(k):
+                    lines.append(
+                        "<div style='margin:1px 0'><span style='color:%s'>%s："
+                        "</span><span style='color:%s'>%s</span></div>"
+                        % (COLORS["text_sub"], _esc(t(key)),
+                           COLORS["text_main"], _esc(str(data.get(k)))))
+        else:
+            lines.append("<div style='color:%s'>%s</div>"
+                         % (COLORS["text_sub"], _esc(t("inst.marker_absent_hint"))))
+        self.marker_lbl.setText("".join(lines))
 
-        self.java_combo = QComboBox()
-        self.java_combo.addItem(t("inst.java_follow_global"), "")
-        row = p.row(t("inst.java_pick"), self.java_combo)
-        browse = ui_kit.make_button(
-            t("inst.java_browse"), kind="secondary", icon_key="folder",
-            on_click=self._browse_java, min_h=30)
-        row.addWidget(browse)
-        p.hint(t("inst.java_hint"))
-
-        self.java_force_chk = QCheckBox(t("instances.java_force_label"))
-        self.java_force_chk.setChecked(bool(getattr(inst, "java_force", False)))
-        p.add(self.java_force_chk)
-
-        p.stretch()
-        self._load_java_list()
-        return p
+    def _recheck_marker(self) -> None:
+        """重新查验：走一次完整探测（含自动补写标识），再刷新展示。"""
+        try:
+            fmt = detect_format(self._inst)
+            toast(self, t("inst.marker_recheck"),
+                  t("inst.marker_recheck_done", name=t("instances.fmt_" + fmt)))
+        except Exception as exc:  # noqa: BLE001
+            warn(self, t("inst.marker_recheck"), str(exc))
+        self._refresh_marker()
+        self._update_fmt_hint()
+    def _pick_game_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, t("inst.game_dir_label"))
+        if path:
+            self.game_dir_edit.setText(path)
 
     def _load_java_list(self) -> None:
         """后台扫已装 Java 再填下拉——``scan_javas`` 会摸注册表与磁盘，
@@ -536,137 +805,6 @@ class InstanceEditorDialog(QDialog):
                 self.java_use_lbl.setText(t("inst.java_use_none"))
         except Exception:  # noqa: BLE001
             pass
-
-    # ── ④ 目录与格式 ────────────────────────────────────────
-    def _page_dir(self) -> _Page:
-        p = _Page(self)
-        inst = self._inst
-        p.section(t("instances.fmt_title"))
-        self.fmt_combo = QComboBox()
-        for k in INSTANCE_FORMATS:
-            self.fmt_combo.addItem(t("instances.fmt_" + k), k)
-        cur = (inst.format or "auto").strip()
-        idx = self.fmt_combo.findData(cur if cur in INSTANCE_FORMATS else "auto")
-        self.fmt_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        p.row(t("inst.fmt_current"), self.fmt_combo)
-        self.fmt_hint = p.hint("")
-        self.fmt_combo.currentIndexChanged.connect(
-            lambda _i: self._update_fmt_hint())
-        self._update_fmt_hint()
-
-        p.section(t("inst.isolation_section"))
-        self.iso_combo = QComboBox()
-        self.iso_combo.addItem(t("instances.isolation_follow"), "")
-        self.iso_combo.addItem(t("instances.isolation_isolated"), "isolated")
-        self.iso_combo.addItem(t("instances.isolation_custom"), "custom")
-        idx = self.iso_combo.findData(inst.isolation or "")
-        self.iso_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        p.row(t("instances.isolation"), self.iso_combo)
-
-        # ☠ 整行一起藏：只 hide 输入框会把「自定义目录」这个标签留在原地，
-        # 选「跟随全局」时出现一行没有控件的孤立标签（截图实测）。
-        self.game_dir_host = QWidget()
-        gd_row = QHBoxLayout(self.game_dir_host)
-        gd_row.setContentsMargins(0, 0, 0, 0)
-        gd_row.setSpacing(10)
-        gd_row.addWidget(p.label(t("inst.game_dir_label")))
-        self.game_dir_edit = QLineEdit((inst.game_dir_override or "").strip())
-        self.game_dir_edit.setPlaceholderText(
-            t("instances.game_dir_override_hint"))
-        gd_row.addWidget(self.game_dir_edit, 1)
-        gd_pick = ui_kit.make_button(
-            t("inst.java_browse"), kind="secondary", icon_key="folder",
-            on_click=self._pick_game_dir, min_h=30)
-        gd_row.addWidget(gd_pick)
-        p.add(self.game_dir_host)
-        self.game_dir_host.setVisible(self.iso_combo.currentData() == "custom")
-        self.iso_combo.currentIndexChanged.connect(
-            lambda _i: self.game_dir_host.setVisible(
-                self.iso_combo.currentData() == "custom"))
-
-        p.section(t("inst.marker_section"))
-        self.marker_lbl = QLabel("")
-        self.marker_lbl.setWordWrap(True)
-        self.marker_lbl.setTextFormat(Qt.RichText)
-        p.add(self.marker_lbl)
-        recheck = ui_kit.make_button(
-            t("inst.marker_recheck"), kind="secondary", icon_key="refresh",
-            on_click=self._recheck_marker, min_h=32)
-        rr = QHBoxLayout()
-        rr.addWidget(recheck)
-        rr.addStretch(1)
-        p.add_layout(rr)
-        self._refresh_marker()
-
-        p.stretch()
-        return p
-
-    def _update_fmt_hint(self) -> None:
-        data = self.fmt_combo.currentData() or "auto"
-        try:
-            det = detect_format(self._inst)
-            if data == "auto":
-                self.fmt_hint.setText(
-                    t("instances.fmt_detected", name=t("instances.fmt_" + det)))
-            else:
-                txt = t("instances.fmt_forced", name=t("instances.fmt_" + data))
-                if det != data:
-                    txt += "\n" + t("instances.fmt_mismatch_hint",
-                                    selected=t("instances.fmt_" + data),
-                                    detected=t("instances.fmt_" + det))
-                self.fmt_hint.setText(txt)
-        except Exception:  # noqa: BLE001
-            self.fmt_hint.setText("")
-
-    def _refresh_marker(self) -> None:
-        """展示 ``.ac-layout.json`` 是否存在、指纹是否还有效。"""
-        from .core import instance_marker
-        inst = self._inst
-        data = {}
-        try:
-            data = instance_marker.read(inst) or {}
-        except Exception:  # noqa: BLE001
-            data = {}
-        ok = bool(data)
-        head = t("inst.marker_present") if ok else t("inst.marker_absent")
-        color = COLORS["success"] if ok else COLORS["text_sub"]
-        lines = ["<div style='color:%s;font-weight:600'>%s</div>"
-                 % (color, _esc(head))]
-        if ok:
-            # 用中文标签：直接显示 owner / declared_format 这类内部键名，
-            # 玩家看不懂（实测「标识有效」下面一堆英文字段）。
-            for k, key in (("owner", "inst.marker_k_owner"),
-                           ("kind", "inst.marker_k_kind"),
-                           ("launcher", "inst.marker_k_launcher"),
-                           ("game_version", "inst.marker_k_game_version"),
-                           ("declared_format", "inst.marker_k_format")):
-                if data.get(k):
-                    lines.append(
-                        "<div style='margin:1px 0'><span style='color:%s'>%s："
-                        "</span><span style='color:%s'>%s</span></div>"
-                        % (COLORS["text_sub"], _esc(t(key)),
-                           COLORS["text_main"], _esc(str(data.get(k)))))
-        else:
-            lines.append("<div style='color:%s'>%s</div>"
-                         % (COLORS["text_sub"], _esc(t("inst.marker_absent_hint"))))
-        self.marker_lbl.setText("".join(lines))
-
-    def _recheck_marker(self) -> None:
-        """重新查验：走一次完整探测（含自动补写标识），再刷新展示。"""
-        try:
-            fmt = detect_format(self._inst)
-            toast(self, t("inst.marker_recheck"),
-                  t("inst.marker_recheck_done", name=t("instances.fmt_" + fmt)))
-        except Exception as exc:  # noqa: BLE001
-            warn(self, t("inst.marker_recheck"), str(exc))
-        self._refresh_marker()
-        self._update_fmt_hint()
-        self._refresh_status()
-
-    def _pick_game_dir(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, t("inst.game_dir_label"))
-        if path:
-            self.game_dir_edit.setText(path)
 
     # ── ⑤ 模组 ──────────────────────────────────────────────
     def _page_mods(self) -> _Page:
@@ -795,53 +933,55 @@ class InstanceEditorDialog(QDialog):
         self._reload_content()
 
     # ── ⑦ 高级 ──────────────────────────────────────────────
-    def _page_adv(self) -> _Page:
-        p = _Page(self)
-        inst = self._inst
-        p.section(t("inst.hooks_section"))
-        self.post_cmd_edit = p.field(t("inst.post_cmd_label"))
-        self.post_cmd_edit.setText((inst.post_launch_cmd or "").strip())
-        self.post_cmd_edit.setPlaceholderText(t("instances.hook_ph"))
-        self.exit_cmd_edit = p.field(t("inst.exit_cmd_label"))
-        self.exit_cmd_edit.setText((inst.exit_cmd or "").strip())
-        self.exit_cmd_edit.setPlaceholderText(t("instances.hook_ph"))
+    def _on_mem_changed(self, value: int) -> None:
+        self.mem_bar.set_values(int(value))
+        self._refresh_mem_info()
 
-        p.section(t("inst.meta_section"))
-        id_edit = QLineEdit(inst.id or "")
-        id_edit.setReadOnly(True)
-        p.row(t("inst.meta_id"), id_edit)
-        src_edit = QLineEdit(
-            "%s%s" % (loader_name(inst.loader or "vanilla"),
-                       (" · " + inst.kind) if inst.kind else ""))
-        src_edit.setReadOnly(True)
-        p.row(t("inst.meta_source"), src_edit)
-        dir_edit = QLineEdit(inst.mc_dir or "")
-        dir_edit.setReadOnly(True)
-        # 只读长路径默认把光标放在末尾 → 显示成「\Appdata\AC_Launcher\…」，
-        # 盘符被截掉（截图实测）。归零后从 D:\ 开始显示。
-        dir_edit.setCursorPosition(0)
-        self.adv_dir_edit = dir_edit
-        d_row = p.row(t("inst.meta_dir"), dir_edit)
-        d_row.addWidget(ui_kit.make_button(
-            t("inst.open_folder"), kind="secondary", icon_key="folder",
-            on_click=lambda: _open_path(self, inst.mc_dir), min_h=30))
-        p.hint(t("inst.meta_ro_hint"))
+    def _refresh_mem_info(self) -> None:
+        """内存条下的一行说明；分配超过 85% 系统内存时黄字提醒。"""
+        game_mb = int(self.mem_spin.value() or 0)
+        total, avail = _sys_memory_bytes()
+        total_gb = total / (1024 ** 3)
+        avail_gb = avail / (1024 ** 3)
+        txt = t("inst.mem_info", total="%.1f" % total_gb,
+                avail="%.1f" % avail_gb, game="%.1f" % (game_mb / 1024.0))
+        # PCL 同款护栏：分配 > 85% 物理内存大概率把系统挤死
+        if total and game_mb * 1024 * 1024 > total * 0.85:
+            self.mem_info_lbl.setStyleSheet(
+                "font-size:11px;color:%s;" % COLORS["danger"])
+            txt += " " + t("inst.mem_too_big")
+        else:
+            self.mem_info_lbl.setStyleSheet(_SUB_STYLE)
+        self.mem_info_lbl.setText(txt)
 
-        # round-184：导出整合包（.mrpack）—— 对应 PCL 概览页的「高级管理」区
-        p.section(t("export.title"))
-        p.hint(t("export.overrides_hint"))
-        ex_row = QHBoxLayout()
-        ex_row.setSpacing(8)
-        ex_row.addWidget(ui_kit.make_button(
-            t("instances.export_pack"), kind="secondary", icon_key="export",
-            on_click=self._export_pack, min_h=32))
-        ex_row.addStretch(1)
-        p.add_layout(ex_row)
+    def _repair_files(self) -> None:
+        """PCL「补全文件」同款：校验 + 重下缺失/损坏的游戏文件。
 
-        p.stretch()
-        return p
+        复用 install_instance 的幂等补全（启动前自动修复走的就是它），
+        这里只是给玩家一个手动入口，不用等启动失败才知道文件缺了。
+        """
+        if self._busy:
+            return
+        from .core.install import install_instance
+        from .worker import ProgressWorker
+        self._set_busy(True, t("inst.repair_working"))
+        self._repair_worker = ProgressWorker(
+            install_instance, self._inst,
+            java_auto=True, java_path="", mirror="official", proxy="")
+        self._repair_worker.finished.connect(self._on_repair_done)
+        self._repair_worker.error.connect(self._on_repair_failed)
+        self._repair_worker.start()
+
+    def _on_repair_done(self, _result) -> None:
+        self._set_busy(False, "")
+        toast(self, t("inst.repair_files"), t("inst.repair_done"))
+
+    def _on_repair_failed(self, err: str) -> None:
+        self._set_busy(False, "")
+        warn(self, t("inst.repair_files"), t("inst.repair_failed", e=str(err)))
 
     def _export_pack(self) -> None:
+        """导出整合包（概览页「高级管理」入口）。"""
         from .export_pack_dialog import ExportPackDialog
         # 先落字段：导出读的是实例对象，玩家刚改的版本号/加载器要用上
         self._collect(trigger=False)
@@ -1154,6 +1294,7 @@ class InstanceEditorDialog(QDialog):
         inst.game_dir_override = self.game_dir_edit.text().strip()
         inst.post_launch_cmd = self.post_cmd_edit.text().strip()
         inst.exit_cmd = self.exit_cmd_edit.text().strip()
+        inst.auto_server = self.auto_server_edit.text().strip()
 
         now = (inst.game_version or "", inst.loader or "vanilla",
                inst.loader_version or "")

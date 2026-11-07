@@ -87,6 +87,9 @@ class Instance:
     jvm_preset: str = ""         # "" = 跟随全局；"default"/"aikar"/"custom" 覆盖全局预设
     isolation: str = ""          # "" = 跟随全局；"isolated" = 版本隔离；"custom" = 自定义游戏目录
     game_dir_override: str = ""  # isolation == "custom" 时的自定义游戏目录（绝对路径）
+    # round-187 实例级「自动进入服务器」：形如 "ip:端口"。启动时自动追加
+    # --server/--port（PCL 同名能力）。留空 = 不自动进。
+    auto_server: str = ""
     post_launch_cmd: str = ""    # 游戏进程启动后执行的命令，空 = 跟随全局
     exit_cmd: str = ""           # 游戏进程退出后执行的命令，空 = 跟随全局
     # round-42 实例分组（对齐主流分组/筛选）：空 = 未分组
@@ -747,6 +750,7 @@ class InstancesManager:
             jvm_preset=raw.get("jvm_preset", "") or "",
             isolation=raw.get("isolation", "") or "",
             game_dir_override=raw.get("game_dir_override", "") or "",
+            auto_server=raw.get("auto_server", "") or "",
             post_launch_cmd=raw.get("post_launch_cmd", "") or "",
             exit_cmd=raw.get("exit_cmd", "") or "",
             group=raw.get("group", "") or "",

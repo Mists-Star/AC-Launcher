@@ -1,0 +1,64 @@
+    def _load_java_list(self) -> None:
+        """后台扫已装 Java 再填下拉——``scan_javas`` 会摸注册表与磁盘，
+        放在 UI 线程里会让「点开面板」卡一下（实例设置页当初就踩过）。"""
+        self._javas_worker = Worker(_java_choices)
+        self._javas_worker.finished.connect(self._fill_java_combo)
+        self._javas_worker.error.connect(lambda _e: None)
+        self._javas_worker.start()
+
+    def _fill_java_combo(self, choices: list | None = None) -> None:
+        """把已扫描到的 Java 填进手选下拉（失败就只剩「跟随全局」）。"""
+        api = getattr(self, "java_combo", None)
+        if api is None:
+            return
+        if choices is None:
+            choices = _java_choices()
+        cur = (self._inst.java_path or "").strip()
+        api.blockSignals(True)
+        while api.count() > 1:
+            api.removeItem(1)
+        for j in choices or []:
+            api.addItem("Java %s · %s" % (j.get("major") or "?", j.get("path")),
+                        j.get("path"))
+        # 扫描失败 / 手填路径不在候选里时补一项：否则 findData 落空 → 保存时
+        # 把玩家原来的手选路径清成「跟随全局」，改个内存就把 Java 弄丢。
+        if cur and api.findData(cur) < 0:
+            api.addItem("Java · %s" % cur, cur)
+        idx = api.findData(cur)
+        api.setCurrentIndex(idx if idx >= 0 else 0)
+        api.blockSignals(False)
+
+    def _browse_java(self) -> None:
+        path, _f = QFileDialog.getOpenFileName(
+            self, t("inst.java_browse"), "", "java*")
+        if not path:
+            return
+        idx = self.java_combo.findData(path)
+        if idx < 0:
+            self.java_combo.addItem("Java · %s" % path, path)
+            idx = self.java_combo.count() - 1
+        self.java_combo.setCurrentIndex(idx)
+
+    def _load_java_plan(self) -> None:
+        """后台算「需要 / 将使用」的 Java，避免进页面卡一次深扫。"""
+        from .settings_dialog import load_config
+        from .core.java import java_plan
+        self._java_worker = Worker(java_plan, self._inst, load_config())
+        self._java_worker.finished.connect(self._on_java_plan)
+        self._java_worker.error.connect(lambda _e: None)
+        self._java_worker.start()
+
+    def _on_java_plan(self, plan: dict) -> None:
+        try:
+            self.java_need_lbl.setText(
+                t("inst.java_need_line", need=int(plan.get("need") or 0)))
+            path = plan.get("path") or ""
+            if path:
+                self.java_use_lbl.setText(t(
+                    "inst.java_use_line",
+                    major=int(plan.get("major") or 0), path=path))
+            else:
+                self.java_use_lbl.setText(t("inst.java_use_none"))
+        except Exception:  # noqa: BLE001
+            pass
+

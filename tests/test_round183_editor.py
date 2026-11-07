@@ -50,15 +50,14 @@ swap_src = read("src/core/loader_swap.py")
 
 check("instance_editor.py 定义 InstanceEditorDialog",
       "class InstanceEditorDialog(QDialog)" in editor_src)
-for key in ("basic", "launch", "modify", "java", "dir", "mods", "content",
-            "adv"):
+for key in ("overview", "setup", "modify", "mods", "content"):
     check("有 %-8s 页构建函数" % key, "def _page_%s(" % key in editor_src)
 
 nav_keys = re.findall(r'\("(\w+)", "inst\.tab_(\w+)", "(\w+)"\)', editor_src)
-check("导航项 8 个", len(nav_keys) == 8, str(len(nav_keys)))
+check("导航项 5 个", len(nav_keys) == 5, str(len(nav_keys)))
 check("导航项与页函数一一对应",
-      {k for k, _t, _i in nav_keys} == {"basic", "launch", "modify", "java",
-                                        "dir", "mods", "content", "adv"})
+      {k for k, _t, _i in nav_keys} == {"overview", "setup", "modify",
+                                        "mods", "content"})
 # PCL 的「修改」页是**换加载器**的操作页，不是字段表单：
 # 加载器下拉与装卸按钮必须落在这个页里，不能再混在「启动」页。
 _mod_body = editor_src.split("def _page_modify(", 1)[-1].split(
@@ -66,9 +65,11 @@ _mod_body = editor_src.split("def _page_modify(", 1)[-1].split(
 check("修改页含加载器下拉", "self.loader_combo" in _mod_body)
 check("修改页含安装按钮", "self.install_btn" in _mod_body)
 check("修改页含卸载按钮", "self.uninstall_btn" in _mod_body)
-_launch_body = editor_src.split("def _page_launch(", 1)[-1].split(
-    "def _page_modify(", 1)[0]
-check("启动页不再放加载器下拉", "loader_combo" not in _launch_body)
+# round-187 重排后「启动/Java/目录」三页并进「设置」：旧页函数必须退役，
+# 否则就是两套字段两个来源
+check("旧三页函数已退役",
+      all(("def _page_%s(" % k) not in editor_src
+          for k in ("basic", "launch", "java", "dir", "adv")))
 
 check("旧 480x620 长条已退役（不再 resize(480, 620)）",
       "resize(480, 620)" not in pages_src)
@@ -240,8 +241,8 @@ live = Instance(id="t5", name="原名称", game_version="1.20.1",
                 ram_mb=2048, jvm_args="-Xmx2G", _base=mc)
 dlg = InstanceEditorDialog(None, live)
 check("面板能实例化", dlg is not None)
-check("八个页都建出来了", dlg.stack.count() == 8, str(dlg.stack.count()))
-check("导航行数 = 8", dlg.nav.count() == 8, str(dlg.nav.count()))
+check("五个页都建出来了", dlg.stack.count() == 5, str(dlg.stack.count()))
+check("导航行数 = 5", dlg.nav.count() == 5, str(dlg.nav.count()))
 check("标题带实例名", "原名称" in dlg.windowTitle(), dlg.windowTitle())
 
 # 改字段 → 保存
@@ -278,6 +279,10 @@ check("模组页列出 2 个文件", len(dlg.mod_panel._all) == 2,
 check("已禁用项被识别",
       sum(1 for r in dlg.mod_panel._all if not r.enabled) == 1,
       str([r.enabled for r in dlg.mod_panel._all]))
+check("概览页有只读状态卡", hasattr(dlg, "status_box") and
+      bool(dlg.status_box.toPlainText() if hasattr(dlg.status_box, "toPlainText")
+           else dlg.status_box.text()))
+check("概览页有导出整合包入口", "instances.export_pack" in editor_src)
 check("模组面板有搜索框", dlg.mod_panel.search.placeholderText() != "")
 check("模组面板有四个筛选", len(dlg.mod_panel.chips.buttons) == 4,
       str(len(dlg.mod_panel.chips.buttons)))
