@@ -1002,6 +1002,7 @@ def resolve_mod_dependencies(
     version_id: str = "",
     _seen: set | None = None,
     _depth: int = 0,
+    only_self: bool = False,
 ) -> list[dict]:
     """递归解析 required 依赖，返回去重后的文件清单。
 
@@ -1046,6 +1047,9 @@ def resolve_mod_dependencies(
         "sha1": _primary_hashes(target).get("sha1", ""),
         "optional": False,
     })
+    if only_self:
+        # round-193：玩家明确选择「不装前置」时只取本体
+        return out
     for dep in target.get("dependencies", []):
         dtype = dep.get("dependency_type", "")
         dpid = dep.get("project_id", "")
@@ -1064,6 +1068,68 @@ def resolve_mod_dependencies(
     return out
 
 
+def mod_version_dependencies(project_id: str, version_id: str = "",
+                             mc_version: str = "", loader: str = "") -> list[dict]:
+    """某个版本的**前置模组**清单（round-193）。
+
+    返回 ``[{"project_id", "title", "slug", "version_id", "optional"}]``：
+    * ``title`` 优先用本地中文名库，其次 Modrinth 原名；
+    * 只列 ``required``（optional / incompatible / embedded 都不装）。
+
+    用途：详情页把前置**摆出来**给玩家看，下载前再问一句「是否一并安装」——
+    玩家不该在进游戏报「缺前置」之后才知道这事。
+    """
+    if not project_id:
+        return []
+    versions = _modrinth_versions(project_id, mc_version, loader)
+    target = None
+    for v in versions:
+        if str(v.get("id")) == str(version_id):
+            target = v
+            break
+    if target is None and versions:
+        target = versions[0]
+    if target is None:
+        return []
+    deps = []
+    for dep in target.get("dependencies", []) or []:
+        dtype = str(dep.get("dependency_type", "") or "")
+        dpid = str(dep.get("project_id", "") or "")
+        if not dpid or dtype != "required":
+            continue
+        title, slug = _dep_title(dpid)
+        deps.append({
+            "project_id": dpid,
+            "title": title,
+            "slug": slug,
+            "version_id": str(dep.get("version_id", "") or ""),
+            "optional": False,
+        })
+    return deps
+
+
+def _dep_title(project_id: str) -> tuple[str, str]:
+    """取依赖项目的名字（中文名库优先），失败就退回 id。"""
+    slug = ""
+    title = ""
+    try:
+        info = get_project_info(project_id)
+        if isinstance(info, dict):
+            slug = str(info.get("slug", "") or "")
+            title = str(info.get("title", "") or "")
+    except Exception:  # noqa: BLE001 - 网络失败就退回 id
+        pass
+    if not title:
+        title = project_id
+    try:
+        from .i18n import get_language
+        if get_language() != "en-US":
+            title = cn_name(slug, title) if slug else title
+    except Exception:  # noqa: BLE001
+        pass
+    return title, slug
+
+
 def download_mod_to(
     project_id: str,
     dest_dir: str,
@@ -1071,6 +1137,7 @@ def download_mod_to(
     loader: str = "",
     callback=None,
     manifest_out: list | None = None,
+    with_deps: bool = True,
 ) -> str:
     """Download a mod + its required dependency tree into dest_dir.
 
@@ -1080,7 +1147,8 @@ def download_mod_to(
     round-111：``callback`` 收 mll 风格 dict（由 :class:`ProgressWorker`
     注入），桥接成跨文件聚合的字节级进度 + 实时速度。
     """
-    files = resolve_mod_dependencies(project_id, mc_version, loader)
+    files = resolve_mod_dependencies(project_id, mc_version, loader,
+                                     only_self=not with_deps)
     if not files:
         raise NetError("没有可下载的文件")
     os.makedirs(dest_dir, exist_ok=True)
@@ -1119,6 +1187,7 @@ def download_mod_version_to(
     loader: str = "",
     callback=None,
     manifest_out: list | None = None,
+    with_deps: bool = True,
 ) -> str:
     """Download a specific version of a mod + its dependency tree (round-66).
 
@@ -1128,7 +1197,8 @@ def download_mod_version_to(
     round-111：新增 ``callback``（mll 风格，ProgressWorker 注入）→ 进度/速度。
     """
     files = resolve_mod_dependencies(
-        project_id, mc_version, loader, version_id=version_id)
+        project_id, mc_version, loader, version_id=version_id,
+        only_self=not with_deps)
     if not files:
         raise NetError("没有可下载的文件（或该版本不存在）")
     os.makedirs(dest_dir, exist_ok=True)

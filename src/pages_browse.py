@@ -814,6 +814,13 @@ class StorePage(QWidget):
         meta.setProperty("cls", "sub")
         meta.setStyleSheet(f"color: {COLORS['text_disabled']};")
         meta_row.addWidget(meta)
+        # round-193：已装的标出来 —— 避免重复下载同一个 mod（用户「下载为啥
+        # 不可见」的一部分：装没装、装了什么要一眼看见）
+        if self._is_installed(m):
+            done = ui_kit.tag(t("store.installed_tag"),
+                              COLORS["bg_hover"], COLORS["success"],
+                              font_size=10, radius=6, pad="2px 8px")
+            meta_row.addWidget(done)
         meta_row.addStretch(1)
         info.addLayout(meta_row)
         lay.addLayout(info, stretch=1)
@@ -839,6 +846,46 @@ class StorePage(QWidget):
         card.setCursor(Qt.PointingHandCursor)
         card.mousePressEvent = lambda _e, m=m: self._open_detail(m)
         return card
+
+    def _current_inst(self):
+        """当前目标实例（页头下拉选中的那个）。"""
+        iid = self.inst_combo.currentData() if hasattr(self, "inst_combo") else ""
+        if not iid:
+            return None
+        for i in (self.list_instances() or []):
+            if i.id == iid:
+                return i
+        return None
+
+    def _is_installed(self, m: dict) -> bool:
+        """这个资源是不是已经装在目标实例里了。"""
+        inst = self._current_inst()
+        if inst is None:
+            return False
+        pid = str(m.get("project_id", "") or "")
+        slug = str(m.get("slug", "") or "")
+        try:
+            from .core import mod_sources
+            rec = mod_sources.load(inst)
+        except Exception:  # noqa: BLE001
+            rec = {}
+        for fn, meta in (rec or {}).items():
+            if pid and str(meta.get("project_id", "")) == pid:
+                return True
+            if slug and str(meta.get("slug", "")) == slug:
+                return True
+        # 没有来源记录（旧下载）→ 按名字在前置里找已装 jar
+        title = str(m.get("title", "") or "").lower()
+        if not title:
+            return False
+        try:
+            mods_dir = getattr(inst, "mods_dir", "") or ""
+            for fn in os.listdir(mods_dir):
+                if fn.lower().endswith(".jar") and title[:8] in fn.lower():
+                    return True
+        except OSError:
+            pass
+        return False
 
     def _open_detail(self, m: dict):
         """在页内打开资源详情（round-132：不再弹独立 QDialog）。

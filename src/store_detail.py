@@ -53,7 +53,7 @@ def _cache_write(store, key, val, cap=48):
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QTextEdit, QMessageBox, QFrame, QWidget, QButtonGroup,
-    QScrollArea, QFileDialog,
+    QScrollArea, QFileDialog, QProgressBar, QCheckBox,
 )
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
@@ -165,9 +165,11 @@ class _VersionRow(QFrame):
     点击整行或右侧「下载」即下载该版本（对齐主流启动器的行内下载）。
     """
 
-    def __init__(self, parent, ver: dict, is_latest: bool, on_download):
+    def __init__(self, parent, ver: dict, is_latest: bool, on_download,
+                 compatible: bool = True, reason: str = ""):
         super().__init__(parent)
         self._ver = ver
+        self._compatible = compatible
         # round-99 极简：容器走全局 ``vrow`` 类（中性卡底 + 中性描边 +
         # hover 描边变亮），删除内联样式——内联样式不随主题切换刷新，且旧
         # hover 的 ``{accent}66`` 是错误 alpha（#RRGGBBAA 会被 Qt 当
@@ -196,10 +198,20 @@ class _VersionRow(QFrame):
         v_lbl = QLabel(ver.get("version_number", "—"))
         # round-99：颜色继承全局 text_main（不再按最新态染 accent——accent
         # 只留给左侧星标点缀）；字号/字重内联保留。
+        # round-193：不兼容的版本整体压暗，并在行尾给一条原因（玩家一眼知道
+        # 为什么这个版本不能装，而不是以为列表乱了）。
+        _dim = "" if compatible else "color:%s;" % COLORS["text_disabled"]
         v_lbl.setStyleSheet(
-            f"font-size: 13px; font-weight: {'800' if is_latest else '600'};")
-        v_lbl.setToolTip(t("store.detail_latest_tip") if is_latest else "")
+            f"font-size: 13px; font-weight: {'800' if is_latest else '600'};"
+            f"{_dim}")
+        v_lbl.setToolTip(t("store.detail_latest_tip") if is_latest else reason)
         vh.addWidget(v_lbl)
+        if not compatible and reason:
+            bad = QLabel(reason)
+            bad.setProperty("cls", "sub")
+            bad.setStyleSheet("font-size:11px;color:%s;"
+                              % COLORS["danger"])
+            vh.addWidget(bad)
         lay.addWidget(v_wrap)
 
         # MC 版本
@@ -274,6 +286,7 @@ class StoreDetailPanel(QWidget):
         self._instances = list(instances) if instances is not None else []
         self._subdir = subdir
         self._versions: list[dict] = []      # 已分页累积的全量版本
+        self._deps: list[dict] = []          # round-193：推荐版本的前置清单
         self._workers: list = []
         self._img = get_image_loader()
         self._offset = 0                     # 服务端分页游标
@@ -315,6 +328,35 @@ class StoreDetailPanel(QWidget):
 
         # ── ② 最新版本条 ──
         bl.addWidget(self._build_latest())
+
+        # round-193：前置模组区（装之前就摆出来，别等进游戏报缺前置）
+        self.deps_box = QFrame()
+        self.deps_box.setProperty("cls", "latest")
+        dl = QHBoxLayout(self.deps_box)
+        dl.setContentsMargins(13, 9, 11, 9)
+        dl.setSpacing(10)
+        self.deps_title = QLabel(t("store.deps_title"))
+        self.deps_title.setProperty("cls", "sub")
+        self.deps_title.setStyleSheet("font-weight: 700;")
+        dl.addWidget(self.deps_title)
+        self.deps_lbl = QLabel("")
+        self.deps_lbl.setProperty("cls", "sub")
+        self.deps_lbl.setWordWrap(True)
+        dl.addWidget(self.deps_lbl, 1)
+        self.deps_box.setVisible(False)
+        bl.addWidget(self.deps_box)
+
+        # round-193：下载进度（详情页内可见，不用回列表页看）
+        self.dl_bar = QProgressBar()
+        self.dl_bar.setProperty("cls", "slim")
+        self.dl_bar.setTextVisible(False)
+        self.dl_bar.setFixedHeight(8)
+        self.dl_bar.setVisible(False)
+        bl.addWidget(self.dl_bar)
+        self.dl_speed = QLabel("")
+        self.dl_speed.setProperty("cls", "sub")
+        self.dl_speed.setVisible(False)
+        bl.addWidget(self.dl_speed)
 
         # ── ③ 筛选栏 ──
         bl.addLayout(self._build_filter_bar())
@@ -584,6 +626,14 @@ class StoreDetailPanel(QWidget):
         self.mc_filter.currentIndexChanged.connect(self._rebuild_rows)
         bar.addWidget(self.mc_filter)
 
+        # round-193：默认只看「兼容当前实例」的版本（可临时放开看全部）。
+        # 用户原话：「模组最高版本推荐不是随着我版本加载器来选的有何作用？」
+        self.compat_chk = QCheckBox(t("store.detail_compat_only"))
+        self.compat_chk.setChecked(True)
+        self.compat_chk.setToolTip(t("store.detail_compat_only_hint"))
+        self.compat_chk.toggled.connect(self._on_compat_toggle)
+        bar.addWidget(self.compat_chk)
+
         bar.addStretch(1)
         self.versions_lbl = QLabel(t("store.detail_loading"))
         self.versions_lbl.setProperty("cls", "sub")
@@ -618,6 +668,36 @@ class StoreDetailPanel(QWidget):
         if bid < 0 or bid >= len(self._loader_options):
             return ""
         return self._loader_options[bid]
+
+    def _compat_of(self, ver: dict) -> tuple[bool, str]:
+        """这个版本对**当前实例**（MC 版本 + 加载器）兼不兼容。
+
+        用户原话：「模组最高版本推荐不是随着我版本加载器来选的有何作用？」
+        —— 推荐必须跟着实例走：给一个装不上的"最新"毫无意义。
+        """
+        inst = self._inst
+        if inst is None:
+            return True, ""
+        mc = str(getattr(inst, "game_version", "") or "")
+        ld = str(getattr(inst, "loader", "") or "vanilla").lower()
+        gvs = [str(g) for g in (ver.get("game_versions") or [])]
+        lds = [str(x).lower() for x in (ver.get("loaders") or [])]
+        if mc and gvs and mc not in gvs:
+            return False, t("store.incompat_mc", mc=mc)
+        if ld and ld != "vanilla" and lds and ld not in lds:
+            return False, t("store.incompat_loader", loader=ld)
+        return True, ""
+
+    def _recommended(self) -> dict | None:
+        """最新**兼容**当前实例的版本（没有就退回最新，并说明不兼容）。"""
+        best = None
+        for v in self._versions:
+            ok, _ = self._compat_of(v)
+            if ok:
+                return v
+            if best is None:
+                best = v
+        return best
 
     def _filtered(self) -> list[dict]:
         mc = self.mc_filter.currentData() or ""
@@ -659,8 +739,13 @@ class StoreDetailPanel(QWidget):
                            self._card.get("project_id", "")
                            or self._card.get("slug", ""), PAGE_SIZE, offset)
         else:
+            # round-193：服务端按实例的 MC 版本 + 加载器过滤。
+            # 原来拉的是「全量最新 50 条」—— Mod Menu 这种上千版本的模组，
+            # 前 50 条全是 26.x 的新版本，**兼容 1.20.1 的版本在第 50+ 位**，
+            # 于是「推荐版本」永远推荐一个装不上的。
+            mc_f, ld_f = self._server_filters()
             w = Worker(_modrinth_versions, self._card.get("project_id", ""),
-                       "", "", PAGE_SIZE, offset)
+                       mc_f, ld_f, PAGE_SIZE, offset)
 
         def _on_ok(page: list):
             self.more_btn.setEnabled(True)
@@ -690,10 +775,16 @@ class StoreDetailPanel(QWidget):
     def _on_versions_ready(self, appending: bool):
         self.versions_lbl.setText(t("store.detail_n_versions", n=len(self._versions)))
 
-        # 最新版本条：全量第一条 = 最新（Modrinth 默认按发布时间倒序）
+        # 最新版本条：round-193 改成「最新**兼容**当前实例的版本」
         if self._versions and not appending:
-            self._fill_latest(self._versions[0])
-            self._latest_box.setVisible(True)
+            rec = self._recommended()
+            if rec is not None:
+                self._fill_latest(rec)
+                self._latest_box.setVisible(True)
+
+        # round-193：前置模组（跟着推荐版本走）
+        if not appending:
+            self._refresh_deps(rec)
 
         # MC 版本下拉聚合
         if not appending:
@@ -763,12 +854,16 @@ class StoreDetailPanel(QWidget):
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
-        latest_id = self._versions[0].get("id") if self._versions else None
+        # round-193：星标给「推荐（最新且兼容当前实例）」，不兼容的行整体压暗
+        rec = self._recommended()
+        latest_id = rec.get("id") if rec else None
         for v in self._filtered():
+            ok, reason = self._compat_of(v)
             self._rows.insertWidget(self._rows.count() - 1,
                                     _VersionRow(self._rows_host, v,
                                                 v.get("id") == latest_id,
-                                                self._download_version))
+                                                self._download_version,
+                                                compatible=ok, reason=reason))
         self.versions_lbl.setText(
             t("store.detail_shown", shown=len(self._filtered()),
               total=len(self._versions)))
@@ -778,6 +873,119 @@ class StoreDetailPanel(QWidget):
     def _download_latest(self):
         if self._versions:
             self._download_version(self._versions[0])
+
+    def _server_filters(self) -> tuple[str, str]:
+        """给服务端过滤用的 (mc, loader)：
+
+        * 勾着「只看兼容」→ 用目标实例的 MC 版本 + 加载器；
+        * 取消勾选 → 空（拉全量版本）。
+        """
+        if not (hasattr(self, "compat_chk") and self.compat_chk.isChecked()):
+            return "", ""
+        inst = self._inst
+        mc = str(getattr(inst, "game_version", "") or "") if inst else ""
+        ld = str(getattr(inst, "loader", "") or "") if inst else ""
+        if ld.lower() == "vanilla":
+            ld = ""
+        return mc, ld
+
+    def _on_compat_toggle(self, _on: bool) -> None:
+        """切换「只看兼容」→ 重新拉版本（服务端过滤变了）。"""
+        self._versions = []
+        self._offset = 0
+        self._load_first_page()
+
+    def _on_dl_progress(self, value: int, maximum: int) -> None:
+        """下载进度（字节级 → 百分比；拿不到最大值就保持忙指示）。"""
+        try:
+            if maximum and maximum > 0:
+                self.dl_bar.setRange(0, 100)
+                self.dl_bar.setValue(int(value * 100 / maximum))
+        except Exception:  # noqa: BLE001 - 进度显示失败不影响下载
+            pass
+
+    def _refresh_deps(self, ver: dict | None) -> None:
+        """拉「推荐版本」的前置模组并显示出来。"""
+        self.deps_box.setVisible(False)
+        self._deps = []
+        if not ver or self._card.get("source") == "curseforge":
+            # CF 的文件接口不暴露依赖（只有 Modrinth 版本带 dependencies）
+            return
+        pid = self._card.get("project_id", "")
+        vid = str(ver.get("id", "") or "")
+        if not pid or not vid:
+            return
+        try:
+            from .net_api import mod_version_dependencies
+            deps = mod_version_dependencies(pid, vid)
+        except Exception:  # noqa: BLE001 - 依赖查询失败不挡住页面
+            return
+        if not deps:
+            return
+        self._deps = deps
+        names = []
+        for d in deps:
+            mark = t("store.deps_installed") if self._dep_installed(d) \
+                else t("store.deps_missing")
+            names.append("%s（%s）" % (d.get("title", ""), mark))
+        self.deps_lbl.setText(" · ".join(names))
+        self.deps_box.setVisible(True)
+
+    def _dep_installed(self, dep: dict) -> bool:
+        """这个前置是不是已经装在实例里了。"""
+        inst = self._current_inst()
+        if inst is None:
+            return False
+        pid = str(dep.get("project_id", "") or "")
+        slug = str(dep.get("slug", "") or "")
+        try:
+            from .core import mod_sources
+            rec = mod_sources.load(inst)
+        except Exception:  # noqa: BLE001
+            rec = {}
+        for fn, meta in (rec or {}).items():
+            if str(meta.get("project_id", "")) == pid or (
+                    slug and str(meta.get("slug", "")) == slug):
+                return True
+        # 没记录来源时退一步：按名字在前置里找已装 jar（宽松但有用）
+        title = str(dep.get("title", "") or "").lower()
+        if not title:
+            return False
+        try:
+            mods_dir = getattr(inst, "mods_dir", "") or ""
+            for fn in os.listdir(mods_dir):
+                if fn.lower().endswith(".jar") and title[:8] in fn.lower():
+                    return True
+        except OSError:
+            pass
+        return False
+
+    def _ask_deps(self, ver: dict) -> bool:
+        """下载前问一句「是否一并安装前置」。返回 True = 连前置一起装。
+
+        没有前置 → 直接 True（不问）；玩家选「不装」→ False（只下本体）。
+        """
+        if self._card.get("source") == "curseforge":
+            return True
+        deps = self._deps
+        if not deps and ver:
+            try:
+                from .net_api import mod_version_dependencies
+                deps = mod_version_dependencies(
+                    self._card.get("project_id", ""), str(ver.get("id", "") or ""))
+            except Exception:  # noqa: BLE001
+                deps = []
+        if not deps:
+            return True
+        names = "\n".join("· %s" % d.get("title", "") for d in deps)
+        box = QMessageBox(self)
+        box.setWindowTitle(t("store.deps_title"))
+        box.setText(t("store.deps_ask", n=len(deps)))
+        box.setInformativeText(names)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.Yes)
+        reply = box.exec()
+        return reply == QMessageBox.Yes
 
     def _download_version(self, v: dict):
         """Download one version into the picked instance — or into a folder.
@@ -817,7 +1025,15 @@ class StoreDetailPanel(QWidget):
             loader = getattr(inst, "loader", "") or ""
         from .net_api import (curseforge_available, download_cfwidget_file,
                               download_curseforge_file, download_mod_version_to)
+        # round-193：下载前问一句「前置要不要一起装」——玩家不该在进游戏报
+        # 缺前置之后才知道这事。
+        with_deps = self._ask_deps(v)
         self.status.setText(t("store.downloading", slug=slug))
+        # round-193：详情页内可见的进度条 + 速度（不用回列表页看进度）
+        self.dl_bar.setVisible(True)
+        self.dl_bar.setRange(0, 0)
+        self.dl_speed.setVisible(True)
+        self.dl_speed.setText("")
         # 每次下载都重置（CF 分支不填 manifest，别让它读到上一次的）
         self._dl_manifest = []
         # round-111：改用 ProgressWorker，速度行进已有 status 标签
@@ -849,15 +1065,46 @@ class StoreDetailPanel(QWidget):
                 self._card.get("project_id", ""), v.get("id", ""), dest,
                 mc_version, loader,
                 manifest_out=self._dl_manifest,
+                with_deps=with_deps,
             )
-        w.speed.connect(lambda s: self.status.setText(s))
+        w.speed.connect(lambda s: self.dl_speed.setText(s))
+        w.progress.connect(self._on_dl_progress)
 
         def _ok(p: str):
-            self.status.setText(t("store.downloaded", file=os.path.basename(p)))
+            # round-193：说清楚「装了哪些文件」（本体 + 前置），别只报一个文件名
+            names = [os.path.basename(p)]
+            for item in (self._dl_manifest or []):
+                fn = item.get("filename", "")
+                if fn and fn not in names:
+                    names.append(fn)
+            msg = t("store.downloaded", file=os.path.basename(p))
+            if len(names) > 1:
+                msg += ("\n" + t("store.installed_files", n=len(names),
+                                  files="、".join(os.path.basename(x)
+                                                  for x in names[:6])))
+            # round-193：装完再体检一次 —— 很多老模组在 Modrinth 上**没声明**
+            # 依赖（Mod Menu 7.x 就不写 Fabric API），下载前的清单是空的，
+            # 只能靠装完扫描实例的 mods 目录才发现「少了 Fabric API」。
+            try:
+                inst = self._current_inst()
+                if inst is not None:
+                    from .core.mod_check import scan_conflicts
+                    res = scan_conflicts(inst)
+                    miss = [f for f in (res.get("findings") or [])
+                            if getattr(f, "kind", "") == "missing_dep"]
+                    if miss:
+                        msg += "\n" + t("store.missing_deps", n=len(miss))
+            except Exception:  # noqa: BLE001 - 体检失败不影响下载结果
+                pass
+            self.status.setText(msg)
+            self.dl_bar.setVisible(False)
+            self.dl_speed.setVisible(False)
             self._record_sources()
 
         def _err(e):
             self.status.setText(t("store.download_fail", e=e))
+            self.dl_bar.setVisible(False)
+            self.dl_speed.setVisible(False)
 
         w.finished.connect(_ok)
         w.error.connect(_err)
