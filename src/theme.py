@@ -945,7 +945,14 @@ QCheckBox::indicator {
     border-radius: 4px;
     background: $bg_card;
 }
-QCheckBox::indicator:checked { background: $accent; border-color: $accent; }
+/* round-186：勾选态原本是「一块纯紫方块」，没有勾形标记 —— 在模组列表这种
+   几十行的场景里分不清「已勾选」还是「一个色块」。改成白底 + accent 描边
+   + 对勾（经典 Win/macOS 观感），任何 accent 亮度下都读得清。 */
+QCheckBox::indicator:checked {
+    background: $bg_card;
+    border-color: $accent;
+    image: url(:/icons/tick.svg);
+}
 QCheckBox::indicator:hover { border-color: $border_light; }
 
 /* ---- radio button ---- */

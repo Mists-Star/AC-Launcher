@@ -2499,6 +2499,43 @@ def download_modpack_to(project_id: str, dest_dir: str, callback=None,
 #                    official GitHub Releases provide an installer jar
 # --------------------------------------------------------------------------
 LEGACY_FABRIC_LOADER_API = "https://meta.legacyfabric.net/v2/versions/loader"
+
+#: Fabric 官方 meta：按 MC 版本列加载器构建（round-186）。
+#: 与 ``mll.fabric.get_all_loader_versions()`` 的区别是**带 MC 版本**——
+#: 后者返回全历史版本，填进下拉就是「这个版本装不上却列着」。
+FABRIC_LOADER_API = "https://meta.fabricmc.net/v2/versions/loader"
+QUILT_LOADER_API = "https://meta.quiltmc.org/v3/versions/loader"
+
+
+def fetch_loader_builds(mc_version: str, loader: str = "fabric") -> list[dict]:
+    """拉「该 MC 版本」可用的 Fabric / Quilt 加载器构建。
+
+    返回 ``[{"title", "meta", "stable"}]``；网络失败抛 :class:`NetError`
+    （由调用方决定是提示还是退回空列表）。
+    """
+    base = QUILT_LOADER_API if str(loader).lower() == "quilt" else FABRIC_LOADER_API
+    key = "%s_loader:%s" % (str(loader).lower(), mc_version)
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    url = base + "/" + str(mc_version)
+    try:
+        r = requests.get(url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
+                         proxies=_proxies())
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as e:
+        raise NetError("Cannot fetch %s loader builds: %s" % (loader, e)) from e
+    out = []
+    for item in data if isinstance(data, list) else []:
+        ld = item.get("loader") or {}
+        ver = str(ld.get("version") or "")
+        if not ver:
+            continue
+        out.append({"title": ver, "meta": ver,
+                    "stable": bool(ld.get("stable", True))})
+    _store(key, out)
+    return out
 LEGACY_FABRIC_GAME_API = "https://meta.legacyfabric.net/v2/versions/game"
 
 

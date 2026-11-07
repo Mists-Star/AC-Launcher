@@ -76,8 +76,9 @@ check("_edit_instance_settings 改开新面板",
       "from .instance_editor import InstanceEditorDialog" in pages_src)
 check("右键菜单有「编辑实例」",
       't("instances.edit_instance")' in pages_src)
-check("面板内嵌模组卡（复用 ModCard）",
-      "from .pages_instances import ModCard" in editor_src)
+# round-185：模组页改用 ModListPanel（不再是 ModCard 大卡片列表）
+check("面板内嵌模组列表（ModListPanel）",
+      "from .mod_list import ModListPanel" in editor_src)
 check("面板内嵌加载器真装/真卸",
       "swap_loader" in editor_src and "uninstall_loader" in editor_src)
 
@@ -271,8 +272,15 @@ with io.open(os.path.join(mods_d, "a.jar"), "wb") as fh:
 with io.open(os.path.join(mods_d, "b.jar.disabled"), "wb") as fh:
     fh.write(b"PK\x03\x04")
 dlg._reload_mods()
-check("模组页列出 2 个文件", dlg.mods_box.count() == 2,
-      str(dlg.mods_box.count()))
+# round-185：模组页换成 ModListPanel（搜索/筛选/多选），行对象在 _all 里
+check("模组页列出 2 个文件", len(dlg.mod_panel._all) == 2,
+      str(len(dlg.mod_panel._all)))
+check("已禁用项被识别",
+      sum(1 for r in dlg.mod_panel._all if not r.enabled) == 1,
+      str([r.enabled for r in dlg.mod_panel._all]))
+check("模组面板有搜索框", dlg.mod_panel.search.placeholderText() != "")
+check("模组面板有四个筛选", len(dlg.mod_panel.chips.buttons) == 4,
+      str(len(dlg.mod_panel.chips.buttons)))
 
 # 内容页：资源包 / 光影 / 存档
 try:

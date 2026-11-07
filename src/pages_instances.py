@@ -226,10 +226,14 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
                 for v in Forge.forge_versions(mc_version)
             ]
         if loader == "neoforge":
+            # ☠ round-186：原来直接 get_loader_versions() —— 那是**所有 MC 版本**
+            # 的 NeoForge 版本（20.1.x / 20.4.x / 21.x 混在一起）。选 1.20.1 的
+            # 实例能在下拉里看到 21.x，装上去必崩。按版本号前缀裁掉。
+            from .core.loader_catalog import filter_neoforge
+            raw = [v["version"] for v in Neoforge.get_loader_versions()]
             return [
-                {"title": v["version"], "meta": v["version"],
-                 "channel": version_channel(v["version"])}
-                for v in Neoforge.get_loader_versions()
+                {"title": v, "meta": v, "channel": version_channel(v)}
+                for v in filter_neoforge(raw, mc_version)
             ]
     except Exception:
         pass
@@ -243,7 +247,20 @@ def _fetch_loader_versions(mc_version: str, loader: str) -> list[dict]:
             ]
     except Exception:
         pass
-    # fabric via minecraft-launcher-lib
+    # fabric / quilt：走官方 meta 的**按 MC 版本**接口
+    # ☠ round-186：原来用 mll 的 get_all_loader_versions()，返回的是 Fabric
+    # 全历史构建（0.4.x 到最新），不看 MC 版本 —— 下拉里会冒出装不上的旧版。
+    if loader in ("fabric", "quilt"):
+        from .net_api import fetch_loader_builds
+        try:
+            return [
+                {"title": b["title"], "meta": b["meta"],
+                 "channel": version_channel(b["title"])}
+                for b in fetch_loader_builds(mc_version, loader)
+            ]
+        except Exception:
+            # 网络失败：退回 mll 的全量列表（至少能手动输版本），不静默空
+            pass
     try:
         from minecraft_launcher_lib.fabric import get_all_loader_versions
         if loader == "fabric":
@@ -2885,14 +2902,14 @@ class InstancesPage(QWidget):
 
 # ---------------------------------------------------------------- Mods
 def _mod_display_name(path: str) -> str:
-    """Human-readable mod name from a jar path. Strips the extension and the
-    optional ``.disabled`` toggle suffix, then prettifies dashes/underscores."""
-    base = os.path.basename(path)
-    if base.endswith(".disabled"):
-        base = base[: -len(".disabled")]
-    if base.lower().endswith(".jar"):
-        base = base[: -len(".jar")]
-    return base.replace("_", " ").replace("-", " ").strip() or os.path.basename(path)
+    """Mod 展示名。
+
+    round-185：改为优先读 jar 里的清单（``fabric.mod.json`` / ``mods.toml`` /
+    ``mcmod.info``）—— 以前拿文件名凑，``fabric-api-0.92.2+1.20.1`` 会显示成
+    「fabric api 0.92.2+1.20.1」。读不到才退回文件名。
+    """
+    from .core.modmeta import display_name
+    return display_name(path)
 
 
 _LOADER_HINT = {

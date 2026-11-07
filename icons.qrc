@@ -59,6 +59,7 @@
     <file alias="skip_prev.svg">assets/icons/skip_prev.svg</file>
     <file alias="store.svg">assets/icons/store.svg</file>
     <file alias="sun.svg">assets/icons/sun.svg</file>
+    <file alias="tick.svg">assets/icons/tick.svg</file>
     <file alias="tools.svg">assets/icons/tools.svg</file>
     <file alias="versions.svg">assets/icons/versions.svg</file>
   </qresource>

@@ -380,12 +380,17 @@ class InstanceEditorDialog(QDialog):
         self.ver_edit.setText(inst.game_version or "")
         self.ver_edit.setToolTip(t("inst.modify_version_hint"))
 
+        # Fabric API 勾选项要先建好 —— 下面重建加载器下拉时会同步它的可见性。
+        self.fabapi_chk = QCheckBox(t("inst.fabapi_label"))
+        self.fabapi_chk.setChecked(True)
+        self.fabapi_chk.setToolTip(t("inst.fabapi_hint"))
+        self.fabapi_hint = p.hint("")
+
         self.loader_combo = QComboBox()
-        for lid in LOADERS:
-            self.loader_combo.addItem(loader_name(lid), lid)
-        idx = self.loader_combo.findData(inst.loader or "vanilla")
-        self.loader_combo.setCurrentIndex(idx if idx >= 0 else 0)
         p.row(t("instances.setting_loader"), self.loader_combo)
+        # 只列「这个 MC 版本真有的」加载器（1.12.2 不该出现 NeoForge）
+        self._rebuild_loader_choices(inst.loader or "vanilla")
+        self.ver_edit.editingFinished.connect(self._on_version_edited)
 
         self.ldver_combo = QComboBox()
         self.ldver_combo.setEditable(True)
@@ -399,6 +404,11 @@ class InstanceEditorDialog(QDialog):
 
         self.ldver_hint = p.hint(t("inst.loader_ver_hint"))
 
+        # Fabric API：装 Fabric/Quilt 时默认一起装（缺了它绝大多数模组进游戏就报
+        # 缺前置）。勾选项只在 fabric/quilt 时出现。
+        p.add(self.fabapi_chk)
+        p.add(self.fabapi_hint)
+
         for w in (self.ver_edit, self.loader_combo, self.ldver_combo):
             w.setEnabled(self._ver_editable)
 
@@ -410,8 +420,7 @@ class InstanceEditorDialog(QDialog):
         act.addWidget(self.install_btn)
         act.addStretch(1)
         p.add_layout(act)
-        self.loader_combo.currentIndexChanged.connect(
-            lambda _i: self._load_loader_versions())
+        self.loader_combo.currentIndexChanged.connect(self._on_loader_picked)
 
         p.section(t("inst.modify_danger"))
         p.hint(t("inst.modify_uninstall_hint"))
@@ -661,103 +670,32 @@ class InstanceEditorDialog(QDialog):
 
     # ── ⑤ 模组 ──────────────────────────────────────────────
     def _page_mods(self) -> _Page:
-        p = _Page(self)
-        p.section(t("inst.mods_section"))
-        # 路径单独一行：和按钮挤同一行时会被挤成 "…\minecraf"（实测），
-        # 而 mods 目录路径正是排查「装到哪去了」最关键的信息。
-        self.mods_path_lbl = QLabel("")
-        self.mods_path_lbl.setStyleSheet(_SUB_STYLE)
-        self.mods_path_lbl.setSizePolicy(QSizePolicy.Ignored,
-                                         QSizePolicy.Preferred)
-        self.mods_path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        p.add(self.mods_path_lbl)
-        bar = QHBoxLayout()
-        bar.setSpacing(8)
-        add_btn = ui_kit.make_button(
-            t("inst.mods_add"), kind="accent", icon_key="add",
-            on_click=self._add_mods, min_h=32)
-        ref_btn = ui_kit.make_button(
-            t("inst.mods_refresh"), kind="secondary", icon_key="refresh",
-            on_click=self._reload_mods, min_h=32)
-        open_btn = ui_kit.make_button(
-            t("inst.open_folder"), kind="secondary", icon_key="folder",
-            on_click=lambda: _open_path(self, self._inst.mods_dir), min_h=32)
-        bar.addWidget(add_btn)
-        bar.addWidget(ref_btn)
-        bar.addWidget(open_btn)
-        bar.addStretch(1)
-        p.add_layout(bar)
-        p.hint(t("inst.mods_hint"))
+        """round-185：整页换成 ModListPanel（搜索 / 筛选 / 多选 / 批量）。
 
-        self.mods_host = QWidget()
-        self.mods_box = QVBoxLayout(self.mods_host)
-        self.mods_box.setContentsMargins(0, 0, 0, 0)
-        self.mods_box.setSpacing(8)
-        p.add(self.mods_host)
-        p.stretch()
-        self._reload_mods()
+        旧实现是「一堆 74px 大卡片 + 三颗按钮」，名字取文件名、没有搜索和
+        多选 —— 装到 40 个模组时完全没法用。新面板对齐 PCL 的 Mod 管理页，
+        真实名称/版本/图标来自 jar 里的清单（core.modmeta）。
+        """
+        p = _Page(self)
+        from .mod_list import ModListPanel
+        self.mod_panel = ModListPanel(
+            self, self._inst, on_open_folder=lambda d: _open_path(self, d))
+        # 面板自带滚动区：外层 _Page 已经在一个 QScrollArea 里，
+        # 再套一层会让滚轮事件打架（内层吃掉滚轮，外层滚不动）。
+        self.mod_panel.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.mod_panel.setMinimumHeight(430)
+        self.mod_panel.changed.connect(self._refresh_status)
+        p.add(self.mod_panel)
         return p
 
+    # 兼容旧调用点（保留同名薄封装）
     def _reload_mods(self) -> None:
-        from .pages_instances import ModCard      # 延迟导入：避免循环引用
-        while self.mods_box.count():
-            item = self.mods_box.takeAt(0)
-            w = item.widget()
-            if w is None:
-                continue
-            w.setParent(None)
-            try:
-                from shiboken6 import delete as _shib_delete
-                _shib_delete(w)
-            except Exception:  # noqa: BLE001
-                w.deleteLater()
-        try:
-            d = self._inst.mods_dir
-            os.makedirs(d, exist_ok=True)
-            names = sorted(os.listdir(d))
-        except OSError as exc:
-            self.mods_path_lbl.setText(str(exc))
-            return
-        self.mods_path_lbl.setText(d)
-        jars = [n for n in names if n.lower().endswith((".jar", ".jar.disabled"))]
-        if not jars:
-            self.mods_box.addWidget(ui_kit.empty_state(
-                "mods", t("inst.mods_empty_title"), t("mods.empty"),
-                icon_size=56))
-            return
-        for name in jars:
-            path = os.path.join(d, name)
-            card = ModCard(path, not name.endswith(".disabled"))
-            card.toggled.connect(self._toggle_mod)
-            card.removed.connect(self._remove_mod)
-            card.open_folder.connect(lambda pth: _reveal_path(self, pth))
-            card.copy_name.connect(self._copy_mod_name)
-            self.mods_box.addWidget(card)
+        if getattr(self, "mod_panel", None) is not None:
+            self.mod_panel.reload()
 
-    def _toggle_mod(self, path: str, enabled: bool) -> None:
-        try:
-            if path.endswith(".disabled"):
-                os.replace(path, path[: -len(".disabled")])
-            else:
-                os.replace(path, path + ".disabled")
-        except OSError as exc:
-            warn(self, t("mods.fail_title"), str(exc))
-        self._reload_mods()
-
-    def _remove_mod(self, path: str) -> None:
-        from .win_rounded import confirm as _confirm
-        if not _confirm(self, t("mods.delete"), os.path.basename(path)):
-            return
-        try:
-            os.remove(path)
-        except OSError as exc:
-            warn(self, t("mods.fail_title"), str(exc))
-        self._reload_mods()
-
-    def _copy_mod_name(self, path: str) -> None:
-        from PySide6.QtWidgets import QApplication
-        QApplication.clipboard().setText(os.path.basename(path))
-        toast(self, t("mods.copy_name"), t("mods.copy_name_done"))
+    def _add_mods(self) -> None:
+        if getattr(self, "mod_panel", None) is not None:
+            self.mod_panel._add_files()
 
     def _add_mods(self) -> None:
         files, _f = QFileDialog.getOpenFileNames(
@@ -930,6 +868,53 @@ class InstanceEditorDialog(QDialog):
                 return data.strip()
         return text
 
+    # ── 加载器可选性（round-186）─────────────────────────────
+    def _rebuild_loader_choices(self, keep: str = "") -> None:
+        """按当前 MC 版本重建加载器下拉 —— 只列**这个版本真有的**加载器。
+
+        用户报「修改的选项中会出现不存在的加载器」：原来直接列 ``LOADERS``
+        全表，1.12.2 的实例也能选 NeoForge（1.20.1 才有）、Quilt（1.14+）。
+
+        实例**当前**的加载器永远保留（哪怕按规则不支持）—— 否则用户一打开面板
+        就发现自己的加载器"消失"了，保存时还会被悄悄换成原版。
+        """
+        from .core.loader_catalog import loaders_for
+        mc = self.ver_edit.text().strip() or self._inst.game_version or ""
+        keep = (keep or self._inst.loader or "vanilla").strip().lower()
+        allowed = loaders_for(mc, LOADERS)
+        if keep and keep not in allowed:
+            allowed = [keep] + allowed
+        self.loader_combo.blockSignals(True)
+        self.loader_combo.clear()
+        for lid in allowed:
+            self.loader_combo.addItem(loader_name(lid), lid)
+        idx = self.loader_combo.findData(keep)
+        self.loader_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.loader_combo.blockSignals(False)
+        self._sync_fabapi_visibility()
+
+    def _on_version_edited(self) -> None:
+        """MC 版本改了 → 加载器可选集与版本列表都要跟着变。"""
+        self._rebuild_loader_choices()
+        self._load_loader_versions()
+
+    def _on_loader_picked(self, _idx: int) -> None:
+        self._sync_fabapi_visibility()
+        self._load_loader_versions()
+
+    def _sync_fabapi_visibility(self) -> None:
+        """Fabric API 勾选项只在 fabric / quilt 时出现。"""
+        from .core.loader_swap import wants_fabric_api
+        show = wants_fabric_api(self._current_loader())
+        chk = getattr(self, "fabapi_chk", None)
+        hint = getattr(self, "fabapi_hint", None)
+        if chk is None:
+            return
+        chk.setVisible(show)
+        if hint is not None:
+            hint.setVisible(show)
+            hint.setText(t("inst.fabapi_hint") if show else "")
+
     def _load_loader_versions(self, initial: bool = False) -> None:
         loader = self._current_loader()
         self._refresh_loader_state()
@@ -941,6 +926,7 @@ class InstanceEditorDialog(QDialog):
             self.ldver_combo.blockSignals(False)
             self.ldver_hint.setText(t("inst.loader_vanilla_hint"))
             self._refresh_loader_state()
+            self._sync_fabapi_visibility()
             return
         self.ldver_combo.setEnabled(self._ver_editable)
         self.ldver_hint.setText(t("inst.loader_ver_loading"))
@@ -981,8 +967,14 @@ class InstanceEditorDialog(QDialog):
             self.ldver_combo.setCurrentIndex(0)
         self.ldver_combo.blockSignals(False)
         n = len(versions or [])
-        self.ldver_hint.setText(
-            t("inst.loader_ver_ready", n=n) if n else t("inst.loader_ver_failed"))
+        if n:
+            self.ldver_hint.setText(t("inst.loader_ver_ready", n=n))
+        else:
+            # ☠ 空列表 ≠ 网络失败：多半是这个 MC 版本**真没有**该加载器
+            # （1.12.2 + NeoForge / 1.21 + LiteLoader）。说清楚，别让人以为是网断了。
+            mc = self.ver_edit.text().strip() or self._inst.game_version or ""
+            self.ldver_hint.setText(t("inst.loader_ver_none", mc=mc))
+        self.install_btn.setEnabled(bool(n) and self._ver_editable)
         self._refresh_loader_state()
 
     def _refresh_loader_state(self) -> None:
@@ -1026,10 +1018,40 @@ class InstanceEditorDialog(QDialog):
         msg = t("inst.loader_install_done", id=vid)
         if removed:
             msg += "\n" + t("inst.loader_old_removed", ids=", ".join(removed))
-        info(self, t("inst.loader_install"), msg)
         self._refresh_loader_state()
         self._refresh_status()
         self.loaderChanged.emit(self._inst.id)
+
+        # 装完 Fabric / Quilt 顺手把 Fabric API 也装上（用户明确要求）。
+        # 这一步失败**不能**把「加载器已装好」说成失败 —— 两件事分开报。
+        from .core.loader_swap import wants_fabric_api
+        if self.fabapi_chk.isChecked() and wants_fabric_api(
+                self._inst.loader or ""):
+            self._install_fabric_api(msg)
+            return
+        info(self, t("inst.loader_install"), msg)
+
+    def _install_fabric_api(self, base_msg: str) -> None:
+        """加载器装好后补装 Fabric API。"""
+        from .core.loader_swap import install_fabric_api
+        self._set_busy(True, t("inst.fabapi_working"))
+        self._fab_worker = Worker(install_fabric_api, self._inst)
+        self._fab_worker.finished.connect(
+            lambda name: self._on_fabric_api_done(base_msg, name))
+        self._fab_worker.error.connect(
+            lambda e: self._on_fabric_api_failed(base_msg, e))
+        self._fab_worker.start()
+
+    def _on_fabric_api_done(self, base_msg: str, name: str) -> None:
+        self._set_busy(False, "")
+        msg = base_msg + "\n" + t("inst.fabapi_done", name=name or "Fabric API")
+        info(self, t("inst.loader_install"), msg)
+
+    def _on_fabric_api_failed(self, base_msg: str, err: str) -> None:
+        self._set_busy(False, "")
+        # 加载器已经装好了，这里只提示补充件没成，别让人以为要重装一遍
+        msg = base_msg + "\n" + t("inst.fabapi_failed", e=str(err))
+        warn(self, t("inst.loader_install"), msg)
 
     def _on_loader_error(self, err: str) -> None:
         self._set_busy(False, "")

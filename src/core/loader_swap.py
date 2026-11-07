@@ -199,3 +199,52 @@ def uninstall_loader(inst) -> dict:
     inst.version_id = ""
     inst.needs_convert = False
     return {"ok": True, "reason": "", "removed": removed, "error": ""}
+
+
+# ── 装完加载器顺手装 Fabric API（round-186）───────────────────────────────
+#: Fabric API 在 Modrinth 的项目 id（slug 同名，接口两者都认）
+FABRIC_API_SLUG = "fabric-api"
+
+#: 这些加载器需要 Fabric API 才能让绝大多数模组跑起来
+_FABRIC_LIKE = ("fabric", "quilt")
+
+
+def wants_fabric_api(loader: str) -> bool:
+    return (loader or "").strip().lower() in _FABRIC_LIKE
+
+
+def install_fabric_api(inst, *, callback=None) -> str:
+    """把与「当前 MC + 当前加载器」匹配的 Fabric API 装进 mods 目录。
+
+    用户原话：「下加载器不下配套 fabric api」。PCL 装 Fabric 时会一并带上
+    Fabric API —— 缺了它，绝大多数 Fabric 模组进游戏直接报缺前置，而玩家
+    通常不会意识到「加载器」和「Fabric API」是两样东西。
+
+    返回装好的 jar 文件名；找不到可用构建时抛 ``RuntimeError("no_build")``，
+    下载失败抛底层 ``NetError`` —— 两种都由调用方提示，**不能**因为这一步
+    失败就把「加载器已装好」判成失败。
+    """
+    from .. import net_api
+
+    loader = (getattr(inst, "loader", "") or "").strip().lower()
+    if not wants_fabric_api(loader):
+        raise RuntimeError("not_fabric_like")
+    mc = str(getattr(inst, "game_version", "") or "")
+    dest = inst.mods_dir
+    os.makedirs(dest, exist_ok=True)
+
+    version = None
+    used_loader = ""
+    # quilt 优先按 quilt 找，找不到再退回 fabric（Fabric API 在 Quilt 上可用）
+    for ld in ((loader, "fabric") if loader == "quilt" else (loader,)):
+        version = net_api.find_mod_version(FABRIC_API_SLUG, mc, ld)
+        if version:
+            used_loader = ld
+            break
+    if not version:
+        raise RuntimeError("no_build")
+
+    path = net_api.download_mod_version_to(
+        FABRIC_API_SLUG, str(version.get("id", "")), dest, mc, used_loader,
+        callback=callback)
+    return os.path.basename(path or "")

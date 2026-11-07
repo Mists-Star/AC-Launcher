@@ -87,6 +87,8 @@ SUITES = [
     ("客户端增强包装/卸", "test_round182_enhance.py", "script"),
     ("PCL 式编辑面板/加载器真装真卸/pcl 格式", "test_round183_editor.py", "script"),
     ("导出 .mrpack / 修改页", "test_round184_export.py", "script"),
+    ("模组元数据/模组列表", "test_round185_mods.py", "script"),
+    ("加载器可用性/Fabric API", "test_round186_loader.py", "script"),
 ]
 SHOTS = "shots_all.py"
 
