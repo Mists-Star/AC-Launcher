@@ -123,14 +123,38 @@ check("当前加载器被选中",
       dlg.loader_combo.currentData() == "forge",
       str(dlg.loader_combo.currentData()))
 
-# 改版本 → 下拉跟着变
-dlg.ver_edit.setText("1.20.1")
+# 改版本 → 可选集跟着变（round-189 起是**卡片选择器**，下拉只是隐藏镜像）
+dlg.ver_edit.setCurrentText("1.20.1")
 dlg._on_version_edited()
 choices2 = [dlg.loader_combo.itemData(i)
             for i in range(dlg.loader_combo.count())]
 check("改成 1.20.1 后出现 neoforge", "neoforge" in choices2, str(choices2))
 check("改成 1.20.1 后出现 fabric", "fabric" in choices2, str(choices2))
 check("改成 1.20.1 后没有 liteloader", "liteloader" not in choices2, str(choices2))
+
+
+def visible_cards(panel):
+    return [lid for lid, c in panel._cards.items() if not c.isHidden()]
+
+
+check("卡片选择器跟版本过滤一致",
+      "neoforge" in visible_cards(dlg.loader_picker)
+      and "liteloader" not in visible_cards(dlg.loader_picker),
+      str(visible_cards(dlg.loader_picker)))
+
+print("⑥·二 卡片选择器：logo / 选中 / 联动")
+card = dlg.loader_picker._cards["fabric"]
+pm = card.layout().itemAt(0).widget().pixmap()
+check("卡片 logo 有像素", not pm.isNull(), "%dx%d" % (pm.width(), pm.height()))
+dlg.loader_picker._cards["quilt"].picked.emit("quilt")
+check("点卡片 → 镜像下拉跟着换",
+      dlg.loader_combo.currentData() == "quilt",
+      str(dlg.loader_combo.currentData()))
+check("点卡片 → _current_loader 跟着换",
+      dlg._current_loader() == "quilt", dlg._current_loader())
+check("选中的卡片样式与未选中不同",
+      dlg.loader_picker._cards["quilt"].styleSheet()
+      != dlg.loader_picker._cards["forge"].styleSheet())
 dlg.deleteLater()
 
 print("⑦ Fabric API 勾选项只在 fabric / quilt 时出现")
@@ -140,11 +164,9 @@ dlg2 = InstanceEditorDialog(None, fab_inst)
 check("Fabric 实例显示 Fabric API 勾选项",
       not dlg2.fabapi_chk.isHidden(), "")
 check("默认勾选", dlg2.fabapi_chk.isChecked())
-dlg2.loader_combo.setCurrentIndex(dlg2.loader_combo.findData("forge"))
-dlg2._on_loader_picked(0)
+dlg2.loader_picker._cards["forge"].picked.emit("forge")
 check("切到 Forge 后隐藏", dlg2.fabapi_chk.isHidden(), "")
-dlg2.loader_combo.setCurrentIndex(dlg2.loader_combo.findData("quilt"))
-dlg2._on_loader_picked(0)
+dlg2.loader_picker._cards["quilt"].picked.emit("quilt")
 check("切回 Quilt 后显示", not dlg2.fabapi_chk.isHidden(), "")
 dlg2.deleteLater()
 

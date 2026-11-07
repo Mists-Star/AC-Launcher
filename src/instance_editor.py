@@ -631,32 +631,63 @@ class InstanceEditorDialog(QDialog):
         """对齐 PCL 的「修改」页 —— 它不是一个字段表单，而是**换加载器**的
         操作入口（PCL 里叫「修改」，对应 PageDownloadModify）。
 
-        为什么单独一页：换加载器是「会真下文件、真删目录」的重操作，和调内存
-        那种改个数就生效的设置混在一起，玩家分不清哪一下会动磁盘。
+        round-189 重做：原来是一个纯文本框 + 两个下拉 + 两颗按钮，看着像
+        调试面板。现在是**带 logo 的加载器卡片**（一眼扫过去就知道每个加载器
+        是什么）+ 可搜索的版本选择 + 标注了「最新」的版本列表 + 说清楚
+        「会删什么、会留什么」的危险区。
         """
         p = _Page(self)
         inst = self._inst
 
         p.hint(t("inst.modify_hint"))
+
+        # ── 当前加载器 ──
         p.section(t("inst.modify_current"))
+        cur = QWidget()
+        cl = QHBoxLayout(cur)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(12)
+        self.ld_logo = QLabel()
+        self.ld_logo.setFixedSize(38, 38)
+        self.ld_logo.setAlignment(Qt.AlignCenter)
+        self.ld_logo.setStyleSheet("background:%s;border-radius:9px;"
+                                   % COLORS["bg_frost"])
+        cl.addWidget(self.ld_logo)
         self.ld_state = p.hint(t("inst.loader_state_unknown"))
+        self.ld_state.setStyleSheet(_SUB_STYLE)
+        cl.addWidget(self.ld_state, 1)
+        p.add(cur)
 
+        # ── 安装 / 更换 ──
         p.section(t("inst.modify_section"))
-        self.ver_edit = p.field(t("instances.setting_game_version"))
-        self.ver_edit.setText(inst.game_version or "")
+
+        # 游戏版本：可输入 + 候选（官方版本列表异步拉），避免打进不存在的版本
+        self.ver_edit = QComboBox()
+        self.ver_edit.setEditable(True)
+        self.ver_edit.setInsertPolicy(QComboBox.NoInsert)
+        self.ver_edit.addItem(inst.game_version or "")
+        self.ver_edit.setCurrentText(inst.game_version or "")
         self.ver_edit.setToolTip(t("inst.modify_version_hint"))
+        self.ver_edit.currentTextChanged.connect(self._on_version_edited)
+        vrow = p.row(t("instances.setting_game_version"), self.ver_edit)
+        vrow.addWidget(ui_kit.make_button(
+            t("inst.modify_pick_version"), kind="secondary", icon_key="search",
+            on_click=self._fill_version_choices, min_h=30))
+        p.hint(t("inst.modify_version_hint"))
 
-        # Fabric API 勾选项要先建好 —— 下面重建加载器下拉时会同步它的可见性。
-        self.fabapi_chk = QCheckBox(t("inst.fabapi_label"))
-        self.fabapi_chk.setChecked(True)
-        self.fabapi_chk.setToolTip(t("inst.fabapi_hint"))
-        self.fabapi_hint = p.hint("")
-
-        self.loader_combo = QComboBox()
-        p.row(t("instances.setting_loader"), self.loader_combo)
-        # 只列「这个 MC 版本真有的」加载器（1.12.2 不该出现 NeoForge）
-        self._rebuild_loader_choices(inst.loader or "vanilla")
-        self.ver_edit.editingFinished.connect(self._on_version_edited)
+        # 加载器：卡片选择器（logo + 名称 + 说明）
+        from .loader_picker import LoaderPicker
+        entries = []
+        for lid in LOADERS:
+            entries.append((lid, loader_name(lid),
+                            t("inst.loader_card_" + lid)))
+        self.loader_picker = LoaderPicker(entries)
+        self.loader_picker.changed.connect(self._on_loader_picked)
+        p.add(self.loader_picker)
+        self.loader_combo = QComboBox()   # 兼容旧逻辑的隐藏镜像
+        self.loader_combo.addItem(loader_name(inst.loader or "vanilla"),
+                                  inst.loader or "vanilla")
+        self.loader_combo.setCurrentIndex(0)
 
         self.ldver_combo = QComboBox()
         self.ldver_combo.setEditable(True)
@@ -672,28 +703,40 @@ class InstanceEditorDialog(QDialog):
 
         # Fabric API：装 Fabric/Quilt 时默认一起装（缺了它绝大多数模组进游戏就报
         # 缺前置）。勾选项只在 fabric/quilt 时出现。
+        self.fabapi_chk = QCheckBox(t("inst.fabapi_label"))
+        self.fabapi_chk.setChecked(True)
+        self.fabapi_chk.setToolTip(t("inst.fabapi_hint"))
+        self.fabapi_hint = p.hint("")
         p.add(self.fabapi_chk)
         p.add(self.fabapi_hint)
 
-        for w in (self.ver_edit, self.loader_combo, self.ldver_combo):
-            w.setEnabled(self._ver_editable)
-
         self.install_btn = ui_kit.make_button(
             t("inst.loader_install"), kind="accent", icon_key="download",
-            on_click=self._install_loader, min_h=34)
+            on_click=self._install_loader, min_h=36)
         act = QHBoxLayout()
         act.setSpacing(8)
         act.addWidget(self.install_btn)
         act.addStretch(1)
         p.add_layout(act)
-        self.loader_combo.currentIndexChanged.connect(self._on_loader_picked)
 
+        # ── 退回原版（危险区）──
         p.section(t("inst.modify_danger"))
-        p.hint(t("inst.modify_uninstall_hint"))
+        d = QWidget()
+        dl = QVBoxLayout(d)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(4)
+        for key, color in (("inst.modify_deletes", COLORS["danger"]),
+                           ("inst.modify_keeps", COLORS["text_sub"])):
+            lb = QLabel(t(key))
+            lb.setWordWrap(True)
+            lb.setStyleSheet("font-size:11px;color:%s;" % color)
+            dl.addWidget(lb)
+        p.add(d)
         self.uninstall_btn = ui_kit.make_button(
-            t("inst.loader_uninstall"), kind="secondary", icon_key="delete",
-            on_click=self._uninstall_loader, min_h=34)
+            t("inst.loader_uninstall"), kind="danger", icon_key="delete",
+            on_click=self._uninstall_loader, min_h=36)
         drow = QHBoxLayout()
+        drow.setSpacing(8)
         drow.addWidget(self.uninstall_btn)
         drow.addStretch(1)
         p.add_layout(drow)
@@ -702,7 +745,12 @@ class InstanceEditorDialog(QDialog):
             p.hint(t("instances.setting_external_hint"))
             for b in (self.install_btn, self.uninstall_btn):
                 b.setEnabled(False)
+            self.loader_picker.enable(False)
 
+        # 初始状态
+        self._rebuild_loader_choices(inst.loader or "vanilla")
+        self._refresh_loader_state()
+        self._sync_fabapi_visibility()
         p.stretch()
         return p
 
@@ -1026,6 +1074,15 @@ class InstanceEditorDialog(QDialog):
 
     # ── 加载器版本列表 ──────────────────────────────────────
     def _current_loader(self) -> str:
+        """当前选中的加载器 id。
+
+        卡片选择器是真相（玩家点的是卡片），隐藏 combo 只是给旧逻辑用的镜像。
+        """
+        picker = getattr(self, "loader_picker", None)
+        if picker is not None:
+            cur = picker.current()
+            if cur:
+                return cur
         return self.loader_combo.currentData() or "vanilla"
 
     def _current_ldver(self) -> str:
@@ -1056,11 +1113,12 @@ class InstanceEditorDialog(QDialog):
         就发现自己的加载器"消失"了，保存时还会被悄悄换成原版。
         """
         from .core.loader_catalog import loaders_for
-        mc = self.ver_edit.text().strip() or self._inst.game_version or ""
+        mc = self.ver_edit.currentText().strip() or self._inst.game_version or ""
         keep = (keep or self._inst.loader or "vanilla").strip().lower()
         allowed = loaders_for(mc, LOADERS)
         if keep and keep not in allowed:
             allowed = [keep] + allowed
+        # 隐藏的 combo 只作「当前值」的镜像（_collect / _load_loader_versions 读它）
         self.loader_combo.blockSignals(True)
         self.loader_combo.clear()
         for lid in allowed:
@@ -1068,14 +1126,77 @@ class InstanceEditorDialog(QDialog):
         idx = self.loader_combo.findData(keep)
         self.loader_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.loader_combo.blockSignals(False)
+        # 卡片选择器：按可用性显隐 + 选中态
+        picker = getattr(self, "loader_picker", None)
+        if picker is not None:
+            picker.set_available(allowed)
+            picker.set_current(keep if keep in allowed else "vanilla")
         self._sync_fabapi_visibility()
 
     def _on_version_edited(self) -> None:
-        """MC 版本改了 → 加载器可选集与版本列表都要跟着变。"""
+        """MC 版本改了 → 加载器可选集与版本列表都要跟着变。
+
+        带去抖：版本框是自由输入，每敲一个字都去拉一次版本列表会把网络打爆。
+        """
+        mc = self.ver_edit.currentText().strip()
+        if mc == getattr(self, "_last_mc_queried", None):
+            return
+        self._last_mc_queried = mc
         self._rebuild_loader_choices()
         self._load_loader_versions()
 
-    def _on_loader_picked(self, _idx: int) -> None:
+    def _fill_version_choices(self) -> None:
+        """拉官方版本列表填进版本框（后台线程，缓存命中就秒回）。"""
+        from .net_api import fetch_versions
+        from .worker import Worker
+
+        self.ver_edit.setEnabled(False)
+        self.ldver_hint.setText(t("inst.modify_versions_loading"))
+        w = Worker(fetch_versions)
+        self._ver_worker = w
+
+        def _fin(data) -> None:
+            self.ver_edit.setEnabled(True)
+            try:
+                _, versions = data
+            except Exception:  # noqa: BLE001
+                versions = []
+            cur = self.ver_edit.currentText().strip()
+            self.ver_edit.blockSignals(True)
+            self.ver_edit.clear()
+            for v in (versions or [])[:400]:
+                vid = v.get("id") if isinstance(v, dict) else str(v)
+                if vid:
+                    self.ver_edit.addItem(str(vid))
+            if cur:
+                self.ver_edit.setCurrentText(cur)
+            self.ver_edit.blockSignals(False)
+            self.ldver_hint.setText(t("inst.modify_versions_ready",
+                                       n=len(versions or [])))
+            self._last_mc_queried = None
+            self._on_version_edited()
+
+        def _err(_e) -> None:
+            self.ver_edit.setEnabled(True)
+            self.ldver_hint.setText(t("inst.modify_versions_failed"))
+
+        w.finished.connect(_fin)
+        w.error.connect(_err)
+        w.start()
+
+    def _on_loader_picked(self, loader_id: str) -> None:
+        """卡片被点选：同步隐藏镜像 + 刷新加载器版本列表。"""
+        lid = (loader_id or "").strip().lower()
+        if not lid:
+            return
+        idx = self.loader_combo.findData(lid)
+        if idx < 0:
+            self.loader_combo.blockSignals(True)
+            self.loader_combo.addItem(loader_name(lid), lid)
+            self.loader_combo.setCurrentIndex(self.loader_combo.count() - 1)
+            self.loader_combo.blockSignals(False)
+        else:
+            self.loader_combo.setCurrentIndex(idx)
         self._sync_fabapi_visibility()
         self._load_loader_versions()
 
@@ -1111,7 +1232,7 @@ class InstanceEditorDialog(QDialog):
             # 已装过：先显示当前值，等列表回来再补全候选
             pass
         from .pages_instances import _fetch_loader_versions
-        mc = self.ver_edit.text().strip() or self._inst.game_version or ""
+        mc = self.ver_edit.currentText().strip() or self._inst.game_version or ""
         self._ldver_worker = Worker(_fetch_loader_versions, mc, loader)
         self._ldver_worker.finished.connect(self._on_loader_versions)
         self._ldver_worker.error.connect(
@@ -1123,6 +1244,7 @@ class InstanceEditorDialog(QDialog):
         self.ldver_combo.blockSignals(True)
         self.ldver_combo.clear()
         seen = set()
+        first = True
         for v in versions or []:
             meta = str(v.get("meta") or "")
             if not meta or meta in seen:
@@ -1133,7 +1255,11 @@ class InstanceEditorDialog(QDialog):
             label = title
             if chan == "beta":
                 label = "%s · %s" % (title, t("new_instance.ldver_beta"))
+            elif first:
+                # 列表第一个就是最新构建（各 meta API 都是新→旧）
+                label = "%s · %s" % (title, t("inst.loader_ver_latest"))
             self.ldver_combo.addItem(label, meta)
+            first = False
         if keep:
             idx = self.ldver_combo.findData(keep)
             if idx < 0:
@@ -1164,9 +1290,18 @@ class InstanceEditorDialog(QDialog):
         if vid:
             self.ld_state.setText(t("inst.loader_state_installed", id=vid))
             self.ld_state.setStyleSheet(
-                "color:%s;font-size:11px;" % COLORS["success"])
+                "color:%s;font-size:12px;font-weight:600;" % COLORS["success"])
         else:
             self.ld_state.setText(t("inst.loader_state_absent"))
+            self.ld_state.setStyleSheet(_SUB_STYLE)
+        # logo：跟着当前加载器走
+        logo = getattr(self, "ld_logo", None)
+        if logo is not None:
+            from .loader_picker import loader_logo
+            pm = loader_logo(self._current_loader(), 30)
+            if pm.isNull():
+                pm = icon("mods").pixmap(26, 26)
+            logo.setPixmap(pm)
             self.ld_state.setStyleSheet(_SUB_STYLE)
 
     # ── 加载器真装 / 真卸 ──────────────────────────────────
@@ -1312,7 +1447,7 @@ class InstanceEditorDialog(QDialog):
         inst.name = self.name_edit.text().strip() or inst.name
         inst.group = self.group_edit.text().strip()
         if self._ver_editable:
-            inst.game_version = (self.ver_edit.text().strip()
+            inst.game_version = (self.ver_edit.currentText().strip()
                                  or inst.game_version)
             inst.loader = self._current_loader()
             inst.loader_version = ("" if inst.loader == "vanilla"

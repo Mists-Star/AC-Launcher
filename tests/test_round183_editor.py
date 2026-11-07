@@ -259,7 +259,7 @@ check("分组写回", live.group == "测试组", live.group)
 
 # 改版本 → 应该报告 changed 并清掉 version_id
 live.version_id = "stale-id"
-dlg.ver_edit.setText("1.21.1")
+dlg.ver_edit.setCurrentText("1.21.1")   # round-189：版本框改成可编辑下拉
 changed2 = dlg._collect(trigger=True)
 check("改版本报告 changed", changed2 is True)
 check("version_id 被清空", live.version_id == "", live.version_id)
