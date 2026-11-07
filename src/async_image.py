@@ -92,6 +92,12 @@ class ImageLoader(QObject):
         self._inflight_urls: set = set()
         self._waiting: dict[str, list] = {}
         self._failed: dict[str, tuple] = {}
+        # round-191：QNAM **默认吃系统代理**，而 API 走 requests（读 download_proxy，
+        # 默认直连）。系统里若残留 Clash/加速器/公司代理，就会出现「搜索正常、
+        # 图标全白」——用户报的正是这个。这里把 QNAM 的代理对齐成同一个设置，
+        # 并且在失败后**退回直连重试一次**（不把中文用户卡死在坏代理上）。
+        self._direct_fallback = False
+        self._apply_proxy()
 
     # ------------------------------------------------------------ helpers
     def _mem_get(self, key):
@@ -203,6 +209,44 @@ class ImageLoader(QObject):
             return
         self._enqueue(url, size, self._screen_dpr(), None)
 
+    def _apply_proxy(self, force_direct: bool = False) -> None:
+        """把图标请求的代理设置对齐到 ``download_proxy``。
+
+        * ``none`` / 空 → 直连（**不吃系统代理**，这是「图标加载不出来」的主因）
+        * ``http://host:port`` → 走玩家填的代理
+        * 失败一次后 force_direct=True → 退回直连重试
+        """
+        from PySide6.QtNetwork import QNetworkProxy
+        if force_direct:
+            self._mgr.setProxy(QNetworkProxy(QNetworkProxy.NoProxy))
+            return
+        proxy_url = ""
+        try:
+            from .settings_dialog import load_config
+            proxy_url = (load_config().get("download_proxy") or "").strip()
+        except Exception:  # noqa: BLE001 - 配置不可用就直连
+            proxy_url = ""
+        if not proxy_url or proxy_url.lower() == "none":
+            self._mgr.setProxy(QNetworkProxy(QNetworkProxy.NoProxy))
+            return
+        try:
+            from urllib.parse import urlparse
+            u = urlparse(proxy_url if "://" in proxy_url else "http://" + proxy_url)
+            if not u.hostname:
+                raise ValueError("bad proxy")
+            self._mgr.setProxy(QNetworkProxy(
+                QNetworkProxy.HttpProxy, u.hostname, u.port or 8080))
+        except Exception:  # noqa: BLE001
+            self._mgr.setProxy(QNetworkProxy(QNetworkProxy.NoProxy))
+
+    def _retry_direct(self, url: str) -> None:
+        """非直连模式下失败 → 清掉负缓存、改直连、重新排一次。"""
+        if self._direct_fallback:
+            return
+        self._direct_fallback = True
+        self._apply_proxy(force_direct=True)
+        self._failed.pop(url, None)
+
     def _enqueue(self, url, size, dpr, target) -> None:
         item = (url, size, dpr, target, self._token)
         # 同 URL 已在途 → 挂等待表，回来后统一派发，不重复请求
@@ -291,8 +335,14 @@ class ImageLoader(QObject):
                 for _u, _s, _d, _tgt, _tok in self._waiting.pop(url, []):
                     self._deliver(_u, _s, _d, _tgt)
             else:
-                cnt = self._failed.get(url, (0, 0))[1] + 1
-                self._failed[url] = (_t.monotonic(), cnt)
+                # round-191：失败先退回直连再试一次 —— 系统代理残留是
+                # 「图标全白但搜索正常」的头号原因。直连也失败才记负缓存。
+                if not self._direct_fallback:
+                    self._retry_direct(url)
+                    self._enqueue(url, size, dpr, target)
+                else:
+                    cnt = self._failed.get(url, (0, 0))[1] + 1
+                    self._failed[url] = (_t.monotonic(), cnt)
                 try:
                     os.remove(self._orig_path(url))
                 except OSError:

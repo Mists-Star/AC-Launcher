@@ -1070,6 +1070,7 @@ def download_mod_to(
     mc_version: str = "",
     loader: str = "",
     callback=None,
+    manifest_out: list | None = None,
 ) -> str:
     """Download a mod + its required dependency tree into dest_dir.
 
@@ -1097,6 +1098,14 @@ def download_mod_to(
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
         if prog is not None:
             prog.next_file()
+        if manifest_out is not None:
+            # round-191：把「这次下了哪些文件、各属于哪个项目」回报给调用方，
+            # 供它登记模组来源（区分资源中心下载 vs 手动放入）。依赖也在内 ——
+            # 否则依赖在模组列表里会被当成"本地安装"。
+            manifest_out.append({
+                "filename": item["filename"],
+                "project_id": item["project_id"],
+            })
         if item["project_id"] == project_id:
             primary_path = dest
     return primary_path
@@ -1109,6 +1118,7 @@ def download_mod_version_to(
     mc_version: str = "",
     loader: str = "",
     callback=None,
+    manifest_out: list | None = None,
 ) -> str:
     """Download a specific version of a mod + its dependency tree (round-66).
 
@@ -1135,6 +1145,11 @@ def download_mod_version_to(
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
         if prog is not None:
             prog.next_file()
+        if manifest_out is not None:
+            manifest_out.append({
+                "filename": item["filename"],
+                "project_id": item["project_id"],
+            })
         if item["project_id"] == project_id:
             primary_path = dest
     return primary_path
@@ -1217,9 +1232,16 @@ def _mymemory_translate(text: str, target: str) -> str:
         if hit is not None:
             out_parts.append(hit)
             continue
+        # ☠ round-191：这里原本把源语言**写死成 en**（只考虑「译成中文」）。
+        # 一旦要中译英（搜索关键词兜底），langpair 就变成 en|en，MyMemory 直接
+        # 回 "PLEASE SELECT TWO DISTINCT LANGUAGES"。
+        _src = "zh-CN" if has_cjk(chunk) else "en"
+        _dst = lang
+        if _src == _dst:
+            _src = "en" if _dst != "en" else "zh-CN"
         r = requests.get(
             _TRANSLATE_FALLBACK,
-            params={"q": chunk, "langpair": f"en|{lang}"},
+            params={"q": chunk, "langpair": f"{_src}|{_dst}"},
             headers=_HEADERS, timeout=12, proxies=_proxies(),
         )
         try:
@@ -2291,6 +2313,35 @@ def search_mods_zh(query: str, offset: int = 0, limit: int = 20,
     if cached is None:
         slugs = _lookup_cn_slugs(query)
         projects = _projects_by_slugs(slugs[:60]) if slugs else []
+        # round-191：名库只有一百多条，绝大多数中文词查不到 —— 那就把中文
+        # 查询翻成英文再搜一次 Modrinth（它不认中文）。名库命中优先保留，
+        # 英文结果按 project_id 去重后接在后面。
+        if len(projects) < 3:
+            try:
+                en = translate_text(query, "en")
+            except Exception:  # noqa: BLE001 - 翻译挂了就当没有
+                en = ""
+            if en and not has_cjk(en):
+                try:
+                    extra = search_mods(en, 0, limit, project_type)
+                except Exception:  # noqa: BLE001
+                    extra = []
+                seen_ids = {str(p.get("id") or "") for p in projects}
+                # 英文结果只有摘要字段，转成和 projects 相同的形状再合并
+                for hit in extra:
+                    pid = str(hit.get("project_id") or "")
+                    if not pid or pid in seen_ids:
+                        continue
+                    seen_ids.add(pid)
+                    projects.append({
+                        "id": pid,
+                        "slug": hit.get("slug", ""),
+                        "title": hit.get("title", ""),
+                        "description": hit.get("description", ""),
+                        "downloads": hit.get("downloads", 0),
+                        "icon_url": hit.get("icon_url") or "",
+                        "project_type": project_type,
+                    })
         cached = [
             {
                 "project_id": p.get("id", ""),

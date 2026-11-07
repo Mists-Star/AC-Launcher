@@ -818,6 +818,8 @@ class StoreDetailPanel(QWidget):
         from .net_api import (curseforge_available, download_cfwidget_file,
                               download_curseforge_file, download_mod_version_to)
         self.status.setText(t("store.downloading", slug=slug))
+        # 每次下载都重置（CF 分支不填 manifest，别让它读到上一次的）
+        self._dl_manifest = []
         # round-111：改用 ProgressWorker，速度行进已有 status 标签
         # （本对话框没有独立进度条，速度是用户明确要的可观测项）。
         if self._card.get("source") == "curseforge":
@@ -836,15 +838,19 @@ class StoreDetailPanel(QWidget):
                 w = ProgressWorker(download_cfwidget_file,
                                    {"id": fid, "name": fname}, dest)
         else:
+            # round-191：详情页「选择版本下载」同样登记来源，模组列表才能标出来
+            self._dl_manifest = []
             w = ProgressWorker(
                 download_mod_version_to,
                 self._card.get("project_id", ""), v.get("id", ""), dest,
                 mc_version, loader,
+                manifest_out=self._dl_manifest,
             )
         w.speed.connect(lambda s: self.status.setText(s))
 
         def _ok(p: str):
             self.status.setText(t("store.downloaded", file=os.path.basename(p)))
+            self._record_sources()
 
         def _err(e):
             self.status.setText(t("store.download_fail", e=e))
@@ -853,6 +859,29 @@ class StoreDetailPanel(QWidget):
         w.error.connect(_err)
         self._track(w)
         w.start()
+
+    def _record_sources(self) -> None:
+        """把这次下载的文件登记到实例的模组来源表（区分资源中心 / 本地）。"""
+        manifest = getattr(self, "_dl_manifest", None) or []
+        inst = getattr(self, "_inst", None)
+        if not manifest or inst is None:
+            return
+        card = getattr(self, "_card", None) or {}
+        pid = str(card.get("project_id", ""))
+        try:
+            from .core import mod_sources
+            mod_sources.record(inst, [{
+                "filename": item.get("filename", ""),
+                "project_id": item.get("project_id", ""),
+                "slug": card.get("slug", "") if item.get("project_id") == pid
+                        else "",
+                "title": card.get("title", "") if item.get("project_id") == pid
+                         else "",
+                "source": "modrinth",
+            } for item in manifest])
+        except Exception:  # noqa: BLE001 - 记录失败不影响下载结果
+            pass
+        self._dl_manifest = []
 
     # ---------- 中文说明 ----------
     def _open_mcmod(self):

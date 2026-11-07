@@ -925,10 +925,19 @@ class StorePage(QWidget):
         else:
             # round-37：传入实例的 MC 版本 + 加载器，让 Modrinth 过滤兼容版本
             # 并自动拉取 required 依赖树（download_mod_to 已支持依赖解析）
+            # round-191：带回「下了哪些文件」，下载完成后登记模组来源
+            self._dl_manifest = []
+            self._dl_meta = {
+                "inst": inst,
+                "slug": slug,
+                "project_id": project_id,
+                "title": (card or {}).get("title", "") or slug,
+            }
             self._dworker = ProgressWorker(
                 download_mod_to, project_id, dest,
                 getattr(inst, "game_version", "") or "",
                 getattr(inst, "loader", "") or "",
+                manifest_out=self._dl_manifest,
             )
         self._dworker.progress.connect(self._on_pack_progress)
         self._dworker.speed.connect(self._on_pack_speed)
@@ -944,6 +953,30 @@ class StorePage(QWidget):
         self._dl_bar.setVisible(False)
         self._dl_speed.setVisible(False)
         self.status.setText(t("store.downloaded", file=os.path.basename(p)))
+        # round-191：登记来源（区分「资源中心下的」与「自己放进去的」）
+        meta = getattr(self, "_dl_meta", None) or {}
+        manifest = getattr(self, "_dl_manifest", None) or []
+        inst = meta.get("inst")
+        if inst is not None and manifest:
+            try:
+                from .core import mod_sources
+                entries = []
+                for item in manifest:
+                    pid = str(item.get("project_id") or "")
+                    entries.append({
+                        "filename": item.get("filename", ""),
+                        "project_id": pid,
+                        "slug": meta.get("slug", "") if pid == meta.get(
+                            "project_id") else "",
+                        "title": meta.get("title", "") if pid == meta.get(
+                            "project_id") else "",
+                        "source": "modrinth",
+                    })
+                mod_sources.record(inst, entries)
+            except Exception:  # noqa: BLE001 - 记录失败不影响下载结果
+                pass
+        self._dl_manifest = []
+        self._dl_meta = {}
 
     # ---- modpack: download .mrpack / CF zip → install as a new instance ----
     def _install_modpack(self, project_id: str, slug: str, card: dict | None = None):

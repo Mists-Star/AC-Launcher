@@ -84,11 +84,12 @@ class ModRow(QFrame):
     selection_changed = Signal()
 
     def __init__(self, path: str, enabled: bool, meta: dict | None,
-                 parent=None):
+                 parent=None, source: dict | None = None):
         super().__init__(parent)
         self.path = path
         self.enabled = enabled
         self.meta = meta or {}
+        self.source = source or {}
         self.setObjectName("modRow")
         self.setFixedHeight(_ROW_H)
         self.setCursor(Qt.PointingHandCursor)
@@ -136,6 +137,14 @@ class ModRow(QFrame):
         ldr = (self.meta.get("loader") or "").strip()
         if ldr:
             top.addWidget(self._pill(loader_name(ldr), dim=True))
+        # round-191：区分「资源中心下的」与「手动放进来的」—— 前者带来源标记，
+        # 点上去能看到它属于哪个 Modrinth 项目。
+        if self.source.get("project_id"):
+            src_pill = self._pill(t("mods.from_store"), dim=True)
+            src_pill.setToolTip(
+                t("mods.from_store_tip",
+                  slug=self.source.get("slug") or self.source.get("title", "")))
+            top.addWidget(src_pill)
         top.addStretch(1)
         col.addLayout(top)
 
@@ -379,11 +388,19 @@ class ModListPanel(QWidget):
         self.path_lbl.setText(d)
 
         jars = [n for n in names if n.lower().endswith((".jar", ".jar.disabled"))]
+        # round-191：来源表（资源中心下载的才有记录）
+        try:
+            from .core import mod_sources
+            self._sources = mod_sources.load(self._inst)
+            mod_sources.prune(self._inst, jars)
+        except Exception:  # noqa: BLE001 - 记录不可用不影响列表
+            self._sources = {}
         for name in jars:
             path = os.path.join(d, name)
             enabled = not name.endswith(".disabled")
             meta = modmeta.read_meta(path)
-            row = ModRow(path, enabled, meta)
+            row = ModRow(path, enabled, meta,
+                         source=self._sources.get(name))
             row.toggled.connect(self._toggle)
             row.selection_changed.connect(self._on_selection)
             self._all.append(row)
@@ -533,9 +550,14 @@ class ModListPanel(QWidget):
         if self._updatable:
             return
         from .mod_updater import check_updates
+        from .core import mod_sources
         app = self
         self.chips.set_text("upd", t("mods.filter_checking"))
-        w = Worker(check_updates, self._inst)
+        try:
+            _smap = mod_sources.slug_map(self._inst)
+        except Exception:  # noqa: BLE001
+            _smap = {}
+        w = Worker(check_updates, self._inst, slug_map=_smap)
         app._upd_worker = w
 
         def _fin(res) -> None:

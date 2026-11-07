@@ -1210,6 +1210,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "mods.empty_open": "打开 Mod 文件夹",
         "mods.empty_hint": "把 .jar 放进这个文件夹也算安装；装了却看不到请检查版本隔离。",
         "mods.pick_filter": "Jar 文件 (*.jar)",
+        # round-191：模组来源（资源中心下载 vs 手动放入）
+        "mods.from_store": "资源中心",
+        "mods.from_store_tip": "从资源中心下载 · {slug}",
         "mods.instance_label": "实例：{name}  ·  {version}",
 
         # ---- versions page ----
@@ -1253,7 +1256,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "store.fetching": "正在从 Modrinth 获取…",
         "store.error": "错误：{e}",
         "store.results": "找到 {n} 个结果",
-        "store.zh_no_hit": "中文名库暂未收录该关键词，试试英文名（如「小地图」→ minimap）",
+        "store.zh_no_hit": "没搜到：中文名库未收录，机器翻译也没匹配。换英文名更准（如「小地图」→ minimap）",
         "store.download": "下载",
         "store.target_label": "下载到实例",
         "store.no_target": "请先在上方选择一个实例，再下载模组。",
@@ -3242,6 +3245,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "mods.empty_open": "Open mods folder",
         "mods.empty_hint": "Dropping .jar files into that folder works too. Not showing up? Check version isolation.",
         "mods.pick_filter": "Jar files (*.jar)",
+        # round-191: mod provenance
+        "mods.from_store": "From store",
+        "mods.from_store_tip": "Downloaded from the store · {slug}",
         "mods.instance_label": "Instance: {name}  ·  {version}",
 
         # ---- versions page ----
@@ -3285,7 +3291,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "store.fetching": "Fetching from Modrinth…",
         "store.error": "Error: {e}",
         "store.results": "{n} results found",
-        "store.zh_no_hit": "Not in the local Chinese name table yet — try the English name (e.g. \u201c小地图\u201d → minimap)",
+        "store.zh_no_hit": "No match — not in the local name table and machine translation missed. Try the English name (e.g. minimap)",
         "store.download": "Download",
         "store.target_label": "Download into instance",
         "store.no_target": "Select an instance above first, then download mods.",

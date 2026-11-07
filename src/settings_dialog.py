@@ -54,7 +54,11 @@ _DEFAULTS = {
     "window_mode": "windowed",       # windowed / borderless / fullscreen
     # round-188：启动前内存优化（全局默认关）+ 内存管理（GC）全局档。
     # gc_mode: "" 不额外指定 / zgc / zgc_gen / g1 / g1_tuned / none
-    "mem_optimize": False,
+    # round-191：用户要求「默认开启启动前内存优化」
+    "mem_optimize": True,
+    # 迁移标记：老配置里是 False（round-188 的默认值），要一次性改成 True；
+    # 玩家之后自己关掉就尊重玩家，不再覆盖。
+    "mem_optimize_defaulted": False,
     "gc_mode": "",
     # round-182 亮度（gamma）覆盖：写进游戏 options.txt，启动前生效，
     # 退出不还原（玩家要的就是「改了就一直亮」）。
@@ -223,6 +227,22 @@ _UPDATE_ERROR_KEYS = {
 }
 
 
+def _migrate_mem_optimize(cfg: dict) -> bool:
+    """老配置把「启动前内存优化」从 False 一次性升到 True（round-191）。
+
+    为什么需要迁移而不是只改默认值：``_DEFAULTS`` 只在缺键时生效，而老版本
+    已经把 ``mem_optimize: false`` 写进配置文件了 —— 光改默认值，老用户永远
+    不会生效。用 ``mem_optimize_defaulted`` 做一次性开关：迁过就不再动，
+    玩家之后手动关掉也不会被反复改回去。
+    """
+    if cfg.get("mem_optimize_defaulted"):
+        return False
+    if cfg.get("mem_optimize") is False:
+        cfg["mem_optimize"] = True
+    cfg["mem_optimize_defaulted"] = True
+    return True
+
+
 def load_config() -> dict:
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -242,6 +262,12 @@ def load_config() -> dict:
     if cfg.get("nav_layout") != "ac" and not cfg.get("dev_mode", False):
         cfg["nav_layout"] = "ac"
         cfg["dev_mode"] = False
+    # round-191：一次性把「启动前内存优化」升到默认开（见 _migrate_mem_optimize）
+    if _migrate_mem_optimize(cfg):
+        try:
+            save_config(cfg)
+        except Exception:  # noqa: BLE001 - 写不进去也不该影响读取
+            pass
     return cfg
 
 

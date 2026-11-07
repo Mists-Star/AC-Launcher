@@ -92,6 +92,7 @@ SUITES = [
     ("GC 模式/启动前内存优化", "test_round188_memory.py", "script"),
     ("修改页重做/加载器卡片", "test_round189_modify.py", "script"),
     ("实例图标/收藏夹", "test_round190_icon_fav.py", "script"),
+    ("中文搜索/图标/模组来源", "test_round191_search_icon_src.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

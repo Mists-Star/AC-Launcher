@@ -108,6 +108,60 @@ CurseForge 渠道仍不解析 required 依赖树、CF 三条下载路径无 hash
 
 ---
 
+## round-191（2026-11-07）— 中文搜索 / 图标加载 / 模组来源 / 内存优化默认开
+
+四条用户反馈：
+
+### ① 模组搜索支持中文
+
+Modrinth 搜索接口**不认中文**。以前只有本地名库（约 150 条）能查，查不到就当
+「没有这个资源」。现在两条腿：
+
+1. 本地名库（精确 > 前缀 > 包含）命中优先；
+2. 命中不足 3 条时把中文**翻成英文**再搜一次 Modrinth，按 project_id 去重合并。
+
+顺带修了一个真 bug：`_mymemory_translate` 把源语言**写死成 `en`**（只考虑
+「译成中文」），中译英时 `langpair` 变成 `en|en`，MyMemory 直接回
+`PLEASE SELECT TWO DISTINCT LANGUAGES` —— 也就是翻译兜底本来根本不可能生效。
+现在按内容是否含 CJK 判定源语言。
+
+空结果文案也改了：说清「名库没有 + 机器翻译也没匹配，换英文名更准」。
+
+### ② 资源中心 mod 图标加载不出来
+
+根因是**两条网络通路不一致**：API 走 `requests`（读 `download_proxy`，默认直连），
+而图标走 `QNetworkAccessManager`（**默认吃系统代理**）。系统里残留 Clash/
+加速器/公司代理时，就表现为「搜索正常、图标全白」。
+
+* 图标请求的代理改成对齐 `download_proxy`（默认直连，不再吃系统代理）；
+* 失败后**退回直连重试一次**，直连也失败才记负缓存。
+
+### ③ 区分模组下载来源
+
+新增 `core/mod_sources.py`：资源中心下载完成后把
+`文件名 → {project_id, slug, title, source, ts}` 记到
+`data/instance_mods/<实例id>.json`（不写游戏目录）。
+
+* 模组列表里这些 jar 带「资源中心」小标（悬停显示它属于哪个项目）；
+* 更新检测优先用登记的真 slug，不再靠文件名猜
+  （`sodium-fabric-0.5.13+mc1.20.1.jar` 这类命名剥错一步就查到别的项目上）；
+* 顺手清理已删文件的孤儿记录。
+
+### ④ 启动前内存优化默认开启
+
+`_DEFAULTS["mem_optimize"]` 改为 `True`，并加**一次性迁移**：老配置里存的是
+`false`（round-188 的默认值），光改默认值对老用户无效；用
+`mem_optimize_defaulted` 做开关迁一次，玩家之后自己关掉就尊重玩家。
+
+### 验证
+
+* `tests/test_round191_search_icon_src.py`（26 条）：迁移只做一次、名库命中、
+  翻译源语言不再写死、图标代理默认直连、来源登记/读回/清理/slug_map、
+  列表「资源中心」标出现且本地 mod 没有、更新检测接受 slug_map。
+* 实测：`translate_text('旅行地图','en')` → `Travel map`；
+  `search_mods_zh('小地图')` → `Xaero's Minimap（Xaero 小地图）`。
+* `regress.py` **60/60**；i18n 1891=1891。
+
 ## round-190（2026-11-07）— 实例图标 + 收藏夹
 
 PCL 概览页「个性化」卡片里的两件事，也是玩家最常用的「让我自己的实例好看/好找」：

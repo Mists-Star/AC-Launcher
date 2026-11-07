@@ -71,7 +71,7 @@ def _resolve_slug(filename: str) -> str | None:
 
 
 def check_updates(inst, *, mc_version: str = "", loader: str = "",
-                  on_progress=None) -> dict:
+                  on_progress=None, slug_map: dict | None = None) -> dict:
     """扫描并检查所有已装 mod 的更新。
 
     Returns {"updates": [{filename, slug, title, local_version, latest_version,
@@ -89,7 +89,10 @@ def check_updates(inst, *, mc_version: str = "", loader: str = "",
                 on_progress(i + 1, len(files), filename)
             except Exception:
                 pass
-        slug = _resolve_slug(filename)
+        # round-191：优先用「模组来源」里记录的真 slug（资源中心下载时登记的），
+        # 比按文件名猜准得多 —— sodium-fabric-0.5.13+mc1.20.1.jar 这类命名
+        # 剥错一步就查到别的项目上。
+        slug = (slug_map or {}).get(filename) or _resolve_slug(filename)
         if not slug:
             unknown.append(filename)
             continue
