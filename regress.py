@@ -94,6 +94,7 @@ SUITES = [
     ("实例图标/收藏夹", "test_round190_icon_fav.py", "script"),
     ("中文搜索/图标/模组来源", "test_round191_search_icon_src.py", "script"),
     ("资源中心：版本/前置/下载", "test_round193_store.py", "script"),
+    ("一键修复反馈", "test_round194_fix_all.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

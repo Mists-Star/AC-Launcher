@@ -109,9 +109,16 @@ class HealthDialog(QDialog):
         # round-163：修复反馈行——apply_fix 返回 False（已是目标状态）时
         # 之前完全没有任何提示，玩家会以为「点了没反应」。
         self.note_lbl = QLabel("")
-        self.note_lbl.setProperty("cls", "sub")
         self.note_lbl.setWordWrap(True)
         self.note_lbl.setVisible(False)
+        # 反馈要做成一条**看得见的条** —— 原来只是底部一行小灰字，
+        # 玩家点了修复按钮几乎注意不到（用户报「一点提示都没有」）。
+        self.note_lbl.setStyleSheet(
+            "background:%s;border:1px solid %s;border-radius:8px;"
+            "padding:8px 10px;font-size:12px;color:%s;"
+            % (COLORS.get("bg_frost", "#F3F4F6"),
+               COLORS.get("border", "#E5E7EB"),
+               COLORS.get("text_main", "#111827")))
         bl.addWidget(self.note_lbl)
 
         self._render(self._result)
@@ -139,6 +146,7 @@ class HealthDialog(QDialog):
 
         if not findings:
             self.fixall_btn.setEnabled(False)
+            self.fixall_btn.setToolTip(t("health.fix_all_none_hint"))
             self._list.addStretch(1)
             return
 
@@ -150,6 +158,9 @@ class HealthDialog(QDialog):
 
         self._list.addStretch(1)
         self.fixall_btn.setEnabled(n_fix > 0)
+        self.fixall_btn.setToolTip(
+            t("health.fix_all_hint") if n_fix > 0
+            else t("health.fix_all_none_hint"))
 
         if self._first_render:
             self._first_render = False
@@ -269,18 +280,46 @@ class HealthDialog(QDialog):
         QMessageBox.critical(self, t("health.dialog_title"), msg or "?")
 
     def _fix_all(self) -> None:
+        """一键修复安全项。
+
+        round-194 修：原来这里调 ``toast(self, ...)`` —— 体检对话框没有主窗口
+        的浮层能力，``toast`` 会**回落到模态 QMessageBox**，在 frameless 对话框
+        后面弹出来，玩家看不到 → 「点了没反应」「一点提示都没有」。
+        现在改成**对话框内的那条反馈行**（永远可见、不打断、不阻塞）。
+
+        同时逐条应用并捕获异常：任何一条修复失败都不该让整批静默。
+        """
         from .core import instance_health
-        n = instance_health.apply_all_safe(
-            self.inst, self._result.get("findings") or [])
-        if n and self.mgr:
+        findings = self._result.get("findings") or []
+        applied: list[str] = []
+        failed: list[str] = []
+        for f in findings:
+            fx = getattr(f, "fix", None)
+            if not isinstance(fx, dict):
+                continue
+            if fx.get("safety", instance_health.FIX_SAFE) != \
+                    instance_health.FIX_SAFE:
+                continue
+            label = t(fx.get("label") or "health.fix",
+                      **(fx.get("label_kwargs") or {}))
+            try:
+                if instance_health.apply_fix(self.inst, fx):
+                    applied.append(label)
+            except Exception as exc:  # noqa: BLE001 - 单条失败不吞整批
+                failed.append("%s(%s)" % (label, exc))
+        if applied and self.mgr:
             self.mgr.save(self.inst)
         self._rescan()
-        try:
-            from .win_rounded import toast
-            toast(self, t("health.dialog_title"),
-                  t("health.fixed_toast", n=n) if n else t("health.fix_none"))
-        except Exception:  # noqa: BLE001 - 提示失败不影响结果
-            pass
+        if applied:
+            msg = t("health.fixed_toast", n=len(applied)) + "\n" + \
+                "、".join(applied)
+            if failed:
+                msg += "\n" + t("health.fix_partial", e="、".join(failed))
+            self._note(msg)
+        elif failed:
+            self._note(t("health.fix_failed", e="、".join(failed)))
+        else:
+            self._note(t("health.fix_none"))
 
     def _rescan(self) -> None:
         from .core import instance_health
