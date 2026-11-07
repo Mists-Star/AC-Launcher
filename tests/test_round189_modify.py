@@ -93,13 +93,19 @@ dlg._on_loader_versions([
 ])
 texts = [dlg.ldver_combo.itemText(i)
          for i in range(dlg.ldver_combo.count())]
-# 实例当前版本会保留在下拉第一项（没匹配到就插回去），所以「最新」应落在
-# 拉回来的那批的第一条上
+# round-198：实例当前版本（0.15.11）**不在**这次拉回来的列表里 →
+# 不再"继承"它（那个版本在新 MC 版本下根本不存在），而是选最新并说明。
 marked = [t for t in texts if "最新" in t]
 check("有且只有一条标「最新」", len(marked) == 1, str(texts))
-check("「最新」标在拉回来的第一条上", "最新" in texts[1], str(texts))
-check("实例当前版本仍在下拉里", texts[0] == "0.15.11", str(texts[0]))
-check("版本数据没丢", dlg.ldver_combo.count() == 3,
+check("「最新」标在拉回来的第一条上", "最新" in texts[0], str(texts))
+check("不再把不存在的旧版本插回下拉",
+      all("0.15.11" not in t for t in texts), str(texts))
+check("当前选中最新可用版本",
+      dlg.ldver_combo.currentData() == "0.20.1",
+      str(dlg.ldver_combo.currentData()))
+check("提示说明换了版本", "不适用于" in dlg.ldver_hint.text(),
+      dlg.ldver_hint.text())
+check("版本数据没丢", dlg.ldver_combo.count() == 2,
       str(dlg.ldver_combo.count()))
 dlg.deleteLater()
 

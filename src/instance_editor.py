@@ -235,6 +235,9 @@ class InstanceEditorPanel(QWidget):
         self._java_worker = None
         self._ldver_worker = None
         self._pages: dict[str, _Page] = {}
+        # round-198：本次拉到的加载器版本列表是否非空。空 → 保存时**不覆盖**
+        # 实例已有的 loader_version（别把"该 MC 版本没有"变成"把版本清了"）。
+        self._ldver_available = True
 
         self._build()
         self._load_java_plan()
@@ -1338,6 +1341,10 @@ class InstanceEditorPanel(QWidget):
 
     def _on_loader_versions(self, versions: list) -> None:
         keep = self._current_ldver()
+        # ☠ round-198：空态下拉里那一项是**提示文案**（"（该 MC 版本没有可用
+        # 版本）"），不是版本号 → 别把它当成"旧版本"去提示。
+        if keep == t("inst.loader_ver_empty_item"):
+            keep = (getattr(self._inst, "loader_version", "") or "").strip()
         self.ldver_combo.blockSignals(True)
         self.ldver_combo.clear()
         seen = set()
@@ -1357,24 +1364,40 @@ class InstanceEditorPanel(QWidget):
                 label = "%s · %s" % (title, t("inst.loader_ver_latest"))
             self.ldver_combo.addItem(label, meta)
             first = False
-        if keep:
-            idx = self.ldver_combo.findData(keep)
-            if idx < 0:
-                self.ldver_combo.insertItem(0, keep, keep)
-                idx = 0
+        n = len(seen)
+        mc = self.ver_edit.currentText().strip() or self._inst.game_version or ""
+        # ☠ round-198：空列表 ≠ 网络失败，多半是这个 MC 版本**真没有**该加载器
+        # （1.12.2 + NeoForge / 1.21 + LiteLoader）。
+        if n == 0:
+            # 旧实现会把"上一个 MC 版本的加载器版本"硬插回下拉（insertItem）——
+            # 那个版本在新 MC 版本下**根本不存在**，玩家看到它还在就以为能用。
+            # 现在：清空 + 下拉里直接写明"没有可用版本"（不是空白）+ 禁用。
+            self.ldver_combo.addItem(t("inst.loader_ver_empty_item"), "")
+            self.ldver_combo.setCurrentIndex(0)
+            self.ldver_combo.setEnabled(False)
+            self._ldver_available = False
+            self.ldver_hint.setText(t("inst.loader_ver_none", mc=mc))
+            self.ldver_combo.blockSignals(False)
+            self.install_btn.setEnabled(False)
+            self._refresh_loader_state()
+            return
+        self._ldver_available = True
+        self.ldver_combo.setEnabled(self._ver_editable)
+        idx = self.ldver_combo.findData(keep) if keep else -1
+        if idx >= 0:
             self.ldver_combo.setCurrentIndex(idx)
-        elif self.ldver_combo.count():
+        else:
+            # 旧值在新列表里没有 → 选最新的，**并说明换了**（别让玩家以为
+            # 自己改的版本被偷偷替换了）。
             self.ldver_combo.setCurrentIndex(0)
         self.ldver_combo.blockSignals(False)
-        n = len(versions or [])
-        if n:
-            self.ldver_hint.setText(t("inst.loader_ver_ready", n=n))
-        else:
-            # ☠ 空列表 ≠ 网络失败：多半是这个 MC 版本**真没有**该加载器
-            # （1.12.2 + NeoForge / 1.21 + LiteLoader）。说清楚，别让人以为是网断了。
-            mc = self.ver_edit.text().strip() or self._inst.game_version or ""
-            self.ldver_hint.setText(t("inst.loader_ver_none", mc=mc))
-        self.install_btn.setEnabled(bool(n) and self._ver_editable)
+        # 基础提示先写，"换了版本"的说明再覆盖它（顺序反了说明会被冲掉）
+        self.ldver_hint.setText(t("inst.loader_ver_ready", n=n))
+        if keep and self.ldver_combo.currentData() != keep:
+            self.ldver_hint.setText(
+                t("inst.loader_ver_switched", mc=mc, old=keep,
+                  new=self.ldver_combo.currentText()))
+        self.install_btn.setEnabled(self._ver_editable)
         self._refresh_loader_state()
 
     def _refresh_loader_state(self) -> None:
@@ -1548,8 +1571,13 @@ class InstanceEditorPanel(QWidget):
             inst.game_version = (self.ver_edit.currentText().strip()
                                  or inst.game_version)
             inst.loader = self._current_loader()
-            inst.loader_version = ("" if inst.loader == "vanilla"
-                                   else self._current_ldver())
+            if inst.loader == "vanilla":
+                inst.loader_version = ""
+            elif getattr(self, "_ldver_available", True):
+                inst.loader_version = self._current_ldver()
+            # ☠ round-198：该 MC 版本**没有**这个加载器的任何版本时（列表为空），
+            # 不要把实例原有的 loader_version 覆盖成空 —— 「这个 MC 版本装不了
+            # 这个加载器」不等于「把这个加载器版本删掉」。
         inst.ram_mb = int(self.mem_spin.value())
         inst.jvm_args = self.jvm_edit.text().strip()
         inst.jvm_preset = self.preset_combo.currentData() or ""

@@ -1196,6 +1196,21 @@ class NewInstanceDialog(QDialog):
         rows = [v for v in (versions or []) if isinstance(v, dict)]
         self.ldver_combo.blockSignals(True)
         self.ldver_combo.clear()
+        # ☠ round-198：空列表时原来照样加一条「最新稳定版（推荐）」—— 玩家
+        # 选了它，装的时候才发现这个 MC 版本根本没有该加载器的版本。
+        # 现在：写明"没有可用版本"并禁用下拉。
+        if not rows:
+            self.ldver_combo.addItem(t("inst.loader_ver_empty_item"), "")
+            self.ldver_combo.setCurrentIndex(0)
+            self.ldver_combo.setEnabled(False)
+            self.ldver_combo.blockSignals(False)
+            # 向导里没有独立的 MC 版本输入框（版本来自版本列表页）→
+            # 没有 mc 就不写空提示，避免出现" 没有这个加载器的可用版本"。
+            mc = getattr(self, "_current_mc", "") or ""
+            if mc and hasattr(self, "ldver_hint"):
+                self.ldver_hint.setText(t("inst.loader_ver_none", mc=mc))
+            return
+        self.ldver_combo.setEnabled(True)
         # round-180：默认项把「会装哪个版本」写清楚，不再只有一句
         # 「最新稳定版（推荐）」让玩家盲选。
         first = (rows[0].get("title") if rows else "") or ""

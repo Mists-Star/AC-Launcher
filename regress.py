@@ -98,6 +98,7 @@ SUITES = [
     ("功能统一/页面化", "test_round195_unify.py", "script"),
     ("全面审计补漏", "test_round196_audit.py", "script"),
     ("崩溃页内/Java合一/来源", "test_round197_inline_java.py", "script"),
+    ("加载器版本继承/空列表", "test_round198_loader_version.py", "script"),
 ]
 SHOTS = "shots_all.py"
 
