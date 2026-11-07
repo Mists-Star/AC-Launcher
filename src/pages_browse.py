@@ -874,15 +874,26 @@ class StorePage(QWidget):
                 return True
             if slug and str(meta.get("slug", "")) == slug:
                 return True
-        # 没有来源记录（旧下载）→ 按名字在前置里找已装 jar
-        title = str(m.get("title", "") or "").lower()
-        if not title:
+        # 没有来源记录（旧下载 / 手动放入）→ 按文件名**前缀**匹配。
+        # ☠ round-196：原来是「标题前 8 字符包含匹配」→ "Sodium" 会命中
+        # "sodium-extra.jar"（另一个模组！）→ 误标「已安装」。改成前缀匹配：
+        # 文件名必须以标题（或 slug）开头才算。
+        title = str(m.get("title", "") or "").strip().lower()
+        slug = str(m.get("slug", "") or "").strip().lower()
+        if not title and not slug:
             return False
+        cands = [c for c in (title, slug) if c]
         try:
             mods_dir = getattr(inst, "mods_dir", "") or ""
             for fn in os.listdir(mods_dir):
-                if fn.lower().endswith(".jar") and title[:8] in fn.lower():
-                    return True
+                low = fn.lower()
+                if not low.endswith((".jar", ".jar.disabled")):
+                    continue
+                stem = low[:-9] if low.endswith(".disabled") else low[:-4]
+                for c in cands:
+                    if stem == c or stem.startswith(c + "-") or \
+                            stem.startswith(c + "_") or stem.startswith(c + "."):
+                        return True
         except OSError:
             pass
         return False

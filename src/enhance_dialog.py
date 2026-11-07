@@ -183,7 +183,8 @@ class EnhancePanel(QWidget):
 
     def _on_status_error(self, err):
         self.btn_refresh.setEnabled(True)
-        self._show_message(t("enhance.state.unreachable", detail=str(err)[:120]))
+        # round-196：不再硬切 120 字符（半句话）→ 完整信息 + 换行显示
+        self._show_message(t("enhance.state.unreachable", detail=str(err)))
 
     def _clear_body(self):
         while self.body_lay.count():

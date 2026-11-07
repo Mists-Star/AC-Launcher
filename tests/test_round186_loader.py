@@ -152,9 +152,14 @@ check("点卡片 → 镜像下拉跟着换",
       str(dlg.loader_combo.currentData()))
 check("点卡片 → _current_loader 跟着换",
       dlg._current_loader() == "quilt", dlg._current_loader())
-check("选中的卡片样式与未选中不同",
-      dlg.loader_picker._cards["quilt"].styleSheet()
-      != dlg.loader_picker._cards["forge"].styleSheet())
+# round-196：卡片选中态改走全局 QSS 类（loader-card-on / loader-card），
+# 不再是内联 styleSheet —— 断言也跟着改成看属性
+check("选中的卡片走 loader-card-on 类",
+      dlg.loader_picker._cards["quilt"].property("cls") == "loader-card-on",
+      str(dlg.loader_picker._cards["quilt"].property("cls")))
+check("未选中的卡片走 loader-card 类",
+      dlg.loader_picker._cards["forge"].property("cls") == "loader-card",
+      str(dlg.loader_picker._cards["forge"].property("cls")))
 dlg.deleteLater()
 
 print("⑦ Fabric API 勾选项只在 fabric / quilt 时出现")

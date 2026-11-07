@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QProgressBar, QPushButton, QVBoxLayout, QWidget,
@@ -22,8 +22,15 @@ from .win_rounded import info, warn
 from .worker import ProgressWorker
 
 
-class ExportPackDialog(QDialog):
-    """把当前实例导出成 Modrinth 整合包。"""
+class ExportPackPanel(QWidget):
+    """把当前实例导出成 Modrinth 整合包（**页内**，round-196）。
+
+    round-195 之后实例编辑面板已经是页内的 —— 编辑面板里再 `exec()` 弹窗
+    就是「页内套窗口」，最刺眼的一处。窗口壳 :class:`ExportPackDialog`
+    保留给历史调用点。
+    """
+
+    closed = Signal()
 
     def __init__(self, parent, inst):
         super().__init__(parent)
@@ -33,12 +40,15 @@ class ExportPackDialog(QDialog):
 
         from .core.mrpack_export import PARTS, default_pack_name
 
-        self.setWindowTitle(t("export.title"))
         self.setMinimumWidth(520)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(TitleBar(self, title=t("export.title"), height=38))
+        # 页内模式不要 frameless 标题栏（页面自己有标题）→ 用普通标题标签
+        self._title = self._label(t("export.title"))
+        self._title.setStyleSheet(
+            "font-size:15px;font-weight:700;color:%s;" % COLORS["text_main"])
+        root.addWidget(self._title)
 
         body = QWidget()
         lay = QVBoxLayout(body)
@@ -119,7 +129,8 @@ class ExportPackDialog(QDialog):
         foot.setSpacing(10)
         foot.addStretch(1)
         self.cancel_btn = ui_kit.make_button(
-            t("common.cancel"), kind="secondary", on_click=self.reject, min_h=36)
+            t("common.cancel"), kind="secondary", on_click=self._on_cancel,
+            min_h=36)
         self.ok_btn = ui_kit.make_button(
             t("export.run"), kind="accent", icon_key="export",
             on_click=self._start, min_h=36)
@@ -214,8 +225,14 @@ class ExportPackDialog(QDialog):
         if skipped:
             msg += "\n" + t("export.skipped", items=", ".join(skipped[:5]))
         self.status.setText(msg)
-        info(self, t("export.title"), msg, detail=result.get("path") or "")
-        self.accept()
+        # 页内模式用浮层提示（round-196：toast 已支持页内面板），
+        # 路径写进状态行，不再弹模态框打断
+        try:
+            from .win_rounded import toast
+            toast(self, t("export.title"), msg)
+        except Exception:  # noqa: BLE001
+            pass
+        self.closed.emit()
 
     def _on_error(self, err: str) -> None:
         self.bar.setVisible(False)
@@ -224,9 +241,36 @@ class ExportPackDialog(QDialog):
         self.status.setText("")
         warn(self, t("export.title"), t("export.failed", e=str(err)))
 
+    def _on_cancel(self) -> None:
+        """取消：页内模式通知外层返回。"""
+        if self._worker is not None and self._worker.isRunning():
+            warn(self, t("export.title"), t("export.busy"))
+            return
+        self.closed.emit()
+
     def closeEvent(self, ev) -> None:  # noqa: N802 - Qt 命名
         if self._worker is not None and self._worker.isRunning():
             warn(self, t("export.title"), t("export.busy"))
             ev.ignore()
             return
         super().closeEvent(ev)
+
+
+class ExportPackDialog(QDialog):
+    """**兼容壳**：窗口模式（历史调用点）。内部就是 :class:`ExportPackPanel`。"""
+
+    def __init__(self, parent, inst):
+        super().__init__(parent)
+        self.setWindowTitle(t("export.title"))
+        self.setMinimumWidth(520)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.panel = ExportPackPanel(self, inst)
+        lay.addWidget(self.panel)
+        self.panel.closed.connect(self.accept)
+
+    def __getattr__(self, name):
+        if name == "panel":
+            raise AttributeError(name)
+        return getattr(self.panel, name)

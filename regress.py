@@ -96,6 +96,7 @@ SUITES = [
     ("资源中心：版本/前置/下载", "test_round193_store.py", "script"),
     ("一键修复反馈", "test_round194_fix_all.py", "script"),
     ("功能统一/页面化", "test_round195_unify.py", "script"),
+    ("全面审计补漏", "test_round196_audit.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

@@ -67,7 +67,17 @@ class _FindingCard(RoundedCard):
 
         # ── raw detail (collapsible-ish: show excerpt) ──
         if finding.detail:
-            det = QLabel(finding.detail.strip()[:220])
+            # round-196：原来按字符硬切 220（半句话，没省略号）→ 改成完整显示
+            # （最多 6 行）+ tooltip 给全文，不再"截断"。
+            det = QLabel(finding.detail.strip())
+            det.setWordWrap(True)
+            det.setToolTip(finding.detail.strip())
+            _fm = det.fontMetrics()
+            _w = max(240, det.width() or 420)
+            _lines = max(1, _fm.boundingRect(
+                _w, 0, Qt.TextWordWrap, finding.detail.strip()).height()
+                // max(1, _fm.lineSpacing()))
+            det.setMaximumHeight(min(_lines, 6) * _fm.lineSpacing() + 4)
             det.setProperty("cls", "sub")
             det.setStyleSheet(
                 f"font-size:11px; color:{COLORS['text_sub']};"

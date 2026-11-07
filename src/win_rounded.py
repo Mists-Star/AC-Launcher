@@ -310,14 +310,36 @@ def info(parent, title: str, text: str, detail: str = "", **kw) -> None:
     _msgbox(parent, title, text, detail, icon="info", buttons=("OK",))
 
 
+def _find_toast_host(parent):
+    """向上找**最近**的带 ``show_toast`` 的祖先（round-195）。
+
+    原来只看 ``parent.window()`` —— 弹窗里没有浮层能力时会退化成模态框。
+    round-195 起实例编辑 / 体检 / 增强包都改成了**页内面板**：页内面板的
+    ``window()`` 是主窗口（有浮层 ✓），但同一个面板被塞进弹窗壳时
+    ``window()`` 又是对话框 → 同样的代码在"页内"能弹浮层、在"弹窗"弹模态框，
+    **两态行为不一致**。
+
+    现在从 parent 沿 parent 链往上找第一个有 ``show_toast`` 的对象：
+    页内面板 → 主窗口 ✓；弹窗壳 → 壳 → 主窗口 ✓（都能用浮层）。
+    """
+    seen = 0
+    obj = parent
+    while obj is not None and seen < 40:
+        show = getattr(obj, "show_toast", None)
+        if callable(show):
+            return show
+        obj = obj.parent()
+        seen += 1
+    return None
+
+
 def toast(parent, title: str, text: str = "", duration: int = 3200) -> None:
     """Non-blocking light toast (round-75 弹窗收敛).
 
     Delegates to the main window's floating toast when available; falls back
     to a modal info box for windowless/standalone contexts.
     """
-    win = parent.window() if parent is not None else None
-    show = getattr(win, "show_toast", None)
+    show = _find_toast_host(parent)
     if show is not None:
         show(title, text, duration=duration)
     else:

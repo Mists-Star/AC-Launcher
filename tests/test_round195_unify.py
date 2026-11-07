@@ -93,14 +93,14 @@ page = InstancesPage()
 inst = Instance(id="p1", name="页内探针", game_version="1.20.1",
                 loader="fabric")
 page._open_instance_editor(inst)
-check("编辑面板进了页内栈", page._feature_idx is not None)
+check("编辑面板进了页内栈", bool(page._feature_stack))
 check("当前显示的是功能页",
-      page._body_stack.currentIndex() == page._feature_idx)
-btn_text = page._body_stack.widget(page._feature_idx).cancel_btn.text()
+      page._body_stack.currentIndex() == page._feature_stack[-1])
+btn_text = page._body_stack.widget(page._feature_stack[-1]).cancel_btn.text()
 check("页内模式按钮是「返回」", btn_text == "返回", btn_text)
 page._close_feature()
 check("返回后回到实例列表",
-      page._body_stack.currentIndex() == 1 and page._feature_idx is None)
+      page._body_stack.currentIndex() == 1 and not page._feature_stack)
 page.deleteLater()
 
 print("⑤ 运行时：模组描述两行显示")

@@ -223,6 +223,7 @@ class InstanceEditorPanel(QWidget):
     versionChanged = Signal(str)  # 实例 id：版本/加载器字段变了，外层触发补全
     loaderChanged = Signal(str)   # 实例 id：加载器真装/真卸完成
     closed = Signal()             # 页内模式：请求返回上一层
+    exportRequested = Signal(object)   # round-196：请求打开导出整合包面板
 
     def __init__(self, parent, inst):
         super().__init__(parent)
@@ -1159,11 +1160,14 @@ class InstanceEditorPanel(QWidget):
         self._refresh_icon_preview()
 
     def _export_pack(self) -> None:
-        """导出整合包（概览页「高级管理」入口）。"""
-        from .export_pack_dialog import ExportPackDialog
+        """导出整合包（概览页「高级管理」入口）。
+
+        round-196：不再自己弹窗 —— 页内面板里再 `exec()` 就是「页内套窗口」。
+        改为发信号，由外层（实例页）用同一个页内栈打开导出面板。
+        """
         # 先落字段：导出读的是实例对象，玩家刚改的版本号/加载器要用上
         self._collect(trigger=False)
-        ExportPackDialog(self, self._inst).exec()
+        self.exportRequested.emit(self._inst)
 
     # ── 加载器版本列表 ──────────────────────────────────────
     def _current_loader(self) -> str:

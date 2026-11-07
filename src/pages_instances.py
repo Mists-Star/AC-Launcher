@@ -3,7 +3,7 @@
 Contains:
 - InstanceCard      compact instance row used in the old list layout
 - _InstRow          compact row for the new left-side instance list
-- _LoaderCard       loader picker card in NewInstanceDialog
+- loader cards      统一用 src/loader_picker.py（round-196 合并）
 - NewInstanceDialog create-instance wizard (version + loader + java)
 - InstancesPage     split view: list | details
 - ModCard / ModsPage  per-instance mod toggling
@@ -470,74 +470,6 @@ class _InstRow(LightTrailCard):
         e.accept()
 
 
-class _LoaderCard(QFrame):
-    """Clickable loader picker card — card-style selection (UI 大改 Step B).
-
-    round-88：左侧显示加载器官方风格图标（assets/icons/loader_*.svg，
-    缺失时回退彩色圆点），中间标题+描述，右侧选中对勾。
-    """
-
-    def __init__(self, dlg: "NewInstanceDialog", loader_id: str, parent=None):
-        super().__init__(parent)
-        self.dlg = dlg
-        self.loader_id = loader_id
-        self.setCursor(Qt.PointingHandCursor)
-        # Uniform card height: descriptions wrap to 2 lines in a 3-column grid,
-        # and a min-height-only card made rows uneven enough to look squeezed.
-        self.setFixedHeight(82)
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(12)
-
-        from .icons import pixmap as _pix
-        ic = _pix(f"loader_{loader_id}", 40)
-        self._logo = QLabel()
-        if not ic.isNull():
-            self._logo.setPixmap(ic)
-        else:
-            # 图标缺失时回退中性色块（round-100：不再用品牌色，绝不留空框）
-            self._logo.setStyleSheet(
-                f"background: {COLORS['bg_hover']}; border-radius:7px;")
-        self._logo.setFixedSize(40, 40)
-        self._logo.setScaledContents(True)
-        lay.addWidget(self._logo, 0, Qt.AlignVCenter)
-
-        mid = QVBoxLayout()
-        mid.setSpacing(3)
-        name = QLabel(loader_name(loader_id))
-        name.setProperty("cls", "title")
-        mid.addWidget(name)
-        desc = QLabel(t(_LOADER_DESC.get(loader_id, "new_instance.ld_vanilla")))
-        desc.setProperty("cls", "sub")
-        desc.setWordWrap(True)
-        mid.addWidget(desc)
-        lay.addLayout(mid, 1)
-
-        # round-91 自绘对勾（Windows 下文本 ✓ 可能被 Segoe UI Emoji 渲染成彩色）
-        from .ui_kit import state_pix
-        self._check = QLabel()
-        self._check.setPixmap(state_pix("done", COLORS["accent"], 15))
-        self._check.setFixedSize(16, 16)
-        self._check.setVisible(False)
-        lay.addWidget(self._check, 0, Qt.AlignTop)
-
-        self._apply_style(False)
-
-    def _apply_style(self, selected: bool):
-        self.setProperty("cls", "loader-card-on" if selected else "loader-card")
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-    def set_selected(self, on: bool):
-        self._check.setVisible(on)
-        self._apply_style(on)
-
-    def mousePressEvent(self, e):
-        self.dlg._select_loader(self.loader_id)
-        super().mousePressEvent(e)
-
-
 class NewInstanceDialog(QDialog):
     """Two-step create-instance wizard:
 
@@ -578,7 +510,7 @@ class NewInstanceDialog(QDialog):
         self._loader = "vanilla"
         self._java_path = ""
         self._preset_version = preset_version
-        self._loader_cards: dict[str, _LoaderCard] = {}
+        self._loader_cards: dict[str, object] = {}
         self._version_filter = "all"
         self._version_search = ""
         self._busy = False  # 防抖：过渡期间禁止页间切换（round-29 防快速连点闪退）
@@ -905,17 +837,27 @@ class NewInstanceDialog(QDialog):
         # 默认 _loader="vanilla"，无卡时也是原版，无需冗余选项。
         self._loader_grid = QGridLayout()
         self._loader_grid.setSpacing(10)
+        # round-196：加载器卡片**只有一套**（src/loader_picker.py）——
+        # 原来这里还有一份 pages_instances._LoaderCard，与实例编辑「修改」页的
+        # 卡片长得不一样（logo 大小、选中反馈、描述文案都不同）。
         cols = 3
         ui_loaders = [l for l in LOADERS if l != "vanilla"]
         # round-68 设置开关：show_quilt=False 时新建实例页不出现 Quilt 卡片
         if not load_config().get("show_quilt", True):
             ui_loaders = [l for l in ui_loaders if l != "quilt"]
+        from .loader_picker import LoaderCard as _LCard
         for i, loader_id in enumerate(ui_loaders):
-            card = _LoaderCard(self, loader_id)
+            card = _LCard(self, loader_id, loader_name(loader_id),
+                          t(_LOADER_DESC.get(loader_id,
+                                             "new_instance.ld_vanilla")))
+            card.picked.connect(self._select_loader)
             self._loader_cards[loader_id] = card
             self._loader_grid.addWidget(card, i // cols, i % cols)
         # LabyMod is not installable in-app; keep it as a link card
-        labymod_card = _LoaderCard(self, "labymod")
+        labymod_card = _LCard(self, "labymod", loader_name("labymod"),
+                              t(_LOADER_DESC.get("labymod",
+                                                 "new_instance.ld_labymod")))
+        labymod_card.picked.connect(self._select_loader)
         self._loader_cards["labymod"] = labymod_card
         self._loader_grid.addWidget(labymod_card, len(ui_loaders) // cols, len(ui_loaders) % cols)
         lay.addLayout(self._loader_grid)
@@ -1495,8 +1437,8 @@ class InstancesPage(QWidget):
         self._closing_scan = False
         self._empty_btn = None
         self._list_panel_visible = True
-        # round-195：页内功能栈（编辑 / 体检 / 增强包）的当前页索引
-        self._feature_idx = None
+        # round-195/196：页内功能栈（编辑 / 体检 / 增强包 / 导出）的页索引栈
+        self._feature_stack: list[int] = []
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
@@ -2025,6 +1967,17 @@ class InstancesPage(QWidget):
                     lambda: self._delete_instance(inst))
         m.exec(pos)
 
+    def _open_export_pack(self, inst: Instance):
+        """导出整合包：**页内**（round-196）。
+
+        原来实例页是弹窗、而实例编辑面板里又弹一次 —— 页内套窗口最刺眼，
+        现在两处都走同一个页内栈。
+        """
+        from .export_pack_dialog import ExportPackPanel
+        panel = ExportPackPanel(self, inst)
+        panel.closed.connect(self._close_feature)
+        self._push_feature(panel)
+
     def _open_enhance(self, inst: Instance):
         """round-182：右键「客户端增强」→ 一键装 / 卸客户端体验类 mod。
 
@@ -2193,10 +2146,13 @@ class InstancesPage(QWidget):
     # ia[instances]: 「⋯ → 体检」 | 详情更多菜单 | 打开实例体检对话框（静态扫描 + 本地修复）
     # ── 页内功能栈（round-195）：编辑 / 体检 / 增强包都是"页面"，不是窗口 ──
     def _push_feature(self, panel) -> None:
-        """把一个功能面板压到实例页上方（页内切换，不是新开窗口）。"""
-        self._close_feature()
+        """把一个功能面板压到实例页上方（页内切换，不是新开窗口）。
+
+        round-196：改成**真正的栈** —— 导出整合包是从「实例编辑」里点进去的，
+        导出完要能回到编辑面板，而不是被踢回列表。
+        """
         idx = self._body_stack.addWidget(panel)
-        self._feature_idx = idx
+        self._feature_stack.append(idx)
         self._body_stack.setCurrentIndex(idx)
         # 页头动作（新建/扫描/导入包）在功能页里会跳走 → 先收起来
         head = getattr(self, "_head_actions", None)
@@ -2204,11 +2160,11 @@ class InstancesPage(QWidget):
             head.setVisible(False)
 
     def _close_feature(self) -> None:
-        """收起当前功能面板，回到实例列表。"""
-        idx = getattr(self, "_feature_idx", None)
-        if idx is None:
+        """收起栈顶功能面板，回到上一层（栈空则回实例列表）。"""
+        stack = getattr(self, "_feature_stack", None)
+        if not stack:
             return
-        self._feature_idx = None
+        idx = stack.pop()
         w = self._body_stack.widget(idx)
         if w is not None:
             self._body_stack.removeWidget(w)
@@ -2218,6 +2174,10 @@ class InstancesPage(QWidget):
                 _shib_delete(w)
             except Exception:
                 w.deleteLater()
+        if stack:
+            # 还有上一层（例：导出面板是从编辑面板进来的）→ 回上一层
+            self._body_stack.setCurrentIndex(stack[-1])
+            return
         self._body_stack.setCurrentIndex(1)
         head = getattr(self, "_head_actions", None)
         if head is not None:
@@ -2231,6 +2191,8 @@ class InstancesPage(QWidget):
         panel.saved.connect(self._on_editor_saved)
         panel.versionChanged.connect(self._on_editor_version_changed)
         panel.loaderChanged.connect(lambda _i: self._refresh())
+        panel.exportRequested.connect(
+            lambda inst: self._open_export_pack(inst))
         panel.closed.connect(self._close_feature)
         self._push_feature(panel)
 
@@ -2383,10 +2345,11 @@ class InstancesPage(QWidget):
         MapDialog(game_dir, self).exec()
 
     def _export_pack(self, inst: Instance):
-        """round-184：把实例导出成 Modrinth 整合包（.mrpack）。"""
-        from .export_pack_dialog import ExportPackDialog
-        dlg = ExportPackDialog(self, inst)
-        dlg.exec()
+        """round-184：把实例导出成 Modrinth 整合包（.mrpack）。
+
+        round-196：改成**页内**（与编辑面板里的入口走同一个页内栈）。
+        """
+        self._open_export_pack(inst)
 
     def _rebuild_instance(self, inst: Instance):
         """round-166：按磁盘现状重构实例定义（只读扫描，不删游戏文件）。

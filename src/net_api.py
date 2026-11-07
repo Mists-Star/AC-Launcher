@@ -1713,10 +1713,44 @@ def search_all(query: str = "", offset: int = 0, limit: int = 20,
         futs = [ex.submit(_mr), ex.submit(_cf)]
         for f in futs:
             f.result()
-    hits = (box["mr"] or []) + (box["cf"] or [])
-    if not hits and errs:
+    mr = box["mr"] or []
+    cf = box["cf"] or []
+    if not mr and not cf and errs:
         raise NetError(str(errs[0]))
-    return hits
+    return _dedupe_two_sources(mr, cf)
+
+
+def _norm_title(s: str) -> str:
+    """标题归一化（用于跨源判重）：小写 + 去非字母数字。"""
+    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+
+def _dedupe_two_sources(mr: list[dict], cf: list[dict]) -> list[dict]:
+    """合并两源并去重（round-195）。
+
+    原来直接把两边相加 → 同一个 mod（JEI、Sodium…）在 Modrinth 和 CF 都有，
+    「全部」源会连着出现**两张几乎一样的卡**，玩家会以为出 bug。
+
+    规则：按 slug 相同、标题归一化相同判为同一个项目 → 保留 **Modrinth** 那张
+    （CF 的 project_id 与 Modrinth 的不是同一套 id，下载分流按 source 走，
+    保留哪边都不会串）；被吞掉的那张在卡上标「另一源也有」。
+    """
+    out = list(mr)
+    seen_keys: set[str] = set()
+    for h in out:
+        for key in (str(h.get("slug", "")).lower(),
+                    _norm_title(h.get("title", ""))):
+            if key:
+                seen_keys.add(key)
+    for h in cf:
+        keys = [str(h.get("slug", "")).lower(), _norm_title(h.get("title", ""))]
+        keys = [k for k in keys if k]
+        if keys and any(k in seen_keys for k in keys):
+            continue
+        for k in keys:
+            seen_keys.add(k)
+        out.append(h)
+    return out
 
 
 def download_curseforge_mod(project_id: str, dest_dir: str,
