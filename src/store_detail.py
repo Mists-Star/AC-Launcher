@@ -836,7 +836,11 @@ class StoreDetailPanel(QWidget):
             else:
                 # keyless channel: forgecdn resolves any file id directly
                 w = ProgressWorker(download_cfwidget_file,
-                                   {"id": fid, "name": fname}, dest)
+                                   {"id": fid, "name": fname}, dest,
+                                   manifest_out=self._dl_manifest,
+                                   project_id=str(self._card.get(
+                                       "project_id", "") or
+                                       self._card.get("slug", "")))
         else:
             # round-191：详情页「选择版本下载」同样登记来源，模组列表才能标出来
             self._dl_manifest = []
@@ -877,7 +881,7 @@ class StoreDetailPanel(QWidget):
                         else "",
                 "title": card.get("title", "") if item.get("project_id") == pid
                          else "",
-                "source": "modrinth",
+                "source": card.get("source", "modrinth"),
             } for item in manifest])
         except Exception:  # noqa: BLE001 - 记录失败不影响下载结果
             pass

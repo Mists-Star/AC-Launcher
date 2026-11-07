@@ -126,9 +126,29 @@ check("缩略图落盘后尺寸受限",
 row = _na._cf_map_row({"id": 1, "logo": {"url":
     "https://media.forgecdn.net/avatars/1992/163/639226607749089342.gif"}})
 check("CF 作者头像 GIF 不再当项目图标", row["icon_url"] == "", row["icon_url"])
-row2 = _na._cf_map_row({"id": 2, "logo": {"url":
-    "https://media.forgecdn.net/avatars/thumb/xyz.png?x=1"}})
-check("CF avatars 路径（非 gif）也过滤", row2["icon_url"] == "")
+# round-192 修正：原断言「CF avatars 路径（非 gif）也过滤」把**项目 logo 本身**
+# 也干掉了 —— CF 的项目图标就在 media.forgecdn.net/avatars/<modId>/<fileId>/，
+# 一刀切的实际后果是 CF 源一个图标都出不来（用户报「好多图标加载不出来」）。
+# 正确规则：只有 .gif 动图要丢；普通 png/jpg 项目图标要保留，并且优先用
+# 256×256 的 thumbnailUrl（小图更快、更省下载槽）。
+row2 = _na._cf_map_row({"id": 2, "logo": {
+    "url": "https://media.forgecdn.net/avatars/1474/428/638957192475584420.png",
+    "thumbnailUrl": "https://media.forgecdn.net/avatars/thumbnails/1474/428/"
+                    "256/256/638957192475584420.png"}})
+check("CF 项目图标（avatars 路径）要保留",
+      row2["icon_url"].endswith("638957192475584420.png"), row2["icon_url"])
+check("优先用 thumbnailUrl（小图）",
+      "/thumbnails/" in row2["icon_url"], row2["icon_url"])
+row3 = _na._cf_map_row({"id": 3, "logo": {
+    "url": "https://media.forgecdn.net/avatars/1992/163/639226607749089342.gif",
+    "thumbnailUrl": "https://media.forgecdn.net/avatars/thumbnails/1992/163/"
+                    "256/256/639226607749089342.png"}})
+check("GIF 动图退到静态缩略图",
+      row3["icon_url"].endswith(".png") and "/thumbnails/" in row3["icon_url"],
+      row3["icon_url"])
+row4 = _na._cf_map_row({"id": 4, "logo": {
+    "url": "https://media.forgecdn.net/avatars/1992/163/x.gif"}})
+check("只有 GIF 且无缩略图 → 当无图标", row4["icon_url"] == "", row4["icon_url"])
 row3 = _na._cf_map_row({"id": 3, "logo": {"url":
     "https://media.forgecdn.net/logos/abc.png"}})
 check("正常 logo URL 不受影响", row3["icon_url"].endswith("abc.png"))

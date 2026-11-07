@@ -907,21 +907,34 @@ class StorePage(QWidget):
             #   kwargs，别占位置参数位（会撞 multiple values）。
             mc = getattr(inst, "game_version", "") or ""
             ld = getattr(inst, "loader", "") or ""
+            # round-192：CF 下载也回报 manifest，模组列表照样标「资源中心」
+            self._dl_manifest = []
+            self._dl_meta = {
+                "inst": inst,
+                "slug": slug,
+                "project_id": project_id,
+                "title": (card or {}).get("title", "") or slug,
+                "source": "curseforge",
+            }
             if cf_file:
                 # 免 key 通道解析出的文件（含 id/name）→ forgecdn 直链
                 self._dworker = ProgressWorker(
                     download_cfwidget_file, cf_file, dest,
-                    mc_version=mc, loader=ld)
+                    mc_version=mc, loader=ld,
+                    manifest_out=self._dl_manifest,
+                    project_id=str(project_id or slug))
             elif not curseforge_available() and curseforge_keyless_enabled():
                 # 免 key 镜像搜索的命中只有 slug → slug → cfwidget → forgecdn
                 self._dworker = ProgressWorker(
                     download_cfwidget_slug, slug, dest,
-                    mc_version=mc, loader=ld)
+                    mc_version=mc, loader=ld,
+                    manifest_out=self._dl_manifest)
             else:
                 # 官方 API 搜索命中只有 project_id → 走官方下载接口
                 self._dworker = ProgressWorker(
                     download_curseforge_mod, project_id, dest,
-                    mc_version=mc, loader=ld)
+                    mc_version=mc, loader=ld,
+                    manifest_out=self._dl_manifest)
         else:
             # round-37：传入实例的 MC 版本 + 加载器，让 Modrinth 过滤兼容版本
             # 并自动拉取 required 依赖树（download_mod_to 已支持依赖解析）
@@ -970,7 +983,7 @@ class StorePage(QWidget):
                             "project_id") else "",
                         "title": meta.get("title", "") if pid == meta.get(
                             "project_id") else "",
-                        "source": "modrinth",
+                        "source": meta.get("source", "modrinth"),
                     })
                 mod_sources.record(inst, entries)
             except Exception:  # noqa: BLE001 - 记录失败不影响下载结果

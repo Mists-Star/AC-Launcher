@@ -1369,16 +1369,88 @@ _CF_POOL_STEP = 50     # CF 单页上限 50（镜像同）
 _CF_POOL_PAGES = 3     # round-141：首屏拉 0/50/100 → 150 条相关性池
 
 
+def _cf_search_zh(base: str, headers: dict, query: str, category: str,
+                  limit: int, offset: int) -> list[dict]:
+    """CF 源的中文搜索（round-192）。
+
+    CF 的 ``searchFilter`` 只认英文/拼音 slug，中文必须转换：
+
+    1. **本地名库**反查 slug（精确 > 前缀 > 包含），逐个试（原来只试第一个，
+       名库命中多个时白白丢掉后面的）；
+    2. 名库没有 → **翻成英文**再按关键词搜（与 Modrinth 源同一套兜底，
+       见 :func:`search_mods_zh`）。
+    """
+    slugs = _lookup_cn_slugs(query)
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for slug in slugs[:6]:
+        params = {
+            "gameId": CURSEFORGE_GAME_ID,
+            "classId": CURSEFORGE_CLASS_OF.get(category, CURSEFORGE_MOD_CLASS),
+            "slug": slug,
+            "pageSize": limit,
+            "index": offset,
+        }
+        try:
+            r = requests.get(
+                f"{base}/mods/search", params=params, headers=headers,
+                timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+            r.raise_for_status()
+            data = r.json().get("data", [])
+        except requests.RequestException:
+            continue
+        for m in data:
+            row = _cf_map_row(m)
+            pid = row.get("project_id", "")
+            if pid and pid not in seen:
+                seen.add(pid)
+                hits.append(row)
+        if hits:
+            break
+    if hits:
+        return hits
+    # 名库没命中 → 翻译兜底
+    try:
+        en = translate_text(query, "en")
+    except Exception:  # noqa: BLE001 - 翻译挂了就当没有
+        en = ""
+    if not en or has_cjk(en):
+        return []
+    params = {
+        "gameId": CURSEFORGE_GAME_ID,
+        "classId": CURSEFORGE_CLASS_OF.get(category, CURSEFORGE_MOD_CLASS),
+        "searchFilter": en,
+        "pageSize": limit,
+        "index": offset,
+    }
+    try:
+        r = requests.get(
+            f"{base}/mods/search", params=params, headers=headers,
+            timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+        r.raise_for_status()
+        data = r.json().get("data", [])
+    except requests.RequestException as e:
+        raise NetError(f"无法搜索 CurseForge：{e}") from e
+    return [_cf_map_row(m) for m in data]
+
+
 def _cf_map_row(m: dict) -> dict:
     """CF API 行 → 统一 hit 形状（与 search_mods 对齐）。"""
-    logo = (m.get("logo") or {}).get("url", "")
-    # round-181：CF 有项目把「作者头像 GIF 动图」塞进 logo.url
-    # （media.forgecdn.net/avatars/*.gif，实测 18.8 MB / 4.2 MB）。
-    # 它不是项目图标，拉下来既拖垮整页下载槽又解码成错图。一律当无图标，
-    # 交给卡片的首字母占位。
-    _low = logo.lower().split("?", 1)[0]
-    if "/avatars/" in _low or _low.endswith(".gif"):
-        logo = ""
+    _logo = m.get("logo") or {}
+    # ☠ round-191 修：原规则是「URL 里带 /avatars/ 就当无图标」，本意是滤掉
+    # 作者头像 GIF 动图（实测 18.8 MB / 4.2 MB）—— 但 **CF 的项目 logo 本身就在**
+    # media.forgecdn.net/avatars/<modId>/<fileId>/xxx.png ！一刀切的结果是
+    # **CF 源一个图标都出不来**，全部退回首字母占位（用户报「好多图标加载不出来」）。
+    # 正确的区分：作者头像是 authors[].avatarUrl（jtvnw / googleusercontent），
+    # 与 logo 无关；logo 里只有动图（.gif）需要丢。
+    # 并且优先用 thumbnailUrl（256×256 小图）：卡片只显示 48px，原图动辄
+    # 300+ KB（实测 grassier-grass 364 KB），小图更快也不占下载槽。
+    logo = _logo.get("thumbnailUrl") or _logo.get("url", "")
+    _low = str(logo).lower().split("?", 1)[0]
+    if _low.endswith(".gif"):
+        # 动图：退到 thumbnailUrl（静态小图），没有就当无图标
+        thumb = str(_logo.get("thumbnailUrl") or "")
+        logo = "" if thumb.lower().endswith(".gif") else thumb
     return {
         "project_id": str(m.get("id", "")),      # CF mod id
         "slug": m.get("slug", ""),
@@ -1507,28 +1579,7 @@ def search_curseforge(query: str = "", offset: int = 0, limit: int = 20,
         cached = _cached(cache_key)
         if cached is not None:
             return cached
-        slugs = _lookup_cn_slugs(query)
-        if not slugs:
-            return []
-        params = {
-            "gameId": CURSEFORGE_GAME_ID,
-            "classId": CURSEFORGE_CLASS_OF.get(category, CURSEFORGE_MOD_CLASS),
-            "slug": slugs[0],
-            "pageSize": limit,
-            "index": offset,
-        }
-        try:
-            r = requests.get(
-                f"{base}/mods/search",
-                params=params,
-                headers=headers,
-                timeout=_REQUEST_TIMEOUT, proxies=_proxies(),
-            )
-            r.raise_for_status()
-            data = r.json().get("data", [])
-        except requests.RequestException as e:
-            raise NetError(f"无法搜索 CurseForge：{e}") from e
-        hits = [_cf_map_row(m) for m in data]
+        hits = _cf_search_zh(base, headers, query, category, limit, offset)
         _store(cache_key, hits)
         return hits
     # 首屏 → 相关性池切片。注意：池是唯一权威 —— 不能先查切片缓存，
@@ -1601,7 +1652,8 @@ def search_all(query: str = "", offset: int = 0, limit: int = 20,
 def download_curseforge_mod(project_id: str, dest_dir: str,
                             file_id: int | str | None = None,
                             callback=None, mc_version: str = "",
-                            loader: str = "") -> str:
+                            loader: str = "",
+                            manifest_out: list | None = None) -> str:
     """Download a CurseForge mod file into dest_dir.
 
     round-111：新增 ``callback``（mll 风格，ProgressWorker 注入）→ 进度/速度。
@@ -1621,7 +1673,7 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
                 default="CurseForge 暂不可用。请到「设置 → 网络 → 第三方服务」"
                         "开启免密钥选项，或填入自己的 CurseForge API Key。"))
         return _download_cf_keyless(project_id, file_id, dest_dir, callback,
-                                    mc_version, loader)
+                                    mc_version, loader, manifest_out)
     if file_id:
         # 整合包 manifest 指定版本 → 官方精确文件端点（不再退回最新版，
         # 否则整合包装出来的模组版本和作者声明的不一致）。
@@ -1641,9 +1693,14 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
         url = f.get("downloadUrl") or FORGECDN_URL.format(
             a=int(file_id) // 1000, b=int(file_id) % 1000, name=filename)
         os.makedirs(dest_dir, exist_ok=True)
-        return download_file(url, os.path.join(dest_dir, _safe_filename(filename)),
-                             timeout=120, progress=_cb_progress(callback),
+        dest = os.path.join(dest_dir, _safe_filename(filename))
+        path = download_file(url, dest, timeout=120,
+                             progress=_cb_progress(callback),
                              expected_sha1=_cf_sha1(f))
+        if manifest_out is not None:
+            manifest_out.append({"filename": os.path.basename(path),
+                                  "project_id": str(project_id)})
+        return path
     try:
         r = requests.get(
             f"{CURSEFORGE_API}/mods/{project_id}/files",
@@ -1669,9 +1726,13 @@ def download_curseforge_mod(project_id: str, dest_dir: str,
         raise NetError("该模组没有直接下载链接")
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, _safe_filename(filename))
-    return download_file(url, dest, timeout=120,
+    path = download_file(url, dest, timeout=120,
                          progress=_cb_progress(callback),
                          expected_sha1=_cf_sha1(f))
+    if manifest_out is not None:
+        manifest_out.append({"filename": os.path.basename(path),
+                              "project_id": str(project_id)})
+    return path
 
 
 def _cfwidget_info(proj: str) -> dict:
@@ -1729,7 +1790,8 @@ def _cf_direct_url(u: str) -> bool:
 
 def _download_cf_keyless(project_id: str, file_id: int | str | None,
                          dest_dir: str, callback=None, mc_version: str = "",
-                         loader: str = "") -> str:
+                         loader: str = "",
+                         manifest_out: list | None = None) -> str:
     """免 key 下载：镜像拿元数据（1 次）→ forgecdn 直链下载（1 次）。
 
     round-142 初版每个文件最多要问 4 个地方（精确端点/文件列表/cfwidget/下载），
@@ -1828,9 +1890,13 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
         filename = os.path.basename(url.split("?")[0]) or f"{project_id}.zip"
     _store(meta_key, [url, filename, sha1])
     os.makedirs(dest_dir, exist_ok=True)
-    return download_file(url, os.path.join(dest_dir, _safe_filename(filename)),
-                         timeout=300, progress=_cb_progress(callback),
-                         expected_sha1=sha1)
+    path = download_file(
+        url, os.path.join(dest_dir, _safe_filename(filename)),
+        timeout=300, progress=_cb_progress(callback), expected_sha1=sha1)
+    if manifest_out is not None:
+        manifest_out.append({"filename": os.path.basename(path),
+                              "project_id": str(project_id)})
+    return path
 
 
 # ---- CurseForge 版本列表 / 指定文件下载（round-120）----
@@ -2050,7 +2116,9 @@ def curseforge_link_search(query: str, limit: int = 8) -> list[dict]:
 
 
 def download_cfwidget_file(cf_file: dict, dest_dir: str, callback=None,
-                            mc_version: str = "", loader: str = "") -> str:
+                            mc_version: str = "", loader: str = "",
+                            manifest_out: list | None = None,
+                            project_id: str = "") -> str:
     """下载 cfwidget 解析出的文件（forgecdn 直链，无需 key）。
 
     round-111：新增 ``callback``（mll 风格，ProgressWorker 注入）→ 进度/速度。
@@ -2071,13 +2139,19 @@ def download_cfwidget_file(cf_file: dict, dest_dir: str, callback=None,
         raise NetError(f"无效的文件 ID：{fid!r}") from None
     url = FORGECDN_URL.format(a=fid // 1000, b=fid % 1000, name=name)
     os.makedirs(dest_dir, exist_ok=True)
-    return download_file(url, os.path.join(dest_dir, _safe_filename(name)),
-                         timeout=120, progress=_cb_progress(callback),
+    dest = os.path.join(dest_dir, _safe_filename(name))
+    path = download_file(url, dest, timeout=120,
+                         progress=_cb_progress(callback),
                          expected_sha1=_cf_sha1(cf_file))
+    if manifest_out is not None:
+        manifest_out.append({"filename": os.path.basename(path),
+                              "project_id": str(project_id or "")})
+    return path
 
 
 def download_cfwidget_slug(slug: str, dest_dir: str, callback=None,
-                            mc_version: str = "", loader: str = "") -> str:
+                            mc_version: str = "", loader: str = "",
+                            manifest_out: list | None = None) -> str:
     """免 key 下载：slug → cfwidget 最新文件 → forgecdn 直链（round-140）。
 
     供免 key 镜像搜索命中的卡片使用——命中只有 slug / project_id，没有
@@ -2094,7 +2168,9 @@ def download_cfwidget_slug(slug: str, dest_dir: str, callback=None,
         raise NetError(_t_err("err.curseforge_no_file",
                               default="该 mod 没有匹配当前版本的可下载文件"))
     return download_cfwidget_file(cf_file, dest_dir, callback=callback,
-                                  mc_version="", loader="")
+                                  mc_version="", loader="",
+                                  manifest_out=manifest_out,
+                                  project_id=str(slug))
 
 
 def fetch_liteloader_builds(mc_version: str) -> list[dict]:
