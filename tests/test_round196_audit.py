@@ -84,9 +84,10 @@ check("增强包错误不再 [:120]", "[:120]" not in enh_src)
 print("⑤ 「已安装」判定收紧")
 check("不再用标题前 8 字符包含匹配",
       "title[:8] in fn.lower()" not in pages_src)
-browse_src = io.open(os.path.join(HERE, "src", "pages_browse.py"),
-                      encoding="utf-8").read()
-check("改成文件名前缀匹配", "stem.startswith(c + \"-\")" in browse_src)
+# round-199：前缀判据已从页面收到 core/mod_sources.is_installed（行为不变）
+src_src = io.open(os.path.join(HERE, "src", "core", "mod_sources.py"),
+                  encoding="utf-8").read()
+check("前缀判据收在 mod_sources", "stem.startswith(c + sep)" in src_src)
 
 print("⑥ 加载器选择器只有一套")
 check("pages_instances 不再定义 _LoaderCard",

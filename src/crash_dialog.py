@@ -59,6 +59,15 @@ class _FindingCard(RoundedCard):
         reason.setProperty("cls", "sub")
         reason.setWordWrap(True)
         lay.addWidget(reason)
+        # round-204：点名可疑模组 —— 光说「日志里有 Exception」不构成结论。
+        if getattr(finding, "culprit", ""):
+            cl = QLabel(t("crash.culprit", default="可疑模组：{name}",
+                          name=finding.culprit))
+            cl.setProperty("cls", "sub")
+            cl.setStyleSheet(
+                "color:%s; font-weight:600;" % COLORS.get("warning", "#F59E0B"))
+            cl.setWordWrap(True)
+            lay.addWidget(cl)
         # round-91 去掉文本 💡 前缀（Windows 下渲染成彩色 emoji，风格突兀）；用 QHBox 自带圆点色块即表达建议层级
         sug = QLabel(t(finding.suggestion))
         sug.setProperty("cls", "sub")

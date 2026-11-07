@@ -119,7 +119,12 @@ _RETRIES = 1
 
 # 是否把 Mojang 主机重写为 BMCLAPI。由 install_instance / install_mrpack 按用户
 # 的 download_mirror 设置在每个安装开始前设定。
+# round-203：这是**进程级默认值**；每次安装在自己的 InstallContext 里存一份，
+# 并行安装不再互相覆盖（详见 InstallContext 的说明）。
 _MIRROR_ON = False
+
+# 「未设置」哨兵：InstallContext.proxy 用它区分「没调用过 set_proxy」。
+_UNSET = object()
 
 # round-113：mll 库/资源下载的并发上限与 HTTP 连接池大小。
 #
@@ -405,9 +410,26 @@ def _diag_log(line: str) -> None:
 
 
 def set_mirror(enabled: bool) -> None:
-    """Enable/disable the BMCLAPI host rewrite for subsequently sent requests."""
+    """Enable/disable the BMCLAPI host rewrite for subsequently sent requests.
+
+    round-203：安装线程内只改本次安装自己的 ``ctx.mirror_on``；该线程外（设置页
+    预览、单文件下载等）才落到进程级默认值。这样两个安装并行时，谁也不会把
+    对方的镜像开关改掉。
+    """
     global _MIRROR_ON
+    ctx = active_context()
+    if ctx is not None:
+        ctx.mirror_on = bool(enabled)
+        return
     _MIRROR_ON = bool(enabled)
+
+
+def _mirror_on_for(ctx=None) -> bool:
+    """当前请求该不该走镜像：本次安装的设置优先，否则用进程级默认值。"""
+    if ctx is None:
+        ctx = active_context()
+    val = getattr(ctx, "mirror_on", None) if ctx is not None else None
+    return _MIRROR_ON if val is None else bool(val)
 
 
 class InstallCancelled(Exception):
@@ -436,10 +458,15 @@ class InstallContext:
     结束（BMCLAPI 挂住时更久，read timeout 最长 30 秒）。现在每个响应都登记
     在案，``abort()`` 直接 ``shutdown`` 其底层 socket，阻塞中的读立刻抛错；
     由 :func:`run_cancellable` 启动的安装器子进程一并结束。
+
+    round-203：``mirror_on`` / ``proxy`` 从进程级全局搬到这里 —— 两个安装
+    （比如「启动前补全」和商店下载）并行时，后启动的那个会把前一个的镜像 /
+    代理设置覆盖掉，表现为「下载互相占用、有的走镜像有的走官方」。现在每次
+    安装用自己的设置，互不影响；未设置时回落到进程级默认值。
     """
 
     __slots__ = ("_ev", "meter", "mirror_dead", "trace", "_resps", "_procs",
-                 "_lock")
+                 "_lock", "mirror_on", "proxy")
 
     def __init__(self) -> None:
         self._ev = threading.Event()
@@ -451,6 +478,9 @@ class InstallContext:
         self._resps: list = []
         self._procs: list = []
         self._lock = threading.Lock()
+        # round-203：未设置 = None，请求时回落到全局默认值。
+        self.mirror_on = None
+        self.proxy = _UNSET
 
     def abort(self) -> None:
         self._ev.set()
@@ -673,7 +703,8 @@ class MirrorSession(requests.Session):
         super().__init__(*args, **kwargs)
         self._ctx = active_context()
         self._last_status = None
-        _apply_proxy(self, _PROXY)
+        # round-203：代理同样按「本次安装优先」取值，不受并行下载影响。
+        _apply_proxy(self, _proxy_for(self._ctx))
         # round-113 P0-c：requests 的默认 HTTPAdapter 连接池只有 10 条
         # （pool_maxsize=10, pool_block=False）。并发 48 时其余 38 条每次都要
         # 重新握手 —— 实测同口径下 pool=10 比 pool=32 慢 15%（6.29s vs 5.30s，
@@ -988,8 +1019,11 @@ _SPROC_PATCH_MODULES = ("mod_loader._fabric", "mod_loader._forge",
 
 
 def _candidates(url, ctx=None):
-    """当前 URL 的候选来源链（镜像关闭 → 只有官方候选）。"""
-    if not _MIRROR_ON or not isinstance(url, str):
+    """当前 URL 的候选来源链（镜像关闭 → 只有官方候选）。
+
+    round-203：``ctx`` 存在时用它自己的 mirror_on（并行安装互不串扰）。
+    """
+    if not _mirror_on_for(ctx) or not isinstance(url, str):
         return _CHAIN.candidates(url, prefer=OFFICIAL_ONLY)
     dead = getattr(ctx, "mirror_dead", None) if ctx is not None else None
     return _CHAIN.candidates(url, dead=dead)
@@ -1001,7 +1035,7 @@ def _rewrite(url):
     round-174：镜像被健康表判为不健康时不再改写 —— 大文件（客户端 jar）宁可
     走官方，也不要在挂住的镜子上等到超时。
     """
-    if not _MIRROR_ON or not isinstance(url, str):
+    if not _mirror_on_for() or not isinstance(url, str):
         return url
     for cand in _candidates(url, active_context()):
         if cand.mirrored and not _HEALTH.is_down(_source_key(cand)):
@@ -1335,9 +1369,25 @@ _PROXY = None
 
 
 def set_proxy(proxy):
-    """Set the proxy mode used by subsequently created MirrorSessions."""
+    """Set the proxy mode used by subsequently created MirrorSessions.
+
+    round-203：与 :func:`set_mirror` 同一套规则 —— 安装线程内写本次安装的
+    ``ctx.proxy``，线程外才改进程级默认值。并行下载不会互相改代理。
+    """
     global _PROXY
+    ctx = active_context()
+    if ctx is not None:
+        ctx.proxy = proxy
+        return
     _PROXY = proxy
+
+
+def _proxy_for(ctx=None):
+    """当前请求该用哪个代理设置：本次安装优先，否则进程级默认值。"""
+    if ctx is None:
+        ctx = active_context()
+    val = getattr(ctx, "proxy", _UNSET) if ctx is not None else _UNSET
+    return _PROXY if val is _UNSET else val
 
 
 def _apply_proxy(session: requests.Session, proxy) -> None:

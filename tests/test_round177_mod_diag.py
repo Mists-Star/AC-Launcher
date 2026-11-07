@@ -136,16 +136,16 @@ check("精确命中时把版本/加载器传给 download_mod_to",
       calls and calls[0][2][:2] == ("1.21.1", "fabric"),
       str(calls[:1]))
 
-# ── C. 实例页按钮 ──────────────────────────────────────────────────
+# ── C. 实例页按钮（round-200 后改为一节入口 + 页内面板）────────────────
 pi = read("src/pages_instances.py")
-check("按钮文案改为诊断键且注释说明旧行为",
-      'QPushButton(t("instances.launch"))' in pi
-      and "体检 / 启动诊断" in pi and "名不副实" in pi)
-check("_launch 真的打开诊断对话框",
-      "open_launch_diagnostics" in pi.split("def _launch")[1][:900]
-      and "self.mgr.set_current(inst_id)" in pi.split("def _launch")[1][:900])
-check("文案不再是光秃秃的「启动」",
-      i18n.t("instances.launch") == "体检 / 启动诊断")
+check("启动诊断是一级入口（页内面板）",
+      '"instances.launch_diag"' in pi
+      and "def _show_launch_diag(" in pi
+      and "LaunchDiagnosticsPanel" in pi)
+check("实例页不再开诊断弹窗",
+      "open_launch_diagnostics" not in pi and "def _launch(" not in pi)
+check("文案是明确的「启动诊断」",
+      i18n.t("instances.launch_diag") == "启动诊断")
 
 # ── D. 诊断对话框行为 ──────────────────────────────────────────────
 from src.launch_diagnostics_dialog import LaunchDiagnosticsDialog  # noqa: E402
@@ -156,8 +156,8 @@ inst = types.SimpleNamespace(
     java_path="", ram_mb=4096, jvm_args="", mods_dir=TMP,
 )
 dlg = LaunchDiagnosticsDialog(inst)
-cmd_txt = dlg._cmd_view.toPlainText()
-health_txt = dlg._health_view.toPlainText()
+cmd_txt = dlg.panel._cmd_view.toPlainText()
+health_txt = dlg.panel._health_view.toPlainText()
 check("命令页有实例/版本/Java/游戏目录四行实信息",
       "Demo" in cmd_txt and "1.21.1" in cmd_txt and "fabric" in cmd_txt
       and TMP in cmd_txt)
@@ -173,7 +173,7 @@ check("build_options 的 token 恒为占位常量、不读真实账号",
 check("体检页有摘要且非空",
       bool(health_txt.strip()) and ("严重" in health_txt
                                    or "未发现问题" in health_txt))
-check("两个 tab 都在", dlg._tabs.count() == 2)
+check("两个 tab 都在", dlg.panel._tabs.count() == 2)
 dlg.deleteLater()
 
 zh, en = i18n._STRINGS["zh-CN"], i18n._STRINGS["en-US"]

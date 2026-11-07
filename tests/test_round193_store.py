@@ -101,7 +101,7 @@ print("⑤ 列表页标「已安装」")
 browse = io.open(os.path.join(HERE, "src", "pages_browse.py"),
                   encoding="utf-8").read()
 check("卡片有已安装标记", "store.installed_tag" in browse)
-check("已装判定用来源记录", "mod_sources.load(inst)" in browse)
+check("已装判定用来源记录", "mod_sources.is_installed(" in browse)
 
 print("⑥ 数据层：依赖清单接口")
 net2 = io.open(os.path.join(HERE, "src", "net_api.py"), encoding="utf-8").read()

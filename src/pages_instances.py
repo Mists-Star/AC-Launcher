@@ -1732,16 +1732,16 @@ class InstancesPage(QWidget):
             tl.addWidget(tt)
             name_row.addWidget(tag)
         name_row.addStretch(1)
-        # round-177：原「启动」按钮名不副实（只 set_current，不启动也不跳首页），
-        # 玩家点了像死了一样。保留按钮但换成「体检 / 启动诊断」——复用现成
-        # 实例体检，并补上真机验收需要的启动命令 / classpath / 缺库视图。
-        launch_btn = QPushButton(t("instances.launch"))
-        launch_btn.setProperty("cls", "accent")
-        launch_btn.setMinimumHeight(36)
-        launch_btn.setIcon(on_accent("check"))
-        launch_btn.setIconSize(QSize(16, 16))
-        launch_btn.clicked.connect(lambda: self._launch(inst.id))
-        name_row.addWidget(launch_btn)
+        # round-200：主按钮从混装的「体检 / 启动诊断」换成「编辑实例」——
+        # 出问题才用的诊断类操作全部下沉到下方「管理与诊断」一级网格。
+        # ia[instances]: 点「编辑实例」 | 详情名称行主按钮 | 页内打开编辑面板（换版本/加载器/内存/模组）
+        edit_btn = QPushButton(t("instances.edit_instance"))
+        edit_btn.setProperty("cls", "accent")
+        edit_btn.setMinimumHeight(36)
+        edit_btn.setIcon(on_accent("settings"))
+        edit_btn.setIconSize(QSize(16, 16))
+        edit_btn.clicked.connect(lambda: self._edit_instance_settings(inst))
+        name_row.addWidget(edit_btn)
         lay.addLayout(name_row)
 
         # badges: version pill · loader badge · format badge (round-82) · java
@@ -1796,27 +1796,46 @@ class InstancesPage(QWidget):
             grid.addRow(QLabel("ID"), self._mono(inst.version_id))
         lay.addLayout(grid)
 
-        # ── actions ──
-        # round-84 简洁化：一行只放高频操作（打开文件夹/实例设置/设为当前/删除），
-        # 低频操作（打开存档/应用整合包/崩溃分析）收进「⋯ 更多」下拉菜单——
-        # 避免按钮挤满一行把详情面板撑出横向滚动条。
+        # ── 管理与诊断（round-200：一级入口）──
+        # 用户反馈「功能藏太深」：体检 / 崩溃分析原来埋在「⋯ 更多」里，
+        # 备份 / 还原 / 复制只存在于右键菜单（详情页根本看不到）。
+        # 改为按用途分组的一级网格：上排全是"查问题 / 修问题"，下排是实例数据操作。
+        # ia[instances]: 点「实例体检」 | 详情「管理与诊断」网格 | 页内体检面板（静态扫描 + 一键本地修复）
+        # ia[instances]: 点「崩溃分析」 | 详情「管理与诊断」网格 | 页内崩溃分析面板（崩溃原因 + 修复建议）
+        # ia[instances]: 点「启动诊断」 | 详情「管理与诊断」网格 | 页内面板：启动命令 / classpath / 体检摘要
+        # ia[instances]: 点「补装依赖」 | 详情「管理与诊断」网格 | 扫描缺失前置并自动安装（后台 Worker）
+        # ia[instances]: 点「创建备份」 | 详情「管理与诊断」网格 | 后台打包实例快照到备份目录
+        # ia[instances]: 点「回滚备份…」 | 详情「管理与诊断」网格 | 选历史快照，二次确认后恢复 mods / config / 存档
+        # ia[instances]: 点「复制实例」 | 详情「管理与诊断」网格 | 输入新名后后台克隆实例目录
+        lay.addWidget(ui_kit.group_label(t("instances.manage_group")))
+        mgmt = [
+            ("health.title", "tools", lambda: self._health_check(inst)),
+            ("instances.crash_analyze", "crash",
+             lambda: self._show_crash(inst)),
+            ("instances.launch_diag", "console",
+             lambda: self._show_launch_diag(inst)),
+            ("instances.repair_deps_short", "download",
+             lambda: self._repair_mod_deps(inst)),
+            ("instances.backup", "export", lambda: self._backup(inst)),
+            ("instances.restore", "refresh", lambda: self._restore(inst)),
+            ("instances.duplicate", "add", lambda: self._duplicate(inst)),
+            ("instances.open_folder", "folder",
+             lambda: self._open_folder(inst)),
+        ]
+        mgmt_grid = QGridLayout()
+        mgmt_grid.setSpacing(8)
+        for i, (label_key, ico, slot) in enumerate(mgmt):
+            b = QPushButton(t(label_key))
+            b.setMinimumHeight(40)
+            b.setIcon(icon(ico))
+            b.setIconSize(QSize(15, 15))
+            b.clicked.connect(lambda _c=False, f=slot: f())
+            mgmt_grid.addWidget(b, i // 4, i % 4)
+        lay.addLayout(mgmt_grid)
+
+        # ── 底部行：设为当前 / 更多（低频） / 删除 ──
         actions = QHBoxLayout()
         actions.setSpacing(8)
-        open_btn = QPushButton(t("instances.open_folder"))
-        open_btn.setMinimumHeight(34)
-        open_btn.setIcon(icon("folder"))
-        open_btn.setIconSize(QSize(15, 15))
-        open_btn.clicked.connect(lambda: self._open_folder(inst))
-        actions.addWidget(open_btn)
-
-        # round-42：实例级设置覆盖（内存/JVM 参数/分组）
-        inst_set_btn = QPushButton(t("instances.instance_settings"))
-        inst_set_btn.setMinimumHeight(34)
-        inst_set_btn.setIcon(icon("settings"))
-        inst_set_btn.setIconSize(QSize(15, 15))
-        inst_set_btn.clicked.connect(lambda: self._edit_instance_settings(inst))
-        actions.addWidget(inst_set_btn)
-
         cur_btn = QPushButton(t("instances.set_current"))
         cur_btn.setMinimumHeight(34)
         cur_btn.setIcon(icon("check"))
@@ -1839,20 +1858,18 @@ class InstancesPage(QWidget):
         more_btn.setCursor(Qt.PointingHandCursor)
         more_btn.setProperty("cls", "surface")
         _more_menu = QMenu(more_btn)
+        # round-200：只剩低频项。体检 / 崩溃分析已升为上方网格一级入口。
         for key, ico, slot in [
             # round-42：打开存档目录
             (t("instances.open_saves"), "folder", (lambda: self._open_saves(inst))),
             # round-38 中轴：把整合包应用到已有实例（二次安装/升级）
             (t("instances.apply_pack"), "download", (lambda: self._apply_mrpack_to(inst))),
-            # 实例体检（含一键本地修复）：静态扫描性能模组 / JVM / Java / 启动参数
-            (t("health.title"), "tools", (lambda: self._health_check(inst))),
             # round-166：按磁盘现状重构实例定义（版本/加载器/布局重新推导）
             (t("instances.rebuild"), "refresh",
              (lambda: self._rebuild_instance(inst))),
             # round-184：导出成 Modrinth 整合包（.mrpack）
             (t("instances.export_pack"), "export",
              (lambda: self._export_pack(inst))),
-            (t("instances.crash_analyze"), "repair", (lambda: self._analyze_crash(inst))),
         ]:
             a = _more_menu.addAction(icon(ico), key)
             a.triggered.connect(
@@ -2165,9 +2182,31 @@ class InstancesPage(QWidget):
         from .crash_dialog import CrashAnalyzerPanel
         panel = CrashAnalyzerPanel(inst, parent=self)
         panel.closed.connect(self._close_feature)
+
+        # round-199：修复可能改了 mods/ 目录 → 关面板时发一次刷新信号
+        # （旧实现是弹窗 exec() 返回后补发，改成页内后挪到这里）。
+        def _done(_iid=inst.id):
+            try:
+                self.current_changed.emit(_iid)
+            except Exception:  # noqa: BLE001
+                pass
+        panel.closed.connect(_done)
         self._push_feature(panel)
 
-    # ia[instances]: 「⋯ → 体检」 | 详情更多菜单 | 打开实例体检对话框（静态扫描 + 本地修复）
+    def _show_launch_diag(self, inst: Instance):
+        """启动诊断：**页内**（round-200）。
+
+        round-177 起它是 QDialog 弹窗，而体检（round-195）/ 崩溃分析
+        （round-197）都已页内化——同一类实例功能不该有窗口 / 页面两套呈现。
+        """
+        from .launch_diagnostics_dialog import LaunchDiagnosticsPanel
+        panel = LaunchDiagnosticsPanel(inst, mgr=self.mgr, parent=self)
+        panel.closed.connect(self._close_feature)
+        # 「打开完整体检」在当前诊断面板之上再压一层体检面板；关闭体检后
+        # 回到诊断面板（页内栈天然支持）。
+        panel.open_health.connect(lambda _i=inst: self._health_check(_i))
+        self._push_feature(panel)
+
     # ── 页内功能栈（round-195）：编辑 / 体检 / 增强包都是"页面"，不是窗口 ──
     def _push_feature(self, panel) -> None:
         """把一个功能面板压到实例页上方（页内切换，不是新开窗口）。
@@ -2251,7 +2290,7 @@ class InstancesPage(QWidget):
         """旧入口（模组冲突预检）→ 转调体检，保持兼容。"""
         self._health_check(inst)
 
-    # ia[instances]: 点「删除」 | 详情操作条 | 二次确认后移除实例并刷新列表
+    # ia[instances]: 点「删除」 | 详情底部操作行 | 二次确认后移除实例并刷新列表
     def _delete_instance(self, inst: Instance):
         from .win_rounded import confirm
         if not confirm(
@@ -2262,27 +2301,7 @@ class InstancesPage(QWidget):
         self.mgr.remove(inst.id)
         self._refresh()
 
-    # ia[instances]: 点「启动」 | 详情主操作 | 设为当前实例并通知主窗口刷新（首页随即可启动）
-    def _launch(self, inst_id: str):
-        """round-177：设为当前实例 + 打开「体检 / 启动诊断」。
-
-        旧实现注释写着 ``jumps home & selects``，实际连跳转都没接，只做了
-        set_current + refresh，所以按钮点了毫无反应。启动游戏本来就只在首页
-        的「启动游戏」按钮，这里不该再放一个假的。
-        """
-        self.mgr.set_current(inst_id)
-        self._refresh()
-        self.current_changed.emit(inst_id)
-        inst = self.mgr.get(inst_id)
-        if inst is None:
-            return
-        try:
-            from .launch_diagnostics_dialog import open_launch_diagnostics
-            open_launch_diagnostics(self, inst, mgr=self.mgr)
-        except Exception:  # noqa: BLE001 - 诊断框不可用绝不影响实例页
-            pass
-
-    # ia[instances]: 点「打开文件夹」 | 详情操作条 | 用系统文件管理器打开实例目录
+    # ia[instances]: 点「打开文件夹」 | 详情「管理与诊断」网格 | 用系统文件管理器打开实例目录
     def _open_folder(self, inst: Instance):
         from PySide6.QtGui import QDesktopServices
         p = inst.mc_dir
@@ -2921,16 +2940,7 @@ class InstancesPage(QWidget):
         if inst is not None and getattr(inst, "id", None):
             self._set_current(inst.id)
 
-    def _analyze_crash(self, inst):
-        from .crash_dialog import CrashAnalyzerDialog
-        CrashAnalyzerDialog(inst=inst, parent=self).exec()
-        # 修复可能改了 mods/ 目录 → 刷新
-        try:
-            self.current_changed.emit(inst.id)
-        except Exception:  # noqa: BLE001
-            pass
-
-    # ia[instances]: 点「设为当前」 | 详情操作条 | 切换当前实例并刷新列表/首页
+    # ia[instances]: 点「设为当前」 | 详情底部操作行 | 切换当前实例并刷新列表/首页
     def _set_current(self, inst_id: str):
         self.mgr.set_current(inst_id)
         self._refresh()

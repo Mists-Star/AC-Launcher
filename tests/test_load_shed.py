@@ -1,7 +1,8 @@
 """round-156 回归测试：启动即降载（装饰动画暂停 + 壁纸缓存释放）。
 
 Qt offscreen；验证的是状态迁移，不渲染真实帧：
-1. `effects.set_game_running` 置位/复位，游戏运行中流光卡不再注册主表；
+1. `effects.set_game_running` 置位/复位：游戏运行中主表停摆，但可见卡片
+   仍保留登记（round-202：退出后无需再切页即可自动恢复动画）；
 2. `WallpaperWidget.suspend()` 丢弃大图/缩放缓存并隐藏，游戏运行中
    `apply()` 不重新加载；`resume()` + `apply()` 能恢复原图。
 """
@@ -38,12 +39,14 @@ check("无卡时主表不启动",
 
 card = effects.LightTrailCard()
 card.show()
-check("游戏运行中不注册流光卡", card not in effects._ACTIVE_CARDS)
+check("游戏运行中主表不跑",
+      effects._MASTER is None or not effects._MASTER.isActive())
+check("降载期间卡片仍登记（供退出后自动恢复）",
+      card in effects._ACTIVE_CARDS)
 effects.set_game_running(False)
 check("游戏退出 → GAME_RUNNING=False", not effects.GAME_RUNNING)
-card.hide()
-card.show()
-check("退出后恢复注册", card in effects._ACTIVE_CARDS)
+check("退出后无需再切页，主表自动恢复",
+      effects._MASTER is not None and effects._MASTER.isActive())
 card.hide()
 effects._stop_master()
 card.deleteLater()

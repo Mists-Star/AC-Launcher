@@ -1833,6 +1833,8 @@ class MainWindow(QMainWindow):
         self._play_stopping = False
         # round-154：实例 → TaskCenter 任务 id（统一任务记录 / 持久历史）
         self._dl_task_ids: dict[str, str] = {}
+        # round-203：实例 → 全局下载闸门 key（同一实例安装只允许一个在跑）。
+        self._dl_gate_keys: dict[str, str] = {}
         self._launch_task_id = ""
         # round-177：状态栏三路信号（status/speed/progress）只允许「当前活跃
         # worker」写入。此前下载/启动 worker 直连状态栏，取消或失败后仅从
@@ -2685,6 +2687,20 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     t("launch.cancel_pending", name=inst.name), 5000)
             return
+        # round-203：全局闸门 —— 同一实例的安装（启动前补全 / 手动补全 / 修复）
+        # 同一时刻只允许一个。没有这道锁时，「点启动」与「点补全」会各开一个
+        # install 写同一批 .part 文件：既重复占用带宽，又可能互相覆盖导致校验
+        # 失败重下（用户反馈「总有好几个下载一起占」）。
+        try:
+            from .core.dl_gate import claim, inst_key
+            _gate_key = inst_key(getattr(inst, "mc_dir", "") or "")
+            if not claim(_gate_key):
+                self.statusBar().showMessage(
+                    t("status.download_busy", name=inst.name), 6000)
+                return
+            self._dl_gate_keys[inst_id] = _gate_key
+        except Exception:  # noqa: BLE001 - 闸门异常不阻断下载
+            pass
         from .core.install import install_instance
 
         if resume:
@@ -2815,6 +2831,8 @@ class MainWindow(QMainWindow):
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
         self._dl_paused.pop(inst_id, None)
+        # round-203：正常完成即释放实例安装闸门。
+        self._release_dl_gate(inst_id)
         # round-177：终态断开状态栏信号，杜绝残留计数继续刷新。
         self._unbind_status_worker(_done_w)
         try:
@@ -2861,6 +2879,10 @@ class MainWindow(QMainWindow):
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
         self._dl_paused.pop(inst_id, None)
+        # round-203：线程已不在收尾（没登记 stopping）→ 立刻放开闸门；
+        # 还在收尾的由 _on_dl_stopping_done 释放。
+        if inst_id not in self._dl_stopping:
+            self._release_dl_gate(inst_id)
         self._unbind_status_worker(_w)  # round-177：失败也是终态
         try:
             from .core.task_center import get_task_center
@@ -3051,6 +3073,10 @@ class MainWindow(QMainWindow):
         self._dl_workers.pop(inst_id, None)
         self._dl_pct.pop(inst_id, None)
         self._dl_paused.pop(inst_id, None)
+        # round-203：取消「暂停中的任务」时已没有 worker，闸门得当场放开；
+        # 有 worker 的由 _on_dl_stopping_done 等线程退出后释放。
+        if inst_id not in self._dl_stopping:
+            self._release_dl_gate(inst_id)
         # 4) UI 复位。round-177：取消后必须先断开该 worker 的状态栏连接，
         #    否则它的速度轮询/stall 定时器会继续刷「9」把新任务数字盖掉。
         self._unbind_status_worker(w)
@@ -3094,6 +3120,20 @@ class MainWindow(QMainWindow):
         """round-168：取消收尾完成 → 允许同实例重新下载。"""
         if self._dl_stopping.get(inst_id) is worker:
             self._dl_stopping.pop(inst_id, None)
+        # round-203：线程真正停下后才放开闸门 —— 在收尾期间放开会让「启动」
+        # 立刻抢进来，与还没退出的旧线程一起写盘，等于没锁。
+        self._release_dl_gate(inst_id)
+
+    def _release_dl_gate(self, inst_id: str) -> None:
+        """round-203：释放该实例的全局下载闸门（重复调用无害）。"""
+        key = getattr(self, "_dl_gate_keys", {}).pop(inst_id, "")
+        if not key:
+            return
+        try:
+            from .core.dl_gate import release
+            release(key)
+        except Exception:  # noqa: BLE001 - 闸门释放失败不影响 UI
+            pass
 
     # ── round-177：状态栏信号归属 ────────────────────────────────────────
     def _bind_status_worker(self, worker) -> None:
@@ -5595,11 +5635,41 @@ class MainWindow(QMainWindow):
                 reason = explain_exit(code, log_path)
             except Exception:  # noqa: BLE001
                 reason = t("exit.generic", default="游戏异常退出（退出码 {code}）", code=code)
-            box.setText(reason)
-            box.setInformativeText(t(
+            # round-204：不再只给「退出码一句话」。真的去读日志，给出
+            # 「最可疑的 mod / jar」与「关键错误行 —— 这才是玩家能照着做的结论。
+            _diag = {}
+            try:
+                from . import crash_analysis as _crash
+                _diag = _crash.diagnose_latest(base_dir)
+            except Exception:  # noqa: BLE001 - 分析失败退回原提示
+                _diag = {}
+            _culprit = str(_diag.get("culprit") or "")
+            _exc = str(_diag.get("exception") or "")
+            _text = reason
+            if _culprit:
+                _text += "\n" + t("exit.culprit", default="最可疑：{name}",
+                                  name=_culprit)
+            box.setText(_text)
+            _hint = t(
                 "exit.crash_hint",
                 default="以下是崩溃关键信息。可打开日志目录查看完整日志，"
-                        "或复制诊断信息粘贴给整合包作者。"))
+                        "或复制诊断信息粘贴给整合包作者。")
+            if _exc:
+                _hint = t("exit.crash_evidence", default="关键错误：{line}",
+                          line=_exc) + "\n" + _hint
+            box.setInformativeText(_hint)
+            # 诊断结论放在详情最上面，复制诊断信息时也会一并带上。
+            if _diag:
+                _head = ["== 分析结论 =="]
+                if _diag.get("kind"):
+                    _head.append("kind: %s" % _diag["kind"])
+                if _culprit:
+                    _head.append("culprit: %s" % _culprit)
+                if _exc:
+                    _head.append("error: %s" % _exc)
+                for _line in (_diag.get("evidence") or [])[:6]:
+                    _head.append("  " + str(_line))
+                detail = "\n".join(_head) + "\n\n" + detail
             box.setDetailedText(detail)
             open_btn = box.addButton(
                 t("exit.crash_open_dir", default="打开日志目录"),
@@ -5708,10 +5778,13 @@ class MainWindow(QMainWindow):
         backdrop = getattr(self, "backdrop", None)
         if backdrop is not None:
             try:
-                if running:
-                    backdrop.suspend()
-                    self._set_wallpaper_surface(False)
-                elif getattr(backdrop, "_suspended", False):
+                # round-203：游戏运行期间**不关闭**背景壁纸 / 全景图 —— 只停
+                # 逐帧播放，画面保留最后一帧。旧实现走 suspend() 丢大图并隐藏
+                # 整层，玩家一启动游戏启动器就变成纯色背景（用户实测反馈）。
+                if hasattr(backdrop, "set_game_running"):
+                    backdrop.set_game_running(running)
+                # 兼容历史 suspend 状态：若上一次运行残留了降载标记，退出时恢复。
+                if not running and getattr(backdrop, "_suspended", False):
                     backdrop.resume()
                     self._apply_wallpaper()
             except Exception:  # noqa: BLE001 - 壁纸降载失败不影响游戏

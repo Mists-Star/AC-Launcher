@@ -99,6 +99,13 @@ SUITES = [
     ("全面审计补漏", "test_round196_audit.py", "script"),
     ("崩溃页内/Java合一/来源", "test_round197_inline_java.py", "script"),
     ("加载器版本继承/空列表", "test_round198_loader_version.py", "script"),
+    ("六维审计补漏（弹窗/截断/来源）", "test_round199_audit.py", "script"),
+    ("实例页入口重构（诊断一级可见）", "test_round200_entries.py", "script"),
+    ("模组 id/项目 slug 别名（cloth-config2）", "test_round201_mod_aliases.py", "script"),
+    ("切页/降载后动画自动恢复", "test_round202_anim_resume.py", "script"),
+    ("启动不关壁纸/下载解耦", "test_round203_no_shed.py", "script"),
+    ("崩溃分析（类别/可疑模组/证据）", "test_round204_crash_diag.py", "script"),
+    ("资源中心（搜索/版本列表/翻译/百科）", "test_round205_store_polish.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

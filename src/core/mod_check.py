@@ -21,10 +21,14 @@ import os
 import zipfile
 from dataclasses import dataclass, field
 
+from .mod_repair import canonical_id
+
 # 内部运行时 id：模组声明依赖它们不属于「缺少另一个模组」，跳过。
+# round-201：同时收录 canonical 形式（下划线 → 连字符），比较时两种都查。
 _INTERNAL_IDS = {
     "minecraft", "minecraft:java", "java", "fabricloader", "fabric-loader",
-    "quilt_loader", "fabric", "mixin", "forge", "neoforge", "fml",
+    "quilt_loader", "quilt-loader", "fabric", "mixin", "forge", "neoforge",
+    "fml",
     # Quilt 标准库 / 游戏本身依赖
     "minecraft:nether", "minecraft:end", "minecraft:overworld",
 }
@@ -67,6 +71,9 @@ class _ModMeta:
     filename: str
     family: str            # fabric / quilt / forge / unknown
     deps: dict             # mod id → version range
+    # round-201：jar 对外提供的额外 id（Fabric 的 provides）。Cloth Config 等
+    # 改名过的项目靠它兼容旧 dep id，判断「已装」时必须算进去。
+    provides: tuple[str, ...] = ()
 
 
 def _mods_dir(inst) -> str:
@@ -98,11 +105,15 @@ def _parse_jar(jar_path: str, filename: str) -> _ModMeta | None:
                 meta_name, family = "META-INF/mods.toml", "forge"
 
             if meta_name:
+                provides: tuple[str, ...] = ()
                 if family in ("fabric", "quilt"):
                     data = json.loads(zf.read(meta_name).decode("utf-8"))
                     mod_id = data.get("id") or ""
                     mod_ver = data.get("version") or ""
                     deps = dict(data.get("depends") or {})
+                    provides = tuple(
+                        str(p) for p in (data.get("provides") or [])
+                        if isinstance(p, str))
                 else:  # forge / neoforge
                     import tomllib
                     data = tomllib.loads(zf.read(meta_name).decode("utf-8"))
@@ -123,7 +134,8 @@ def _parse_jar(jar_path: str, filename: str) -> _ModMeta | None:
                                 deps.setdefault(dep, entry.get("versionRange", ""))
                 if mod_id:
                     return _ModMeta(id=mod_id, version=mod_ver,
-                                    filename=filename, family=family, deps=deps)
+                                    filename=filename, family=family,
+                                    deps=deps, provides=provides)
     except (OSError, zipfile.BadZipFile, KeyError, ValueError,
             json.JSONDecodeError):
         return None
@@ -161,11 +173,18 @@ def scan_conflicts(inst) -> dict:
         else:
             unknown.append(fn)
 
-    # 提供 map：mod id → 文件（只统计能在该实例加载的模组，避免误报）
+    # 提供 map：项目规范 id → 文件（只统计能在该实例加载的模组，避免误报）
+    # round-201：mod id 与 Modrinth slug 常不一致（cloth-config2 ↔ cloth-config），
+    # 且 jar 的 provides 也算「已提供」，比较统一走 canonical_id。
     provided: dict[str, list[str]] = {}
     for m in metas:
         if _family_loadable(m.family, inst_loader):
-            provided.setdefault(m.id, []).append(m.filename)
+            # 先归一再去重：id 与 provides 可能映射到同一个项目 key，
+            # 同一 jar 出现两次会被 duplicate_id 误报成「装了两份」。
+            keys = {canonical_id(mid) for mid in (m.id,) + tuple(m.provides or ())}
+            for key in keys:
+                if key:
+                    provided.setdefault(key, []).append(m.filename)
 
     findings: list[Finding] = []
 
@@ -185,15 +204,20 @@ def scan_conflicts(inst) -> dict:
         for dep, dep_range in m.deps.items():
             if dep in _INTERNAL_IDS:
                 continue
-            if dep not in provided:
+            key = canonical_id(dep)
+            if key in _INTERNAL_IDS:
+                continue
+            if key not in provided:
                 findings.append(Finding(
                     kind="missing_dep", severity=SEV_CRITICAL,
                     title="modcheck.kind.missing_dep",
                     reason="modcheck.reason.missing_dep",
                     suggestion="modcheck.fix.missing_dep",
                     filenames=[m.filename],
-                    meta={"mod_id": m.id, "dep": dep, "range": dep_range,
-                          "inst_loader": inst_loader}))
+                    # dep 存规范 id（提示里让玩家搜的是能搜到的项目名），
+                    # dep_raw 留原始声明便于排查。
+                    meta={"mod_id": m.id, "dep": key, "dep_raw": dep,
+                          "range": dep_range, "inst_loader": inst_loader}))
 
     # 3) 重复 id（两个 jar 声明同一 mod id）
     for mid, fns in provided.items():

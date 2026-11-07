@@ -478,6 +478,9 @@ class WallpaperWidget(QWidget):
         self._last_video_pos = -1
         # round-156：游戏运行中降载（suspend 后 apply 只记录不加载，恢复时重放）。
         self._suspended = False
+        # round-203：游戏运行只暂停动画（画面保留最后一帧），不再把壁纸/全景
+        # 整个关掉 —— suspend() 会让主窗背景变成纯色，用户明确不接受。
+        self._game_paused = False
 
     # ------------------------------------------------------------- config
     def apply(self, cfg: dict, version_id: str | None = None,
@@ -1034,7 +1037,12 @@ class WallpaperWidget(QWidget):
         round-61 性能：页面在 QStackedWidget 里切走或窗口最小化时，QMovie /
         QMediaPlayer 仍会继续逐帧解码；这里随可见性暂停与恢复。放行与暂停
         都带 try/except —— 状态错乱最坏只是动图停一下，绝不抛错。
+
+        round-203：游戏运行期间（``_game_paused``）即使窗口重新可见也不恢复
+        播放，避免「启动游戏 → 切回启动器」时动画又偷偷跑起来。
         """
+        if on and self._game_paused:
+            return
         m = self._movie
         if m is not None:
             try:
@@ -1077,6 +1085,23 @@ class WallpaperWidget(QWidget):
         self._stop_panorama()
 
     # ------------------------------------------------------ load shedding
+    def set_game_running(self, on: bool) -> None:
+        """游戏运行中只暂停逐帧播放，**不丢弃**壁纸 / 全景画面（round-203）。
+
+        旧行为（round-156）是 ``suspend()``：丢大图、丢六面贴图、隐藏整层，
+        于是玩家一启动游戏，启动器窗口的背景就变成纯色 —— 用户反馈这是 bug。
+        现在画面保留最后一帧，只停动画（动图/视频/全景按时钟推进的那部分），
+        既不烧 CPU 又不改变外观。退出游戏后恢复播放。
+        """
+        self._game_paused = bool(on)
+        if self._suspended:
+            # 仍在 suspend 状态（历史路径）：由 resume() + apply() 负责恢复。
+            return
+        try:
+            self._set_playing(not on)
+        except Exception:  # noqa: BLE001 - 播放状态最坏只是停/开一下
+            pass
+
     def suspend(self) -> None:
         """round-156：游戏运行期间释放大图 / 全景缓存并暂停一切动画。
 

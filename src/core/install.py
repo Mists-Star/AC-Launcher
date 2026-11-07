@@ -31,12 +31,16 @@ def _diag_enabled() -> bool:
         return False
 
 
-def _start_source_watchdog(meter, callback=None, timeout: float = 30.0) -> None:
+def _start_source_watchdog(meter, callback=None, timeout: float = 30.0,
+                           ctx=None) -> None:
     """round-151：下载源 30s 没有任何字节进展 → 自动切到 BMCLAPI。
 
     只对「慢但没报错」的源生效（请求超时 / 4xx 由 MirrorSession 的逐文件回退和
     ``_retry_with_mirror`` 处理）。字节数来自 round-110 的传输层计量
     （``InstallContext.meter``），比 mll 的文件计数更细。
+
+    round-203：切换只写本安装的 ``ctx.mirror_on``。watchdog 跑在自己的线程里，
+    直接 ``set_mirror`` 会落到进程级默认值，把并行安装的源策略一起改掉。
     """
     if meter is None:
         return
@@ -64,8 +68,11 @@ def _start_source_watchdog(meter, callback=None, timeout: float = 30.0) -> None:
                 continue
             if state["switched"] or now - state["ts"] < timeout:
                 continue
-            from .mirror import set_mirror
-            set_mirror(True)
+            if ctx is not None:
+                ctx.mirror_on = True
+            else:
+                from .mirror import set_mirror
+                set_mirror(True)
             state["switched"] = True
             print(f"[install] 下载源 {int(timeout)}s 无进展 → 自动切换 BMCLAPI")
             try:
@@ -99,8 +106,9 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
             mirror = "official"
     # round-109：打补丁与走镜像解耦 —— 镜像与否由 set_mirror 在请求时决定，
     # 补丁本身永远打上，好让官方源也拿到「超时 + 重试 + 可取消」。
-    from .mirror import (InstallCancelled, abort_requested, active_meter,
-                         patch_install_session, set_diag, set_mirror, set_proxy)
+    from .mirror import (InstallCancelled, abort_requested, active_context,
+                         active_meter, patch_install_session, set_diag,
+                         set_mirror, set_proxy)
     if abort_requested():
         # round-172：上一阶段刚被取消，别再开下一段下载。
         raise InstallCancelled("install cancelled by user")
@@ -110,7 +118,9 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
     patch_install_session()
     if mirror != "bmclapi":
         # round-151：官方源「能连但极慢」时 30s 无字节进展自动切 BMCLAPI。
-        _start_source_watchdog(active_meter(), callback)
+        # round-203：带上本次安装的上下文，切换只影响自己。
+        _start_source_watchdog(active_meter(), callback,
+                               ctx=active_context())
 
     # round-164：补全写盘根必须与启动解析根同一口径。外来版本隔离实例
     # （mc_dir 就是 versions/<id> 目录）如果按 mc_dir 安装，mll 会写出

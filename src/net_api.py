@@ -1378,6 +1378,11 @@ STORE_CATEGORIES = [
     ("datapack",     "store.category_datapack"),
 ]
 
+# round-199：Modrinth 搜索命中里 `categories` 混着加载器与主题标签，只认这些。
+_STORE_LOADER_TAGS = {
+    "fabric", "forge", "quilt", "neoforge", "liteloader", "rift",
+}
+
 # BMCLAPI OptiFine 元数据端点（按 MC 版本列出所有 OptiFine 版本）。
 BMCLAPI_OPTIFINE_LIST = "https://bmclapi2.bangbang93.com/optifine/{mc}"
 OPTIFINE_ADLOADX = "https://optifine.net/adloadx?f={file}&x=5b84"
@@ -1691,7 +1696,7 @@ def search_all(query: str = "", offset: int = 0, limit: int = 20,
     结果为空才 raise）。命中 dict 自带 ``source`` 字段，卡片/详情/下载
     据此分流。
     """
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, wait
     box: dict[str, list[dict] | None] = {"mr": None, "cf": None}
     errs: list[Exception] = []
 
@@ -1709,10 +1714,19 @@ def search_all(query: str = "", offset: int = 0, limit: int = 20,
         except Exception as e:  # noqa: BLE001
             errs.append(e)
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        futs = [ex.submit(_mr), ex.submit(_cf)]
-        for f in futs:
-            f.result()
+    # round-205：给「慢源」设总预算。旧实现 `with ThreadPoolExecutor` 退出时
+    # 无条件 join 两个源 —— CF 免 key 镜像一旦挂住（最坏要等 30s 请求超时），
+    # 已经拿到的 Modrinth 结果也一起被拖着，用户感受就是「搜索 mod 特别慢」。
+    # 现在 8 秒还没回来的源直接放弃（请求线程会在自身超时后自然结束）。
+    ex = ThreadPoolExecutor(max_workers=2)
+    futs = [ex.submit(_mr), ex.submit(_cf)]
+    try:
+        wait(futs, timeout=8.0)
+    finally:
+        try:
+            ex.shutdown(wait=False, cancel_futures=True)
+        except TypeError:  # Python < 3.9 没有 cancel_futures
+            ex.shutdown(wait=False)
     mr = box["mr"] or []
     cf = box["cf"] or []
     if not mr and not cf and errs:
@@ -2550,6 +2564,26 @@ def mcmod_search_url(name: str) -> str:
         else MCMOD_SEARCH_URL
 
 
+def mcmod_best_entry(names) -> str:
+    """按候选词依次找 MC百科精确条目；全不中时返回第一个候选的搜索页。
+
+    round-205：`_open_mcmod` 原来只用 ``cn_short(slug)``（本地名库只有百余条，
+    绝大多数 mod 没有中文短名）→ 直接拿英文 slug 去中文站搜，命中率极低，
+    玩家体验就是「MC百科基本查不到」。现在调用方按「中文短名 → 中文全名 →
+    标题 → slug」给候选，逐个尝试，命中即返回。
+    """
+    clean: list[str] = []
+    for n in (names or []):
+        s = str(n or "").strip()
+        if s and s not in clean:
+            clean.append(s)
+    for name in clean:
+        url = mcmod_entry_url(name)
+        if "/class/" in url:
+            return url
+    return mcmod_search_url(clean[0] if clean else "")
+
+
 def mcmod_entry_url(name: str) -> str:
     """MC百科条目地址：命中就返回精确 /class/<id>.html，否则返回搜索页。
 
@@ -2631,6 +2665,11 @@ def search_mods(query: str = "", offset: int = 0, limit: int = 20,
             "icon_url": h.get("icon_url", ""),
             "author": h.get("author", ""),
             "source": "modrinth",
+            # round-199：搜索命中自带全部支持版本与加载器（Modrinth 的
+            # `versions` 是完整列表），列表页据此画兼容徽章，不用逐卡再查。
+            "game_versions": [str(x) for x in (h.get("versions") or [])],
+            "loaders": [str(x).lower() for x in (h.get("categories") or [])
+                        if str(x).lower() in _STORE_LOADER_TAGS],
         }
         for h in data.get("hits", [])
     ]

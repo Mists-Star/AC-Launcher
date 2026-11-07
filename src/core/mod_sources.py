@@ -120,3 +120,72 @@ def source_of(inst, filename: str) -> str:
     if not rec:
         return ""
     return str(rec.get("source") or "")
+
+
+def _looks_versionish(rest: str) -> bool:
+    """``<slug>-`` 后面那段像不像版本号 / 加载器（而不是另一个模组的名字）。
+
+    round-199：只按「slug + 连字符」前缀匹配还不够 —— ``sodium-extra-0.6``
+    同样以 ``sodium-`` 开头，会被当成 Sodium 已安装。要求分隔符后紧跟
+    数字 / v1 / mc1.20 / 加载器名，才认定是同一个项目的文件。
+    """
+    if not rest:
+        return False
+    if rest[0].isdigit():
+        return True
+    low = rest.lower()
+    if low.startswith("v") and low[1:2].isdigit():
+        return True
+    if low.startswith("mc") and low[2:3].isdigit():
+        return True
+    return any(low.startswith(t) for t in (
+        "fabric", "forge", "quilt", "neoforge", "liteloader"))
+
+
+def is_installed(inst, *, project_id: str = "", slug: str = "",
+                 title: str = "") -> bool:
+    """这个资源是否已经装在实例的 mods/ 里。
+
+    round-199：把「已安装」判定从两个页面各一份收成一处（资源中心列表、
+    商店详情页、前置依赖检查都调它）。
+
+    判定顺序：
+    1. 来源记录里有同 project_id / slug → 确定已装（最可靠，重命名也不怕）；
+    2. 没有记录（旧下载 / 手动放入）→ 按文件名**前缀**匹配 —— 文件名必须以
+       标题或 slug 开头（``sodium`` 不会命中 ``sodium-extra.jar``，round-196
+       修过的误报不能在新调用点复现）。
+    """
+    if inst is None:
+        return False
+    pid = str(project_id or "")
+    slug_l = str(slug or "").strip().lower()
+    title_l = str(title or "").strip().lower()
+    for _fn, meta in load(inst).items():
+        if pid and str(meta.get("project_id") or "") == pid:
+            return True
+        if slug_l and str(meta.get("slug") or "").strip().lower() == slug_l:
+            return True
+    cands = [c for c in (title_l, slug_l) if c]
+    if not cands:
+        return False
+    try:
+        mods_dir = getattr(inst, "mods_dir", "") or ""
+        for fn in os.listdir(mods_dir):
+            low = fn.lower()
+            if not low.endswith((".jar", ".jar.disabled")):
+                continue
+            # ".jar.disabled"（被禁用的模组）也算已安装，别只剥 9 个字符
+            if low.endswith(".jar.disabled"):
+                stem = low[:-13]
+            else:
+                stem = low[:-4]
+            for c in cands:
+                if stem == c:
+                    return True
+                for sep in ("-", "_", "."):
+                    if stem.startswith(c + sep) and _looks_versionish(
+                            stem[len(c) + 1:]):
+                        return True
+    except OSError:
+        pass
+    return False

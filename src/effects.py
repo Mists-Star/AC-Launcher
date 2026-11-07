@@ -53,8 +53,8 @@ def set_game_running(on: bool) -> None:
             except Exception:  # noqa: BLE001 - 单卡析构中，忽略
                 pass
         _stop_master()
-    elif EFFECTS_ENABLED and not MOTION_REDUCED and _ACTIVE_CARDS:
-        _ensure_master()
+    else:
+        _resume_if_possible()
 
 
 def set_reduce_motion(on: bool) -> None:
@@ -62,14 +62,16 @@ def set_reduce_motion(on: bool) -> None:
     MOTION_REDUCED = bool(on)
     if MOTION_REDUCED:
         # 已在跑的流光卡：先请求重绘一次（paintEvent 会退回静态卡片），
-        # 再清出活动集合，主表停摆。
+        # 再停主表。⚠ 不清空 _ACTIVE_CARDS —— 卡片仍在可见集合里，
+        # 关掉「减少动效」后能立刻恢复；清空会让所有卡片失活到下次切页。
         for c in list(_ACTIVE_CARDS):
             try:
                 c.update()
             except Exception:  # noqa: BLE001 - 单卡析构中，忽略
                 pass
-        _ACTIVE_CARDS.clear()
         _stop_master()
+    else:
+        _resume_if_possible()
 
 
 def motion_ms(ms: int) -> int:
@@ -86,6 +88,8 @@ def set_effects_enabled(on: bool) -> None:
     EFFECTS_ENABLED = bool(on)
     if not EFFECTS_ENABLED:
         _stop_master()
+    else:
+        _resume_if_possible()
 
 
 # ── shared master ticker (round-50 性能：多卡片共用一只表) ────────────────
@@ -118,6 +122,17 @@ def _stop_master() -> None:
         # 此时 C++ 侧的 QTimer 可能已被销毁（Python 包装还活着），
         # isActive()/stop() 抛 RuntimeError —— 直接放过，不再重试。
         pass
+
+
+def _resume_if_possible() -> None:
+    """把「开关都允许且有卡片注册」这一条件收敛成一处。
+
+    round-202：切页 / 游戏退出 / 关掉「减少动效」/ 重新打开流光后，
+    都要能自己把主表拉起来——旧实现只在部分分支重启，漏掉任何一条
+    都会表现为「切换页面后所有卡片动画失效，直到再切一次页」。
+    """
+    if EFFECTS_ENABLED and not MOTION_REDUCED and not GAME_RUNNING and _ACTIVE_CARDS:
+        _ensure_master()
 
 
 def _has_focus() -> bool:
@@ -220,11 +235,13 @@ class LightTrailCard(RoundedCard):
     # -- lifecycle -----------------------------------------------------
     def showEvent(self, e):
         super().showEvent(e)
-        # 减少动效：不注册到主表，paintEvent 同步退回静态卡片。
-        if EFFECTS_ENABLED and not MOTION_REDUCED and not GAME_RUNNING and (
-                self._trail or self._reflect):
+        # round-202：可见即登记（不看 reduced/game 状态）。主表是否启动交给
+        # _resume_if_possible 统一判断——登记状态保留后，游戏退出 / 关掉
+        # 「减少动效」都能立刻恢复；旧实现只在「允许动画」时才登记，
+        # 于是降载期间切页露出的卡片永远是冷的，退出后也不复活。
+        if EFFECTS_ENABLED and (self._trail or self._reflect):
             _ACTIVE_CARDS.add(self)
-            _ensure_master()
+            _resume_if_possible()
 
     def hideEvent(self, e):
         super().hideEvent(e)
@@ -379,8 +396,33 @@ def fade_page_transition(stack, index: int) -> None:
     from PySide6.QtCore import QPropertyAnimation, QEasingCurve
     from PySide6.QtWidgets import QGraphicsOpacityEffect
     try:
-        # 清掉上一次被打断可能残留的 effect
+        # round-202：先收尾上一次过渡，再装新的。
+        # 旧动画的 finished 若晚于新动画到达，会把这次新装的 effect 一起清掉
+        # —— 表象就是「切几次页面之后，所有页面的动画都没了」。
+        # 旧上浮若被 stop() 打断，页面会停在偏移位置，下次再从偏移处取落点
+        # 会累积漂移；这里按记录的落点先归位。
+        old_page = getattr(stack, "_rise_page", None)
+        old_end = getattr(stack, "_rise_end", None)
+        for _attr in ("_fade_anim", "_rise_anim"):
+            old = getattr(stack, _attr, None)
+            if old is not None:
+                try:
+                    old.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                setattr(stack, _attr, None)
+        if old_page is not None and old_end is not None:
+            try:
+                old_page.move(old_end)
+            except Exception:  # noqa: BLE001
+                pass
+        prev_eff = stack.graphicsEffect()
         stack.setGraphicsEffect(None)
+        if prev_eff is not None:
+            try:
+                prev_eff.deleteLater()
+            except Exception:  # noqa: BLE001
+                pass
         eff = QGraphicsOpacityEffect(stack)
         eff.setOpacity(0.0)
         stack.setGraphicsEffect(eff)
@@ -391,16 +433,20 @@ def fade_page_transition(stack, index: int) -> None:
         anim.setEndValue(1.0)
         anim.setEasingCurve(QEasingCurve.OutCubic)
 
-        def _done():
-            # 无论正常结束还是被打断后恢复，都移除 effect，杜绝重影
+        def _done(_eff=eff):
+            # 只清「自己装的」effect；被后续切换替换掉时绝不越权清理。
             try:
-                stack.setGraphicsEffect(None)
-                eff.deleteLater()
+                if stack.graphicsEffect() is _eff:
+                    stack.setGraphicsEffect(None)
+                _eff.deleteLater()
             except Exception:  # noqa: BLE001
                 pass
 
         anim.finished.connect(_done)
         anim.start()
+        # 兜底：即使 finished 因异常/事件循环卡住没送达，也保证 effect 被摘掉，
+        # 不留半透明页面。迟到的回调只会清自己的 effect（见 _done 的判据）。
+        QTimer.singleShot(anim.duration() + 80, _done)
         # 持有引用防 GC；下次切换会重新 setGraphicsEffect，旧的 finished 仍
         # 会触发 _done 清掉自身，不会互相干扰。
         stack._fade_anim = anim
@@ -429,6 +475,8 @@ def fade_page_transition(stack, index: int) -> None:
             rise.finished.connect(_rise_done)
             rise.start()
             stack._rise_anim = rise
+            stack._rise_page = page
+            stack._rise_end = end_pos
     except Exception:  # noqa: BLE001
         try:
             stack.setGraphicsEffect(None)
@@ -448,7 +496,22 @@ def fade_in_widget(w, duration: int = MOTION_QUICK_MS) -> None:
     from PySide6.QtCore import QPropertyAnimation, QEasingCurve
     from PySide6.QtWidgets import QGraphicsOpacityEffect
     try:
+        # round-202：停掉旧的淡入，避免它的 finished 迟到后清掉这次新装的
+        # effect（快速重建列表时表现为「第二次刷新不再淡入」）。
+        old = getattr(w, "_fade_in_anim", None)
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            w._fade_in_anim = None
+        prev_eff = w.graphicsEffect()
         w.setGraphicsEffect(None)
+        if prev_eff is not None:
+            try:
+                prev_eff.deleteLater()
+            except Exception:  # noqa: BLE001
+                pass
         eff = QGraphicsOpacityEffect(w)
         eff.setOpacity(0.0)
         w.setGraphicsEffect(eff)
@@ -458,15 +521,18 @@ def fade_in_widget(w, duration: int = MOTION_QUICK_MS) -> None:
         anim.setEndValue(1.0)
         anim.setEasingCurve(QEasingCurve.OutCubic)
 
-        def _done():
+        def _done(_eff=eff):
+            # 只清自己装的 effect（理由同 fade_page_transition）
             try:
-                w.setGraphicsEffect(None)
-                eff.deleteLater()
+                if w.graphicsEffect() is _eff:
+                    w.setGraphicsEffect(None)
+                _eff.deleteLater()
             except Exception:  # noqa: BLE001
                 pass
 
         anim.finished.connect(_done)
         anim.start()
+        QTimer.singleShot(anim.duration() + 80, _done)
         w._fade_in_anim = anim  # 持有引用防 GC
     except Exception:  # noqa: BLE001
         try:

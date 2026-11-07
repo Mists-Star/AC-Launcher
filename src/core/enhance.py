@@ -84,7 +84,8 @@ CATALOG: tuple[Item, ...] = (
     Item("fabric-api", "Fabric API", "dep", "fabric_api",
          ("fabric-api", "fabric"), is_dep=True),
     Item("cloth-config", "Cloth Config API", "dep", "cloth_config",
-         ("cloth-config", "cloth_config"), is_dep=True),
+         ("cloth-config", "cloth_config", "cloth-config2",
+          "cloth_config2"), is_dep=True),
     Item("architectury-api", "Architectury API", "dep", "architectury",
          ("architectury",), is_dep=True),
 )

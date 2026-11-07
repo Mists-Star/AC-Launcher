@@ -8,6 +8,292 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-205（2026-11-07）— 资源中心四件套（搜索 / 版本列表 / 翻译 / 百科）
+
+> 用户反馈：「搜索 mod 速度慢」「出 mod 版本选择卡顿灾难」「翻译半天没动静」
+> 「MC 百科基本上没有用（很多查不到）」「mod 版本建议设计很奇怪」。
+
+### 修复
+
+1. **翻译从未真正启动（实锤 bug）**
+   - `_translate` 只定义了 `_ok` 就结束，`_err` / `w.finished.connect` /
+     `w.start()` 被错误缩进进了 `_render_translation` 的方法体。
+   - 症状：首次点翻译毫无反应（Worker 根本没 start），缓存命中路径还会
+     `NameError`。已把连接与启动移回 `_translate`，`_render_translation`
+     只负责渲染。
+2. **推荐版本与下载按钮错位**
+   - 推荐条显示 `_recommended()`，下载按钮却取 `self._versions[0]`（列表
+     第一条 = 最新发布，可能不兼容）——玩家看到推荐 1.20.1，点下去装了 1.21。
+   - `_download_latest` 改为下载 `_recommended()`。
+   - `_recommended` 现在优先 **release**（正式版），避免把 beta/alpha
+     推荐给普通玩家；同类保持服务端「最新在前」顺序。
+3. **版本列表卡顿**
+   - 旧 `_rebuild_rows` 每次筛选/翻页都同步删光 + 重建全部行（每行约 10 个
+     控件，一页 50 行直接顶住 UI 线程）。
+   - 改为：行按「版本 + 推荐态 + 兼容态」缓存复用；新建行每批 8 个
+     （`QTimer 0ms` 接力）；缓存上限 300 行，只回收布局外的旧行。
+   - 翻页追加（`appending=True`）不再把滚动条拉回顶部。
+4. **搜索被慢源拖死**
+   - `search_all` 原来在 `with ThreadPoolExecutor` 退出时无条件 join 两个源；
+     CF 免 key 镜像一旦挂住（最坏 30s 请求超时），Modrinth 已返回的结果也
+     一起被拖住。
+   - 改为 `wait(futs, timeout=8.0)`：8 秒未回的源直接放弃，先把已有结果
+     给用户；请求线程在自身超时后自然结束。
+5. **MC 百科查不到**
+   - `_open_mcmod` 原来直接拿 `cn_short(slug)`，未收录就退英文 slug 去中文站
+     搜——命中率极低。
+   - 新增 `mcmod_best_entry(names)`：按「中文短名 → 中文全名（括号内主体）→
+     标题 → slug」逐个尝试，命中 `/class/` 即返回，全不中退回首个候选搜索页。
+
+### 🔍 验证（实测）
+
+- `tests/test_round205_store_polish.py` → 17/17 全过
+  （推荐版本选择 / 下载按钮跟随 / 分批与缓存静态契约 / 搜索预算 /
+  多候选百科 / 翻译 Worker 启动）
+- `python regress.py` → **73/73 全绿**
+
+## round-204（2026-11-07）— 崩溃分析：从「退出码一句话」到可操作结论
+
+> 用户截图里只有「游戏启动即崩溃（退出码 1）—— 多为 Java 版本或安装不完整」，
+> 没有任何具体 finding。根因：`classify_exit` 只认少数关键词，Fabric/Forge
+> 的真实报错（Mixin / Mod resolution / 模组加载失败）全部落到兜底文案。
+
+### 修复
+
+1. `classify_exit` 新增真实特征分类：
+   - `Mixin apply / MixinTransformerError / @Inject` → `exit.mixin`
+   - `Mod resolution failed / FormattedException / mandatory dependencies`
+     → `exit.mod_resolution`
+   - `ModLoadingException / Failed to load mod` → `exit.mod_loading`
+   - `Duplicate mods` → `exit.duplicate_mod`
+   - `IncompatibleClassChangeError / NoSuchMethod(Field)Error`
+     → `exit.incompatible`
+   - 均排在「classpath 缺失」之前判定（这些日志也含 NoClassDefFoundError，
+     但根因是模组/加载器不兼容）。
+2. `crash_analysis` 新增结构化提取：
+   - `guess_culprit(text, mods_dir)`：按 `Suspected mods` / `Mod File` /
+     `Failed to load mod` / Mixin `from` 的顺序点名可疑 mod；只采信 mods
+     目录里真实存在的 jar，避免把 `1.20.1.jar` 当模组。
+   - `_gather_evidence`：匹配行 + 紧随 3 行栈帧 + `Caused by` 链（去重），
+     不再只存 `m.group(0)[:160]`。
+   - `_last_exception`：跳过 `at ...` 栈帧与 `Crash report saved` 收尾日志。
+   - `diagnose_latest(mc_dir)`：按「首次出现位置」取根因类别（Mixin 失败常
+     带一条 `Caused by: NoSuchMethodError`，按规则表顺序会误报成加载器不匹配）。
+   - `CrashFinding` 新增 `culprit` 字段；`meta` 带 `culprit` / `exception`。
+3. 崩溃弹窗与崩溃分析面板：
+   - QMessageBox 文本追加「最可疑：xxx」，说明文字追加「关键错误：<异常行>」；
+     详情首段是 `== 分析结论 ==`（kind / culprit / error / evidence）。
+   - `_FindingCard` 显示「可疑模组：xxx」。
+
+### 🔍 验证（实测）
+
+- `tests/test_round204_crash_diag.py` → 16/16 全过
+  （指名格式识别 / mods 目录过滤 / diagnose 字段 / finding 上下文 /
+  `classify_exit` mixin、mod_resolution、OOM）
+- `python regress.py` → **73/73 全绿**
+
+## round-203（2026-11-07）— 启动不关壁纸 + 下载解耦（单飞 / 线程局部镜像）
+
+> 用户反馈：「启动游戏会关闭背景壁纸和全景图」「排查为什么总是会有多个下载
+> 占用，是不是功能没解耦一起运行相撞」。
+
+### 修复
+
+1. **启动游戏不再关闭壁纸 / 全景**
+   - 旧 `_set_game_running_ui` 在运行时调用 `backdrop.suspend()`（丢大图、丢
+     六面贴图、隐藏整层）+ `_set_wallpaper_surface(False)`，启动器直接变纯色。
+   - `WallpaperWidget.set_game_running(on)`：只暂停逐帧播放（动图/视频/全景
+     时钟），画面保留最后一帧；`_set_playing` 在 `_game_paused` 期间即使窗口
+     重新可见也不偷偷恢复播放。
+   - `_set_game_running_ui` 改为调用它；保留「历史 suspend 残留 → 退出时
+     resume + 重新上屏」的兼容分支。
+2. **下载不再「一起跑相撞」**
+   - 根因 A：`mirror` 的 `_MIRROR_ON` / `_PROXY` 是进程级全局，两个安装并行
+     时后启动的会覆盖前一个的镜像 / 代理设置（同一个下载一会儿走镜像一会儿
+     走官方）。改为 `InstallContext.mirror_on / proxy` 线程局部优先，未设置
+     才回落全局默认；`_start_source_watchdog` 只切自己安装的设置。
+   - 根因 B：同一实例的安装（启动前补全 / 手动补全 / 修复）没有共享互斥。
+     新增 `core/dl_gate.py`（进程级单飞闸门）：
+     * `claim / release / is_active / wait_free`，key 约定 `inst:` / `file:` /
+       `store:`；
+     * `_start_instance_download` 占用 `inst:<mc_dir>`，worker 真正退出
+       （`_on_dl_stopping_done`）才释放；
+     * `launch_instance` 在 `install_instance` 前占用同一 key；被占用时提示
+       「正在等待当前下载完成…」并等待（最多 180s，可被取消），避免两条
+       install 同时写同一批 `.part`。
+   - 根因 C：商店详情下载无防连点。`_download_version` 按
+     `store:<project>:<version>` 单飞，同一版本在跑时提示并拒绝；面板
+     `shutdown()` 时统一释放闸门。
+
+### 🔍 验证（实测）
+
+- `tests/test_round203_no_shed.py` → 21/21 全过
+  （壁纸保留 / 主窗不再 suspend / 镜像代理线程隔离 / 闸门单飞与等待 / 商店接入）
+- `python regress.py` → **73/73 全绿**
+
+## round-202（2026-11-07）— 切页/降载后动画自动恢复
+
+> 用户反馈「切换其他页面后可能导致所有页面动画失效」。根因不是动画被关掉，
+> 而是恢复路径分散：主表只在部分开关分支里重启，卡片登记又受
+> `MOTION_REDUCED` / `GAME_RUNNING` 影响。任一分支漏掉，表现都是「所有卡片
+> 动画死掉，直到再切一次页」。
+
+### 修复
+
+1. `effects._resume_if_possible()`
+   - 把「特效开 + 未减动效 + 游戏未运行 + 有卡片登记」收敛成唯一判断。
+   - `set_effects_enabled` / `set_game_running` / `set_reduce_motion`
+     四路开关全部改走它，不再各自手写 `_ensure_master()`。
+2. `LightTrailCard.showEvent`
+   - 可见即登记，不再先看 reduced / game 状态；主表启停只由
+     `_resume_if_possible` 决定。降载期间露出的卡片因此不再「永远冷」，
+     游戏退出后无需再切页即可续上动画。
+3. `set_reduce_motion`
+   - 不再 `_ACTIVE_CARDS.clear()`（清空会让所有卡片失活到下次切页）；
+     只请求重绘一次走静态样式 + 停主表，登记保留。
+4. `fade_page_transition` / `fade_in_widget`
+   - 启动新动画前先 `stop()` 旧的，避免同属性两条 QPropertyAnimation
+     互相抢值导致「一半动画卡住」。
+   - 结束回调只清自己那条 effect（旧实现会无条件清空）。
+   - 增加 QTimer 兜底：动画因窗口隐藏/销毁未被回调时也能收尾复位。
+   - `rise` 记录 `_rise_page` / `_rise_end` 并归位，避免二次调用叠位移。
+
+### 修改
+
+- `tests/test_load_shed.py`：契约从「游戏运行中不注册流光卡」更新为
+  「主表停摆、卡片仍登记、退出后自动恢复」，与 round-202 一致。
+
+### 🔍 验证（实测）
+
+- `tests/test_round202_anim_resume.py` → 28/28 全过
+- `python regress.py` → **70/70 全绿**（套数 70）
+- 未构建 / 未部署（本批与 round-201 一起留待下一轮出包）
+
+## round-201（2026-11-07）— mod id 与项目 slug 别名（cloth-config2）
+
+> 用户反馈「clothconfig2 是什么？找不到 mod 依赖」。根因是两套命名体系被当成
+> 同一个 key：Fabric 生态里 `cloth-config2` 是 **mod id**，而 Modrinth 的项目
+> **slug** 是 `cloth-config`。按依赖 id 直接查项目 → 查不到 → 误报「缺失依赖 /
+> 找不到项目」。
+
+### 修复
+
+1. `core/mod_repair`
+   - 新增 `PROJECT_ALIASES` 别名表、`norm_id()` 归一化、`canonical_id()` 反查。
+   - `match_project` 允许别名命中；`repair_missing` 统一用
+     `query = canonical_id(dep)` 去搜项目。
+2. `crash_analysis`
+   - 解析 Fabric `fabric.mod.json` 的 `provides`（第三方 jar 常以别名
+     提供依赖），`find_missing_dependencies` 按 canonical 比较，不再把
+     「已被 provides 满足」的依赖算成缺失。
+3. `core/mod_check`
+   - `_ModMeta` 增加 `provides`；已提供集合按 canonical 去重。
+   - 缺失项 meta 同时保留 `dep`（canonical，用于下载）与 `dep_raw`
+     （原始声明，用于展示）。
+4. `core/enhance`
+   - 补 `cloth-config2` 映射，增强包识别与别名表同步。
+
+### 🔍 验证（实测）
+
+- `tests/test_round201_mod_aliases.py` → 23/23 全过
+- `python regress.py` → **70/70 全绿**
+- 未构建 / 未部署
+
+## round-200（2026-11-07）— 实例页入口重构（诊断一级可见）
+
+> 用户反馈「部分功能藏太深了，换入口」。实例详情页此前只放高频四钮，
+> 体检 / 崩溃分析埋在「⋯ 更多」；备份 / 还原 / 复制只在右键菜单；
+> 启动诊断虽在名称行，却和体检挤成同一个按钮、且是 QDialog 弹窗。
+> 本批把这些按实例生效的功能全部提到一级并按用途分组。
+
+### 修改
+
+1. `pages_instances._render_detail_card`
+   - 名称行主按钮：`instances.launch`（体检 / 启动诊断）→ `instances.edit_instance`（编辑实例）。
+   - 新增「管理与诊断」2×4 一级网格：实例体检 / 崩溃分析 / 启动诊断 / 补装依赖；
+     创建备份 / 回滚到备份… / 复制实例 / 打开文件夹。
+   - 底部行保留：设为当前 / ⋯ 更多 / 删除；「更多」精简为 4 项低频
+     （打开存档 / 应用整合包 / 重构实例 / 导出整合包）。
+2. `launch_diagnostics_dialog.py`
+   - 新增 `LaunchDiagnosticsPanel(QWidget)`（`closed` / `open_health` 信号），
+     报告判据 `_command_report` / `_health_report` 原样复用，无第二份。
+   - `LaunchDiagnosticsDialog` 退化为壳：只包一层 panel；`open_launch_diagnostics()`
+     签名不变，历史调用点不受影响。
+3. `pages_instances`
+   - 新增 `_show_launch_diag`（页内栈）；「打开完整体检」在诊断面板之上再压
+     体检面板，关闭后回到诊断。
+   - 删除 `_launch`（旧入口只做 set_current + 弹窗，标签名不副实）与
+     已无调用者的 `_analyze_crash`。
+4. `i18n`：新增 `instances.manage_group` / `instances.launch_diag` /
+   `instances.repair_deps_short`；删除 `instances.launch` 与已无引用的
+   `instances.instance_settings`。中英各一处。
+5. `docs/ia/paths.md` 重新生成（新增 8 条一级路径标记，旧「⋯ → 体检」
+   「点启动」两条已不存在）。
+
+### 🔍 验证（实测）
+
+- `python -m compileall -q src main.py` → 通过
+- `tests/test_round200_entries.py` → 27/27 全过（静态 21 + 运行时 6）
+- `python regress.py` → **68/68 全绿**（套数 67 → 68）
+- 离屏渲染：详情卡 720 / 640 px 两档，8 个网格按钮 + 主按钮 + 底部行全部在
+  可视区内，无横向裁切
+- 构建：116.9 MB / 4100 文件（trim removed=116 failed=0），exe 6,672,265 B
+- 部署冒烟：`AC_NO_TERMS=1 AC_LIVE=1` 10 秒 `ALIVE pid=19068`；清理后
+  procs=0 / bak=False / 4100 文件
+
+### 未改（留待决策）
+
+- 模组启停仍走「内容分区 → 模组」（切到模组页），未内嵌进详情。
+- 实例页不新增「启动游戏」按钮：启动链路只在首页，避免第二条状态机。
+- 右键菜单保留全部项（高级快捷入口）。
+
+## round-199（2026-11-07）— 六维审计补漏（弹窗 / 截断 / 反馈 / 来源）
+
+> 承接 WorkBuddy 的接力项：全项目六维审计后，把 round-197 仍挂着的四条旧登记
+> 项逐条核对并清零，同时修掉审计中新发现的同类问题。维度定义见
+> `docs/quality_punchlist.md` 第七章：① 同一功能多套实现 / 弹窗未页内化
+> ② 硬截断 ③ 点了没反应 ④ toast 上下文 ⑤ 来源记录覆盖 ⑥ 匹配过宽误报。
+
+### 修复 / 行为变更
+
+* **商店详情页补「已安装」标记**：列表卡片早就有，点进详情反而看不到（最容易
+  重复下载的位置）。头部徽章跟随「下载到」实例切换实时刷新；下载成功后也刷新。
+* **商店列表卡片补兼容性徽章**：Modrinth 搜索命中自带 `versions` / `categories`，
+  不额外发请求就能判「兼容 / 不兼容」；不兼容时 tooltip 给出原因（需要 MC x /
+  不支持某加载器）。详情页原有的 `_compat_of` 同步改成「跟随当前下载目标实例」，
+  不再固定用打开面板时的实例。
+* **两个诊断面板标题分键**：`diag.title` 在 i18n 同语言字典里出现两次，后写的
+  覆盖前一个，启动诊断的「— {name}」被吃掉。启动诊断改用 `diag.launch_title`，
+  设置页的全局诊断保留 `diag.title`。
+* **实例编辑「内容」页补来源标记**：资源包 / 光影文件名后标「资源中心 / 整合包 /
+  导入」（与模组页一致）；文件名单独存 `Qt.UserRole`，删除不再依赖显示文本。
+* **「已安装」判定收成一套**：新增 `core/mod_sources.is_installed()`，列表、
+  详情、前置依赖检查共用。顺带修掉 `_dep_installed` 的「标题前 8 字符包含匹配」
+  （Sodium 会命中 sodium-extra.jar）；前缀匹配新增「分隔符后必须像版本号 / 加载器」
+  的约束，`sodium-extra` 不再冒充 `sodium`，`sodium-fabric-0.5.8` 仍能命中；
+  `.jar.disabled` 也能正确判已装（旧切片少剥 4 个字符）。
+* **详情页简介 / 原文截断**：简介不再按 240 字符硬切，改为按当前宽度像素省略
+  两行 + tooltip 全文，窗口宽度变化时重折；原文不再从 1600 截到 1200（后半段
+  消失且无提示）。
+* **崩溃分析只剩页内一种呈现**：实例页「更多 → 崩溃分析」此前仍 `exec()`
+  `CrashAnalyzerDialog`，同功能已有页内 `CrashAnalyzerPanel`。改为统一走页内，
+  关闭面板后刷新实例状态。
+* **不兼容文案**：`store.incompat_loader` 从「只支持 {loader} 以外的环境」改为
+  「不支持 {loader}」——旧文案把实例的加载器说成「被排除的环境」，读不懂。
+* **详情页来源记录落到实际写入实例**：下载中途用户可能改「下载到」，旧代码记
+  到打开面板时的 `_inst`；现在记到本次真正写入的实例。
+
+### 🔍 验证
+
+* 新增 `tests/test_round199_audit.py`（39 项断言：静态 29 + 运行时 10），
+  覆盖已安装前缀判据（含 sodium-extra 反例）、兼容徽章纯逻辑、i18n 分键、
+  内容页来源标记、崩溃分析入口唯一性、截断移除。
+* `compileall` 通过；`regress.py` **67 / 67** 全绿（i18n 1915 / 1915 对称）。
+* 目视轨：离屏渲染详情页头部与列表卡片，确认「已安装」绿标 + 「兼容」标
+  同时出现、简介为两行像素省略（离屏缺字体，文字显示为方框，仅验布局）。
+* 构建 116.9 MB / 4100 文件；部署到用户安装目录（exe 6,670,852 B），
+  10 秒冒烟 `ALIVE pid=11844`；已杀进程、删除锁与 `.upd_bak`。
+
 ## 2026-11-06 真机验收修订（WorkBuddy，非 TRAE 迭代批次）
 
 > 按 `docs/round163_instance_java_reliability/tasks.md` 重打部署后真机验收，

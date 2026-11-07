@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
     QComboBox, QTextEdit, QMessageBox, QFrame, QWidget, QButtonGroup,
     QScrollArea, QFileDialog, QProgressBar, QCheckBox,
 )
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import QDesktopServices, QPixmap
 
 from .theme import COLORS, with_alpha
@@ -291,6 +291,8 @@ class StoreDetailPanel(QWidget):
         self._img = get_image_loader()
         self._offset = 0                     # 服务端分页游标
         self._has_more = False
+        # round-203：本详情页占用中的下载闸门 key（连点不再开第二个下载）
+        self._dl_gate_keys: set[str] = set()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -325,6 +327,10 @@ class StoreDetailPanel(QWidget):
 
         # ── ①b 下载目标（round-119）：实例列表 + 「不指定版本 · 另存为…」──
         bl.addLayout(self._build_target_bar())
+        # 目标实例换了 → 「已安装」徽章跟着换（round-199）
+        self.target_combo.currentIndexChanged.connect(
+            lambda _i=0: self._refresh_installed_tag())
+        self._refresh_installed_tag()
 
         # ── ② 最新版本条 ──
         bl.addWidget(self._build_latest())
@@ -368,6 +374,17 @@ class StoreDetailPanel(QWidget):
         self._rows.setSpacing(6)
         self._rows.addStretch(1)
         bl.addWidget(self._rows_host)
+        # round-205：版本行缓存 + 分批构建。旧实现每次筛选/翻页都把 N 行
+        # 同步重建（每行 ~10 个控件），一页 50 行直接把 UI 线程顶住 ——
+        # 这就是「出 mod 版本选择卡顿灾难」。现在：
+        #   * 行按「版本+推荐态+兼容态」缓存，筛选只换可见性，不重建；
+        #   * 新建行每批 8 个（QTimer 0ms 接力），首屏立刻可用；
+        #   * 翻页追加不再把滚动条拉回顶部。
+        self._row_cache: dict[str, _VersionRow] = {}
+        self._rebuild_gen = 0
+        self._pending_rows: list[dict] = []
+        self._pending_i = 0
+        self._latest_id: str | None = None
 
         # 加载更多
         more_row = QHBoxLayout()
@@ -467,6 +484,32 @@ class StoreDetailPanel(QWidget):
                 return i
         return None
 
+    def _installed(self) -> bool:
+        """这个资源是否已装在当前目标实例的 mods/ 里（round-199）。
+
+        与资源中心列表卡片同一判据（``mod_sources.is_installed``），避免
+        「列表说装了、详情说不装」两套逻辑。
+        """
+        inst = self._current_inst()
+        if inst is None:
+            return False
+        try:
+            from .core import mod_sources
+            return mod_sources.is_installed(
+                inst,
+                project_id=str(self._card.get("project_id", "") or ""),
+                slug=str(self._card.get("slug", "") or ""),
+                title=str(self._card.get("title", "") or ""),
+            )
+        except Exception:  # noqa: BLE001 - 判定失败按未装处理
+            return False
+
+    def _refresh_installed_tag(self) -> None:
+        tag = getattr(self, "installed_tag", None)
+        if tag is None:
+            return
+        tag.setVisible(self._installed() and self._category == "mod")
+
     def _build_header(self) -> QFrame:
         card = self._card
 
@@ -508,6 +551,13 @@ class StoreDetailPanel(QWidget):
         meta.addWidget(ui_kit.tag(
             _src, COLORS["bg_hover"], COLORS["text_sub"],
             font_size=10, radius=6, pad="2px 8px"))
+        # round-199：详情页也标「已安装」——列表卡片早就有，进详情反而看不到
+        # 是最容易重复下载的地方。切换「下载到」实例时同步刷新。
+        self.installed_tag = ui_kit.tag(
+            t("store.installed_tag"), COLORS["bg_hover"], COLORS["success"],
+            font_size=10, radius=6, pad="2px 8px")
+        self.installed_tag.setVisible(False)
+        meta.addWidget(self.installed_tag)
         self.meta = QLabel(t("store.meta",
                              downloads=ui_kit.format_count(card.get("downloads", 0)),
                              author=card.get("author", "")))
@@ -534,10 +584,15 @@ class StoreDetailPanel(QWidget):
         meta.addWidget(self.open_btn)
         ti.addLayout(meta)
 
-        self.desc = QLabel(self._short(card.get("description", ""), 240))
+        # round-199：简介不再按 240 字符硬切（半句话 + 无全文）。改为按当前
+        # 宽度像素省略两行，完整内容进 tooltip；宽度变化时重折（_rewrap_desc）。
+        self._desc_full = " ".join((card.get("description", "") or "").split())
+        self.desc = QLabel("")
         self.desc.setProperty("cls", "sub")
         self.desc.setWordWrap(True)
         self.desc.setMaximumHeight(44)
+        if self._desc_full:
+            self.desc.setToolTip(self._desc_full)
         ti.addWidget(self.desc)
         hl.addLayout(ti, stretch=1)
         return head
@@ -656,6 +711,22 @@ class StoreDetailPanel(QWidget):
         self._chips_box.addWidget(b)
 
     # ---------- helpers ----------
+    def resizeEvent(self, event):  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._rewrap_desc()
+
+    def _rewrap_desc(self) -> None:
+        """按当前宽度把头部简介折成最多两行（像素省略，tooltip 给全文）。"""
+        if not hasattr(self, "desc") or not hasattr(self, "_desc_full"):
+            return
+        w = max(120, self.desc.width() - 2)
+        if w == getattr(self, "_desc_width", 0):
+            return
+        self._desc_width = w
+        from .mod_list import _wrap_by_width
+        self.desc.setText(
+            _wrap_by_width(self._desc_full, self.desc.fontMetrics(), w, 2))
+
     def _short(self, s: str, n: int) -> str:
         s = (s or "").strip()
         return s if len(s) <= n else s[: n - 1] + "…"
@@ -675,7 +746,7 @@ class StoreDetailPanel(QWidget):
         用户原话：「模组最高版本推荐不是随着我版本加载器来选的有何作用？」
         —— 推荐必须跟着实例走：给一个装不上的"最新"毫无意义。
         """
-        inst = self._inst
+        inst = self._current_inst() or self._inst
         if inst is None:
             return True, ""
         mc = str(getattr(inst, "game_version", "") or "")
@@ -689,15 +760,19 @@ class StoreDetailPanel(QWidget):
         return True, ""
 
     def _recommended(self) -> dict | None:
-        """最新**兼容**当前实例的版本（没有就退回最新，并说明不兼容）。"""
-        best = None
-        for v in self._versions:
-            ok, _ = self._compat_of(v)
-            if ok:
-                return v
-            if best is None:
-                best = v
-        return best
+        """推荐版本：优先「兼容当前实例的正式版」，其次兼容版，最后最新。
+
+        round-205：旧实现直接取「第一个兼容」——Modrinth 列表按发布时间倒序，
+        第一个兼容常常是 beta/alpha；而下面的大按钮显示的正是这个推荐版本。
+        推荐给普通玩家一个测试版，就是用户说的「版本建议很奇怪」。
+        """
+        ok_versions = [v for v in self._versions if self._compat_of(v)[0]]
+        if ok_versions:
+            stable = [v for v in ok_versions
+                      if str(v.get("version_type") or "").lower()
+                      in ("release", "")]
+            return (stable or ok_versions)[0]
+        return self._versions[0] if self._versions else None
 
     def _filtered(self) -> list[dict]:
         mc = self.mc_filter.currentData() or ""
@@ -814,7 +889,8 @@ class StoreDetailPanel(QWidget):
             t("store.detail_more_n", n=len(self._versions) + PAGE_SIZE)
             if self._has_more else t("store.detail_all_loaded"))
         self.more_btn.setEnabled(self._has_more)
-        self._rebuild_rows()
+        # round-205：翻页追加时不重置滚动条（见 _rebuild_rows）。
+        self._rebuild_rows(appending)
 
     def _fill_latest(self, v: dict):
         self.latest_ver.setText(v.get("version_number", "—"))
@@ -846,33 +922,91 @@ class StoreDetailPanel(QWidget):
         self._latest_box.setVisible(True)
 
     # ---------- 行卡片渲染 ----------
-    def _rebuild_rows(self, *_):
-        # 清空旧行（保留末尾 stretch）
+    def _row_key(self, v: dict, compatible: bool, reason: str,
+                 is_latest: bool) -> str:
+        """缓存键：版本 + 推荐态 + 兼容态。任一项变化才需要新行。"""
+        return "%s|%s|%s|%s" % (
+            v.get("id") or v.get("version_number", ""),
+            "1" if is_latest else "0",
+            "1" if compatible else "0",
+            reason or "")
+
+    def _rebuild_rows(self, appending=False):
+        """按当前筛选重建版本行（缓存复用 + 分批插入）。
+
+        ``appending`` 为 True（「加载更多」）时不重置滚动条 —— 旧实现每次
+        追加都 ``setValue(0)``，玩家刚滚到底部又被弹回第一行。
+        """
+        self._rebuild_gen += 1
+        gen = self._rebuild_gen
+        # 旧行移出布局但不销毁：筛选切回来时直接复用（hide 后才能被
+        # insertWidget 重新按顺序摆放）。
         while self._rows.count() > 1:
             item = self._rows.takeAt(0)
             w = item.widget()
             if w is not None:
-                w.setParent(None)
-                w.deleteLater()
+                w.hide()
         # round-193：星标给「推荐（最新且兼容当前实例）」，不兼容的行整体压暗
         rec = self._recommended()
-        latest_id = rec.get("id") if rec else None
-        for v in self._filtered():
-            ok, reason = self._compat_of(v)
-            self._rows.insertWidget(self._rows.count() - 1,
-                                    _VersionRow(self._rows_host, v,
-                                                v.get("id") == latest_id,
-                                                self._download_version,
-                                                compatible=ok, reason=reason))
+        self._latest_id = rec.get("id") if rec else None
+        self._pending_rows = self._filtered()
+        self._pending_i = 0
         self.versions_lbl.setText(
-            t("store.detail_shown", shown=len(self._filtered()),
+            t("store.detail_shown", shown=len(self._pending_rows),
               total=len(self._versions)))
-        self.body_scroll.verticalScrollBar().setValue(0)
+        self._flush_rows(gen)
+        if not (isinstance(appending, bool) and appending):
+            self.body_scroll.verticalScrollBar().setValue(0)
+
+    def _flush_rows(self, gen: int) -> None:
+        """插入下一批版本行；被新的筛选代际打断则立即停手。"""
+        if gen != self._rebuild_gen:
+            return
+        BATCH = 8
+        while self._pending_i < len(self._pending_rows) and BATCH > 0:
+            v = self._pending_rows[self._pending_i]
+            self._pending_i += 1
+            BATCH -= 1
+            ok, reason = self._compat_of(v)
+            latest = v.get("id") == self._latest_id
+            key = self._row_key(v, ok, reason, latest)
+            row = self._row_cache.get(key)
+            if row is None:
+                row = _VersionRow(self._rows_host, v, latest,
+                                  self._download_version,
+                                  compatible=ok, reason=reason)
+                self._row_cache[key] = row
+            self._rows.insertWidget(self._rows.count() - 1, row)
+            row.show()
+        if self._pending_i < len(self._pending_rows):
+            QTimer.singleShot(0, lambda g=gen: self._flush_rows(g))
+        else:
+            self._trim_row_cache()
+
+    def _trim_row_cache(self) -> None:
+        """限制缓存上限：只删除当前不在布局里的旧行，避免内存无限增长。"""
+        LIMIT = 300
+        if len(self._row_cache) <= LIMIT:
+            return
+        for key, row in list(self._row_cache.items()):
+            if len(self._row_cache) <= LIMIT:
+                break
+            if row.isVisible():
+                continue
+            self._row_cache.pop(key, None)
+            try:
+                row.deleteLater()
+            except RuntimeError:  # noqa: BLE001 - 已随面板销毁
+                pass
 
     # ---------- 下载 ----------
     def _download_latest(self):
-        if self._versions:
-            self._download_version(self._versions[0])
+        # round-205：下载按钮必须下「卡片上显示的那个推荐版本」。旧实现取
+        # `self._versions[0]`（列表第一条 = 最新发布），与推荐条显示的
+        # 版本不一致 —— 玩家看到推荐 1.20.1 版，点下去却装了 1.21 版。
+        v = self._recommended()
+        if v:
+            self._download_version(v)
 
     def _server_filters(self) -> tuple[str, str]:
         """给服务端过滤用的 (mc, loader)：
@@ -882,7 +1016,7 @@ class StoreDetailPanel(QWidget):
         """
         if not (hasattr(self, "compat_chk") and self.compat_chk.isChecked()):
             return "", ""
-        inst = self._inst
+        inst = self._current_inst() or self._inst
         mc = str(getattr(inst, "game_version", "") or "") if inst else ""
         ld = str(getattr(inst, "loader", "") or "") if inst else ""
         if ld.lower() == "vanilla":
@@ -932,33 +1066,24 @@ class StoreDetailPanel(QWidget):
         self.deps_box.setVisible(True)
 
     def _dep_installed(self, dep: dict) -> bool:
-        """这个前置是不是已经装在实例里了。"""
+        """这个前置是不是已经装在实例里了（round-199：与列表页同一判据）。
+
+        旧实现用「标题前 8 字符包含匹配」，``Sodium`` 会命中
+        ``sodium-extra.jar`` —— 和 round-196 修掉的商品误报是同一个坑。
+        """
         inst = self._current_inst()
         if inst is None:
             return False
-        pid = str(dep.get("project_id", "") or "")
-        slug = str(dep.get("slug", "") or "")
         try:
             from .core import mod_sources
-            rec = mod_sources.load(inst)
-        except Exception:  # noqa: BLE001
-            rec = {}
-        for fn, meta in (rec or {}).items():
-            if str(meta.get("project_id", "")) == pid or (
-                    slug and str(meta.get("slug", "")) == slug):
-                return True
-        # 没记录来源时退一步：按名字在前置里找已装 jar（宽松但有用）
-        title = str(dep.get("title", "") or "").lower()
-        if not title:
+            return mod_sources.is_installed(
+                inst,
+                project_id=str(dep.get("project_id", "") or ""),
+                slug=str(dep.get("slug", "") or ""),
+                title=str(dep.get("title", "") or ""),
+            )
+        except Exception:  # noqa: BLE001 - 判定失败按未装处理
             return False
-        try:
-            mods_dir = getattr(inst, "mods_dir", "") or ""
-            for fn in os.listdir(mods_dir):
-                if fn.lower().endswith(".jar") and title[:8] in fn.lower():
-                    return True
-        except OSError:
-            pass
-        return False
 
     def _ask_deps(self, ver: dict) -> bool:
         """下载前问一句「是否一并安装前置」。返回 True = 连前置一起装。
@@ -994,6 +1119,9 @@ class StoreDetailPanel(QWidget):
         folder the user picks, no instance (and therefore no MC version) needed.
         """
         inst = self._current_inst()
+        # round-199：记下这次真正写入的实例 —— 下载中途用户可能改「下载到」，
+        # 来源记录必须落到文件实际所在的那个实例，不能跟着下拉框漂。
+        self._dl_inst = inst
         slug = self._card.get("slug", "")
         ver = v.get("version_number", "")
         if inst is None:
@@ -1028,6 +1156,17 @@ class StoreDetailPanel(QWidget):
         # round-193：下载前问一句「前置要不要一起装」——玩家不该在进游戏报
         # 缺前置之后才知道这事。
         with_deps = self._ask_deps(v)
+        # round-203：详情页单飞 —— 同一项目/版本只允许一个下载在跑。旧实现连点
+        # 会各开一个 worker（本体 + 依赖各下一遍），带宽被自己抢掉，看起来
+        # 就是「好几个下载一起占用」。
+        from .core.dl_gate import claim, release as _release_gate
+        _gate_key = "store:%s:%s" % (
+            self._card.get("project_id") or self._card.get("slug", ""),
+            v.get("id") or v.get("version_number", ""))
+        if not claim(_gate_key):
+            self.status.setText(t("store.download_busy"))
+            return
+        self._dl_gate_keys.add(_gate_key)
         self.status.setText(t("store.downloading", slug=slug))
         # round-193：详情页内可见的进度条 + 速度（不用回列表页看进度）
         self.dl_bar.setVisible(True)
@@ -1070,7 +1209,17 @@ class StoreDetailPanel(QWidget):
         w.speed.connect(lambda s: self.dl_speed.setText(s))
         w.progress.connect(self._on_dl_progress)
 
+        def _finish_gate():
+            """round-203：下载本体结束（成功/失败）即放开单飞闸门。"""
+            if _gate_key in self._dl_gate_keys:
+                self._dl_gate_keys.discard(_gate_key)
+                try:
+                    _release_gate(_gate_key)
+                except Exception:  # noqa: BLE001
+                    pass
+
         def _ok(p: str):
+            _finish_gate()
             # round-193：说清楚「装了哪些文件」（本体 + 前置），别只报一个文件名
             names = [os.path.basename(p)]
             for item in (self._dl_manifest or []):
@@ -1102,6 +1251,7 @@ class StoreDetailPanel(QWidget):
             self._record_sources()
 
         def _err(e):
+            _finish_gate()
             self.status.setText(t("store.download_fail", e=e))
             self.dl_bar.setVisible(False)
             self.dl_speed.setVisible(False)
@@ -1114,7 +1264,8 @@ class StoreDetailPanel(QWidget):
     def _record_sources(self) -> None:
         """把这次下载的文件登记到实例的模组来源表（区分资源中心 / 本地）。"""
         manifest = getattr(self, "_dl_manifest", None) or []
-        inst = getattr(self, "_inst", None)
+        inst = getattr(self, "_dl_inst", None) or self._current_inst() \
+            or getattr(self, "_inst", None)
         if not manifest or inst is None:
             return
         card = getattr(self, "_card", None) or {}
@@ -1133,17 +1284,41 @@ class StoreDetailPanel(QWidget):
         except Exception:  # noqa: BLE001 - 记录失败不影响下载结果
             pass
         self._dl_manifest = []
+        self._refresh_installed_tag()
 
     # ---------- 中文说明 ----------
     def _open_mcmod(self):
-        """打开 MC百科条目（中文说明的正解；找不到就退搜索页）。"""
-        from .mod_names import cn_short
-        from .net_api import mcmod_entry_url, mcmod_search_url
+        """打开 MC百科条目（中文说明的正解；找不到就退搜索页）。
+
+        round-205：候选词按「中文短名 → 中文全名 → 标题 → slug」排序。
+        MC百科是中文站，拿英文 slug 去搜基本查不到 —— 必须先试中文。
+        """
+        from .mod_names import cn_short, cn_name
+        from .net_api import mcmod_best_entry, mcmod_search_url
         slug = self._card.get("slug") or ""
-        key = (cn_short(slug) or self._card.get("title") or slug or "").strip()
+        title = self._card.get("title") or ""
+        cands: list[str] = []
+
+        def _add(value):
+            v = str(value or "").strip()
+            if v and v not in cands:
+                cands.append(v)
+
+        _add(cn_short(slug))
+        # cn_name 形如「Sodium（钠·渲染优化）」：取括号里的第一个中文短语。
+        full = cn_name(slug, "")
+        if full:
+            for lp, rp in (("（", "）"), ("(", ")")):
+                i, j = full.find(lp), full.find(rp)
+                if i >= 0 and j > i:
+                    _add(full[i + 1:j].split("·")[0])
+                    break
+        _add(title)
+        _add(slug)
+        key = cands[0] if cands else ""
         self.mcmod_btn.setEnabled(False)
         self.tr_status.setText(t("store.detail_mcmod_searching"))
-        w = Worker(mcmod_entry_url, key)
+        w = Worker(mcmod_best_entry, cands)
 
         def _ok(url):
             self.mcmod_btn.setEnabled(True)
@@ -1175,23 +1350,6 @@ class StoreDetailPanel(QWidget):
             _cache_write(_TRANSLATION_CACHE, self._ck, pair)
             self._render_translation(pair)
 
-    def _render_translation(self, pair):
-        self.translate_btn.setEnabled(True)
-        src, tr = pair
-        if tr is None:
-            # round-128：原文已是中文，没走机翻。
-            self.text.setPlainText(src)
-            self.tr_status.setText(t("store.detail_native_cn"))
-            return
-        disp = tr if len(tr) <= 6000 else tr[:6000] + "…"
-        self.text.setPlainText(
-            f"── {t('store.detail_original')} ──\n{src[:1200] if len(src) > 1200 else src}"
-            f"\n\n── {t('store.detail_translated')} ──\n{disp}"
-        )
-        # 头部短简介也换成中文（默认视图不再让玩家先看到英文）。
-        self.desc.setText(self._short(tr, 240))
-        self.tr_status.setText(t("store.detail_translated_ok"))
-
         def _err(e):
             self.translate_btn.setEnabled(True)
             if auto:
@@ -1200,10 +1358,35 @@ class StoreDetailPanel(QWidget):
             else:
                 self.tr_status.setText(t("store.detail_translate_fail", e=e))
 
+        # round-205：修复缩进错位 —— 旧代码把 `_err` / connect / start 全塞进
+        # `_render_translation` 的方法体，`_translate` 定义完 `_ok` 就结束了：
+        # Worker 从未 start()（「翻译半天没动静」），缓存命中路径还会 NameError。
         w.finished.connect(_ok)
         w.error.connect(_err)
         self._track(w)
         w.start()
+
+    def _render_translation(self, pair):
+        self.translate_btn.setEnabled(True)
+        src, tr = pair
+        if tr is None:
+            # round-128：原文已是中文，没走机翻。
+            self.text.setPlainText(src)
+            self.tr_status.setText(t("store.detail_native_cn"))
+            return
+        disp = tr or ""
+        self.text.setPlainText(
+            f"── {t('store.detail_original')} ──\n{src}"
+            f"\n\n── {t('store.detail_translated')} ──\n{disp}"
+        )
+        # 头部短简介也换成中文（默认视图不再让玩家先看到英文）。
+        # round-199：同样改成像素省略 + 全文 tooltip，不再按 240 字符硬切。
+        self._desc_full = " ".join(disp.split())
+        if self._desc_full:
+            self.desc.setToolTip(self._desc_full)
+        self._desc_width = 0
+        self._rewrap_desc()
+        self.tr_status.setText(t("store.detail_translated_ok"))
 
     # ---------- 生命周期 ----------
     def _track(self, w):
@@ -1231,6 +1414,15 @@ class StoreDetailPanel(QWidget):
             except RuntimeError:
                 pass
         self._workers.clear()
+        # round-203：面板走了但下载线程可能还没退，闸门必须跟着放 —— 否则
+        # 同一个项目的下一次下载会被误判为「已有下载在进行」。
+        try:
+            from .core.dl_gate import release
+            for key in list(self._dl_gate_keys):
+                release(key)
+            self._dl_gate_keys.clear()
+        except Exception:  # noqa: BLE001 - 闸门释放失败不影响关闭
+            pass
 
 
 def _cat_key(category: str) -> str:

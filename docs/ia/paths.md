@@ -19,11 +19,17 @@
 | 操作 | 层/组件 | 结果与反馈 | 备注 |
 | --- | --- | --- | --- |
 | 点左侧实例行 | 实例列表 | 右侧详情切换到该实例 | `src/pages_instances.py` |
-| 「⋯ → 体检」 | 详情更多菜单 | 打开实例体检对话框（静态扫描 + 本地修复） | `src/pages_instances.py` |
-| 点「删除」 | 详情操作条 | 二次确认后移除实例并刷新列表 | `src/pages_instances.py` |
-| 点「启动」 | 详情主操作 | 设为当前实例并通知主窗口刷新（首页随即可启动） | `src/pages_instances.py` |
-| 点「打开文件夹」 | 详情操作条 | 用系统文件管理器打开实例目录 | `src/pages_instances.py` |
-| 点「设为当前」 | 详情操作条 | 切换当前实例并刷新列表/首页 | `src/pages_instances.py` |
+| 点「编辑实例」 | 详情名称行主按钮 | 页内打开编辑面板（换版本/加载器/内存/模组） | `src/pages_instances.py` |
+| 点「实例体检」 | 详情「管理与诊断」网格 | 页内体检面板（静态扫描 + 一键本地修复） | `src/pages_instances.py` |
+| 点「崩溃分析」 | 详情「管理与诊断」网格 | 页内崩溃分析面板（崩溃原因 + 修复建议） | `src/pages_instances.py` |
+| 点「启动诊断」 | 详情「管理与诊断」网格 | 页内面板：启动命令 / classpath / 体检摘要 | `src/pages_instances.py` |
+| 点「补装依赖」 | 详情「管理与诊断」网格 | 扫描缺失前置并自动安装（后台 Worker） | `src/pages_instances.py` |
+| 点「创建备份」 | 详情「管理与诊断」网格 | 后台打包实例快照到备份目录 | `src/pages_instances.py` |
+| 点「回滚备份…」 | 详情「管理与诊断」网格 | 选历史快照，二次确认后恢复 mods / config / 存档 | `src/pages_instances.py` |
+| 点「复制实例」 | 详情「管理与诊断」网格 | 输入新名后后台克隆实例目录 | `src/pages_instances.py` |
+| 点「删除」 | 详情底部操作行 | 二次确认后移除实例并刷新列表 | `src/pages_instances.py` |
+| 点「打开文件夹」 | 详情「管理与诊断」网格 | 用系统文件管理器打开实例目录 | `src/pages_instances.py` |
+| 点「设为当前」 | 详情底部操作行 | 切换当前实例并刷新列表/首页 | `src/pages_instances.py` |
 
 ## 设置（`settings`）
 

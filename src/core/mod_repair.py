@@ -20,10 +20,36 @@ import re
 MAX_SCAN_JARS = 60
 
 # 这些 id 由游戏 / 加载器本身提供，不是需要下载的 mod
+# round-201：键写成 canonical 后的形式（下划线归一成连字符）
 _BUILTIN_IDS = frozenset({
     "minecraft", "java", "fabricloader", "forge", "neoforge",
-    "quilt_loader", "fabric-api-base",
+    "quilt-loader", "fabric-api-base",
 })
+
+# round-201：mod id 与 Modrinth 项目 slug 并不总是一致。Cloth Config 的
+# fabric.mod.json 里 id 是 ``cloth-config2``，而 Modrinth 项目 slug 是
+# ``cloth-config``；旧逻辑拿 dep id 去搜索、再要求 slug/title **完全相等**，
+# 于是「补装依赖」恒报「未在 Modrinth 找到同名项目」。
+# 只登记**已确认同源**的 id → slug，不做模糊猜测（装错项目比装不上更糟）。
+PROJECT_ALIASES = {
+    "cloth-config2": "cloth-config",       # Cloth Config API
+    "architectury": "architectury-api",    # Architectury API
+    "kotlinforforge": "kotlin-for-forge",  # Kotlin for Forge
+    "forgeconfigapiport": "forge-config-api-port",
+    "owo": "owo-lib",
+    "yet-another-config-lib-v3": "yacl",
+}
+
+
+def norm_id(value) -> str:
+    """mod id / slug 归一：小写、空格与下划线折成连字符。"""
+    return re.sub(r"[\s_]+", "-", str(value or "").strip().lower())
+
+
+def canonical_id(dep: str) -> str:
+    """把 mod id 归一到「Modrinth 项目 slug」；未知 id 只做归一化原样返回。"""
+    d = norm_id(dep)
+    return PROJECT_ALIASES.get(d, d)
 
 
 def _mods_dir(inst) -> str:
@@ -69,19 +95,22 @@ def match_project(dep: str, hits: list[dict]) -> dict | None:
     ☠ 刻意不做 ``startswith(dep + "-")`` 的「同项目子模块」宽松命中——
     那正是 ``fabric-api`` → ``fabric-api-base`` 装错项目的来源。匹配不上
     就明确计入 failed，让玩家自己到资源中心装，比静默装错好。
+
+    round-201：除 dep 本身，也接受它经 ``PROJECT_ALIASES`` 归一后的项目
+    slug（``cloth-config2`` → ``cloth-config``）。这仍是**精确等价**，
+    不是模糊包含。
     """
     def norm(value) -> str:
-        # Modrinth 标题常写作 "Fabric API"，而 modid 是 "fabric-api"：
-        # 空格 / 下划线归一成连字符后仍是**精确等价**，不是模糊包含。
-        return re.sub(r"[\s_]+", "-", str(value or "").strip().lower())
+        return norm_id(value)
 
     d = norm(dep)
     if not d or not hits:
         return None
+    targets = {d, canonical_id(d)}
     for h in hits:
         if not isinstance(h, dict):
             continue
-        if norm(h.get("slug")) == d or norm(h.get("title")) == d:
+        if norm(h.get("slug")) in targets or norm(h.get("title")) in targets:
             return h
     return None
 
@@ -117,8 +146,11 @@ def repair_missing(inst, missing_ids: list[str] | None = None,
     for dep in result["missing"]:
         if callback:
             callback("正在查找依赖：%s …" % dep)
+        # round-201：按项目 slug 搜索（cloth-config2 → cloth-config），
+        # 否则搜到的命中仍是别名本身，精确匹配阶段会失败。
+        query = canonical_id(dep)
         try:
-            hits = search_mods(dep, 0, 5, project_type="mod")
+            hits = search_mods(query, 0, 5, project_type="mod")
         except Exception as e:  # noqa: BLE001 - 网络失败要能解释
             result["failed"].append(
                 {"id": dep, "stage": "search", "reason": str(e)})

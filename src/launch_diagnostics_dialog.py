@@ -19,11 +19,13 @@ from __future__ import annotations
 import os
 import subprocess
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QPlainTextEdit,
-    QPushButton, QLabel,
+    QWidget, QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QPlainTextEdit,
+    QLabel,
 )
 
+from . import ui_kit
 from .i18n import t
 from .theme import COLORS
 
@@ -128,20 +130,41 @@ def _health_report(inst) -> str:
     return "\n".join(lines)
 
 
-class LaunchDiagnosticsDialog(QDialog):
+class LaunchDiagnosticsPanel(QWidget):
+    """启动诊断面板（**页内**，round-200）。
+
+    round-177 起这个功能一直是 QDialog 弹窗，而体检（round-195）/ 崩溃分析
+    （round-197）都已页内化——实例相关功能不该有窗口 / 页面两套呈现。诊断
+    报告本身原样复用 :func:`_command_report` / :func:`_health_report`，不改判据。
+    窗口壳 :class:`LaunchDiagnosticsDialog` 保留给历史调用点。
+    """
+
+    closed = Signal()        # 页内：请求返回
+    open_health = Signal()   # 页内：请求外层压入完整体检面板
+
     def __init__(self, inst, mgr=None, parent=None):
         super().__init__(parent)
         self.inst = inst
         self.mgr = mgr
-        self.setWindowTitle(t("diag.title", name=getattr(inst, "name", "")))
-        self.resize(900, 580)
+
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(20, 14, 20, 16)
+        bl.setSpacing(10)
+        root.addWidget(body, stretch=1)
+
+        title = QLabel(t("diag.launch_title", name=getattr(inst, "name", "")))
+        title.setProperty("cls", "big")
+        bl.addWidget(title)
 
         head = QLabel(t("diag.subtitle"))
         head.setStyleSheet("color: %s; font-size: 12px;" % COLORS["text_sub"])
-        root.addWidget(head)
+        head.setWordWrap(True)
+        bl.addWidget(head)
 
         self._tabs = QTabWidget()
         self._cmd_view = self._text_view()
@@ -150,20 +173,21 @@ class LaunchDiagnosticsDialog(QDialog):
         self._health_view = self._text_view()
         self._health_view.setPlainText(_health_report(inst))
         self._tabs.addTab(self._health_view, t("diag.tab_health"))
-        root.addWidget(self._tabs, stretch=1)
+        bl.addWidget(self._tabs, stretch=1)
 
         row = QHBoxLayout()
         row.addStretch(1)
-        self._copy_btn = QPushButton(t("diag.copy"))
-        self._copy_btn.clicked.connect(self._copy)
+        self._copy_btn = ui_kit.make_button(
+            t("diag.copy"), on_click=self._copy, min_h=34)
+        self._health_btn = ui_kit.make_button(
+            t("diag.open_health"), kind="accent",
+            on_click=self.open_health.emit, min_h=34)
+        close_btn = ui_kit.make_button(
+            t("diag.close"), on_click=self.closed.emit, min_h=34)
         row.addWidget(self._copy_btn)
-        self._health_btn = QPushButton(t("diag.open_health"))
-        self._health_btn.clicked.connect(self._open_health)
         row.addWidget(self._health_btn)
-        close_btn = QPushButton(t("diag.close"))
-        close_btn.clicked.connect(self.accept)
         row.addWidget(close_btn)
-        root.addLayout(row)
+        bl.addLayout(row)
 
     @staticmethod
     def _text_view() -> QPlainTextEdit:
@@ -185,11 +209,28 @@ class LaunchDiagnosticsDialog(QDialog):
         QApplication.clipboard().setText(text)
         self._copy_btn.setText(t("diag.copied"))
 
+
+class LaunchDiagnosticsDialog(QDialog):
+    """窗口壳：只包一层 :class:`LaunchDiagnosticsPanel`，不复制逻辑。"""
+
+    def __init__(self, inst, mgr=None, parent=None):
+        super().__init__(parent)
+        self.inst = inst
+        self.mgr = mgr
+        self.setWindowTitle(t("diag.launch_title", name=getattr(inst, "name", "")))
+        self.resize(900, 580)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        self.panel = LaunchDiagnosticsPanel(inst, mgr=mgr, parent=self)
+        root.addWidget(self.panel)
+        self.panel.closed.connect(self.accept)
+        self.panel.open_health.connect(self._open_health)
+
     def _open_health(self):
         from .mod_check_dialog import open_health_dialog
         open_health_dialog(self, self.inst, mgr=self.mgr)
 
 
 def open_launch_diagnostics(parent, inst, mgr=None) -> None:
-    """便捷入口：静态扫描一次并弹诊断框。"""
+    """便捷入口：静态扫描一次并弹诊断框（历史调用点保留）。"""
     LaunchDiagnosticsDialog(inst, mgr=mgr, parent=parent).exec()

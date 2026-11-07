@@ -1025,6 +1025,18 @@ class InstanceEditorPanel(QWidget):
         return os.path.join(base or "", key)
 
     def _reload_content(self) -> None:
+        # round-199：资源包 / 光影也标来源 —— 模组页早就有「资源中心 / 整合包 /
+        # 导入」标记，内容页一直只有文件名，看不出哪些是启动器装的。
+        try:
+            from .core import mod_sources
+        except Exception:  # noqa: BLE001
+            mod_sources = None
+        _SRC_KEYS = {
+            "modrinth": "mods.from_store",
+            "curseforge": "mods.from_store",
+            "modpack": "mods.from_pack",
+            "imported": "mods.from_import",
+        }
         for key, lst in getattr(self, "_content_lists", {}).items():
             lst.clear()
             d = self._content_dir(key)
@@ -1038,14 +1050,26 @@ class InstanceEditorPanel(QWidget):
                 lst.addItem(item)
                 continue
             for n in names:
-                lst.addItem(n)
+                label = n
+                if mod_sources is not None and key in ("resourcepacks",
+                                                       "shaderpacks"):
+                    src = mod_sources.source_of(self._inst, n)
+                    src_key = _SRC_KEYS.get(src)
+                    if src_key:
+                        label = "%s  ·  %s" % (n, t(src_key))
+                item = QListWidgetItem(label)
+                # 文件名单独存 UserRole —— 显示文本带了来源尾巴，删除时不能直接
+                # 拿 item.text() 当路径。
+                item.setData(Qt.UserRole, n)
+                item.setToolTip(n)
+                lst.addItem(item)
 
     def _delete_content(self, key: str) -> None:
         lst = self._content_lists.get(key)
         item = lst.currentItem() if lst else None
         if item is None or not (item.flags() & Qt.ItemIsSelectable):
             return
-        name = item.text()
+        name = item.data(Qt.UserRole) or item.text()
         if not confirm(self, t("inst.content_delete"), name):
             return
         target = os.path.join(self._content_dir(key), name)

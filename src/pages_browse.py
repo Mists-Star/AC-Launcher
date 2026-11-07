@@ -821,6 +821,19 @@ class StorePage(QWidget):
                               COLORS["bg_hover"], COLORS["success"],
                               font_size=10, radius=6, pad="2px 8px")
             meta_row.addWidget(done)
+        # round-199：兼容徽章 —— 搜索响应自带 game_versions / loaders，
+        # 不额外发请求就能在列表上直接标「兼容 / 不兼容」，不用点进详情。
+        comp = self._compat_of_card(m)
+        if comp is not None:
+            ok, reason = comp
+            badge = ui_kit.tag(
+                t("store.compat_tag") if ok else t("store.incompat_tag"),
+                COLORS["bg_hover"],
+                COLORS["success"] if ok else COLORS["warn"],
+                font_size=10, radius=6, pad="2px 8px")
+            if reason:
+                badge.setToolTip(reason)
+            meta_row.addWidget(badge)
         meta_row.addStretch(1)
         info.addLayout(meta_row)
         lay.addLayout(info, stretch=1)
@@ -858,45 +871,43 @@ class StorePage(QWidget):
         return None
 
     def _is_installed(self, m: dict) -> bool:
-        """这个资源是不是已经装在目标实例里了。"""
+        """这个资源是不是已经装在目标实例里了（round-199：判定收到 mod_sources）。"""
         inst = self._current_inst()
         if inst is None:
             return False
-        pid = str(m.get("project_id", "") or "")
-        slug = str(m.get("slug", "") or "")
         try:
             from .core import mod_sources
-            rec = mod_sources.load(inst)
-        except Exception:  # noqa: BLE001
-            rec = {}
-        for fn, meta in (rec or {}).items():
-            if pid and str(meta.get("project_id", "")) == pid:
-                return True
-            if slug and str(meta.get("slug", "")) == slug:
-                return True
-        # 没有来源记录（旧下载 / 手动放入）→ 按文件名**前缀**匹配。
-        # ☠ round-196：原来是「标题前 8 字符包含匹配」→ "Sodium" 会命中
-        # "sodium-extra.jar"（另一个模组！）→ 误标「已安装」。改成前缀匹配：
-        # 文件名必须以标题（或 slug）开头才算。
-        title = str(m.get("title", "") or "").strip().lower()
-        slug = str(m.get("slug", "") or "").strip().lower()
-        if not title and not slug:
+            return mod_sources.is_installed(
+                inst,
+                project_id=str(m.get("project_id", "") or ""),
+                slug=str(m.get("slug", "") or ""),
+                title=str(m.get("title", "") or ""),
+            )
+        except Exception:  # noqa: BLE001 - 判定失败就按未安装处理
             return False
-        cands = [c for c in (title, slug) if c]
-        try:
-            mods_dir = getattr(inst, "mods_dir", "") or ""
-            for fn in os.listdir(mods_dir):
-                low = fn.lower()
-                if not low.endswith((".jar", ".jar.disabled")):
-                    continue
-                stem = low[:-9] if low.endswith(".disabled") else low[:-4]
-                for c in cands:
-                    if stem == c or stem.startswith(c + "-") or \
-                            stem.startswith(c + "_") or stem.startswith(c + "."):
-                        return True
-        except OSError:
-            pass
-        return False
+
+    def _compat_of_card(self, m: dict):
+        """列表卡片的兼容判定：只用搜索响应里带的版本/加载器。
+
+        返回 ``None``（没有版本数据，不画徽章）/ ``(True, "")`` / ``(False, 原因)``。
+        """
+        inst = self._current_inst()
+        if inst is None:
+            return None
+        gv = [str(x) for x in (m.get("game_versions") or [])]
+        lds = [str(x).lower() for x in (m.get("loaders") or [])]
+        if not gv and not lds:
+            return None
+        mc = str(getattr(inst, "game_version", "") or "")
+        ld = str(getattr(inst, "loader", "") or "vanilla").lower()
+        reason = ""
+        if mc and gv and mc not in gv:
+            reason = t("store.incompat_mc", mc=mc)
+        elif ld and ld != "vanilla" and lds and ld not in lds:
+            reason = t("store.incompat_loader", loader=loader_name(ld))
+        if reason:
+            return False, reason
+        return True, ""
 
     def _open_detail(self, m: dict):
         """在页内打开资源详情（round-132：不再弹独立 QDialog）。

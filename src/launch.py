@@ -749,17 +749,56 @@ def launch_instance(
         # 原版实例
         _skip = _os.path.isfile(_os.path.join(
             inst.mc_dir, "versions", inst.game_version, f"{inst.game_version}.json"))
+    _gate_key = ""
     if not _skip:
         # round-52 阶段上报：安装/修复游戏版本（点第 2 步）。
         _emit_step(callback, "install")
-        installed = install_instance(
-            inst,
-            java_auto=settings.get("java_auto", True),
-            java_path=user_java,
-            mirror=settings.get("download_mirror", "official"),
-            proxy=settings.get("download_proxy", ""),
-            callback=callback,
-        )
+        # round-203：同一实例的安装（手动「补全文件」/ 另一个启动）正在跑时，
+        # 先等它结束再补。两条 install 并行写同一批 .part 会重复下载、互相
+        # 覆盖，用户看到的就是「总有好几个下载一起占带宽」。
+        try:
+            from .core.dl_gate import claim, inst_key, wait_free
+            from .core.mirror import InstallCancelled, active_context
+            _gate_key = inst_key(getattr(inst, "mc_dir", "") or "")
+            if not claim(_gate_key):
+                from .i18n import t as _t
+                _st = (callback.get("setStatus")
+                       if callback and hasattr(callback, "get") else None)
+                if _st:
+                    _st(_t("status.wait_download"))
+                _ctx = active_context()
+
+                def _aborted(_c=_ctx):
+                    return _c is not None and _c.aborted
+
+                if not wait_free(_gate_key, timeout=180, should_abort=_aborted):
+                    if _aborted():
+                        raise InstallCancelled("install cancelled by user")
+                    # 等不到（前一个下载卡住）：不退化成「启动没反应」，
+                    # 放弃闸门继续走 install（幂等，最坏是多下一次）。
+                    from .core.dl_gate import release
+                    release(_gate_key)
+                    _gate_key = ""
+        except InstallCancelled:
+            raise
+        except Exception:  # noqa: BLE001 - 闸门异常不阻断启动
+            _gate_key = ""
+        try:
+            installed = install_instance(
+                inst,
+                java_auto=settings.get("java_auto", True),
+                java_path=user_java,
+                mirror=settings.get("download_mirror", "official"),
+                proxy=settings.get("download_proxy", ""),
+                callback=callback,
+            )
+        finally:
+            if _gate_key:
+                try:
+                    from .core.dl_gate import release
+                    release(_gate_key)
+                except Exception:  # noqa: BLE001
+                    pass
     # Prefer the scanned versions/<id> folder name (version_id) when present —
     # it is what minecraft-launcher-lib resolves versions by, and differs from
     # the base game_version for imported instances (e.g. "1.20.1-forge-47.2.0").
@@ -1217,6 +1256,23 @@ def classify_exit(returncode: int, log_path: str | None = None) -> tuple[str, di
     # 原生库缺失/加载失败
     if has("unsatisfiedlinkerror", "failed to load jni dll", "natives not found", "native librarynot found"):
         return "exit.native", {}
+
+    # round-204：模组生态的真实报错先于「classpath 缺失」判定 —— 这两类日志
+    # 也含 NoClassDefFoundError，但根因是模组/加载器不兼容，让玩家补前置或
+    # 删模组，比「删实例重装」有用得多。
+    if has("mixin apply", "mixintransformererror", "mixin transformation of",
+           "invalidmixin", "@inject"):
+        return "exit.mixin", {}
+    if has("mod resolution failed", "formattedexception",
+           "mandatory dependencies", "which is missing"):
+        return "exit.mod_resolution", {}
+    if has("modloadingexception", "failed to load mod", "mod loading failed"):
+        return "exit.mod_loading", {}
+    if has("duplicate mods", "duplicatemod", "duplicate mod file"):
+        return "exit.duplicate_mod", {}
+    if has("incompatibleclasschangeerror", "nosuchmethoderror",
+           "nosuchfielderror"):
+        return "exit.incompatible", {}
 
     # 普通库(classpath)缺失
     if has("noclassdeffounderror", "classnotfoundexception", "symbol not found:"):
