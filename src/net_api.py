@@ -1268,6 +1268,9 @@ def download_mod_to(
     """
     files = resolve_mod_dependencies(project_id, mc_version, loader,
                                      only_self=not with_deps)
+    if with_deps:
+        # round-220：跨源「必需伴随」覆盖（Ultimine Unchained → FTB Ultimine 等）
+        files.extend(_override_companions(project_id, mc_version, loader))
     if not files:
         raise NetError("没有可下载的文件")
     os.makedirs(dest_dir, exist_ok=True)
@@ -1318,6 +1321,9 @@ def download_mod_version_to(
     files = resolve_mod_dependencies(
         project_id, mc_version, loader, version_id=version_id,
         only_self=not with_deps)
+    if with_deps:
+        # round-220：跨源「必需伴随」覆盖（Ultimine Unchained → FTB Ultimine 等）
+        files.extend(_override_companions(project_id, mc_version, loader))
     if not files:
         raise NetError("没有可下载的文件（或该版本不存在）")
     os.makedirs(dest_dir, exist_ok=True)
@@ -1342,6 +1348,261 @@ def download_mod_version_to(
         if item["project_id"] == project_id:
             primary_path = dest
     return primary_path
+
+
+# ── CurseForge 依赖树解析（round-220）────────────────────────────────
+# 资源中心的依赖递归解析一直只有 Modrinth 通道；CurseForge 通道直接下单，
+# 导致 FTB Ultimine（CF 独占，project 448231）这种「本体 + 前置分开发布」的
+# 模组，装完缺 FTB Library / Architectury，版本不对就崩退出码 1。
+# 这里补齐 CF 依赖解析：CF 文件元数据自带 dependencies（relationType），
+# 官方 API 与免 key 镜像（mod.mcimirror.top）契约一致，无需 API key。
+#
+# 实测事实（2026-11-08，来自 CurseForge 镜像）：
+#   * FTB Ultimine(448231) 文件 dependencies：FTB Library(438495) relType=3(required)
+#     + Fabric API(306612) relType=3；1.21.1 线额外 required Architectury(419699)。
+#   * FTB Library(438495) 自身又 required Fabric API(306612)（26.1.x 线）。
+#   * Fabric API(306612) 是加载器级依赖（实例已由加载器提供），**不**当作普通
+#     mod jar 重下，否则会和实例已有的 Fabric API 撞出两个 jar。
+#   * 递归用 _seen 去重 + 深度上限，FTB 家族依赖树干净、不会爆 / 成环。
+
+_CF_REL_REQUIRED = 3
+# 加载器级 API：实例已由加载器提供，不当普通 mod 重下（避免双 jar）。
+_CF_LOADER_API_IDS = frozenset({"306612"})  # Fabric API (CurseForge)
+
+# 跨源「必需伴随」覆盖：某些上游在一个源发布、却依赖只在另一源存在的模组。
+# Modrinth 的 Ultimine Unchained(rGNPldmX) 是 FTB Ultimine 的 mixin 修复补丁，
+# 自身只声明 Fabric API + Cloth Config，但**必须有** FTB Ultimine（CF 独占、
+# 无 Modrinth 条目）+ FTB Library 才能真正工作；FTB Ultimine 自己的 CF 依赖会
+# 顺带把 FTB Library 拉进来，所以这里只桥到 FTB Ultimine 即可。
+_KNOWN_DEP_OVERRIDES: dict[str, list[tuple[str, str]]] = {
+    "rGNPldmX": [("curseforge", "448231")],  # Ultimine Unchained → FTB Ultimine
+}
+
+
+def _cf_file_required_deps(project_id: str, file_id) -> list[str]:
+    """某 CF 文件的 required(relationType==3) 依赖 mod id 列表。
+
+    优先官方 keyed API，失败回退免 key 镜像；都拿不到返回空（子依赖降级、
+    主文件照常下）。
+    """
+    pid, fid = str(project_id), str(file_id or "")
+    if not fid:
+        return []
+    key = _curseforge_key()
+    if key:
+        try:
+            r = requests.get(
+                f"{CURSEFORGE_API}/mods/{pid}/files/{fid}",
+                headers={**_HEADERS, "x-api-key": key, "Accept": "application/json"},
+                timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+            if r.status_code == 200:
+                f = r.json().get("data") or {}
+                return [str(d["modId"]) for d in (f.get("dependencies") or [])
+                        if d.get("relationType") == _CF_REL_REQUIRED]
+        except requests.RequestException:
+            pass
+    try:
+        r = requests.get(f"{_CF_MIRROR}/mods/{pid}/files/{fid}",
+                         headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
+                         proxies=_proxies())
+        if r.status_code == 200:
+            f = r.json().get("data") or r.json()
+            return [str(d["modId"]) for d in (f.get("dependencies") or [])
+                    if d.get("relationType") == _CF_REL_REQUIRED]
+    except requests.RequestException:
+        pass
+    return []
+
+
+def _cf_raw_files(project_id: str) -> list[dict]:
+    """某 CF 项目的文件列表（原始形状），官方 API 优先、免 key 镜像兜底。"""
+    pid = str(project_id)
+    key = _curseforge_key()
+    if key:
+        try:
+            r = requests.get(
+                f"{CURSEFORGE_API}/mods/{pid}/files",
+                params={"pageSize": 50, "sortField": 2, "sortOrder": "desc"},
+                headers={**_HEADERS, "x-api-key": key, "Accept": "application/json"},
+                timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+            if r.status_code == 200:
+                return r.json().get("data") or []
+        except requests.RequestException:
+            pass
+    try:
+        return _cf_files_mirror(pid)
+    except NetError:
+        return []
+
+
+def _cf_resolve_dep_file(project_id: str, mc_version: str, loader: str) -> dict | None:
+    """为依赖 mod 选一个匹配实例版本的最新文件，返回可下载元数据。
+
+    返回 {"project_id","file_id","filename","url","sha1"}，挑不到返回 None。
+    """
+    pid = str(project_id)
+    files = _cf_filter_files(_cf_raw_files(pid), mc_version, loader)
+    if not files:
+        return None
+    f = files[0]
+    fid = f.get("id")
+    fname = f.get("fileName") or ""
+    if not (fid and fname):
+        return None
+    url = f.get("downloadUrl") or ""
+    if not _cf_direct_url(url):
+        try:
+            url = FORGECDN_URL.format(a=int(fid) // 1000, b=int(fid) % 1000,
+                                      name=fname)
+        except (TypeError, ValueError):
+            return None
+    return {"project_id": pid, "file_id": str(fid), "filename": fname,
+            "url": url, "sha1": _cf_sha1(f)}
+
+
+def resolve_cf_dependencies(project_id: str, file_id: str,
+                            mc_version: str = "", loader: str = "",
+                            _seen: set | None = None, _depth: int = 0) -> list[dict]:
+    """递归解析 CF required 依赖，返回去重文件清单（**不含本体**）。
+
+    每项 {"project_id","file_id","filename","url","sha1"}，与 MR 解析器同形状，
+    下载循环直接复用。跳过 Fabric API 等加载器级依赖；循环 / 超限由 _seen 截断。
+    """
+    if _seen is None:
+        _seen = set()
+    out: list[dict] = []
+    if project_id in _seen or _depth > _MOD_DEP_MAX_DEPTH:
+        return out
+    _seen.add(project_id)
+    for dpid in _cf_file_required_deps(project_id, file_id):
+        if dpid in _seen or dpid in _CF_LOADER_API_IDS:
+            continue
+        df = _cf_resolve_dep_file(dpid, mc_version, loader)
+        if not df:
+            continue
+        out.append(df)
+        out.extend(resolve_cf_dependencies(dpid, df["file_id"], mc_version,
+                                           loader, _seen, _depth + 1))
+    return out
+
+
+def cf_project_title(project_id: str) -> str:
+    """CF 项目的显示名（中文名库优先），拿不到退回 id。"""
+    pid = str(project_id)
+    slug, name = "", ""
+    try:
+        r = requests.get(f"{_CF_MIRROR}/mods/{pid}",
+                         headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
+                         proxies=_proxies())
+        if r.status_code == 200:
+            p = r.json().get("data") or r.json()
+            slug = str(p.get("slug") or "")
+            name = str(p.get("name") or p.get("title") or "")
+    except requests.RequestException:
+        pass
+    if not name:
+        return pid
+    try:
+        from .i18n import get_language
+        if get_language() != "en-US" and slug:
+            name = cn_name(slug, name)
+    except Exception:  # noqa: BLE001
+        pass
+    return name
+
+
+def cf_version_dependencies(project_id: str, file_id: str,
+                            mc_version: str = "", loader: str = "") -> list[dict]:
+    """CF 某文件的 required 前置清单，给详情页「前置」展示用。
+
+    返回 [{"project_id","title","slug","optional":False}]；跳过加载器级 API。
+    """
+    out = []
+    for dpid in _cf_file_required_deps(project_id, file_id):
+        if dpid in _CF_LOADER_API_IDS:
+            continue
+        out.append({"project_id": dpid, "title": cf_project_title(dpid),
+                    "slug": "", "optional": False})
+    return out
+
+
+def _override_companions(project_id: str, mc_version: str,
+                        loader: str) -> list[dict]:
+    """跨源「必需伴随」覆盖：返回附加的 CF 依赖文件清单（已递归解析）。
+
+    仅 Ultimine Unchained(rGNPldmX) 触发，桥到 FTB Ultimine(CF) → FTB Library。
+    """
+    out: list[dict] = []
+    for csrc, cpid in _KNOWN_DEP_OVERRIDES.get(str(project_id), []):
+        if csrc != "curseforge":
+            continue
+        cf = _cf_resolve_dep_file(cpid, mc_version, loader)
+        if not cf:
+            continue
+        out.append(cf)
+        out.extend(resolve_cf_dependencies(cpid, cf["file_id"], mc_version, loader))
+    return out
+
+
+def _cf_existing_pid_map(inst, dest_dir: str) -> dict[str, list[str]]:
+    """{project_id: [已装在 dest_dir 的文件名]}，供依赖重下时删旧版。"""
+    mapping: dict[str, list[str]] = {}
+    if inst is None:
+        return mapping
+    try:
+        from .core import mod_sources
+        reg = mod_sources.load(inst)
+        present = set(os.listdir(dest_dir)) if os.path.isdir(dest_dir) else set()
+        for fn, meta in reg.items():
+            if fn in present:
+                mapping.setdefault(str(meta.get("project_id") or ""), []).append(fn)
+    except Exception:  # noqa: BLE001 - 判定失败按无旧版处理
+        pass
+    return mapping
+
+
+def _cf_download_one(pid: str, fid, dest_dir: str, callback, manifest_out,
+                     existing_by_pid: dict, sha1: str = "") -> str:
+    """下载一个 CF 文件；下载前删掉同 mod 的旧版本 jar，避免双 jar 共存崩游戏。"""
+    for fn in existing_by_pid.get(str(pid), []):
+        p = os.path.join(dest_dir, fn)
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    key = _curseforge_key()
+    if key and fid:
+        path = download_curseforge_file(str(pid), fid, dest_dir,
+                                       callback=callback, sha1=sha1)
+        if manifest_out is not None and path:
+            manifest_out.append({"filename": os.path.basename(path),
+                                "project_id": str(pid)})
+    else:
+        path = _download_cf_keyless(str(pid), fid, dest_dir, callback=callback,
+                                   manifest_out=manifest_out)
+    return path
+
+
+def download_cf_with_deps(project_id, file_id, dest_dir, mc_version: str = "",
+                          loader: str = "", callback=None, manifest_out=None,
+                          with_deps: bool = True, inst=None) -> str:
+    """下载 CF 模组本体 + 其 required 依赖树（含跨源覆盖）。
+
+    round-220：CF 通道终于和 MR 一样会自动拉前置；依赖重下时删掉同 mod 旧版本
+    jar，防止「新旧 FTB Library 共存」继续崩游戏。返回本体文件路径。
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+    existing_by_pid = _cf_existing_pid_map(inst, dest_dir) if inst else {}
+    primary = _cf_download_one(str(project_id), file_id, dest_dir, callback,
+                               manifest_out, existing_by_pid)
+    if not with_deps:
+        return primary
+    for d in resolve_cf_dependencies(str(project_id), str(file_id),
+                                     mc_version, loader):
+        _cf_download_one(d["project_id"], d["file_id"], dest_dir, callback,
+                         manifest_out, existing_by_pid, sha1=d.get("sha1", ""))
+    return primary
 
 
 # ── 模组翻译（round-66）───────────────────────────────────────────────

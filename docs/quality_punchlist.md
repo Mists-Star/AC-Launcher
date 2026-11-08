@@ -1089,6 +1089,19 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
   FTB 整合包在 `classId=6` 下没有本体，属分类边界（切「整合包」即可），
   都不是 bug，不为了「像别人」擅自改已定决策。
 
+### P0 — 装 FTB Ultimine 缺 FTB Library → 启动崩退出码 1 ✅
+
+- **不是网络**：CF 文件元数据完整（relationType=3 即 required）。
+- **根因**：依赖递归解析只有 Modrinth 通道；CF 通道直接下单，而 FTB Ultimine 是
+  CF 独占（448231）、FTB Library / Architectury 分开发布 → 装完只剩本体、缺前置、
+  版本不对就崩。Ultimine Unchained（MR rGNPldmX）是 FTB Ultimine 的 mixin 修复
+  补丁，只声明 Fabric API + Cloth Config，却必须有 FTB Ultimine(CF) + FTB Library。
+- **修**：`resolve_cf_dependencies`（CF required 依赖递归，跳过 Fabric API 等加载器级
+  依赖）+ `_KNOWN_DEP_OVERRIDES`（Ultimine Unchained → FTB Ultimine 跨源桥）+
+  详情页 CF 前置展示 / 询问 + `download_cf_with_deps` 装依赖时删同 mod 旧 jar。
+- **复验**：`tests/test_round220_ftb_deps.py` 13/13（拉 FTB Library、跳过 Fabric API、
+  跨源桥接、删旧 jar、只下本体）。
+
 ### P0 —「一键修复没用 / 修补无反馈」（二次反馈）✅
 
 - 三条入口离屏复现（拦截全部模态框、用 `isHidden()` 而非 `isVisible()`

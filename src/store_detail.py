@@ -1045,19 +1045,37 @@ class StoreDetailPanel(QWidget):
             pass
 
     def _refresh_deps(self, ver: dict | None) -> None:
-        """拉「推荐版本」的前置模组并显示出来。"""
+        """拉「推荐版本」的前置模组并显示出来（MR + CF + 跨源覆盖）。"""
         self.deps_box.setVisible(False)
         self._deps = []
-        if not ver or self._card.get("source") == "curseforge":
-            # CF 的文件接口不暴露依赖（只有 Modrinth 版本带 dependencies）
+        if not ver:
             return
+        src = self._card.get("source", "")
         pid = self._card.get("project_id", "")
-        vid = str(ver.get("id", "") or "")
-        if not pid or not vid:
+        if not pid:
             return
+        inst = self._current_inst()
+        mc = str(getattr(inst, "game_version", "") or "") if inst else ""
+        ld = str(getattr(inst, "loader", "") or "") if inst else ""
+        if ld.lower() == "vanilla":
+            ld = ""
         try:
-            from .net_api import mod_version_dependencies
-            deps = mod_version_dependencies(pid, vid)
+            if src == "curseforge":
+                from .net_api import cf_version_dependencies
+                fid = (ver.get("files") or [{}])[0].get("id") or ver.get("id")
+                deps = cf_version_dependencies(pid, fid, mc, ld)
+            else:
+                from .net_api import (mod_version_dependencies,
+                                      _override_companions, cf_project_title)
+                vid = str(ver.get("id", "") or "")
+                deps = mod_version_dependencies(pid, vid)
+                # round-220：跨源「必需伴随」（Ultimine Unchained → FTB Ultimine）
+                for c in _override_companions(pid, mc, ld):
+                    if not any(str(d.get("project_id")) == c["project_id"]
+                               for d in deps):
+                        deps.append({"project_id": c["project_id"],
+                                     "title": cf_project_title(c["project_id"]),
+                                     "slug": "", "optional": False})
         except Exception:  # noqa: BLE001 - 依赖查询失败不挡住页面
             return
         if not deps:
@@ -1096,14 +1114,19 @@ class StoreDetailPanel(QWidget):
 
         没有前置 → 直接 True（不问）；玩家选「不装」→ False（只下本体）。
         """
-        if self._card.get("source") == "curseforge":
-            return True
         deps = self._deps
         if not deps and ver:
+            src = self._card.get("source", "")
+            pid = self._card.get("project_id", "")
             try:
-                from .net_api import mod_version_dependencies
-                deps = mod_version_dependencies(
-                    self._card.get("project_id", ""), str(ver.get("id", "") or ""))
+                if src == "curseforge":
+                    from .net_api import cf_version_dependencies
+                    fid = (ver.get("files") or [{}])[0].get("id") or ver.get("id")
+                    deps = cf_version_dependencies(pid, fid)
+                else:
+                    from .net_api import mod_version_dependencies
+                    deps = mod_version_dependencies(
+                        pid, str(ver.get("id", "") or ""))
             except Exception:  # noqa: BLE001
                 deps = []
         if not deps:
@@ -1158,7 +1181,8 @@ class StoreDetailPanel(QWidget):
             mc_version = getattr(inst, "game_version", "") or ""
             loader = getattr(inst, "loader", "") or ""
         from .net_api import (curseforge_available, download_cfwidget_file,
-                              download_curseforge_file, download_mod_version_to)
+                              download_curseforge_file, download_mod_version_to,
+                              download_cf_with_deps)
         # round-193：下载前问一句「前置要不要一起装」——玩家不该在进游戏报
         # 缺前置之后才知道这事。
         with_deps = self._ask_deps(v)
@@ -1184,24 +1208,16 @@ class StoreDetailPanel(QWidget):
         # round-111：改用 ProgressWorker，速度行进已有 status 标签
         # （本对话框没有独立进度条，速度是用户明确要的可观测项）。
         if self._card.get("source") == "curseforge":
+            # round-220：CF 通道终于自动拉前置（FTB Ultimine → FTB Library 等），
+            # 并把同 mod 旧版本 jar 删掉，避免新旧 FTB Library 共存崩游戏。
             f0 = (v.get("files") or [{}])[0]
             fid = f0.get("id") or v.get("id")
-            fname = f0.get("filename", "")
-            if curseforge_available():
-                # round-178：CF 文件元数据带 sha1 时落盘前校验；详情页是
-                # 玩家**显式选了版本**，不再用实例版本二次过滤（会误拒）。
-                w = ProgressWorker(download_curseforge_file,
-                                   self._card.get("project_id", ""), fid, dest,
-                                   fname, f0.get("url", ""),
-                                   sha1=f0.get("sha1", ""))
-            else:
-                # keyless channel: forgecdn resolves any file id directly
-                w = ProgressWorker(download_cfwidget_file,
-                                   {"id": fid, "name": fname}, dest,
-                                   manifest_out=self._dl_manifest,
-                                   project_id=str(self._card.get(
-                                       "project_id", "") or
-                                       self._card.get("slug", "")))
+            w = ProgressWorker(
+                download_cf_with_deps,
+                str(self._card.get("project_id", "")), fid, dest,
+                mc_version, loader,
+                manifest_out=self._dl_manifest,
+                with_deps=with_deps, inst=self._current_inst())
         else:
             # round-191：详情页「选择版本下载」同样登记来源，模组列表才能标出来
             self._dl_manifest = []

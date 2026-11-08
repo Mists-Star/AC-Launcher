@@ -8,6 +8,35 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-220（2026-11-08）— 资源中心装 FTB Ultimine 缺 FTB Library → 启动崩退出码 1
+
+> 主理人反馈：装 FTB Ultimine（及其「移植修复版」Ultimine Unchained）后启动直接
+> 崩退出码 1；日志里是旧版 FTB Library 前置 + 旧版 Ultimine 不兼容。
+
+- **根因**：资源中心的依赖递归解析**只有 Modrinth 通道**做了；CurseForge 通道
+  直接下单，而 FTB Ultimine 是 **CF 独占项目（project 448231）**、FTB Library /
+  Architectury 作为 `required` 前置分开发布。于是装 FTB Ultimine 只剩本体，FTB
+  Library 全靠玩家自己凑；版本不对就 `NoSuchMethodError` / `NoClassDefFoundError`
+  → 崩退出码 1。Ultimine Unchained（Modrinth rGNPldmX）是 FTB Ultimine 的 mixin
+  修复补丁，自身只声明 Fabric API + Cloth Config，却**必须有** FTB Ultimine(CF) +
+  FTB Library 才能工作，上游元数据没桥接。
+- **修法**：
+  1. 新增 **CF 依赖解析**（`resolve_cf_dependencies`）：CF 文件元数据自带
+     `dependencies`（relationType），官方 API 与免 key 镜像（mod.mcimirror.top）
+     契约一致、无需 API key；按 `required(relType=3)` 递归拉，跳过 Fabric API 等
+     加载器级依赖（`_CF_LOADER_API_IDS`，实例已自带，不能重下成双 jar）。
+  2. 新增 **跨源「必需伴随」覆盖**（`_KNOWN_DEP_OVERRIDES`）：Ultimine Unchained
+     → FTB Ultimine(CF)，FTB Ultimine 自己的 CF 依赖顺带把 FTB Library 拉进来。
+  3. 详情页「前置」展示与下载前询问**覆盖 CF 通道**（此前 CF 直接 return 不显示）；
+     MR 通道也合并跨源伴随，让 Ultimine Unchained 的前置里能看到 FTB Ultimine。
+  4. `download_cf_with_deps` 装依赖时**删掉同 mod 的旧版本 jar**（`_cf_existing_pid_map`
+     读实例 mod 来源注册表），避免「新旧 FTB Library 共存」继续崩游戏。
+- **判据**（离线桩测试 `tests/test_round220_ftb_deps.py`）：`resolve_cf_dependencies`
+  拉到 FTB Library(438495)、跳过 Fabric API(306612)；`_override_companions` 把
+  Ultimine Unchained 桥到 FTB Ultimine + FTB Library；`download_cf_with_deps` 装依赖时
+  旧版 FTB Library jar 被删除、manifest 记录依赖文件；`with_deps=False` 只下本体。
+  13/13 通过。
+
 ## round-219（2026-11-08）— 崩溃分析「一键修复」点了没反应
 
 > 主理人实机反馈（实例 26.3）：点「一键修复」没有任何反应。
