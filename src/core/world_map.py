@@ -314,10 +314,16 @@ def _top_blocks(root: dict, dv: int) -> tuple[list[str], list[int]]:
     return out, top_y
 
 
-def render_region(path: str) -> tuple[bytes, int, int] | None:
-    """渲染一个 region → ``(RGBA bytes, 未配色方块种类数, 区块数)``。
+def render_region(path: str) -> tuple[bytes, int, int, int] | None:
+    """渲染一个 region → ``(RGBA bytes, 未知方块种类数, 区块数, 损坏槽位数)``。
 
-    RGBA 为 512×512；没有区块的像素 alpha=0（由 UI 填底色）。失败返回 None。
+    RGBA 为 512×512；没有区块的像素 alpha=0（由 UI 填底色）。
+
+    round-214：**一个区块都没解析成功**（文件存在但内容损坏 / LZ4 压缩 /
+    被杀软截断）时返回 ``None``，不再返回一张全透明 RGBA —— 旧实现会让
+    ``load_region_image`` 把这张「看似正常的空白图」写进缓存，玩家看到的
+    就是一张永久空白地图且没有任何错误提示。空 region（本来就没有区块）
+    仍然返回全透明图，因为那是正确结果。
     """
     try:
         fh = open(path, "rb")
@@ -326,6 +332,7 @@ def render_region(path: str) -> tuple[bytes, int, int] | None:
     rgba = bytearray(REGION_BLOCKS * REGION_BLOCKS * 4)
     unknown: set[str] = set()
     chunks = 0
+    failed = 0
     try:
         with fh:
             locs = _chunk_locations(fh)
@@ -334,6 +341,7 @@ def render_region(path: str) -> tuple[bytes, int, int] | None:
                     continue
                 root = _chunk_nbt(fh, sector, count)
                 if not isinstance(root, dict):
+                    failed += 1
                     continue
                 dv = int(root.get("DataVersion") or 0)
                 if dv <= 0:
@@ -368,7 +376,10 @@ def render_region(path: str) -> tuple[bytes, int, int] | None:
                         rgba[i + 3] = 255
     except (OSError, ValueError):
         return None
-    return bytes(rgba), len(unknown), chunks
+    if chunks == 0 and failed > 0:
+        # 全是坏块 / 不支持的压缩 → 这不是一张「空地图」，是解析失败。
+        return None
+    return bytes(rgba), len(unknown), chunks, failed
 
 
 def image_cache_path(world_dir: str, dim: str, rx: int, rz: int,
@@ -400,27 +411,35 @@ def load_region_image(world_dir: str, dim: str, rx: int, rz: int,
     if cache and os.path.isfile(cache):
         img = QImage(cache)
         if not img.isNull():
-            if not with_stats:
-                return img
+            # round-214：缓存必须带「区块数 / 损坏数」才可信。旧版本只有
+            # 两个值，而且会把「整片解析失败」存成全透明 PNG —— 这里把
+            # 旧格式和 broken 标记都判为无效，落到下面重渲染并覆盖。
+            meta_ok = False
+            unknown = chunks = 0
             try:
                 with open(cache + ".meta", "r", encoding="utf-8") as fh:
-                    unknown, chunks = (int(x) for x in fh.read().split(",")[:2])
-                return img, unknown, chunks
+                    parts = [int(x) for x in fh.read().strip().split(",")]
+                if len(parts) >= 3:
+                    unknown, chunks, failed = parts[0], parts[1], parts[2]
+                    if not (chunks == 0 and failed > 0):
+                        meta_ok = True
             except (OSError, ValueError):
-                pass
-            got = render_region(src)
-            return img, (got[1], got[2]) if got else (0, 0)
+                meta_ok = False
+            if meta_ok:
+                if not with_stats:
+                    return img
+                return img, unknown, chunks
     got = render_region(src)
     if got is None:
         return None
-    data, unknown, chunks = got
+    data, unknown, chunks, failed = got
     img = QImage(data, REGION_BLOCKS, REGION_BLOCKS,
                  REGION_BLOCKS * 4, QImage.Format.Format_RGBA8888)
     if cache:
         try:
             img.save(cache, "PNG")
             with open(cache + ".meta", "w", encoding="utf-8") as fh:
-                fh.write("%d,%d" % (unknown, chunks))
+                fh.write("%d,%d,%d" % (unknown, chunks, failed))
         except Exception:  # noqa: BLE001 - 缓存失败不影响显示
             pass
     if with_stats:

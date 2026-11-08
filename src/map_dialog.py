@@ -24,6 +24,8 @@ from .theme import COLORS
 from .worker import Worker
 
 MAX_TILES = 16                 # 一次最多铺的 region 数（4×4）
+MAX_TILES_SIDE = 4             # 连续窗口边长：4×4 = 16 个 region
+_MAX_CANVAS_BYTES = 256 * 1024 * 1024   # 画布硬上限（4×4 正常只有 16 MB）
 ZOOMS = (1, 2, 4, 8)
 REGION_PX = wm.REGION_BLOCKS   # 512
 
@@ -47,13 +49,30 @@ def build_tiles(world_dir: str, dim: str, center) -> dict | None:
         rz0 = int(center[2] // REGION_PX)
     else:
         rx0 = rz0 = 0
-    chosen = sorted(grid, key=lambda g: max(abs(g[0] - rx0), abs(g[1] - rz0)))[:MAX_TILES]
+    # round-214 P1：只铺「以锚点为中心的连续 4×4 窗口」，不能按距离取散点。
+    # 旧实现取 16 个**最近**的 region 再按极值算包围盒 —— 存档里只要有两张
+    # 相距 8000 方块的 region（玩家坐鞘翅/传送就会留下），包围盒就是
+    # 26112×26112 ≈ 2.7 GB 的 QImage：分配失败 → 一块无提示的全白画布，
+    # 分配成功 → 直接顶满内存。
+    half = MAX_TILES_SIDE // 2
+    window = {(x, z)
+              for x in range(rx0 - half, rx0 + MAX_TILES_SIDE - half)
+              for z in range(rz0 - half, rz0 + MAX_TILES_SIDE - half)}
+    chosen = [tuple(g) for g in grid if tuple(g) in window]
+    if not chosen:
+        # 锚点周围没有 region（玩家站在未生成区域）→ 只画最近的一个，
+        # 绝不为了「凑 16 张」把包围盒拉到几百个 region 宽。
+        chosen = [min(grid, key=lambda g: max(abs(g[0] - rx0),
+                                              abs(g[1] - rz0)))]
     minx = min(c[0] for c in chosen)
     maxx = max(c[0] for c in chosen)
     minz = min(c[1] for c in chosen)
     maxz = max(c[1] for c in chosen)
     w = (maxx - minx + 1) * REGION_PX
     h = (maxz - minz + 1) * REGION_PX
+    if w * h * 4 > _MAX_CANVAS_BYTES:
+        # 护栏：即使上面的窗口逻辑被改坏，也不允许分配超过 256 MB 的画布。
+        return None
     canvas = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
     canvas.fill(0)
     painter = QPainter(canvas)
@@ -230,6 +249,8 @@ class MapDialog(QDialog):
         super().__init__(parent)
         self._game_dir = game_dir
         self._worker = None
+        # round-214：每次 _reload 递增；旧 worker 的结果按代号丢弃。
+        self._load_gen = 0
         self._marks: list[tuple[float, float, str]] = []
         self.setWindowTitle(t("map.title"))
         self.resize(920, 700)
@@ -326,12 +347,20 @@ class MapDialog(QDialog):
             return
         self.canvas.set_empty(t("map.loading"))
         self.stats.setText("")
-        self._worker = Worker(build_tiles, world, dim, center)
-        self._worker.finished.connect(self._on_tiles)
-        self._worker.error.connect(self._on_error)
-        self._worker.start()
+        self._load_gen += 1
+        gen = self._load_gen
+        worker = Worker(build_tiles, world, dim, center)
+        # round-214 P1：切世界/维度后旧 worker 不会被取消（build_tiles 没有
+        # 中断点），旧实现把 finished 直连 _on_tiles → 旧图覆盖新画布，
+        # 而 _marks 已经是新世界的玩家/出生点，画面与坐标互相矛盾。
+        worker.finished.connect(lambda res, g=gen: self._on_tiles(res, g))
+        worker.error.connect(lambda err, g=gen: self._on_error(err, g))
+        self._worker = worker
+        worker.start()
 
-    def _on_tiles(self, result) -> None:
+    def _on_tiles(self, result, gen: int = 0) -> None:
+        if gen and gen != self._load_gen:
+            return  # 旧世界/旧维度的迟到结果，丢弃
         if not result:
             self.canvas.set_empty(t("map.no_region"))
             return
@@ -340,5 +369,7 @@ class MapDialog(QDialog):
         n = result.get("unknown") or 0
         self.stats.setText(t("map.legend_unknown", n=n) if n else "")
 
-    def _on_error(self, err: str) -> None:
+    def _on_error(self, err: str, gen: int = 0) -> None:
+        if gen and gen != self._load_gen:
+            return
         self.canvas.set_empty(t("map.err_open_world", err=err))

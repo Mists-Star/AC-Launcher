@@ -391,7 +391,7 @@ write_region(mca, [(0, 0, chunk_nbt(0, 0, 64))])
 got = wm.render_region(mca)
 check("region 渲染返回结果", got is not None)
 if got:
-    rgba, unknown, chunks = got
+    rgba, unknown, chunks = got[:3]
     check("RGBA 长度 = 512×512×4", len(rgba) == 512 * 512 * 4, len(rgba))
     check("解析到 1 个区块", chunks == 1, chunks)
     check("已配色方块无未知项", unknown == 0, unknown)
@@ -412,6 +412,19 @@ check("第二次读取命中磁盘缓存",
 check("不存在的 region 返回 None",
       wm.load_region_image(world, "overworld", 5, 5) is None)
 
+# round-214：region 结构在、但区块内容全坏 → 必须返回 None，不能伪装成
+# 一张「全透明但合法」的地图写进缓存（玩家会看到永久空白且无任何提示）。
+bad = wm.region_path(world, "overworld", 1, 1)
+_bad_hdr = bytearray(4096)
+_bad_hdr[0:4] = ((2 << 8) | 1).to_bytes(4, "big")   # slot0 → sector 2, 1 sector
+_bad_body = b"\x00\x00\x00\x10" + b"\x02" + b"\xff" * 24
+with open(bad, "wb") as fh:
+    fh.write(bytes(_bad_hdr) + b"\x00" * 4088 + _bad_body)
+check("整片损坏的 region 渲染返回 None（不产假空白图）",
+      wm.render_region(bad) is None)
+check("整片损坏的 region 不进地图缓存",
+      wm.load_region_image(world, "overworld", 1, 1) is None)
+
 # 未知方块（模组方块）→ 计入未知种类
 mod_chunk = chunk_nbt(0, 0, 64, "mymod:machine")
 write_region(mca, [(0, 0, mod_chunk)])
@@ -419,9 +432,23 @@ got2 = wm.render_region(mca)
 check("模组方块计入未知种类", got2 is not None and got2[1] == 1,
       "" if got2 is None else str(got2[1]))
 
+# round-214：存档里只要有一张远处的 region，旧实现就按极值把画布拉到
+# 26112×26112（2.7 GB）。现在只铺锚点周围的连续 4×4 窗口。
+far = wm.region_path(world, "overworld", 50, 50)
+with open(far, "wb") as fh:
+    fh.write(b"\x00" * 4096)
+import src.map_dialog as md  # noqa: E402
+_tiles = md.build_tiles(world, "overworld", (0, 64, 0))
+check("地图画布限制在 4×4 窗口内（不再按极值铺满）",
+      _tiles is not None and _tiles["image"].width() <= 2048
+      and _tiles["image"].height() <= 2048,
+      "" if _tiles is None else "%dx%d" % (
+          _tiles["image"].width(), _tiles["image"].height()))
+
 # region 网格 / 世界列表 / 出生点
-check("region_grid 解析文件名", wm.region_grid(world, "overworld") == [(0, 0)],
-      str(wm.region_grid(world, "overworld")))
+_grid = wm.region_grid(world, "overworld")
+check("region_grid 解析文件名", (0, 0) in _grid and (50, 50) in _grid,
+      str(_grid))
 check("无 region 的维度返回空", wm.region_grid(world, "nether") == [])
 
 saves = os.path.join(tmp, "game", "saves")
@@ -450,6 +477,13 @@ check("世界名回退目录名", info["name"] == "MyWorld", info["name"])
 
 # ── 5. 地图对话框（P2 接入层）────────────────────────────────────────────
 print("== 地图对话框 ==")
+# round-214：上面为了验证「损坏 region / 远处 region」临时加了两个文件，
+# 拼图断言假设只有一个 region，这里先清掉。
+for _p in (bad, far):
+    try:
+        os.remove(_p)
+    except OSError:
+        pass
 from src.map_dialog import MapDialog, build_tiles  # noqa: E402
 
 tiles = build_tiles(world, "overworld", None)
@@ -482,6 +516,17 @@ check("地图铺进画布（512 缩放 1×时有图）",
       not dlg2.canvas._pix.isNull() and dlg2.canvas._pix.width() == 512,
       0 if dlg2.canvas._pix.isNull() else dlg2.canvas._pix.width())
 check("玩家与出生点各一个标记", len(dlg2._marks) == 2, len(dlg2._marks))
+
+# round-214：切世界/维度后旧 worker 的迟到结果不得覆盖画布
+from PySide6.QtGui import QImage as _QImage  # noqa: E402
+_stale = {"image": _QImage(32, 32, _QImage.Format.Format_ARGB32),
+          "origin": (0, 0), "unknown": 0}
+dlg2.canvas.set_empty("KEEP")
+dlg2._load_gen = 7
+dlg2._on_tiles(_stale, 6)
+check("旧 gen 的地图结果被丢弃", dlg2.canvas._pix.isNull())
+dlg2._on_tiles(_stale, 7)
+check("当前 gen 的结果正常上屏", not dlg2.canvas._pix.isNull())
 dlg2.close()
 dlg.close()
 

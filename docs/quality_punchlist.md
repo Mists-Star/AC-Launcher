@@ -1478,9 +1478,24 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 | **P1** | authlib `.version` 旁路让固定 sha256 失效，且每次启动用「zip 能打开」覆盖 | `core/authlib.py` 删 `_version_of` / `latest_authlib` / `_fetch_to`；`ensure_authlib` 只认固定版 + 固定 sha；`update_authlib` 改为「确保固定版存在且校验通过」 | 坏 jar + `.version` + 离线 → `None`（旧实现返回该 jar）；sha 匹配 → 返回路径；三个死函数已不存在 |
 
 **本轮未修**：`aclive` 无鉴权 / 不校验 Origin（要同时改 `tools/aclive/live.py`
-控制端加 token，否则调试流断；默认不启用）。其余 §19.2 的 P1（地图静默空白、
-包围盒 2.7GB QImage、BGM 顺序播放、扫描 Worker、导入复制 N 份、模块 `..` 越界、
-联机密钥明文、节点生命周期、Worker 跨线程改控件）仍开放。
+控制端加 token，否则调试流断；默认不启用）。
+
+---
+
+## 二十一、round-214：地图链三条 P1（2026-11-08 14:xx）
+
+| # | §19.2 条目 | 修法 | 复验 |
+|---|---|---|---|
+| 1 | 解析失败被吞成「全透明 PNG」并写缓存 | `world_map.render_region` 返回 4 元组（多一个 `failed` 槽位）；`chunks==0 and failed>0` → 返回 `None`；`load_region_image` 的 `.meta` 升级为 3 值，旧 2 值 / broken 缓存判无效重渲染 | 造「slot 指向坏数据」的 region → 渲染与取图都 `None`，不写缓存 |
+| 2 | 包围盒只取最近 16 个 region 的极值，可申请 2.7 GB QImage | `map_dialog.build_tiles` 改为锚点周围**连续 4×4 窗口**；无 region 时只画最近一个；`_MAX_CANVAS_BYTES=256MB` 硬上限 | `r.0.0` + `r.50.50` → 画布 `1024×1024`（旧实现会是 26112²） |
+| 3 | 切世界/维度后旧 worker 结果覆盖画布 | `_load_gen` 递增 + 闭包带 gen，`_on_tiles/_on_error` 丢弃旧 gen | 投递旧 gen → 画布保持空；当前 gen 正常上屏 |
+
+`tests/test_schematic_tools.py` **76 项全过**（新增 4 条）。
+
+**仍开放（§19.2）**：BGM 顺序播放实际单曲循环、扫描面板关闭后 Worker 不取消、
+「一键导入全部」复制 N 份、模块 legacy `id=".."` 越界写、联机密钥明文 + 回退邀请码、
+EasyTier 节点生命周期绑对话框、下载进度跨线程改 QWidget、`aclive` 鉴权、
+`map_cache` 只增不删、区块级解压上限。
 
 > ☠ 双轨欠账仍在：以上是代码轨 + 离屏轨；没有联网真机跑完整链路。
 

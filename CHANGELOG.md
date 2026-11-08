@@ -8,6 +8,24 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-214（2026-11-08）— 地图链三条 P1
+
+> 主理人「行」= 按上一轮建议修地图链。共同点：**不崩，但静默给玩家错东西**。
+
+| 位置 | 问题 | 修法 | 判据 |
+|---|---|---|---|
+| `src/core/world_map.py:315` | region 结构在、区块内容全坏（损坏 / LZ4 / 被杀软截断）时，返回一张**全透明 RGBA** 并写进缓存 → 玩家看到永久空白地图且零提示 | `render_region` 返回 4 元组 `(rgba, unknown, chunks, failed)`；`chunks==0 and failed>0` 直接返回 `None`，不产假图、不写缓存。缓存 `.meta` 升级为 3 值；旧 2 值 / broken 标记的缓存判无效并重渲染 | 造「slot 指向坏数据」的 region → `render_region` 与 `load_region_image` 都返回 `None` |
+| `src/map_dialog.py:46` | 包围盒按「最近 16 个 region」的极值算 → 存档里两张相距 8000 方块的 region 就能申请 **26112×26112 ≈ 2.7 GB** QImage：失败是无提示全白画布，成功则顶满内存 | 只铺**以锚点为中心的连续 4×4 窗口**；锚点周围没 region 时只画最近一个；再加 `256 MB` 画布硬上限兜底 | 存档里放 `r.0.0` + `r.50.50`，`build_tiles` 画布 `1024×1024`（窗口内 2 张），不再按极值铺满 |
+| `src/map_dialog.py:329` | 切世界/维度后旧 worker 不取消、结果也不判代号 → 旧图覆盖新画布，而 `_marks` 已是新世界的坐标，画面与坐标互相矛盾 | `_load_gen` 递增，`finished/error` 用闭包带 gen，`_on_tiles/_on_error` 里 `gen != _load_gen` 直接丢弃 | 手动投递旧 gen 的结果 → 画布保持空态；当前 gen 正常上屏 |
+
+**回归**：`tests/test_schematic_tools.py` 从 74 项扩到 **76 项全过**（新增损坏 region ×2、4×4 窗口、
+旧 gen 丢弃、当前 gen 上屏）。
+
+**同轮未修**：`map_cache` 只增不删（长期累积）、NBT 区块解压的 512 MB 全局上限没有「区块级小上限」、
+`_probe_ip` 取错网卡。仍在 `docs/quality_punchlist.md` §19.2。
+
+---
+
 ## round-213（2026-11-08）— 修 3 条安全/资源 P0·P1
 
 > 主理人「随便你，开吧」。按「能离线验证的先做」排序：壁纸泄漏 → authlib 旁路 →
