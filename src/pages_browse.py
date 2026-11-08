@@ -608,7 +608,11 @@ class StorePage(QWidget):
         return None
 
     def _on_target_changed(self, _index: int):
-        """目标实例变了 → 版本/加载器隐含筛选也变，防抖后重搜（§2.3）。"""
+        """目标实例变了 → 更新侧栏提示与详情页推荐口径，防抖后重搜。
+
+        round-209：搜索范围不再随目标实例隐式收窄，但卡片兼容性徽章 /
+        详情页推荐版本仍按实例计算，因此切换实例仍需刷新列表。
+        """
         self.filter_panel.set_target(self._target())
         self._search_timer.start()
 
@@ -633,19 +637,19 @@ class StorePage(QWidget):
 
     # ---- round-208：筛选 / 防抖去重 / 真分页 / SWR ----
     def _collect_filters(self) -> dict:
-        """侧栏显式筛选 + 目标实例隐式版本/加载器回退（§2.3）。
+        """只收集玩家在侧栏显式选择的筛选（round-209）。
 
-        玩家在侧栏选了值就优先；没选才用目标实例的 MC 版本与加载器
-        下推服务端，vanilla 视为「不加加载器过滤」。
+        上游 prism:ModFilterWidget.ui:198-224 与 pclce:PageComp.xaml:33-106
+        的版本 / 加载器都是玩家在控件里**显式选**的，从不在玩家没选时按当前
+        实例偷偷收窄。round-208 曾自动把目标实例的 MC 版本与加载器下推服务端，
+        联网实测把 CF「FTB」从 409 条砍到 58 条（-86%）、「FTB Quests」从
+        140 砍到 27 条，FTB 官方 Forge/NeoForge 版本整批消失，且 can_next
+        变 False 直接翻不到底 —— 这是主理人报的「一部分 mod 搜不到」主因。
+
+        版本 / 加载器仍然参与详情页推荐版本与卡片兼容性徽章，只是不再静默
+        改变搜索范围；玩家想按当前实例筛，在侧栏选版本 / 加载器即可。
         """
         f = dict(self.filter_panel.get_filter())
-        inst = self._target()
-        if inst is not None:
-            if not f.get("game_version"):
-                f["game_version"] = str(getattr(inst, "game_version", "") or "")
-            if not f.get("loader"):
-                ld = str(getattr(inst, "loader", "") or "vanilla").lower()
-                f["loader"] = "" if ld == "vanilla" else ld
         self._filters = f
         return f
 

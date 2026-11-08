@@ -76,9 +76,16 @@ check("PageSize=40 由 STORE_PAGE_SIZE 驱动",
       "STORE_PAGE_SIZE" in page_src and ss.STORE_PAGE_SIZE == 40)
 check("双源游标 / 累积结果传入数据层",
       "self._store_cursors, self._store_results, meta, on_source" in page_src)
-check("目标实例版本/加载器下推服务端（§2.3）",
-      "f[\"game_version\"] = str(getattr(inst, \"game_version\"" in page_src
-      and "f[\"loader\"] = \"\" if ld == \"vanilla\" else ld" in page_src)
+# 只检查 _collect_filters 自身：_download / _open_detail 合法调用 _target()，
+# 不能因为别处有 inst = self._target() 就判失败。
+collect_src = ast.get_source_segment(
+    page_src, next(n for n in cls.body
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_collect_filters")) or ""
+check("目标实例版本/加载器由玩家显式选择，不隐式下推（round-209）",
+      "self._target()" not in collect_src
+      and "getattr(inst" not in collect_src
+      and "setPlaceholderText(v)" in filter_src)
 check("CF 服务端参数四段齐备",
       all(k in search_src for k in ("gameVersion", "modLoaderType",
                                     "categoryId", "sortField", "pageSize")))
@@ -220,8 +227,11 @@ try:
           and isinstance(p.splitter.widget(1), type(p._list_view)))
     f = p._collect_filters()
     check("默认来源仍是 all（round-140 决策不被偷改）", f["source"] == "all")
-    check("隐含筛选带出目标实例版本与加载器",
-          f["game_version"] == "1.20.1" and f["loader"] == "fabric")
+    check("默认不隐式带出目标实例版本与加载器（round-209）",
+          f["game_version"] == "" and f["loader"] == "",
+          "got %r / %r" % (f["game_version"], f["loader"]))
+    check("目标实例版本仍作为侧栏 placeholder 提示可见",
+          p.filter_panel.version_combo.placeholderText() == "1.20.1")
     check("页码器首屏：第 1 页 / 上一页禁用 / 下一页可用",
           not p.page_prev_btn.isEnabled() and not p.page_first_btn.isEnabled())
 

@@ -56,7 +56,12 @@ check("_fix_all 里没有 info(", "info(" not in fix_all_body)
 check("_fix_all 会调用 _note", "_note(" in fix_all_body)
 
 print("② 反馈行做得醒目")
-check("反馈行有底色/边框样式", "border-radius" in src and "note_lbl" in src)
+# round-209：样式抽到共享 fix_feedback.FeedbackBar，三条入口共用一套。
+fb_src = io.open(os.path.join(HERE, "src", "fix_feedback.py"),
+                 encoding="utf-8").read()
+check("反馈行有底色/边框样式且来自共享组件",
+      "border-radius" in fb_src and "border-left" in fb_src
+      and "FeedbackBar(self)" in src and "note_lbl" in src)
 
 print("③ 运行时：修复真的生效 + 有反馈")
 from PySide6.QtWidgets import QApplication  # noqa: E402

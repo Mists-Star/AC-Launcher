@@ -2032,32 +2032,38 @@ class InstancesPage(QWidget):
 
         网络动作放 Worker，避免卡 UI；结果是结构化终态（成功 / 失败阶段 /
         jar 过多跳过），不再误报「依赖齐全」。
+        round-209：以前全程只有模态 info/warn —— frameless 主窗口里可能弹到
+        后面，玩家看到的就是「点了没反应、修补没提示」。现在和另外两条一键
+        修复入口共用 fix_feedback.report()（主窗口浮层 toast），并在点击瞬间
+        就给出「正在处理」。
         """
-        from .win_rounded import info, warn
+        from .fix_feedback import report, summarize
         from .worker import Worker
         from .core import mod_repair
 
+        report(self, t("fix.progress"), "busy")
         scan = mod_repair.scan_missing(inst)
         if scan["skipped"]:
-            warn(self, t("health.title"),
-                 t("crash.deps_skipped", n=scan["jar_count"]))
+            report(self, t("crash.deps_skipped", n=scan["jar_count"]), "warn")
             return
-        if not scan["missing"]:
-            info(self, t("health.title"), t("crash.deps_ok"))
+        missing = scan["missing"]
+        if not missing:
+            report(self, t("fix.deps_none"), "info")
             return
+        report(self, t("fix.deps_start", n=len(missing)), "busy")
 
         def _done(result):
-            info(self, t("health.title"),
-                 t("instances.repair_deps_result",
-                   msg=result.get("message", "")))
+            ok = len(result.get("downloaded") or [])
+            fail = len(result.get("failed") or [])
+            text, tone = summarize(ok, fail)
             if result.get("failed"):
-                warn(self, t("health.title"),
-                     "\n".join(mod_repair.failed_lines(result)))
+                text += "\n" + "\n".join(mod_repair.failed_lines(result))
+            report(self, text, tone)
 
-        self._repair_worker = Worker(mod_repair.repair_missing, inst)
+        self._repair_worker = Worker(mod_repair.repair_missing, inst, missing)
         self._repair_worker.finished.connect(_done)
         self._repair_worker.error.connect(
-            lambda e: warn(self, t("health.title"), str(e)))
+            lambda e: report(self, str(e), "warn"))
         self._repair_worker.start()
 
     def _duplicate(self, inst: Instance):

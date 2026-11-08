@@ -88,9 +88,13 @@ def filters_key(filters: dict | None) -> str:
     """Stable cache-key fragment. Sort and every filter must enter the key,
     otherwise changing sort/filter silently keeps showing the old page."""
     f = filters or {}
+    # ``source`` must be part of the key (round-209): the page-level SWR key
+    # and the request-dedupe key both derive from this fragment. Without it,
+    # switching "All / Modrinth / CurseForge" reuses the previous source's
+    # snapshot and never issues a new request — the filter looks dead.
     return ":".join(
         "%s=%s" % (k, str(f.get(k) or ""))
-        for k in ("game_version", "loader", "category_id",
+        for k in ("source", "game_version", "loader", "category_id",
                   "category_tag", "sort")
     )
 

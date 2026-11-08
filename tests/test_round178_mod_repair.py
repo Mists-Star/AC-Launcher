@@ -141,17 +141,23 @@ with tempfile.TemporaryDirectory() as td:
 # ── 6. UI 接线静态判据 ──────────────────────────────────────────────
 cd = read("src/crash_dialog.py")
 pi = read("src/pages_instances.py")
+# round-209：汇总终态改由共享 fix_feedback.summarize 生成，并写进页内反馈条；
+# 判据按新链路等价化（仍要求区分「可自动 / 需手动」，不再只钉字面 key）。
 check("崩溃弹窗一键修复有汇总终态（不再只调 deps）",
-      "crash.repair_all_note" in cd and "_repair_all" in cd
-      and "for k in (\"java_version\", \"out_of_memory\"" in cd)
+      "summarize(" in cd and "_repair_all" in cd
+      and "for k in (\"java_version\", \"out_of_memory\"" in cd
+      and "report(self, t(\"fix.progress\"), \"busy\")" in cd)
 check("崩溃弹窗跳过扫描时给明确提示",
       "crash.deps_skipped" in cd and "mod_repair.scan_missing" in cd)
 check("崩溃弹窗失败明细用结构化阶段",
       "failed_lines(result)" in cd)
 check("实例右键新增「补装缺失依赖」入口",
       "instances.repair_deps" in pi and "def _repair_mod_deps" in pi)
-check("右键入口走统一模块",
-      "Worker(mod_repair.repair_missing, inst)" in pi)
+# round-209：显式传入扫描出的 missing，避免后台重复扫一遍；同时改用共享
+# report() 汇报，不再只靠模态 info/warn。
+check("右键入口走统一模块且结果可见",
+      "Worker(mod_repair.repair_missing, inst, missing)" in pi
+      and "fix_feedback import report, summarize" in pi)
 
 zh, en = i18n._STRINGS["zh-CN"], i18n._STRINGS["en-US"]
 new_keys = {"crash.deps_skipped", "crash.repair_all_note",

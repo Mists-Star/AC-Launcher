@@ -181,9 +181,22 @@ HMCL 同构：`hmcl:…/ModrinthRemoteAddonRepository.java:149-163`（`project_t
 
 - **AC 落地点**：`_cf_page()` / `search_curseforge()` / `search_mods()` 统一新增可选
   `game_version`、`loader`、`category_id`、`sort` 形参；`search_all()` 透传；
-  `StorePage._load()` 从 `_target()`（`src/pages_browse.py:599-628`）取目标实例的 MC 版本与加载器。
+  `StorePage._load()` 只取**侧栏显式筛选**（round-209 修订，见下）。
 - **断言点**：构造出的 URL 参数与上游四段一一对应；**不得**出现「拉回 N 条再本地筛」的
-  `_cf_pool` 式回退（round-207 已废弃，见 `net_api.py:1551-1562` 的注释）。
+  `_cf_pool` 式回退（round-207 已废弃，见 `net_api.py:1551-1562` 的注释）；
+  **默认请求不得携带 `gameVersion` / `modLoaderType`**（round-209 回归红线）。
+
+> **round-209 修订（规格纠错，2026-11-08）**：本条初版写了「`_load()` 从
+> `_target()` 取目标实例的 MC 版本与加载器」，落地成「玩家什么都没选也按当前
+> 实例静默收窄搜索」。这是对上游的误读 —— `prism:ModFilterWidget.ui:198-224`
+> 与 `pclce:PageComp.xaml:33-106` 的版本 / 加载器**都是玩家显式选的**，上游没有
+> 「按当前实例偷偷过滤」这回事；HMCL 的 `gameVersion` 同样来自 `args.versions`。
+> 联网 A/B 实测：CF「FTB」409 → 58 条（-86%）、「FTB Quests」140 → 27 条且
+> `can_next=False`，FTB 官方 Forge/NeoForge 版本整批消失（主理人当日报「一部分
+> mod 搜不到」）。
+> **现行口径**：`_collect_filters()` 只取侧栏值；`set_target()` 只用 editable
+> combo 的 `setPlaceholderText()` 给提示，不产生真实筛选；版本 / 加载器继续用于
+> 详情页推荐版本与卡片兼容性徽章。断言见 `tests/test_round209_store_regression.py`。
 
 ### 2.4 排序映射（不再写死一个数字）
 

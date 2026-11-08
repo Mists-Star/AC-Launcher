@@ -8,6 +8,89 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-209（2026-11-08）— 修复「一部分 mod 搜不到（FTB 系列）」
+
+> 主理人真机反馈：资源中心整页重做后，FTB 系列搜不到。
+> **结论：不是网速、不是源挂了（所有请求 HTTP 200），是默认搜索被静默收窄了。**
+
+**联网 A/B 证据**（`_scratch/upstream/diag_ftb*.log`，同一 MCIM 镜像、同一关键词，
+每次只改一个参数）
+
+| 请求 | CF `FTB` total | CF `FTB Quests` total | MR `FTB` total |
+|---|---|---|---|
+| 不带过滤 | **409** | **140** | **96** |
+| 只加 `gameVersion=1.20.1` | 183 | 88 | 61 |
+| 只加 `modLoaderType=4`（fabric） | 91 | 41 | — |
+| 两者都加（round-208 默认） | **58** | **27** | **29** |
+
+`FTB Quests` 在旧默认下 `can_next=False`（29 条直接翻不到底）；CF 首项从
+`FTB Library (NeoForge)` 变成 `FTB XMod Compat`，玩家视觉上就是「FTB 系列不见了」。
+
+**P0 根因 1 — 默认隐式过滤（对上游规格的误读）**
+`StorePage._collect_filters()` 在玩家什么筛选都没选时，自动把目标实例的
+MC 版本 / 加载器下推服务端；`StoreFilterPanel.set_target()` 还用
+`setCurrentText(v)` 把实例版本填进可见下拉框，`get_filter()` 又把这段「提示」
+当成真实筛选。而上游 `prism:ModFilterWidget.ui:198-224`、`pclce:PageComp.xaml:33-106`
+的版本 / 加载器**全是玩家显式选的**，从没有「按当前实例偷偷收窄」这回事。
+另外主理人最早要求的「随版本加载器变化」指的是**详情页推荐版本**，不是搜索列表范围。
+
+- 修：`_collect_filters()` 只取侧栏显式值；`set_target()` 改成 editable combo 的
+  `setPlaceholderText(v)`（看得见提示，不进 `currentText()`、不进请求）。
+  版本 / 加载器仍参与详情页推荐版本与卡片兼容性徽章，侧栏显式选择仍能下推服务端。
+
+**P0 根因 2 — 切来源像是死的**
+`filters_key()` 漏了 `source`，而页面级 `_swr_key()` / `_request_key()` 都由它派生：
+从「全部」切到「仅 CurseForge」时 key 不变 → SWR 直接复用上一源的快照、不发请求。
+- 修：`filters_key()` 纳入 `source`，切来源必定换 key 并重搜。
+
+**刻意不改的两点**（避免为了「像别人」反而制造新偏差）
+
+- 搜索结果里 Modrinth 的第三方 fix / compat 排在 CurseForge 官方本体前面，是
+  `pclce:PCL.Launcher.Core/Comp/ProjectQuery.cs:604` 的 `.OrderBy(x => x.FromCurseForge)`
+  同款行为，不是 bug。想看 FTB 官方本体，把侧栏「来源」切到 **CurseForge** 即可
+  （实测首三项就是 `FTB Library / FTB Teams / FTB Quests (NeoForge)`）。
+- `FTB StoneBlock 4` / `FTB Evolution 2` 是**整合包**：`classId=6` 下只有 2~3 条
+  本地化 / Companion，`classId=4471` 才有 367 条 FTB 整合包。切顶部「整合包」分类即可。
+
+**验证**
+
+- 新增 `tests/test_round209_store_regression.py`（27 项）：含一个**会按请求参数
+  过滤的假服务端**重放「官方本体消失」，并证明默认路径不再发送
+  `gameVersion` / `modLoaderType`；显式筛选仍下推四段；切来源 key 变化且真重搜。
+- 按新行为重写 round-208 里两条钉住旧隐式过滤的断言（其中一条曾误把
+  `_download` 里合法的 `_target()` 调用判失败，改为只检查 `_collect_filters` 自身）。
+- 全量回归 **78/78**、PII zero、IA 4 页 / 29 条、i18n `1993=1993`。
+- 联网复验：默认 `FTB` CF **58 → 409** / MR **29 → 96**，官方本体全部回来；
+  `FTB Quests` CF **27 → 140**、`can_next` 恢复 True，耗时 2.4s 无 partial。
+
+### round-209 追加（同日）— 「mod 一键修复没用 / 修补无反馈」二次修复
+
+> 主理人接着报「mod 一键修复按钮没有用，而且修复无反馈」。
+> 不猜是哪个按钮，把**三条入口全部离屏复现**（拦截所有模态框，测玩家实际能
+> 看见什么；探针先用 `isHidden()` 校正过，避免顶层窗口未 show 造成假阴性）。
+
+| 入口 | 修复前实测 | 根因 |
+|---|---|---|
+| 崩溃分析「一键修复」（补 mod 依赖） | 只有一行 `status` 小灰字，且被异步结果覆盖；点击瞬间就写「已自动补装缺失依赖」 | 无独立反馈区 + 谎报成功 + 对 Java/内存问题什么都不做也不说 |
+| 实例体检「一键修复安全项」 | 反馈条其实可见（round-194 已修），但样式/逻辑是另一套 | 三处各写一份，违反「相同功能导向同一实现」 |
+| 实例右键「补装缺失依赖」 | **页内零反馈**，只有 `info()` / `warn()` 模态框 | frameless 窗口里弹窗可能跑到后面，正是 round-194 修过却没铺开的老病根 |
+
+- 新增 `src/fix_feedback.py`：`FeedbackBar` / `attach()` / `report()` /
+  `summarize()` 单一实现。页内面板写反馈条，主窗口页走浮层 toast，最后才兜底
+  模态；**永远不阻塞、不会藏在窗口后面**。
+- 崩溃分析：加可见反馈条；点击瞬间显示「正在补装 N 个缺失依赖…」（不再谎报）；
+  异步完成给出 `已自动处理 {ok} 项 · 失败 {fail} 项 · 需手动处理 {manual} 项`
+  的汇总终态，失败附逐条阶段明细；Java / 内存 / 加载器不匹配明确列为需手动，
+  不再假装全修好。
+- 实例右键：结果改走浮层 toast，点击即时反馈 + 终态汇总；`Worker` 显式传
+  `scan["missing"]`，不再让后台线程重复扫一遍。
+- 体检：反馈条换成共享 `FeedbackBar`；`label_kwargs` 缺参数时兜底，不再把
+  `{advised}` 这类占位符漏进玩家 UI。
+- i18n 新增 7 组中英对称键（`fix.*`），`2000 = 2000`。
+- 验证：`tests/test_round209_fix_feedback.py` 24 项离屏点击断言（含失败分支、
+  全零分支、无缺失依赖分支）；round-178 / 194 的 3 条旧静态断言按新链路等价化；
+  全量回归 **79/79**、文案门禁、i18n 对称、PII zero、IA `--check` 全过。
+
 ## round-208（2026-11-08）— 阶段二：整套对齐落地（数据层 + 整页重做 + IA 护栏）
 
 **执行拍板**：真页码器（PCL-CE）/ 详情保留 `_stack` 整页切换 / 默认「全部」双源不变

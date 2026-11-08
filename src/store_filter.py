@@ -226,20 +226,19 @@ class StoreFilterPanel(QWidget):
         self.filterChanged.emit()
 
     def set_target(self, inst) -> None:
-        """Seed the editable version box hint from the target instance.
+        """Show the target instance's MC version as a placeholder hint ONLY.
 
-        Only fills an empty box: an explicit player filter always wins.
+        round-209: previously this seeded the editable version box with the
+        instance version, and ``get_filter()`` read the box text as a real
+        filter — so a "hint" silently narrowed every default search to one
+        MC version.
+        ``QComboBox.setPlaceholderText()`` on an editable box is visible to the
+        player but does NOT enter ``currentText()``, so it cannot leak into the
+        HTTP request. The player still picks an explicit version/loader in the
+        sidebar when they actually want server-side filtering.
         """
-        if inst is None or self.version_combo.currentText():
-            return
-        v = str(getattr(inst, "game_version", "") or "")
-        if not v:
-            return
-        self._guard = True
-        if self.version_combo.findText(v) < 0:
-            self.version_combo.addItem(v, v)
-        self.version_combo.setCurrentText(v)
-        self._guard = False
+        v = str(getattr(inst, "game_version", "") or "") if inst is not None else ""
+        self.version_combo.setPlaceholderText(v)
 
     def get_filter(self) -> dict:
         """Plain dict consumed by ``StorePage._filters()`` and by

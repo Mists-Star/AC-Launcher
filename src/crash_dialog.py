@@ -16,7 +16,8 @@ from PySide6.QtCore import Qt, Signal
 from .theme import COLORS, RoundedCard
 from .icons import icon
 from .i18n import t
-from .win_rounded import _msgbox, info, warn
+from .win_rounded import _msgbox
+from .fix_feedback import attach, report, summarize
 from .worker import Worker
 from . import crash_analysis as crash
 from .instances import manager
@@ -201,6 +202,12 @@ class CrashAnalyzerPanel(QWidget):
 
         root.addLayout(foot)
 
+        # round-209：一键修复的可见反馈条。以前结果只写进一行 status 小灰字，
+        # 既会被异步 Worker 覆盖，也可能停在 hidden 状态；确认/告警弹窗在
+        # frameless 窗口里还可能跑到后面，玩家就看到「点了没反应」。
+        self.fix_note = attach(root, self)
+        self._repair_manual: list[str] = []
+
         # ☠ round-197：frameless 只在**窗口模式**启用 —— 页内面板套 frameless
         # 会把控件当成窗口处理（标题栏、圆角、拖拽），在页面里表现为布局跑偏。
         self._frameless = None
@@ -249,6 +256,7 @@ class CrashAnalyzerPanel(QWidget):
 
     def _on_analyzed(self, findings: list[crash.CrashFinding]):
         self._findings = findings
+        self._repair_manual = []
         self.bar.setVisible(False)
         self.analyze_btn.setEnabled(True)
         # clear — takeAt removes every item (widgets AND spacers) so repeated
@@ -295,26 +303,27 @@ class CrashAnalyzerPanel(QWidget):
         self._vbox.addStretch(1)
 
     # ------------------------------------------------------------- repairs
-    def _repair_deps(self, _finding=None):
+    def _repair_deps(self, _finding=None) -> bool:
         """Scan mods dir for missing deps, then download them (Modrinth).
 
         round-178：改走 ``core.mod_repair`` 的唯一实现。旧路径把
         「jar 过多导致深扫被跳过」当成「依赖齐全」，且失败原因全折叠成
         一个 modid，玩家分不清「搜不到」还是「下载失败」。
+        round-209：所有终态改用页内可见反馈条，返回「是否启动了后台任务」，
+        让 ``_repair_all`` 能区分「异步中」与「当场就能汇总」。
         """
         if self.inst is None:
-            warn(self, t("crash.title"), t("crash.no_instance"))
-            return
+            report(self, t("crash.no_instance"), "warn")
+            return False
         from .core import mod_repair
         scan = mod_repair.scan_missing(self.inst)
         if scan["skipped"]:
-            warn(self, t("crash.title"),
-                 t("crash.deps_skipped", n=scan["jar_count"]))
-            return
+            report(self, t("crash.deps_skipped", n=scan["jar_count"]), "warn")
+            return False
         missing = scan["missing"]
         if not missing:
-            info(self, t("crash.title"), t("crash.deps_ok"))
-            return
+            report(self, t("fix.deps_none"), "info")
+            return False
         if not _msgbox(
             self, t("crash.deps_found_title"),
             t("crash.deps_found_body", n=len(missing)),
@@ -322,21 +331,25 @@ class CrashAnalyzerPanel(QWidget):
             icon="question",
             buttons=(t("crash.btn_download"), t("common.cancel")),
         ) == t("crash.btn_download"):
-            return
+            report(self, t("common.cancel"), "info")
+            return False
+        report(self, t("fix.deps_start", n=len(missing)), "busy")
         self.bar.setVisible(True)
         self.status.setText(t("crash.deps_fixing"))
         self._worker = Worker(self._fix_deps_worker, missing)
         self._worker.finished.connect(self._on_deps_done)
-        self._worker.error.connect(lambda e: self.status.setText(str(e)))
+        self._worker.error.connect(
+            lambda e: report(self, str(e), "warn"))
         self._worker.start()
+        return True
 
     def _fix_deps_worker(self, missing: list[str]):
         from .core import mod_repair
         return mod_repair.repair_missing(self.inst, missing)
 
     def _on_deps_done(self, result):
-        downloaded = result.get("downloaded", [])
-        failed = result.get("failed", [])
+        downloaded = result.get("downloaded", []) or []
+        failed = result.get("failed", []) or []
         self.bar.setVisible(False)
         self.status.setText(
             t("crash.deps_done", n=len(downloaded)) if downloaded else
@@ -348,11 +361,14 @@ class CrashAnalyzerPanel(QWidget):
             append("mod_dep", t("crash.log_fixed_deps", n=len(downloaded)),
                    instance=inst_name)
             _ach.unlock("first_repair")
+        # round-209：结构化汇总终态写进页内反馈条；status 那行小灰字只是兼容。
+        manual = len(getattr(self, "_repair_manual", []) or [])
+        text, tone = summarize(len(downloaded), len(failed), manual)
         if failed:
             from .core.mod_repair import failed_lines
-            warn(self, t("crash.title"),
-                 t("crash.deps_failed_detail", n=len(failed)),
-                 detail="\n".join(failed_lines(result)))
+            text += "\n" + "\n".join(failed_lines(result))
+        report(self, text, tone)
+        self._repair_manual = []
 
     def _fix_java(self):
         """去管理 Java（round-197）。
@@ -373,22 +389,31 @@ class CrashAnalyzerPanel(QWidget):
         JavaManagerDialog(self).exec()
 
     def _fix_ram(self):
-        info(self, t("crash.title"), t("crash.ram_hint"))
+        report(self, t("crash.ram_hint"), "info")
 
     def _repair_all(self):
-        """round-178：一键修复要有**汇总终态**。
+        """一键修复：先给即时可见反馈，再分流「可自动 / 需手动」，最后汇总终态。
 
-        旧实现只调 ``_repair_deps()``，对 java_version / out_of_memory /
-        loader_mismatch 什么都不做、也不说，玩家以为全修好了。这里明确
-        区分「已自动联网补装」与「需点卡片单独处理」，不擅自把弹 Java
-        管理器 / 改内存这类交互动作塞进异步流程。
+        round-209 修掉三个老毛病：
+        1. 点击后没有任何页内可见变化（反馈只写进可能被隐藏的 status 小字）。
+        2. 异步还没跑完就写「已自动补装缺失依赖」——谎报成功。
+        3. java_version / out_of_memory / loader_mismatch 什么都不做也不说。
+
+        交互型动作（切 Java、改内存）不塞进异步流程，但会明确列进汇总，
+        玩家不会再以为「按钮没用」。
         """
-        self._repair_deps()
         kinds = {f.kind for f in (getattr(self, "_findings", None) or [])}
         manual = [k for k in ("java_version", "out_of_memory",
                               "loader_mismatch") if k in kinds]
-        if manual:
-            self.status.setText(t("crash.repair_all_note", n=len(manual)))
+        self._repair_manual = manual
+        report(self, t("fix.progress"), "busy")
+        started = self._repair_deps()
+        if not started:
+            # 没有后台任务 = 当场就能给终态；异步路径由 _on_deps_done 汇总。
+            if manual:
+                text, tone = summarize(0, 0, len(manual))
+                report(self, text, tone)
+            self._repair_manual = []
 
 
 class CrashAnalyzerDialog(QDialog):

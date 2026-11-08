@@ -20,6 +20,7 @@ from .i18n import t, loader_name
 from . import ui_kit
 from .core import mod_check
 from .frameless import FramelessHelper, TitleBar
+from .fix_feedback import FeedbackBar, report
 from .win_rounded import enable_win11_round_corners
 
 _SEV_COLOR = {
@@ -114,19 +115,10 @@ class HealthPanel(QWidget):
         row.addWidget(self.close_btn)
         bl.addLayout(row)
 
-        # round-163：修复反馈行——apply_fix 返回 False（已是目标状态）时
-        # 之前完全没有任何提示，玩家会以为「点了没反应」。
-        self.note_lbl = QLabel("")
-        self.note_lbl.setWordWrap(True)
-        self.note_lbl.setVisible(False)
-        # 反馈要做成一条**看得见的条** —— 原来只是底部一行小灰字，
-        # 玩家点了修复按钮几乎注意不到（用户报「一点提示都没有」）。
-        self.note_lbl.setStyleSheet(
-            "background:%s;border:1px solid %s;border-radius:8px;"
-            "padding:8px 10px;font-size:12px;color:%s;"
-            % (COLORS.get("bg_frost", "#F3F4F6"),
-               COLORS.get("border", "#E5E7EB"),
-               COLORS.get("text_main", "#111827")))
+        # round-163 建了反馈条；round-209 换成三条一键修复入口共用的
+        # fix_feedback.FeedbackBar —— 同一套控件 / 样式 / 上报逻辑，不再各写一份。
+        self.note_lbl = FeedbackBar(self)
+        self.fix_note = self.note_lbl
         bl.addWidget(self.note_lbl)
 
         self._render(self._result)
@@ -230,9 +222,8 @@ class HealthPanel(QWidget):
                    else t("health.no_change"))
         self._rescan()
 
-    def _note(self, text: str) -> None:
-        self.note_lbl.setText(text or "")
-        self.note_lbl.setVisible(bool(text))
+    def _note(self, text: str, tone: str = "info") -> None:
+        report(self, text, tone)
 
     # ── 网络补装（round-163）─────────────────────────────────────────────
     def _run_install(self) -> None:
@@ -310,6 +301,8 @@ class HealthPanel(QWidget):
         同时逐条应用并捕获异常：任何一条修复失败都不该让整批静默。
         """
         from .core import instance_health
+        # round-209：点击瞬间就给可见反馈，批量修复期间不再像「卡住没反应」。
+        report(self, t("fix.progress"), "busy")
         findings = self._result.get("findings") or []
         applied: list[str] = []
         failed: list[str] = []
@@ -320,8 +313,14 @@ class HealthPanel(QWidget):
             if fx.get("safety", instance_health.FIX_SAFE) != \
                     instance_health.FIX_SAFE:
                 continue
-            label = t(fx.get("label") or "health.fix",
-                      **(fx.get("label_kwargs") or {}))
+            try:
+                label = t(fx.get("label") or "health.fix",
+                          **(fx.get("label_kwargs") or {}))
+                # t() 缺参数会原样留下 {advised} 之类占位符 —— 不能漏进玩家 UI。
+                if "{" in label:
+                    label = t("health.fix")
+            except Exception:  # noqa: BLE001
+                label = t("health.fix")
             try:
                 if instance_health.apply_fix(self.inst, fx):
                     applied.append(label)
@@ -335,11 +334,11 @@ class HealthPanel(QWidget):
                 "、".join(applied)
             if failed:
                 msg += "\n" + t("health.fix_partial", e="、".join(failed))
-            self._note(msg)
+            self._note(msg, "warn" if failed else "ok")
         elif failed:
-            self._note(t("health.fix_failed", e="、".join(failed)))
+            self._note(t("health.fix_failed", e="、".join(failed)), "warn")
         else:
-            self._note(t("health.fix_none"))
+            self._note(t("health.fix_none"), "info")
 
     def _rescan(self) -> None:
         from .core import instance_health

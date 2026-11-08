@@ -110,6 +110,8 @@ SUITES = [
     ("资源中心秒获取（round-207）", "test_round207_search_latency.py", "script"),
     ("资源中心服务端过滤/真分页（round-208）", "test_round208_store_search.py", "script"),
     ("资源中心整页对齐/IA 护栏（round-208）", "test_round208_store_alignment.py", "script"),
+    ("FTB 搜索回归/切来源缓存键（round-209）", "test_round209_store_regression.py", "script"),
+    ("一键修复反馈统一（round-209）", "test_round209_fix_feedback.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

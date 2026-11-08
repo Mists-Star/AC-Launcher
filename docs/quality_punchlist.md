@@ -1067,3 +1067,45 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 - 改动前先复核「已知结论是否过期」—— round-141「sortField 不起作用」就是
   靠对照实验推翻的，别把历史判断当事实。
 - P2 未定前，默认源与镜像行为保持不变，不要为了「像别人」悄悄换后端。
+
+## 十五、round-209 真机反馈两项回归（2026-11-08，已修）
+
+### P0 —「一部分 mod 搜不到，比如 FTB 系列」✅
+
+- **不是网络**：所有请求 HTTP 200。联网 A/B（同一镜像、每次只改一个参数）：
+  CF `FTB` 无过滤 409 → 加 `gameVersion=1.20.1+modLoaderType=4` 后 58（-86%）；
+  `FTB Quests` 140 → 27 且 `can_next=False`；MR `FTB` 96 → 29。
+- 根因：`_collect_filters()` 在玩家什么都没选时把目标实例版本 / 加载器隐式
+  下推服务端；`set_target()` 还用 `setCurrentText(v)` 把「提示」变成真实筛选。
+  上游 `prism:ModFilterWidget.ui:198-224` / `pclce:PageComp.xaml:33-106` 全是
+  **玩家显式选**，规格 §2.3 初版属于误读，已加纠错框并同步断言。
+- 修：默认只取侧栏显式值；`set_target()` 改 `setPlaceholderText()`；
+  版本 / 加载器仍用于详情页推荐版本与兼容性徽章。
+- 复验：默认 `FTB` CF **58 → 409**、MR 29 → 96，官方本体
+  `FTB Library / Teams / Quests (NeoForge)` 全回来；`FTB Quests` 27 → 140、
+  `can_next` 恢复 True。
+- **刻意不改**：Modrinth 排在 CurseForge 前面是
+  `pclce:ProjectQuery.cs:604` 的 `.OrderBy(x => x.FromCurseForge)` 同款；
+  FTB 整合包在 `classId=6` 下没有本体，属分类边界（切「整合包」即可），
+  都不是 bug，不为了「像别人」擅自改已定决策。
+
+### P0 —「一键修复没用 / 修补无反馈」（二次反馈）✅
+
+- 三条入口离屏复现（拦截全部模态框、用 `isHidden()` 而非 `isVisible()`
+  校正探针）：崩溃分析只有会被异步覆盖的小灰字且**点击瞬间谎报成功**；
+  实例右键**页内零反馈**、只有 frameless 下可能跑到窗口后面的模态框；
+  体检反馈条虽在但另写一套样式/逻辑（违反「相同功能同一实现」）。
+- 修：新增 `src/fix_feedback.py` 共享 `FeedbackBar` / `report()` /
+  `summarize()`；三条入口统一；点击即时可见反馈 + 结构化汇总终态
+  （成功 / 失败 / 需手动），失败附逐条阶段明细；占位符不漏进 UI。
+- 断言：`tests/test_round209_fix_feedback.py` 24 项，含失败 / 全零 /
+  无缺失依赖分支；round-178 / 194 的 3 条旧静态断言按新链路等价化。
+
+### 纪律追加
+
+- ☠ **探针先自证**：`isVisible()` 对未 `show()` 的顶层窗口的所有子控件恒为
+  False，直接拿它当「反馈不可见」的判据会得到假阳性；用 `isHidden()`。
+- ☠ **异步动作不得在启动瞬间写「已…」文案**：点击到完成之间必须显示
+  「正在…」，终态由回调写，否则玩家看到的成功是假的。
+- 一键修复只需修「能自动修的」，**剩下的必须明确列出**，不能静默跳过。
+
