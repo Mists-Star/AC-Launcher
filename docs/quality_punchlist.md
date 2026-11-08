@@ -1563,3 +1563,20 @@ N 份、模块 `id=".."` 越界、`map_cache` 只增不删、区块级解压上�
 
 **至此 §19.3 也全清。** 全仓只剩：§14 的详情预取（已写明「有意不做」的理由）与
 发布清单 A 组的联网真机全链路。
+
+---
+
+## 二十五、round-218：主理人实机反馈三条（2026-11-08 15:4x）
+
+> ① 资源中心长 mod 名把右侧内容挤出窗口（且不要底部横向滑块）；
+> ② 崩溃分析显示「发现 2 个问题」但列表空白、「一键修复」点了没反应；
+> ③ 部分 mod 搜不到 / 版本与需要找不到对应的。三条都复现到根因。
+
+| # | 现象 | 根因 | 修法 | 判据 |
+|---|---|---|---|---|
+| 1 | 长标题溢出 | 卡片标题是普通 `QLabel`，`minimumSizeHint` = 全文宽度（400 字 → 4356 px），把 `QScrollArea` 内容顶宽 | 新增 `ui_kit.ElidedLabel`（Ignored 策略 + 宽度下限 0 + 按实际宽度省略 + tooltip 存全文）；标题/描述/meta 全部改用；详情页标题改 Ignored；结果区横向滑块 `AlwaysOff` | 1400/1100/900 三档：hbar.max=0、内容最小宽度 ≤ 视口、右栏不越页 |
+| 2 | 崩溃面板空白 + 一键修复无效 | `QFontMetrics.boundingRect(w, 0, flags, text)` **该重载在 PySide6 不存在** → 每张带 detail 的卡抛 TypeError → `_on_analyzed` 循环中断 → 卡片全没、按钮 `setEnabled` 那行没执行 → 永久禁用 | 改 `QRect(0,0,_w,4096)` 重载；结论列表**逐张兜底**，坏卡只跳过一张并计数提示 | 2 条结论 → vbox=3、卡高 340px、按钮 enabled=True；全失败时按钮正确禁用 |
+| 3a | 搜不到 mod | Modrinth 对非法 facet 直接 **HTTP 400**（实测 `versions:26.` → 400）→ 整个搜索请求挂掉 | 新增 `normalize_mc_version()` 形态校验；MR facet / CF `gameVersion` / 详情 `game_versions` 三处全走它，非法一律当「不过滤」 | 非法值不进任何请求参数；合法 `26.3` 三处都带上 |
+| 3b | 版本选不到 | 版本下拉是写死的 12 条静态表（最新 1.21.11），主理人实例是 **26.3** | 新增 `modrinth_game_versions()` 拉 Modrinth 官方 `/tag/game_version`（922 条，含 26.3；30 分钟缓存，失败回退静态表）；筛选面板后台拉取重填；目标实例版本必定在可选项里（但仍不写进过滤值） | 下拉含 26.3/26.2/26.1.2…；`set_target` 后目标版本在列；过滤值仍为空 |
+
+`tests/test_round218_long_title_overflow.py` 24 项 + `tests/test_round218_crash_and_filter.py` 30 项。

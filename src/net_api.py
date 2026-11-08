@@ -817,10 +817,16 @@ def _modrinth_versions(project_id: str, mc_version: str = "", loader: str = "",
         return cached
     base = MODRINTH_SEARCH_URL.replace("/search", "")
     params = {}
-    if mc_version:
-        params["game_versions"] = f'["{mc_version}"]'
+    # round-218：这两个是**服务端过滤参数**，形态不合法时 Modrinth 直接回
+    # HTTP 400（实测 "versions:26." → 400）→ 详情页一条版本都拿不到，
+    # 玩家看到的就是「版本找不到对应的」。校验不过就不传这个参数。
+    _mc = normalize_mc_version(mc_version)
+    if _mc:
+        params["game_versions"] = f'["{_mc}"]'
     if loader and loader not in ("vanilla", ""):
-        params["loaders"] = f'["{loader}"]'
+        _ld = str(loader).strip().lower()
+        if _ld and re.match(r"^[a-z0-9_-]{1,24}$", _ld):
+            params["loaders"] = f'["{_ld}"]'
     if limit:
         params["limit"] = limit
     if offset:
@@ -936,6 +942,61 @@ def _version_primary_file(version: dict, project_id: str) -> tuple[str, str]:
 
 
 # round-41：Modrinth project 信息查询（slug→id/title/最新版本）——缓存。
+# round-218：Modrinth 的版本 facet 对**非法** id 直接回 HTTP 400
+# （实测 "versions:26." → 400），整个搜索请求就挂了 → 玩家看到「搜不到任何
+# 东西」。所以凡是拼进 facet / gameVersion 的版本号，都要先过形态校验。
+_MC_VERSION_RE = re.compile(r"^\d+(\.\d+){0,2}(-[0-9A-Za-z._-]+)?$")
+
+
+def normalize_mc_version(raw) -> str:
+    """规整 MC 版本号；形态不合法一律返回 ""（调用方按「不过滤」处理）。"""
+    v = str(raw or "").strip()
+    if not v or not _MC_VERSION_RE.match(v):
+        return ""
+    return v
+
+
+def modrinth_game_versions(*, timeout: int = 20) -> list[str]:
+    """Modrinth 官方版本标签列表（release 优先 + 最近几个 snapshot，按日期倒序）。
+
+    round-218：版本下拉原来是一张**写死的 12 条**静态表（抄自 Prism，最新只到
+    1.21.11）。主理人的实例是 MC **26.3**，压根不在表里 → 「我想要的版本找不到
+    对应的」。这里改成从 Modrinth 的 ``/tag/game_version`` 拉真实列表
+    （实测 922 条，含 26.3），离线时回退静态表。
+    """
+    key = "mr:tag:game_version"
+    cached = _cached(key, 1800)
+    if cached is not None:
+        return cached
+    base = MODRINTH_SEARCH_URL.replace("/search", "")
+    try:
+        r = requests.get("%s/tag/game_version" % base, headers=_HEADERS,
+                         timeout=timeout, proxies=_proxies())
+        r.raise_for_status()
+        data = r.json()
+    except Exception:  # noqa: BLE001 - 离线 / 限流：回退静态表，不打断搜索
+        return []
+    rel: list[tuple[str, str]] = []
+    snap: list[tuple[str, str]] = []
+    for x in data if isinstance(data, list) else []:
+        if not isinstance(x, dict):
+            continue
+        vid = str(x.get("version") or "").strip()
+        if not vid:
+            continue
+        item = (str(x.get("date") or ""), vid)
+        if x.get("version_type") == "release":
+            rel.append(item)
+        elif x.get("version_type") == "snapshot":
+            snap.append(item)
+    rel.sort(reverse=True)
+    snap.sort(reverse=True)
+    out = [v for _d, v in rel[:80]] + [v for _d, v in snap[:8]]
+    if out:
+        _store(key, out)
+    return out
+
+
 def get_project_info(slug_or_id: str) -> dict | None:
     """Fetch a Modrinth project by slug or id (cached 300s+disk). None if 404."""
     if not slug_or_id:

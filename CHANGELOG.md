@@ -8,6 +8,59 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-218（2026-11-08）— 主理人实机反馈三条：长名溢出 / 崩溃面板空白 / 搜不到 mod
+
+> 三条都是**真机实测**反馈，本轮逐条复现到根因并修掉，每条都有可证伪判据。
+
+### ① 资源中心：部分 mod 名称过长把右侧内容挤出窗口
+
+- **根因**：卡片标题是普通 `QLabel`，它的 `minimumSizeHint` 等于**整段文本宽度**
+  （实测 400 字标题 → 4356 px）。`QScrollArea` 内容最小宽度随之变大，
+  两栏 splitter 只能把右栏推出可视区，底部还冒出横向滑块。
+- **修法**：`ui_kit.ElidedLabel`（新增）——水平 size policy 设 `Ignored`、
+  `minimumSizeHint().width()` 恒 0、文本按**控件实际宽度** `elidedText`，
+  全文留在 tooltip。卡片标题 / 描述 / meta 行全部改用它；
+  详情页标题改成 `Ignored` + tooltip（`wordWrap` 对无空格长串无效）。
+  结果区滚动条策略改 `ScrollBarAlwaysOff`（主理人明确不要底部滑块）。
+- **判据**：窗口 1400 / 1100 / 900 三档下，`horizontalScrollBar().maximum()==0`、
+  内容最小宽度 ≤ 视口、右栏右边界不越页；对照的普通 QLabel 最小宽度 4356 px。
+
+### ② 崩溃分析：显示「发现 2 个问题」但列表空白、「一键修复」点了没反应
+
+- **根因**：`crash_dialog._FindingCard` 里 `QFontMetrics.boundingRect(w, 0, Qt.TextWordWrap, text)`
+  ——**这个重载在 PySide6 里不存在**（只有 `QRect` 版 / 纯文本版）。于是每张带
+  `detail` 的结论卡构造时抛 `TypeError`；异常冒到 `_on_analyzed` 的循环里 →
+  后面的卡全没了，而且 `repair_all_btn.setEnabled(repairable > 0)` 那行
+  **根本没执行** → 按钮永久禁用 → 点击毫无反应。
+- **修法**：改用 `boundingRect(QRect(0, 0, _w, 4096), Qt.TextWordWrap, text)`；
+  另外给结论列表加**逐张兜底**——单张卡渲染失败只跳过那一张并计数，
+  末尾明确提示「有 N 条结论没能显示」，不再整页塌掉。
+- **判据**：两条结论 → `vbox` 3 项（2 卡 + stretch）、卡片高度 340 px、
+  「一键修复」`isEnabled() == True`；全部卡渲染失败时按钮正确保持禁用。
+
+### ③ 资源中心：部分 mod 搜不到 / 版本与需要找不到对应的
+
+- **根因 A（搜不到）**：Modrinth 对**非法** facet 直接回 **HTTP 400**
+  （实测 `versions:26.` → 400）。版本下拉是**可编辑**的，玩家手输半个版本号
+  就会让**整个搜索请求失败** → 一个结果都没有。
+- **根因 B（版本选不到）**：版本下拉是一张**写死的 12 条**静态表（抄自 Prism，
+  最新只到 1.21.11），而主理人的实例是 **MC 26.3** → 压根不在表里。
+- **修法**：
+  - 新增 `net_api.normalize_mc_version()`：版本号形态校验（`^\d+(\.\d+){0,2}(-后缀)?$`），
+    不合法一律当作「不过滤」——宁可多给结果，也不给空白页。
+    MR facet、CF `gameVersion`、详情页 `game_versions` 三处**全部**走它。
+  - 新增 `net_api.modrinth_game_versions()`：从 Modrinth 官方
+    `/tag/game_version` 拉真实版本表（实测 922 条，含 26.3；release 优先 + 最近
+    8 个 snapshot），带 30 分钟缓存，失败自动回退静态表。
+  - 筛选面板启动后台拉取并重填下拉；**目标实例的版本必定出现在可选项里**
+    （`set_target()` 记录并注入），但**不会**被写进过滤值（仍只是提示）。
+- **判据**：非法版本不进 facet / 不进 CF 参数 / 不进详情请求参数；
+  合法 `26.3` 三处都正确带上；官方版本表可取到且含 26.3；
+  下拉里能选到 26.3 / 26.2 / 26.1.2 …，目标版本必定在列。
+
+**新增回归**：`tests/test_round218_long_title_overflow.py` **24 项** +
+`tests/test_round218_crash_and_filter.py` **30 项**，均已登记 `regress.py`。
+
 ## round-217（2026-11-08）— §19.3 P2 长尾 13 条清完
 
 > 主理人「可以」= 把 P2 那批小尾巴扫掉。没有一条是「新功能」，全是

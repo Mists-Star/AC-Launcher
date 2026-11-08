@@ -116,6 +116,8 @@ SUITES = [
     ("设计比对第 3/5/6 批行为回归（round-211）", "test_round211_regression.py", "script"),
     ("磁盘边界/生命周期/缓存预算回归（round-216）", "test_round216_regression.py", "script"),
     ("§19.3 P2 长尾行为回归（round-217）", "test_round217_p2_regression.py", "script"),
+    ("资源中心长标题不撑破右栏（round-218）", "test_round218_long_title_overflow.py", "script"),
+    ("崩溃面板与搜索/版本过滤（round-218b）", "test_round218_crash_and_filter.py", "script"),
 ]
 SHOTS = "shots_all.py"
 
@@ -187,6 +189,16 @@ def run_script(fname: str) -> tuple[bool, str]:
     note = tail[-1][:60] if tail else "exit=%d" % p.returncode
     if teardown_noise:
         note += "  (teardown 噪音，实际通过)"
+    if not ok:
+        # round-218：失败时把**完整输出**落盘，否则只剩一行 note，排查时
+        # 看不到「到底崩在哪」。落在 tests/_last_fail.log（已 gitignore）。
+        try:
+            dump = os.path.join(HERE, "tests", "_last_fail.log")
+            with open(dump, "w", encoding="utf-8") as f:
+                f.write("=== %s (rc=%s) ===\n" % (fname, p.returncode))
+                f.write(out)
+        except OSError:
+            pass
     return ok, note
 
 

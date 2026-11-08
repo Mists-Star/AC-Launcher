@@ -53,7 +53,7 @@ def _cache_write(store, key, val, cap=48):
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QTextEdit, QMessageBox, QFrame, QWidget, QButtonGroup,
-    QScrollArea, QFileDialog, QProgressBar, QCheckBox,
+    QScrollArea, QFileDialog, QProgressBar, QCheckBox, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import QDesktopServices, QPixmap
@@ -537,6 +537,12 @@ class StoreDetailPanel(QWidget):
         # 详情页主标题用全站 big 类，不再和列表卡片同权重
         self.title.setProperty("cls", "big")
         self.title.setWordWrap(True)
+        # round-218：wordWrap 只会在**空格**处折行，一整串没有空格的英文 mod
+        # 名（或 120 字标题）仍会把详情页顶到窗口外。这里让水平方向忽略
+        # sizeHint，超长无空格串直接裁切，不再参与最小宽度计算。
+        self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.title.setMinimumWidth(0)
+        self.title.setToolTip(card.get("title", "") or "")
         ti.addWidget(self.title)
 
         meta = QHBoxLayout()

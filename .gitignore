@@ -100,3 +100,5 @@ _full_stage/
 
 # round-208 源码调研临时快照（不入库）
 _scratch/
+# round-218：回归失败时的完整输出落盘（排查用，不入库）
+tests/_last_fail.log

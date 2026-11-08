@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QProgressBar, QWidget,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QRect
 
 from .theme import COLORS, RoundedCard
 from .icons import icon
@@ -84,8 +84,15 @@ class _FindingCard(RoundedCard):
             det.setToolTip(finding.detail.strip())
             _fm = det.fontMetrics()
             _w = max(240, det.width() or 420)
+            # round-218：原来调的是 ``boundingRect(w, 0, Qt.TextWordWrap, text)``——
+            # 这个重载在 PySide6 里**不存在**（只有 QRect 版 / 纯文本版），
+            # 于是每张带 detail 的结论卡都在构造时抛 TypeError。异常冒到
+            # ``_on_analyzed`` 的循环里 → **后面的卡全没了**，而且
+            # ``repair_all_btn.setEnabled(...)`` 那行根本执行不到 →
+            # 「发现 2 个问题」但列表空白、「一键修复」按钮永远点不动。
             _lines = max(1, _fm.boundingRect(
-                _w, 0, Qt.TextWordWrap, finding.detail.strip()).height()
+                QRect(0, 0, _w, 4096), Qt.TextWordWrap,
+                finding.detail.strip()).height()
                 // max(1, _fm.lineSpacing()))
             det.setMaximumHeight(min(_lines, 6) * _fm.lineSpacing() + 4)
             det.setProperty("cls", "sub")
@@ -286,21 +293,24 @@ class CrashAnalyzerPanel(QWidget):
         self.status.setVisible(True)
         self.status.setText(t("crash.found", n=len(findings)))
         repairable = 0
+        card_errors = 0
         for f in findings:
-            if f.kind == "mod_dep_missing":
+            # round-218：单张卡渲染失败**不许**拖垮整页 —— 以前异常直接冒到
+            # 循环外，后面的结论全没了、按钮也永远保持禁用。现在逐张兜住，
+            # 失败的那张跳过并计数，末尾明确告诉玩家「有 N 条没显示出来」。
+            try:
                 card = _FindingCard(
                     f, self._repair_deps, self._fix_java, self._fix_ram)
+            except Exception:  # noqa: BLE001 - 一张坏卡不能带塌整页
+                card_errors += 1
+                continue
+            if f.kind in ("mod_dep_missing", "java_version", "out_of_memory"):
                 repairable += 1
-            elif f.kind in ("java_version", "out_of_memory"):
-                card = _FindingCard(
-                    f, self._repair_deps, self._fix_java, self._fix_ram)
-                repairable += 1
-            else:
-                card = _FindingCard(
-                    f, self._repair_deps, self._fix_java, self._fix_ram)
             self._vbox.addWidget(card)
         self.repair_all_btn.setEnabled(repairable > 0)
         self._vbox.addStretch(1)
+        if card_errors:
+            report(self, t("crash.card_render_failed", n=card_errors), "warn")
 
     # ------------------------------------------------------------- repairs
     def _repair_deps(self, _finding=None) -> bool:

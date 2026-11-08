@@ -110,6 +110,11 @@ class StoreFilterPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._guard = False
+        # round-218：版本下拉不再只依赖写死的静态表 —— 静态表最新只到 1.21.11，
+        # 主理人的实例是 26.3，压根选不到。这里后台从 Modrinth 拉真实版本表。
+        self._live_versions: list[str] = []
+        self._target_version: str = ""
+        self._version_worker = None
         self.setMinimumWidth(192)
         self.setMaximumWidth(280)
 
@@ -149,6 +154,58 @@ class StoreFilterPanel(QWidget):
         self._lay.addStretch(1)
 
         self.retranslate_ui()
+        self.refresh_versions()
+
+    def refresh_versions(self) -> None:
+        """后台拉 Modrinth 官方版本列表并填进下拉（拉不到就保持静态表）。
+
+        round-218：静态表最新只到 1.21.11，主理人实例是 26.3 → 选不到。
+        这里改成用 Modrinth 的 ``/tag/game_version`` 真实列表。
+
+        刻意**不**触发 filterChanged：只是把「本来就没有的版本」补上，
+        不应该因为列表刷新就重新搜一遍。
+        """
+        try:
+            from .worker import Worker
+            from .net_api import modrinth_game_versions
+        except Exception:  # noqa: BLE001 - 拉不到就用静态表
+            return
+
+        def _fetch():
+            return modrinth_game_versions()
+
+        w = Worker(_fetch)
+        w.finished.connect(self._on_versions)
+        w.finished.connect(lambda _r: w.deleteLater())
+        self._version_worker = w
+        w.start()
+
+    def _on_versions(self, versions) -> None:
+        if not versions:
+            return
+        self._live_versions = [v for v in versions if isinstance(v, str) and v]
+        self._fill_versions()
+
+    def _fill_versions(self) -> None:
+        """重填版本下拉：实时表在前（倒序），静态表兜底，保留当前输入。"""
+        merged = list(self._live_versions)
+        for v in UPSTREAM_VERSIONS:
+            if v not in merged:
+                merged.append(v)
+        # 目标实例的版本永远要在（主理人的 26.3 就靠这一条兜住）
+        tgt = self._target_version or ""
+        if tgt and tgt not in merged:
+            merged.insert(0, tgt)
+        text = self.version_combo.currentText()
+        self._guard = True
+        self.version_combo.blockSignals(True)
+        self.version_combo.clear()
+        self.version_combo.addItem(t("store.filter_any_version"), "")
+        for v in merged:
+            self.version_combo.addItem(v, v)
+        self.version_combo.setCurrentText(text)
+        self.version_combo.blockSignals(False)
+        self._guard = False
 
     def _add_combo(self, label_key: str, editable: bool = False) -> QComboBox:
         box = QWidget()
@@ -201,14 +258,7 @@ class StoreFilterPanel(QWidget):
         self._fill(self.loader_combo, UPSTREAM_LOADERS)
         self._fill(self.tag_combo, UPSTREAM_TAGS)
         # Version combo is editable: keep the current text and re-seed the list.
-        text = self.version_combo.currentText()
-        self.version_combo.blockSignals(True)
-        self.version_combo.clear()
-        self.version_combo.addItem(t("store.filter_any_version"), "")
-        for v in UPSTREAM_VERSIONS:
-            self.version_combo.addItem(v, v)
-        self.version_combo.setCurrentText(text)
-        self.version_combo.blockSignals(False)
+        self._fill_versions()
         self.hide_installed.setText(t("store.filter_hide_installed"))
         self.reset_btn.setText(t("store.filter_reset"))
         self._guard = False
@@ -239,6 +289,11 @@ class StoreFilterPanel(QWidget):
         """
         v = str(getattr(inst, "game_version", "") or "") if inst is not None else ""
         self.version_combo.setPlaceholderText(v)
+        # round-218：目标实例的版本必须出现在**可选项**里，否则玩家只能手动
+        # 打字（打错就是非法 facet → 搜索直接 400 → 一个都搜不到）。
+        self._target_version = v
+        if v:
+            self._fill_versions()
 
     def get_filter(self) -> dict:
         """Plain dict consumed by ``StorePage._filters()`` and by

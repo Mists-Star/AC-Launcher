@@ -544,6 +544,9 @@ class StorePage(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
+        # round-218：结果区**永远不出横向滑块**（主理人明确要求）。配合
+        # ElidedLabel，内容宽度恒等于视口宽度；这行是最后一道闸。
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._load_gen = 0  # guards against stale search results
         self._content = QWidget()
         self._vbox = QVBoxLayout(self._content)
@@ -1044,20 +1047,24 @@ class StorePage(QWidget):
 
         info = QVBoxLayout()
         info.setSpacing(4)
-        title = QLabel(m["title"])
+        # round-218：标题必须「按可用宽度省略」。QLabel 的 sizeHint 是整段
+        # 文本宽度，120 字的 mod 名会把卡片最小宽度顶到几千像素，QScrollArea
+        # 的内容跟着变宽 → 右侧内容被挤出窗口 / 底部冒横向滑块（主理人实测）。
+        title = ui_kit.ElidedLabel(m["title"])
         title.setProperty("cls", "title")
         _f = title.font()
         _f.setBold(True)          # 只加字重，颜色仍走 QSS token
         title.setFont(_f)
+        title.setToolTip(m["title"])
         info.addWidget(title)
 
         # round-180：描述单行省略。旧代码 wordWrap(True) 让长描述把
         # 84px 的卡片撑成两三行高，整列节奏忽松忽紧（主流启动器都是
         # 固定行高 + 省略号）。完整描述放到 tooltip，不丢信息。
+        # round-218：省略宽度不再写死 460 —— 交给 ElidedLabel 按真实宽度算，
+        # 否则窄分栏时 460 本身就会把卡片顶宽。
         raw_desc = " ".join((m["description"] or "").split())
-        _short = QFontMetrics(title.font()).elidedText(
-            raw_desc, Qt.ElideRight, 460)
-        desc = QLabel(_short)
+        desc = ui_kit.ElidedLabel(raw_desc)
         desc.setProperty("cls", "sub")
         if raw_desc:
             desc.setToolTip(raw_desc[:400])
@@ -1072,12 +1079,14 @@ class StorePage(QWidget):
         meta_row.addWidget(ui_kit.tag(
             _src, COLORS["bg_hover"], COLORS["text_sub"],
             font_size=10, radius=6, pad="2px 8px"))
-        meta = QLabel(t("store.meta",
-                        downloads=ui_kit.format_count(m["downloads"]),
-                        author=m["author"]))
+        _meta_text = t("store.meta",
+                       downloads=ui_kit.format_count(m["downloads"]),
+                       author=m["author"])
+        meta = ui_kit.ElidedLabel(_meta_text)
         meta.setProperty("cls", "sub")
         meta.setStyleSheet(f"color: {COLORS['text_disabled']};")
-        meta_row.addWidget(meta)
+        meta.setToolTip(_meta_text)
+        meta_row.addWidget(meta, stretch=1)
         # round-193：已装的标出来 —— 避免重复下载同一个 mod（用户「下载为啥
         # 不可见」的一部分：装没装、装了什么要一眼看见）
         if self._is_installed(m):

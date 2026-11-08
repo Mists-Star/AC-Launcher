@@ -377,6 +377,63 @@ def card(radius: int = R_CARD, fill=None, border=None, parent=None,
     return c
 
 
+# ── ellipsis label (long text must never widen the layout) ─────────────────
+class ElidedLabel(QLabel):
+    """单行省略标签：按**当前可用宽度**省略，绝不用文本宽度去顶布局。
+
+    round-218（主理人实机反馈）：资源中心搜到的 mod 名很长时，右侧内容被挤到
+    窗口外面，底部还冒出横向滑块。根因是 `QLabel` 的 `sizeHint/minimumSizeHint`
+    等于整段文本的宽度——一个 120 字的标题会把卡片所在的 QScrollArea 内容
+    最小宽度撑到几千像素，两栏 splitter 只能把它推出可视区。
+
+    这里做三件事：
+      1. 水平 size policy 设为 ``Ignored``：布局不把 sizeHint 当约束；
+      2. ``minimumSizeHint`` 只保留高度，宽度下限 0；
+      3. 文本按控件实际宽度 ``elidedText``，resize 时重算（保留全文到 tooltip）。
+
+    用法与 QLabel 一致；`full_text()` 取回未省略的原文。
+    """
+
+    def __init__(self, text: str = "", parent=None, mode=Qt.ElideRight):
+        super().__init__(parent)
+        self._full = text or ""
+        self._mode = mode
+        pol = self.sizePolicy()
+        pol.setHorizontalPolicy(QSizePolicy.Ignored)
+        pol.setVerticalPolicy(QSizePolicy.Preferred)
+        self.setSizePolicy(pol)
+        super().setText(self._full)
+
+    # ---- text ----
+    def setText(self, text: str):  # noqa: N802 - Qt 命名
+        self._full = text or ""
+        self._apply_elide()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def _apply_elide(self) -> None:
+        w = self.width()
+        if w <= 0 or not self._full:
+            # 还没布局（宽 0）：先给原文，首帧布局完成后再收窄
+            super().setText(self._full)
+            return
+        super().setText(self.fontMetrics().elidedText(self._full, self._mode, w))
+
+    # ---- size / paint ----
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def changeEvent(self, event):  # noqa: N802 - Qt 命名
+        # 字体/样式变化后字宽也变 → 重新省略
+        super().changeEvent(event)
+        self._apply_elide()
+
+
 # ── pill filter group (Versions / Store category tabs) ──────────────────────
 class ChipGroup(QWidget):
     """Mutually-exclusive pill filter row — the reusable replacement for the

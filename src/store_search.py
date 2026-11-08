@@ -135,8 +135,12 @@ def _mr_facets(project_type: str, filters: dict | None) -> str:
     """prism:.../ModrinthAPI.cpp:105-144 — one JSON array of OR-groups."""
     f = filters or {}
     facets: list[list[str]] = [["project_type:%s" % project_type]]
-    if f.get("game_version"):
-        facets.append(["versions:%s" % f["game_version"]])
+    # round-218：版本值先过形态校验。非法值（如玩家在可编辑下拉里打了 "26."）
+    # 会让 Modrinth 直接回 HTTP 400 → 整个搜索失败、「一个都搜不到」。
+    # 校验不过就当作「不过滤」，宁可多给结果也不给玩家一个空白页。
+    _ver = na.normalize_mc_version(f.get("game_version"))
+    if _ver:
+        facets.append(["versions:%s" % _ver])
     if f.get("loader"):
         facets.append(["categories:%s" % str(f["loader"]).lower()])
     _, mr_cat = _category_pair(f)
@@ -174,8 +178,9 @@ def _cf_page_ex(base: str, headers: dict, query: str, category: str,
         "sortField": _CF_SORT_FIELD.get(f.get("sort"), _CF_SORT_FIELD["relevance"]),
         "sortOrder": "desc",
     }
-    if f.get("game_version"):
-        params["gameVersion"] = f["game_version"]
+    _ver = na.normalize_mc_version(f.get("game_version"))
+    if _ver:
+        params["gameVersion"] = _ver
     cf_cat, _ = _category_pair(f)
     if cf_cat:
         params["categoryId"] = cf_cat

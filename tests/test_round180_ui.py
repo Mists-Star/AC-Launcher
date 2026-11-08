@@ -111,7 +111,10 @@ check("下载量人读格式",
 pb = read("src/pages_browse.py")
 sd = read("src/store_detail.py")
 check("列表描述单行省略（列表节奏统一）",
-      "ElideRight" in pb and "setToolTip(raw_desc[:400])" in pb)
+      # round-218：省略逻辑从 pages_browse 里的固定宽度 elidedText(…, 460)
+      # 移进 ui_kit.ElidedLabel（按控件实际宽度省略），行为不变、且不再顶宽。
+      "ElidedLabel(raw_desc)" in pb and "setToolTip(raw_desc[:400])" in pb
+      and "ElideRight" in read("src/ui_kit.py"))
 check("列表有来源标签 + 次信息降权",
       'ui_kit.tag(' in pb and "COLORS['text_disabled']" in pb)
 check("详情页封面 88px / 标题用 big 类",
