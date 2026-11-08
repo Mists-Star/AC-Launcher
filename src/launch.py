@@ -40,6 +40,34 @@ _AIKAR_FLAGS = [
     "-XX:+AlwaysPreTouch",
 ]
 
+# round-210 P0：显式选 GC 时，预设组（Aikar / auto）与玩家手填参数里可能仍带
+# 互斥 flag。JVM 同时收到 UseG1GC + UseZGC 或 G1* 专用参数会直接拒启动（秒退），
+# 而旧代码只在 perf_g1gc 组上做了「显式 GC 跳过」，Aikar 组没跳过。
+_G1_ONLY_PREFIXES = ("-XX:G1", "-XX:MaxGCPauseMillis=")
+_G1_ONLY_EXACT = frozenset({"-XX:+UseG1GC", "-XX:-UseG1GC"})
+_ZGC_ONLY_EXACT = frozenset({
+    "-XX:+UseZGC", "-XX:-UseZGC", "-XX:+ZGenerational", "-XX:-ZGenerational",
+})
+
+
+def normalize_gc_flags(args: list[str], gc_mode: str) -> list[str]:
+    """剔除与显式 GC 模式互斥的 JVM 参数，返回新列表（纯函数，便于断言）。
+
+    - ``zgc`` / ``zgc_gen``：去掉 G1GC 与所有 G1 专用参数（含预设组注入的）。
+    - ``g1`` / ``g1_tuned``：去掉玩家手填的 ZGC 参数。
+    - 其它（含 ``""`` / ``follow`` / ``none``）：原样返回。
+    """
+    mode = (gc_mode or "").strip().lower()
+    if mode in ("zgc", "zgc_gen"):
+        def _drop(a: str) -> bool:
+            return (a in _G1_ONLY_EXACT
+                    or a.startswith(_G1_ONLY_PREFIXES))
+        return [a for a in args if not _drop(a)]
+    if mode in ("g1", "g1_tuned"):
+        return [a for a in args if a not in _ZGC_ONLY_EXACT
+                and not a.startswith("-XX:Z")]
+    return list(args)
+
 
 def parse_game_args(text: str) -> tuple[str | None, str | None, list[str]]:
     """把「游戏附加参数」字符串拆成 (server, port, extra)。
@@ -360,6 +388,9 @@ def build_options(
         opts["server"] = server
         if port:
             opts["port"] = str(port)
+    # 最后统一清理：无论来自预设、性能开关还是玩家手填，只要显式选了 GC，
+    # 互斥参数一律剔除（顺序放在所有 append 之后，避免漏掉某一路注入）。
+    opts["jvmArguments"] = normalize_gc_flags(opts["jvmArguments"], gc_mode)
     return opts
 
 

@@ -214,7 +214,11 @@ class ModRow(QFrame):
             col.addWidget(self.desc_lbl)
         self._desc_width = 0
         self._relayout_desc()
-        QTimer.singleShot(0, self._relayout_desc)
+        # round-210 P0：列表刷新会先 deleteLater 旧行，QTimer(0) 的回调可能在
+        # C++ 对象已销毁后才派发 → 访问 self.desc_lbl 抛
+        # 「wrapped C/C++ object ... has been deleted」并写进 crash.log
+        # （真机同一位置累计 705 条）。用 safe 包装吞掉对象已死的回调。
+        QTimer.singleShot(0, self._relayout_desc_safe)
         lay.addLayout(col, 1)
 
         self.toggle_btn = ui_kit.make_button(
@@ -241,21 +245,33 @@ class ModRow(QFrame):
         super().resizeEvent(ev)
         self._relayout_desc()
 
+    def _relayout_desc_safe(self) -> None:
+        """异步重排入口：行已被销毁时静默跳过，不写崩溃日志。"""
+        try:
+            self._relayout_desc()
+        except RuntimeError:
+            # PySide6 对象已 deleteLater → Qt wrapper 失效，属于正常刷新竞态。
+            return
+
     def _relayout_desc(self) -> None:
         """按当前可用宽度重排描述（最多两行）。
 
         构造时行还没布局（width=0）→ 用默认宽度 620 排一次，等第一次
-        resizeEvent 再按真实宽度重排。
+        resizeEvent 再按真实宽度重排。对象销毁后所有 Qt 访问都要能安全退化。
         """
-        if not getattr(self, "_desc_full", ""):
+        try:
+            if not getattr(self, "_desc_full", ""):
+                return
+            fm = self.desc_lbl.fontMetrics()
+            w = self.width()
+            avail = max(160, (w - 210) if w > 400 else 620)
+            if abs(avail - getattr(self, "_desc_width", 0)) < 24:
+                return
+            self._desc_width = avail
+            self.desc_lbl.setText(
+                _wrap_by_width(self._desc_full, fm, avail, 2))
+        except RuntimeError:
             return
-        fm = self.desc_lbl.fontMetrics()
-        w = self.width()
-        avail = max(160, (w - 210) if w > 400 else 620)
-        if abs(avail - getattr(self, "_desc_width", 0)) < 24:
-            return
-        self._desc_width = avail
-        self.desc_lbl.setText(_wrap_by_width(self._desc_full, fm, avail, 2))
 
     @staticmethod
     def _pill(text: str, dim: bool = False) -> QLabel:

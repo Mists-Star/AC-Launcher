@@ -12,7 +12,8 @@
 没意义）；回滚时顺着联接还会覆盖共享池。所以存取都跳过，回滚后由
 ``Instance.ensure_dirs()`` 重建联接即可。
 
-回滚 = 摘掉 libraries 联接 → 清空当前 mc_dir → 用快照内容覆盖 → 重建联接。
+回滚 = 摘掉 libraries 联接 → **把当前内容整体搬进同盘暂存区** → 用快照内容覆盖
+→ 验证成功后才销毁暂存区。任何一步失败都把原内容原样搬回（round-210 P0）。
 """
 from __future__ import annotations
 
@@ -119,49 +120,99 @@ def load_manifest(snapshot: str) -> dict:
         return {}
 
 
-def restore_backup(inst, snapshot: str) -> dict:
-    """用快照覆盖实例当前 mc_dir。返回该快照的 manifest。
-
-    - 会删除实例当前的 mods / config / saves ——调用方必须先用确认框兜底。
-    - 先摘 libraries 联接再清空，避免误删共享池；回滚后 ensure_dirs 重建联接。
-    """
-    src = os.path.join(snapshot, "minecraft")
-    if not os.path.isdir(src):
-        raise FileNotFoundError(f"备份损坏：缺少 {src!r}")
-
-    mc = inst.mc_dir
-    os.makedirs(mc, exist_ok=True)
-
-    # 1) 摘掉共享池联接（清空时不能顺着它删池）
-    inst._strip_shared_junctions(mc)
-
-    # 2) 清空当前内容（避开符号链接/联接，防止顺链接越出边界）
-    for name in os.listdir(mc):
-        p = os.path.join(mc, name)
-        if name in _SKIP_DIRS:
+def _clear_contents(folder: str) -> None:
+    """清掉 folder 的直接子项，绝不顺着符号链接/目录联接越界。"""
+    for name in os.listdir(folder):
+        p = os.path.join(folder, name)
+        if _is_link(p):
+            # Windows junction 用 rmdir 只摘链接本身，不动目标目录。
+            try:
+                os.rmdir(p)
+            except OSError:
+                pass
             continue
-        if os.path.isdir(p) and not _is_link(p):
+        if os.path.isdir(p):
             shutil.rmtree(p, ignore_errors=True)
-        elif not _is_link(p):
+        else:
             try:
                 os.remove(p)
             except OSError:
                 pass
 
-    # 2b) round-49：libraries 在 _SKIP_DIRS 被上面的循环跳过；若它是去重前
-    # 遗留的「真实目录」（非联接），也一并清掉——否则 ensure_dirs 会把它的
-    # 陈旧内容（如 keep.me）迁进共享池，回滚后 mc_dir 里仍残留旧文件。
-    _lib = os.path.join(mc, "libraries")
-    if os.path.isdir(_lib) and not _is_link(_lib):
-        shutil.rmtree(_lib, ignore_errors=True)
 
-    # 3) 覆盖
-    shutil.copytree(src, mc, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns(*_SKIP_DIRS))
+def _move_contents(src_folder: str, dst_folder: str) -> None:
+    """同盘逐项 rename（原子且可逆），用于暂存 / 搬回。"""
+    os.makedirs(dst_folder, exist_ok=True)
+    for name in os.listdir(src_folder):
+        os.replace(os.path.join(src_folder, name),
+                   os.path.join(dst_folder, name))
 
-    # 4) 重建 libraries 联接（去重池）
-    inst.ensure_dirs()
 
+def restore_backup(inst, snapshot: str) -> dict:
+    """用快照覆盖实例当前 mc_dir。返回该快照的 manifest。
+
+    round-210 P0：原实现「先 rmtree 清空 → copytree」，磁盘写满 / 文件被占用 /
+    快照损坏时 copytree 半途抛异常，玩家存档与新加的 mods 已永久丢失且无法回滚。
+    现在改成两阶段事务：
+
+      1. 摘掉 libraries 联接；把当前所有内容**搬进同盘暂存区**（不删除）。
+      2. copytree 覆盖 + ensure_dirs 重建联接；任一步失败 → 清掉半成品、
+         把暂存区原样搬回 → 原状态完整恢复后向上抛异常。
+      3. 只有全部成功才销毁暂存区。
+
+    注意：成功回滚会删除「做快照之后新增」的文件，调用方确认框必须写明。
+    """
+    src = os.path.join(snapshot, "minecraft")
+    if not os.path.isdir(src):
+        raise FileNotFoundError(f"备份损坏：缺少 {src!r}")
+
+    mc = os.path.abspath(inst.mc_dir)
+    os.makedirs(mc, exist_ok=True)
+
+    # 1) 摘掉共享池联接（搬移时不能顺着它把整个去重池搬走）
+    inst._strip_shared_junctions(mc)
+
+    # 2) 同盘暂存区：与 mc_dir 同级，保证 os.replace 是原子 rename。
+    parent = os.path.dirname(mc)
+    stem = ".ac-restore-tx-%d-%d" % (os.getpid(), int(time.time() * 1000))
+    stage = os.path.join(parent, stem)
+    n = 0
+    while os.path.exists(stage):
+        n += 1
+        stage = os.path.join(parent, f"{stem}_{n}")
+    os.makedirs(stage)
+
+    moved = False
+    try:
+        _move_contents(mc, stage)
+        moved = True
+
+        # 3) 覆盖；失败时清半成品并把暂存区原样搬回。
+        try:
+            shutil.copytree(src, mc, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns(*_SKIP_DIRS))
+            inst.ensure_dirs()
+        except Exception:
+            _clear_contents(mc)
+            _move_contents(stage, mc)
+            moved = False
+            try:
+                inst.ensure_dirs()
+            except Exception:  # noqa: BLE001 - 回滚优先，重建联接失败不覆盖原异常
+                pass
+            raise
+    except Exception:
+        # 连「搬进暂存区」都失败：把已搬走的逐项放回，不能留半个空目录。
+        if moved:
+            _move_contents(stage, mc)
+        try:
+            os.rmdir(stage)
+        except OSError:
+            pass
+        raise
+
+    # 4) 提交：只有走到这里才真正销毁旧内容。
+    shutil.rmtree(stage, ignore_errors=True)
     return load_manifest(snapshot)
 
 

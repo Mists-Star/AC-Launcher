@@ -287,6 +287,9 @@ def complete_login_with_token(client_id: str, token: dict) -> dict:
     profile["access_token"] = mc_token
     profile["refresh_token"] = token.get("refresh_token", "")
     profile["ms_access_token"] = access_token
+    # round-210 P0：refresh_token 只能由当初签发它的同一个 client_id 兑换。
+    # 把登录用的 client_id 记进 profile，静默刷新时不再猜 / 不再硬编码。
+    profile["ms_client_id"] = client_id
     return profile
 
 
@@ -323,12 +326,19 @@ def refresh_microsoft(profile: dict) -> dict | None:
     refresh_token = (profile.get("refresh_token") or "").strip()
     if not refresh_token:
         return None
+    # round-210 P0：旧实现硬编码 MICROSOFT_CLIENT_ID="00000000402b12d1"，
+    # 而设备码登录实际用 get_active_client_id()（内置 brand ID 或玩家自填
+    # Azure ID）。refresh_token 与 client_id 绑定，换一个 ID 兑换必然 400，
+    # 静默续期 / 皮肤上传 401 重试 100% 失败。优先用签发时记录的 ID。
+    client_id = (profile.get("ms_client_id") or "").strip()
+    if not client_id:
+        client_id = get_active_client_id() or MICROSOFT_CLIENT_ID
     try:
         r = requests.post(
             _TOKEN_REFRESH_URL,
             data={
                 "grant_type": "refresh_token",
-                "client_id": MICROSOFT_CLIENT_ID,
+                "client_id": client_id,
                 "refresh_token": refresh_token,
                 "scope": MICROSOFT_SCOPE,
             },
@@ -338,7 +348,11 @@ def refresh_microsoft(profile: dict) -> dict | None:
         data = r.json()
         if "access_token" not in data:
             return None  # 刷新被拒（token 失效/撤销）→ 需重新登录
-        new_profile = complete_login_with_token(MICROSOFT_CLIENT_ID, data)
+        new_profile = complete_login_with_token(client_id, data)
+        # 微软刷新响应通常不回传 refresh_token；不能让上面把它清成空串，
+        # 否则「刷新一次之后就再也刷不了」。
+        new_profile["refresh_token"] = (data.get("refresh_token") or "").strip() \
+            or refresh_token
         # 保留原账号 id，避免刷新后账号身份漂移
         new_profile["id"] = profile.get("id", new_profile.get("id", ""))
         return new_profile

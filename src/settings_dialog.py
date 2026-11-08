@@ -2426,7 +2426,6 @@ class SettingsPage(QWidget):
         if not dlg_dir:
             return
         try:
-            from . import _SENSITIVE_CFG_KEYS
             self._sync_ui_to_cfg()
         except Exception:  # noqa: BLE001 - 收集失败仍可导出已持久化档
             pass
@@ -2446,7 +2445,6 @@ class SettingsPage(QWidget):
     def _import_settings(self):
         """round-83 设置导入：读 JSON → 仅合并已知键 → 写回并重建设置页/外观。"""
         from .win_rounded import pick_files, warn, info
-        from . import _SENSITIVE_CFG_KEYS
         path = pick_files(self, t("settings.cfg_import_title"), "", "配置文件 (*.json)")
         if not path:
             return

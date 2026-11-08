@@ -917,7 +917,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "instances.restore_pick_title": "选择要回滚的备份",
         "instances.restore_pick_hint": "选择后会用该快照覆盖实例当前的 mods / config / 存档。",
         "instances.backup_saved_at": "快照时间",
-        "instances.restore_confirm": "将实例「{name}」回滚到所选备份？\n当前所有 mods / config / 存档 都会被替换。",
+        "instances.restore_confirm": "将实例「{name}」回滚到所选备份？\n当前所有 mods / config / 存档 都会被替换，做备份之后新增的文件也会被删除。",
         "instances.restore_warn": "建议先创建一份当前备份，以便回滚后若不满意还能再恢复。",
         "instances.restore_done": "回滚完成",
         # ---- 启动前模组冲突预检（N5）----
@@ -3066,7 +3066,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "instances.restore_pick_title": "Choose a backup to restore",
         "instances.restore_pick_hint": "Restoring overwrites the instance's current mods / config / saves.",
         "instances.backup_saved_at": "Snapshot time",
-        "instances.restore_confirm": "Restore instance \"{name}\" to the selected backup?\nCurrent mods / config / saves will all be replaced.",
+        "instances.restore_confirm": "Restore instance \"{name}\" to the selected backup?\nCurrent mods / config / saves will all be replaced, and files added after the backup will be deleted.",
         "instances.restore_warn": "Consider creating a current backup first, so you can recover again later.",
         "instances.restore_done": "Restore complete",
         # ---- pre-launch mod conflict scan (N5) ----

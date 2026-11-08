@@ -1109,3 +1109,250 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
   「正在…」，终态由回调写，否则玩家看到的成功是假的。
 - 一键修复只需修「能自动修的」，**剩下的必须明确列出**，不能静默跳过。
 
+---
+
+## 十六、全量审查（2026-11-08 11:1x，round-209 之后 · 只读审查）
+
+> 触发：主理人「审查一遍整个启动器」。**未改任何源码**；本节只登记。
+> 基线：HEAD `a8335bb`、工作树干净、`origin/main` 同步；部署版 exe
+> `sha256 5C0019EC…` 与 `dist_beta/AC_Launcher` 逐字节一致，`_internal`
+> 4184 : 4183（唯一差是运行期 `_startup.log`）。
+> 三轨结论：`regress.py` **79/79**（i18n 2000=2000、PII zero residual、IA 4 页 29 条）；
+> 部署版离屏冒烟 8s 存活、`crash.log` 无新增；**但真机日志与运行期探针仍抓到
+> 回归覆盖不到的活问题** —— 又是一次「全绿 ≠ 没问题」。
+
+> ⚠ **范围更正（主理人 11:41 指出）**：本节初版把资源中心写成了主角，
+> 编排偏了。**本次审查对象是整个启动器**：按 8 个域分工逐文件扫过
+> （① 资源中心 ② 启动/安装/下载 ③ 账号/认证/隐私 ④ 设置/主题/更新
+> ⑤ 导航/页栈/IA ⑥ 实例/备份/导入 ⑦ 模组/内容 ⑧ 构建/文档/门禁），
+> 覆盖矩阵见 **§16.6**；资源中心只占其中 1 个域。
+> **§16.1 是资源中心域，§16.5 起才是其余 7 个域** —— 后者的 P0 更严重
+> （点一下就崩 / 更新起不来 / 回滚丢档），返工顺序以 **§16.7** 为准。
+
+### 16.1 资源中心域发现（按级别，均带判据）
+
+| 级别 | 位置 | 问题 / 证据 | 可测量判据 / 修法方向 |
+|---|---|---|---|
+| **P0** | `src/mod_list.py:217,252` ↔ `src/store_detail.py:841,1392-1416` | **异步回调无 Qt 对象生命周期守卫**。部署版 `data/crash.log` 共 733 条，其中 **705 条** `RuntimeError: libshiboken: QLabel already deleted`：`store_detail.py:1122`(410) / `:849`(269) 属 11-07 旧 exe，`mod_list.py:252`(26) **最后一次 2026-11-08 10:35:38，当前版仍在复现**。本地离屏强制派发 `DeferredDelete` 后调 `ModRow._relayout_desc()` 已 100% 复现同一异常。`QTimer.singleShot(0, self._relayout_desc)` 无守卫；`_track/shutdown()` 只 `requestInterruption()` 不 disconnect，回调仍可触碰已删 `versions_lbl` | 项目内已有正解：`src/pages_browse.py:759` 用 `except RuntimeError: continue  # 卡片已被 deleteLater`。给 `_relayout_desc` / 所有 worker 回调加 `isValid()` 或 RuntimeError 守卫；`shutdown()` 断开信号。修完必须真机切页 10 次后确认 crash.log 零新增 |
+| **P0** | `src/pages_browse.py:965-985` ↔ `:884-891,945-947` | **迟到源补卡只加 UI，不写回规范状态**。`_append_source_rows()` 只改 `_mods` / `_vbox` / status，不写 `_store_results`、`_store_cursors`、`_can_next`、页码器、`_store_swr`，也不重应用 `hide_installed`。后果：① 翻页时迟到行从累积集消失；② SWR 缓存的是「不含迟到行」快照，之后 fresh 命中永久丢数据；③ 勾「隐藏已装」后迟到回调把已装 mod 加回来（点了没反应）；④ 状态栏停在 `store.partial_loading` 不再回终态。触发器是 §16.1 第三条超时回调 | 离屏桩 `_is_installed` 恒 True + `_append_source_rows([m])`，断言 `m in _mods`（成立=缺陷）、`m not in _store_results`；再 `_goto_page(1)` 断言 m 消失。修法：迟到行走与 `_on_loaded` 同一套状态写回 / 或统一走「完整结果重渲染」 |
+| **P1** | `src/store_search.py:249,256,277,390` ↔ `pages_browse.py:820` | **`total == -1` 让页码器无限翻空页**。中文搜索两条名库回退路径都返回 `total=-1`，`store_can_continue()` 把它当「还有」，`can_next` 恒 True。实测 `page1 hits=0 can_next=True`、`page5 hits=0 can_next=True` | 区分「本轮继续尝试」与「还有下一页」：`can_next` 用 `len(results) > target` 或已知 total 判定；**别直接改 `store_can_continue`**，`tests/test_round208_store_search.py:249-251` 已把 -1 允许继续钉成契约（单轮语义正确） |
+| **P1** | `src/pages_browse.py:670-694,849-852,890-891` ↔ `store_search.py:87-99,228-232` | **SWR fresh 自我续期 + 键不一致**。fresh 分支 `_on_loaded(snap, reset)` 默认 `swr=False` → 又调 `_store_swr(data)` 刷新 `time.time()`，同一 key 30min 内反复命中即「永远 fresh」，revalidate 永不触发；freshness 是盘上 `{"n":N}` marker、数据本体只在内存 `_swr_cache`，两者分裂。且 `_swr_key`/`filters_key` 缺 `language` / `hide_installed` / 目标实例 → 切语言、勾隐藏已装、换目标实例都命中旧快照**不发 HTTP**（`_request_key` 含 hide_installed 反而放行去重，短路发生在它之后） | `p0=p._swr_key(); p._filters['hide_installed']=True; assert p._swr_key()==p0`（成立=缺陷）；桩 `search_store_page` 计数验证第二次 `_load` 不请求。`r208:` 单源缓存键同样缺语言 |
+| **P1** | `src/store_search.py:338,348-355,363-386` | **8s 预算后 daemon 线程仍在写共享对象**。实测 `_SEARCH_BUDGET=0.01`、源 `sleep(0.06)`：函数已返回 `hits=0 / partial=True`，60ms 后 `on_source` 仍回调 `['Modrinth','CurseForge']` → 页面可能已切走/销毁，或往已渲染页补卡（即上一条 P0）。另 `box.items()`(`377`) 与线程 `box[k]=...` 并发，理论上可抛 `RuntimeError: dictionary changed size during iteration`（**静态分析，未离屏复现，不写成已证实**）；`net_api.search_all:1652` 预置两键只读下标，没有这个 race | 超时后给线程结果一个「不再回灌」标记，或把 `box` 换成每线程独立 return + 队列；`on_source` 回调带 gen 且页面销毁即丢弃 |
+| **P1** | 历史开放项（§五/§六/§八 复核后**仍成立**） | ① `launch.py:1094-1128` 补库失败吞掉继续 spawn，`main_window.py:5242` 无条件 `last_session.record(...,"ok")` → 缺库秒退记成成功；② `launch.py:1068-1082` classpath 用 vroot、补库基准用 `mc_dir/libraries`，`..` 开头缺失库整批跳过；③ `launch.py:816-909` / `core/install.py:143-145` Java 判据仍四套（`java_plan()` 只被 `instance_editor.py:916` 消费）；④ `worker.py:365-379` 异常+取消时三个终态信号一个都不发、`_cancel_requested` 仍是裸 bool；⑤ 配置仍是 4 份长生命周期快照 + 整文件覆盖；⑥ `store_detail.py:1187-1193` CF 直下无依赖树；⑦ `launch.py:1144-1157` 缺前置只提示不拦截 | §十三 的排序提醒仍然有效：这几条才是真正让人难受的，**不宜长期排在 UI 毛刺后面**。逐条配行为断言（不能只查源码字符串） |
+| **P1** | `pages_browse.py:358`、`settings_dialog.py:2623` + `main_window.py:4873`、`crash_dialog.py:389`、`main_window.py:5744-5748` | **弹窗收敛没收尾**（用户最早吐槽的「启动器分歧感」）。全仓 35 处 QDialog `.exec()`；同一功能两套形态仍存：版本页「安装」弹 `NewInstanceDialog`（实例页走页内栈）、诊断对话框页内+主窗口双入口、`_fix_java` 回退弹 `JavaManagerDialog`、崩溃 auto_analyze 仍是窗口壳（虽已改 NonModal `show()`） | 登录 / 皮肤库 / 地图 / 投影图是约定保留的全局模态，**不是缺陷**；只收敛上面 4 处 |
+| **P2** | `src/fix_feedback.py:28-58` ↔ `crash_dialog.py:208`、`mod_check_dialog.py:120-122`、`pages_instances.py:2040-2066` | 主题切换后 `FeedbackBar` 颜色不更新（无 `on_theme_change`，`_TONE_COLOR['info']` 是 import 时冻结合照，ok/warn/busy 硬编码 hex）；三条修复入口只有两条 attach 真 FeedbackBar，第三条走 4.5s 浮层 toast、宿主断链时仍可兜到模态 —— 与「统一实现」宣称有偏差 | `bar.show_message('x','info'); theme.set_theme_mode('dark'); assert bar.styleSheet()==old`（成立=缺陷） |
+| **P2** | `tests/test_round208_store_alignment.py:135-153`、`test_round208_store_search.py:48-54`、`test_round209_store_regression.py:145-147` | **回归里有假断言 / 覆盖盲区**。`:140` 只查源码里有没有 `"key == self._last_request_key"`，删掉去重逻辑仍通过；`search.py:53` 断言的是 docstring 一句注释；`regression.py` 把 `na._cached/_stale` 全 mock 成 None，导致 SWR fresh 短路路径**从不进入**（正是 §16.1 第四条逃逸原因） | 这是「79/79 全绿但仍有 P0」的直接解释。修 bug 前先把对应断言换成行为判据，否则新行为会被旧断言挡住 |
+| **P3** | `AGENTS.md:38-66`、`RELEASE_1.0.0_CHECKLIST.md`、`CHANGELOG.md` | 文档过期：AGENTS 仍写「当前开发主线 2026-09-25 / round 99-103 待做 / 编号从 99 起」，实际已 round-209；发布清单 A 组两项仍未打勾（真机新建实例启动到主菜单、真机首启目检，AI 做不了）；CHANGELOG 375 KB 单文件。另 `main_window.py` 5940 行 / `i18n.py` 4377 行 / `net_api.py` 2901 行，192 处 `except...: pass`（旧文写 310 处，口径不同） | 协作者 TRAE 会照 AGENTS 排期，优先同步；发布清单两项标注「待主理人真机」而非空白 |
+
+### 16.2 复核：这些**不是** bug，别再当开放项修
+
+| 旧账 | 复核结论 |
+|---|---|
+| 状态栏三路信号交替刷（§七·续） | ✅ round-177 已加 `_bind_status_worker` / `_unbind_status_worker`（`main_window.py:3139-3176`） |
+| Java 下载 95 分钟 / 取消删掉已装 jre-25 | ✅ round-177 已接 USTC 镜像 + Range 续传（`core/java_install.py:126,226`）+ 删前判 `java.exe` 存在（`:310-313`） |
+| 微软 token 无刷新 / 离线 UUID 为空 | ✅ 已有 `refresh_microsoft()`（`core/auth.py:316`）；离线 UUID 现为 12 位内部 id（`accounts.py:29-30`）。⚠ 但「无 `expires_at` 判据、无条件刷新」与「非规范 `OfflinePlayer:<name>` UUID v3」仍缺，属残留 |
+| `find_missing_dependencies` 只比 modid 字符串 | ✅ round-201 已加 `canonical_id()` + `provides`（`crash_analysis.py:463-493`）；**版本区间 / Forge 约束仍不解析**，这半条仍成立 |
+| 切来源后复用旧快照 | ✅ round-209 已把 `source` 纳入 `filters_key`，且 `test_round209_store_regression.py:267-270` 有断言 |
+| `_prepare_natives` 缺 on_repair / `needs_convert` 死字段 | 仍成立，但 §五 里 `i18n.py:1360` / `pages_instances.py:2153` 两处 UI 引用已不存在，行号过期 |
+| 陈旧 `ac.lock`（PID 27608 无对应进程） | ✅ 不是 bug：`main.py:223-239` 的 `QLockFile.setStaleLockTime(30_000)` + 窗口探测接管。实测第二次冒烟锁 PID `27608 → 7120`、7s 存活、crash.log 零新增 |
+
+### 16.3 本次附带处理（非源码改动）
+
+- 主理人要求「备份删掉（有 bug 的版本不要）」→ 已删 5 份旧版备份共约 **5.2 GB**：
+  部署目录同级 3 份 `AC_Launcher_prev_20261107_230232` / `_20261108_003832` /
+  `_20261108_110908`，仓库 `dist_beta/` 2 份 `AC_Launcher_prev_20261108_003642` /
+  `_110742`；前 3 份里后两份含 `data/` 旧副本，已按「直接删除」确认执行。
+  删前校验当前版 exe 与构建产物 sha256 一致；当前 `AC_Launcher/`、`data/`、
+  `dist_beta/AC_Launcher` 及无关的 XAMPP 备份全部保留。
+- `AC_LIVE=1` 时启动器会起 `127.0.0.1:8788` 的本地控制面板（`src/aclive.py:489,1098`，
+  `/ctl` 为 POST 控制口，无 token）。绑定 loopback 且**只在显式开 AC_LIVE 时启用**，
+  默认不监听；若将来常态化开启需补鉴权。
+
+### 16.4 建议返工顺序（等主理人拍板，本轮不动手）
+
+1. **Qt 生命周期守卫**（真机还在刷 crash.log）+ **迟到回调状态写回**（会丢数据）；
+2. **分页无限空页 + SWR 键/续期**（资源中心，且需先把 `test_round208_store_search.py:249`
+   的契约断言改成区分两种语义）；
+3. **把假断言换成行为判据**，否则 1/2 的修复会被旧断言挡住；
+4. 历史 P0/P1：缺库秒退记成功 → classpath 基准 → Java 判据统一 → ProgressWorker 终态；
+5. 弹窗收敛 4 处 + AGENTS / 发布清单同步。
+
+> ☠ 双轨验收欠账未变：以上全是代码轨 + 离屏/日志轨，**没有联网真机跑「搜模组 →
+> 下载 → 启动到主菜单」**。发布清单 A 组两项仍待主理人真机执行。
+
+---
+
+### 16.5 其余 7 个域的发现（**全启动器的主战场**）
+
+> 三条轨道：源码逐域扫描 + 可复现探针（用 venv 直接调函数）+ 代码确证。
+> 标 **【实测】** 的是我本地跑过并拿到结果的；标 **【静态】** 的是读码确证但未运行时复现。
+> 与 §16.1 不重复，也不复述 §五/§六/§八 已登记旧账。
+
+#### 16.5.1 P0 — 点一下就崩 / 直接丢数据
+
+| # | 域 | 位置 | 问题 | 证据 |
+|---|---|---|---|---|
+| 1 | 设置 | `src/settings_dialog.py:2429,2449` | **「导出设置 / 导入设置」两个按钮必然崩**：`from . import _SENSITIVE_CFG_KEYS`，`src/__init__.py` 是空文件、包内无此属性也无同名模块。导出处 import 在 `try` 内被吞 → `:2434` 变 `UnboundLocalError`；导入处 import 在 `try` 之前 → 直接冒泡。设置备份/迁移功能完全不可用 | **【实测】** `ImportError: cannot import name '_SENSITIVE_CFG_KEYS' from 'src'`。修法：把键集合提到模块级常量或独立的 `src/core/cfg_keys.py` |
+| 2 | 启动 | `src/launch.py:245-256,281-295` ↔ `src/settings_dialog.py:62,85` | **`jvm_preset=aikar` 与 `gc_mode=zgc/zgc_gen` 同时下发 `-XX:+UseG1GC` 和 `-XX:+UseZGC`**，JVM 直接拒绝启动、秒退。注释 `:279-280` 自己写明互斥，但 `_gc_explicit` 只保护 `perf_g1gc` 组（`:301-315`），**漏了预设组**；两个下拉在设置页可独立同时选 | **【实测】** `build_options(..., jvm_preset="aikar", gc_mode="zgc")["jvmArguments"]` 同时含 `UseG1GC` / `UseZGC`。修法：预设组也纳入 `_gc_explicit` 跳过，或 UI 互斥置灰 |
+| 3 | 实例/备份 | `src/core/backup.py:135-163` ↔ `pages_instances.py:2123-2129` | **「还原备份」不是事务**：先摘共享池联接 → `os.listdir(mc)` 全量删（含 mods/config/saves）→ 再 `shutil.copytree`。中间任何失败（磁盘满 / 只读 / 文件被游戏占用）**既不回滚也不重建联接**，`error` 回调只 `warn()`。另外语义是「清空+覆盖」，快照之后新建的存档/新装 mod/新配置全部静默删除，确认框（`restore_confirm + restore_warn`）**没写这一句** | **【静态·代码确证】** 全函数无 `try/except`，`ensure_dirs()` 在 `:163` 才执行。判据：桩 `copytree` 抛 `OSError`，断言 `saves/W/level.dat` 已消失且 `libraries` 不再是联接。属**不可逆数据丢失**，优先级高于本表其它条目 |
+| 4 | 下载完整性 | `src/net_api.py:511-529,567-580` | **分片下载把「服务端忽略 Range 返回的 200」当该分片成功**：`:513` 允许 `(206,200)`，`:516-529` 从偏移 `s` 写入整个 body、只按写入字节数判完成，各段互相覆盖；无 `expected_sha1` 的路径直接 `os.replace` 成正式文件。probe 阶段 `:448-452` 有 200 回退单流，**`_worker` 内部漏了同一判断**。5 个调用点未传 hash（`core/install.py:499,711,721,833`、`net_api.py:2388`）→ 客户端 jar / 整合包静默损坏，且下次 `isfile` 判「已装」跳过修复 | **【静态·代码确证】** 与 `core/java_install.py:236-237` 的正确处理形成对照。判据：让某分片返回 200 + 完整 body，落盘文件 sha1 ≠ 远端 |
+| 5 | 更新 | `src/core/update_install.py:245-255` | **升级脚本在「确认新 exe 真能运行」之前就删掉备份**：`Expand-Archive` → `Test-Path $exePath`（只查存在）→ `:251-252` 删 `.upd_bak` → `:253` 才 `Start-Process`。`catch` 回滚（`:256-269`）只在解压/改名抛异常时触发；「exe 存在但启动即崩」不抛异常，**备份已没了** → 一次坏更新让启动器永久起不来，只能手工重装 | **【静态·代码确证】** 修法：先 `Start-Process` + 短时存活探测，成功后再删备份 |
+
+#### 16.5.2 P1 — 功能错 / 隐私与合规
+
+| 域 | 位置 | 结论 |
+|---|---|---|
+| 认证 | `src/core/auth.py:331,341` ↔ `:46-73`、`src/brand.py:30` | 微软静默刷新把 `client_id` 硬编码成 `MICROSOFT_CLIENT_ID=00000000402b12d1`，而登录走 `get_active_client_id()`（默认 `ba522940-6118-4c81-82f1-7e5dd304d5e0` 或玩家自填 Azure ID）→ **凡用内置/自定义 client_id 登录的账号，refresh_token 换不到新 token**，静默续期与皮肤上传 401 重试必然失败。**【实测】** 两值不同；`refresh_current_silently` 全项目唯一调用点是 `skin_dialog.py:564`，启动链路根本不调 |
+| 启动 | `main_window.py:5817-5822` ↔ `:5496-5568` | 点「结束游戏」后 `kill_game` 直接 `_game_poll_timer.stop()` + `_game_procs.clear()`，**跳过 `_poll_game` 的全部退出回收**：窗口不弹回、退出命令不执行、控制台无结束标记、`last_session` 永远停在 `ok` |
+| 启动 | `launch.py:779-780` ↔ `core/dl_gate.py:71-77`、`main_window.py:2697-2762` | 下载闸门两处断链：`wait_free` 超时**无条件 release 别人的锁**（全局 `discard` 不认持有者）；`claim` 成功后到 `w.start()` 之间无 `try/finally`，中途抛异常则闸门永久占用，该实例此后所有启动被 `download_busy` 拒绝 |
+| 启动 | `core/loader_swap.py:138,145-162` | 换加载器失败只回滚 3 个内存字段：`version_id` 被清空、`old_vid` 取了却从未用，磁盘半成品 `versions/<id>/` 不清理 → 下次 `isfile` 判「已安装」跳过重装 |
+| 安装 | `core/install.py:420-457` | `.mrpack` 覆盖安装做了 mods/config/options.txt 备份却**从不还原**（备份失败还静默 `pass`），中途失败则 mods 已被部分覆盖且无人认领备份 |
+| 安装 | `core/mirror.py:1205-1248,1309-1317` | `_resume_mll_download` 在 `sha1=None` 时零完整性校验：`.part` 无来源标记、416 分支直接 `os.replace` 残件、无 hash 时不比 `start+got` 与 `total` → 版本 json / assetIndex 可能被截断后成正式文件 |
+| 下载 | `net_api.py:2376-2382` | **`download_optifine_to` 是全仓唯一没走 `_safe_filename` 的网络文件名落盘点**（其余 8 处都走了）→ 页面被污染返回 `../` 可写穿目标目录 |
+| 启动 | `launch.py:238,257-264` | 玩家在 `jvm_args` 写 `-Xmx2G` 会覆盖预设堆参数，但 `-Xms` 仍按 `ram_mb//2` 算 → `8192M` 时得到 `-Xms4096M -Xmx2G`，JVM 拒绝启动且 UI 无提示 |
+| 账号/隐私 | `accounts.py:116-119` ↔ `win_dpapi.py:48-67`、`README.md:59` | DPAPI 是「尽力而为」：`enc is None` 时 token **原样明文**写进 `data/accounts.json`，无提示。README 宣称「磁盘密文」不成立 |
+| 隐私 | `log_mask.py:24-44` ↔ `core/support_bundle.py:51-53,95-141`、`crash_analysis.py:363` | 脱敏只识别 `accessToken `（关键字+空格）一种形态，`token=` 参数默认空且两个导出通道都没传。`"accessToken":"…"` / `refresh_token=…` / `Authorization: Bearer …` 全部原样进可对外分享的诊断包 |
+| 隐私 | `settings_dialog.py:40-45` ↔ `core/support_bundle.py:38-41` | 敏感配置键两处各写一份且**已漂移**；`redact_config` 对非敏感字符串只做 `mask_launch_text` → `download_proxy`（可含 `user:pass@`）、`ms_client_id`、`update_manifest_url`、一批自定义绝对路径都会随 `config.json` 外带 |
+| 隐私/合规 | `README.md:62-63`、`terms.py:18,21` ↔ `net_api.py:1241-1341`、`launch.py:974-975`、`skins.py:188-229` | **「零数据上传 / 仅与 Mojang 官方 API 或你指定的服务器通信」被证伪**：翻译把最长 5000 字玩家文本发 `translate.googleapis.com` / `api.mymemory.translated.net`；外置登录启动时后台自动打 `api.github.com` 查 authlib 更新；登录成功后自动拉皮肤到 `crafatar.com` / `mc-heads.net` 等。全库 58 个 host 里**未见遥测/统计域名**，「零遥测」本身无反证，但「无任何数据上传」不成立 |
+| 构建 | `build.py:118`、`.gitignore:9`、`README.md:91` | `AC_PiTest_noupx.spec` **本机存在（10012 B）但 `git ls-files` 为 0**（被 `*.spec` 忽略）→ 换机 / 新 clone 跑 `python build.py` 直接失败；README 写的 `python build_main.py` 文件不存在。构建不可复现，spec 的 `datas=` 也因此无法审计 |
+| 导航 | `main_window.py:4759-4763` | pcl2 布局切语言时 `_pcl2_select_top()` 已切到正确子页，紧接 `stack.setCurrentIndex(STACK_INDEX.get(_pcl2_active_top,0))` 又覆盖；顶栏 key（`launch/download/...`）与 `STACK_INDEX` 键（`home/instances/...`）不同名，除 settings 外全回退 0 → 顶栏高亮「下载」、侧栏高亮「资源中心」、内容却是首页 |
+| 导航 | `main_window.py:1951` ↔ `pages_instances.py:2950-2953` | 首页切当前实例直调 `inst_mgr.set_current()` **不发信号**，其它页面仍显示旧实例；实例页走 `current_changed.emit()`。两个页面同时指向不同实例，后续操作可能落在错误实例 |
+| 实例 | `pages_instances.py:2005,2300-2308` ↔ `:1885,2955-2974` | 「删除实例」两套入口：右键确认框**不显示将删路径 / 无警告**、删后不清 `_selected_id`、不发 `current_changed`；详情按钮三项都做。IA 标记只挂前者 |
+| 实例 | `core/backup.py` 同上、`instances.py:1116-1130` | 删除实例 `rmtree(..., ignore_errors=True)` 吞失败，元数据仍无条件移除 → 列表里没了、磁盘上留着含存档的目录 |
+| 模组 | `modpack_import.py:147-177,326-329` | `_record_pack_sources` 声明并接收 `project_ids`，函数体却硬写 `"project_id":"" / "slug":""` → **CF 整合包所有 jar 的 slug 恒空**，`slug_map()` 返回空字典，round-197 的「精确来源」承诺落空 |
+| 模组 | `mod_updater.py:61-70,124` / `:154-168` / `mod_list.py:575-597` | 更新检测「第一个返回 id 的候选即采纳」可能命中同名不同项目；仅比文件名判可更新；批量更新备份失败就 `os.remove(old)`，新旧两份 jar 并存导致 duplicate；启停用 `os.replace` **覆盖已存在的 `.jar.disabled`**，批量还静默吞 `OSError` |
+| 性能 | `mod_list.py:443-482` ↔ `core/modmeta.py:186-223` | 40+ jar 时 `reload()` 在 **UI 主线程**逐个 `zipfile` 解清单，且每次销毁重建全部行 → 首次打开 / 批量变更后界面卡住 |
+| 导入 | `modpack_import.py:242-322`、`scan_dialog.py:457-482` | CF 整合包**先落盘注册实例再下载**，失败留半成品且元数据已入库（Mrpack 弹窗反而会清理）；复制模式导入失败**静默改成就地 link**，把玩家原目录变成 external 实例，无二次确认 |
+| IA 护栏 | `tools/gen_paths.py:38-39,76-82` ↔ `main_window.py:100-103` | `REQUIRED_PAGES` 只有 4 页、`MIN_PATHS_PER_PAGE=3`，而 `STACK_INDEX` 有 **8 个主页面**；`mods / versions / lobby / toolbox` 零标记，`--check` 仍 exit 0 → round-208 补的「覆盖率护栏」实际只覆盖 50% 主页面 |
+
+#### 16.5.3 P2（摘）
+
+- 更新 manifest 无 `expires` / 单调版本链 → 旧签名清单可无限重放（`core/update_trust.py:82-93,145-146`）；`_check_url` 只验 scheme 不验域名（`:176-189`）。**Ed25519 验签链本身完整、私钥不入库**，别误伤。
+- `lobby.py:45-48` 非原子写 + `_load()` 遇损坏静默返回空 → 断电全量丢大厅；`:89-97` 加入不校验人数 / 不去重，`max_players=8` 从未被读。
+- `apply_wrapper` 用 `list2cmdline` 拼进 `cmd /c`，未转义 `& | ^ < >`（`launch.py:125-129`）；authlib 配置是**全局共享文件**，多开不同外置登录服务器会互相覆盖（`:321-346`）。
+- `download_optifine_to` 之外：`batch_download.make_download_task` / `download_modpack_to` 都不传 `expected_sha1`；**全仓无 sha512 校验**，只有 sha512 的 Modrinth 文件零校验；两条路径是坏文件已 `os.replace` 后才复核 hash。
+- `Java` 下载全程无 hash（只用 `zipfile.is_zipfile`），同一 major 无并发锁；`install_java()` 装完仍未失效 `scan_javas` 缓存（§十二 旧账，仍成立）。
+- `DownloadQueue.shutdown` / `BatchDownloader.cancel` 中断不了**在途** `download_file`（只遍历队列里的），关窗 4s drain 后 `os._exit` 强杀 → `.part` 残留、任务中心无终态。
+- `last_session` 在「取消启动」后永久停在 `starting`（枚举里根本没有 cancelled/ended）；空 `inst.id` 的多开进程统一归到 `_unknown` 且第二个直接 return，成为无人监控孤儿。
+- `login_dialog.py:456-467` 设备码 `webbrowser.open` 失败静默（§十三 已登记）；`skins.py:40-45,148-160` 对玩家粘贴 URL 无 scheme/host 限制（可请求本机内网）。
+- `i18n.t()` 缺键最终回退 **key 原文**（`i18n.py:4357-4367`）；静态键全命中（zh/en 各 2000、1299 个静态字面键零缺失），但 `onboarding.py:519` 等处动态拼键无护栏。
+- `server_favorites.py:91-99` 编辑时留空端口会清空已存端口；`instance_editor.py:1067-1084` 删内容回退用显示文本拼路径（注释自己警告过不能这么做）。
+- `pcl2` 占位页下 `_current_page_key()` 回退 `instances`、任务召回可能落错页；`_pcl2_goto` 对 `account` 无 else 分支静默返回（**静态，未真机复现**）。
+
+#### 16.5.4 已核对**无问题**的路径（证明是全量扫，不是只挑毛病）
+
+更新信任链 Ed25519 验签 / key_id 白名单 / 严格 JSON / size+sha256 三重校验（`core/update_trust.py:152-190,238-369`）；条款门禁 fail-closed（`main.py:300-338`）；支持包不夹带 `accounts.json` / `skins.json` 且 zip 原子写；`launcher_config.json` 原子写、语言/主题切换即时生效**不需重启**；`win_dpapi` 实现本身正确（失败才返回 None）；i18n 双语键对称、静态键零缺失；`core/utils.py:41-59` 与 `modpack_import.py:254-273` 的 zip-slip 双重防护；`loader_swap._inside()` 的 commonpath 越界与 external / 原版目录保护；`mrpack_export` 跳过软链 + 体积上限；`async_image.py:164-199` 用 `shiboken6.isValid()` 包住所有 QLabel 写入（**正是 §16.1 该抄的正解**）；`shared_libs` sha1 判重 + junction 回滚；`core/mirror.py:412-432` 把 mirror/proxy 收进 InstallContext，并行安装不再互相污染；`main_window.py:3139-3176` 状态栏信号归属（旧账已修）；`main.py:591-630` 退出清理与 `os._exit`；`main_window.py:5039-5061` 同实例多开护栏。
+⚠ 第三方 `minecraft_launcher_lib` 内部（Forge processors / natives exclude / `mrpack.install_mrpack` 的 overrides 解压）**未读源码，标未核实**。
+
+---
+
+### 16.6 覆盖矩阵（8 域 × 结论）
+
+| 域 | 主文件 | 新发现 | 状态 |
+|---|---|---|---|
+| ① 资源中心 | `pages_browse` / `store_search` / `store_filter` / `store_detail` / `net_api` 搜索段 | §16.1：P0×2、P1×5、P2×2、P3×1 | 已审 |
+| ② 启动·安装·下载 | `launch` / `core/install` / `core/java*` / `core/mirror` / `downloader` / `batch_download` / `worker` / `main_window` 启动段 | §16.5：P0×2、P1×8、P2×6 | 已审 |
+| ③ 账号·认证·隐私 | `accounts` / `core/auth` / `core/authlib` / `win_dpapi` / `log_mask` / `skins` / `login_dialog` | §16.5：P1×5、P2×2（含实测 client_id 不一致） | 已审 |
+| ④ 设置·主题·更新 | `settings_dialog` / `theme` / `onboarding` / `core/update_*` / `terms` | §16.5：P0×2、P1×1、P2×2 | 已审 |
+| ⑤ 导航·页栈·IA | `main_window` 导航段 / `frameless` / `win_rounded` / `ui_kit` / `effects` / `docs/ia` + `tools/gen_paths` | §16.5：P1×2、P2×2 | 已审 |
+| ⑥ 实例·备份·导入 | `pages_instances` / `instance_editor` / `instances` / `core/backup` / `scan*` / `modpack_import` / `mrpack_export` | §16.5：P0×1、P1×5、P2×2 | 已审 |
+| ⑦ 模组·内容 | `mod_list` / `modules_page` / `core/modmeta` / `mod_check` / `mod_sources` / `mod_repair` / `mod_updater` | §16.1 P0（ModRow 生命周期，与①共享）+ §16.5：P1×4 | 已审 |
+| ⑧ 构建·文档·门禁 | `build.py` / `AC_PiTest_noupx.spec` / `regress.py` / `tests/` / `AGENTS.md` / `RELEASE_*` / `.gitignore` | §16.1 P2（假断言）、§16.5 P1（spec 未入库 / 隐私宣称） | 已审 |
+
+**全仓规模**：369 个受控文件、源码约 70.5k 行（`icons_rc.py` 7.2k / `main_window.py` 5.9k / `i18n.py` 4.4k / `pages_instances.py` 3.4k / `settings_dialog.py` 3.1k / `net_api.py` 2.9k）；35 处 QDialog `.exec()`、192 处 `except...: pass`、TODO/FIXME 0。`regress.py` 79 项全绿，但 **79 项里含源码字符串存在性断言**（§16.1 P2），且 8 个域的新 P0 **一项都没被覆盖**。
+
+---
+
+### 16.7 返工顺序（**取代 §16.4，以本节为准**）
+
+1. **数据安全 P0**：备份回滚事务化 + 确认框写明「将删除快照后新增文件」→ 分片下载 200 分支 → 更新脚本先验证再删备份。这三条会造成**不可逆丢档 / 装坏包 / 启动器报废**。
+2. **点一下就崩 P0**：设置导出/导入的 import → aikar+zgc 互斥 → 微软刷新 client_id → 异步回调生命周期守卫（§16.1 P0，真机还在刷日志）→ 迟到回调状态写回。
+3. **资源中心**：分页无限空页 + SWR 键/续期（修前先把 `test_round208_store_search.py:249` 的契约断言改成区分两种语义）。
+4. **把假断言换成行为判据**（`test_round208_store_alignment.py:140`、`test_round208_store_search.py:53`），否则 1–3 的修复会被旧断言挡住；并给 IA 护栏补到 8 页。
+5. **隐私/合规**：DPAPI 失败不静默明文、`log_mask` 覆盖全部凭据形态、敏感键清单合并、README/条款文案对齐实际域名。
+6. 历史 P0/P1（缺库秒退记成功 → classpath 基准 → Java 判据统一 → ProgressWorker 终态）→ 弹窗收敛 4 处 → AGENTS / 发布清单同步。
+
+> §16.7 提出时**只登记、未改源码**；§16.1 的 16.4 顺序作废。
+> 2026-11-08 12:xx 主理人「行」→ 已执行第 1、2 批（七条 P0）+ 第 4 批的行为断言，
+> 明细见 **§十七**；第 3、5、6 批仍为开放项。
+
+---
+
+### 16.8 主理人问答：`ac.lock` 有什么用
+
+| 项 | 结论 |
+|---|---|
+| 它是什么 | `main.py:212-255` 的**单实例互斥锁**，Qt `QLockFile` 写的 67 字节小文件，内容 = PID / 应用名 / 主机名 / UUID（本机当前是 `27608 / AC_Launcher / MISTS-STAR / 9ad20f1d…`）。**不是存档、不含账号或配置**，删了不丢玩家数据 |
+| 为什么要有 | 防止双击 exe / 卡住的进程再开第二个窗口（历史「双页」bug）。第二个进程 `tryLock` 失败 → `_raise_existing_instance()` 按品牌名找窗口并 `SetForegroundWindow` 提升已有窗口后退出；**连拿到锁的情况也会再扫一遍窗口**（round-96 修「教程背后露出页面」） |
+| 放哪 | `get_config_path("ac.lock")` = **exe 同级目录**（`src/paths.py:42-44`），所以部署目录里能看到它；配置本体是 `launcher_config.json`，玩家数据在 `data/` |
+| `ac.live.lock` | `AC_LIVE=1` 时用独立锁文件，让调试/live 实例与玩家正常启动器**并存**（`main.py:222-223`）。这解释了第一次冒烟没碰 `ac.lock` |
+| 残留怎么办 | 正常退出会 release；强杀 / 崩溃会残留。`setStaleLockTime(30_000)` + 窗口探测 → 30s 后自动 `remove()` 接管（`:224,234-239`）。**实测**：陈旧 PID 27608 无对应进程，第二次冒烟锁 PID 变 7120、7s 存活、`crash.log` 零新增 → 设计内正常，不需要手工删 |
+| 能删吗 | 启动器**没在跑**时删没有副作用，下次启动会重建；**运行中别删**（会让第二个实例乘虚而入，造成双开写同一份数据） |
+
+---
+
+## 十七、round-210：§16.7 第 1、2、4 批返工（2026-11-08 12:xx，已改源码）
+
+> 主理人「行」= 按 §16.7 顺序开工。**本轮范围**：数据安全三条 P0、
+> 点一下就崩四条 P0、以及「先补行为断言再改代码」。
+> **未动**：资源中心分页/SWR 与迟到回调（第 3 批）、隐私/合规文案（第 5 批）、
+> 历史 P0/P1 与弹窗收敛（第 6 批）。**未打包、未部署、未提交**。
+
+### 17.1 七条 P0 的处置
+
+| # | §十六 条目 | 现状 | 落点 |
+|---|---|---|---|
+| 1 | 备份还原先 rmtree 后 copytree、无事务 | ✅ 已修 | `src/core/backup.py:122` 两阶段事务 + `_clear_contents` / `_move_contents`；确认框 `i18n.py:920,3069` 补「新增文件也会被删除」 |
+| 2 | 分片把 200 当成功、坏 jar 落盘 | ✅ 已修 | `src/net_api.py:511` 严格 206 + Content-Range 起点 + 段长**相等**判定 |
+| 3 | 升级先删 `.upd_bak` 再 Start-Process | ✅ 已修 | `src/core/update_install.py:247` `-PassThru` + 3s `HasExited` 验证通过才删备份 |
+| 4 | 设置导出/导入 `from . import _SENSITIVE_CFG_KEYS` | ✅ 已修 | `src/settings_dialog.py:2422,2445` 改用本模块 `:40` 常量 |
+| 5 | aikar+zgc 同时下发 G1GC/ZGC | ✅ 已修 | `src/launch.py:44` `normalize_gc_flags()`，在 `build_options` 返回前统一清理 |
+| 6 | 微软静默刷新 client_id 硬编码不一致 | ✅ 已修 | `src/core/auth.py:273,316` 记录签发 ID + 优先复用 + 保住 refresh_token |
+| 7 | ModRow QLabel 生命周期崩溃（真机 705 条） | ✅ 已修 | `src/mod_list.py:217,244` `_relayout_desc_safe` + `RuntimeError` 守卫 |
+
+### 17.2 行为断言（不再只看源码字符串）
+
+`tests/test_round210_p0_regression.py`，46 项，已登记 `regress.py`：
+
+- **故障重放**：`copytree` 注入 `OSError` → 逐文件比对旧内容原样搬回、暂存区不留；
+  假服务端首请求 206、后续 200 → 断言回退 `_allow_parallel=False` 且无 `.part`/dest；
+  正常 206 → 断言不回退且拼出的字节与源完全一致（**反向对照**，防止把好路径改哑）。
+- **真实对象**：离屏 `SettingsPage()` 真调 `_export_settings` / `_import_settings`
+  （patch 掉文件对话框、模态与 `save_config`），断言导出 JSON 无敏感键、
+  导入不合还原密钥、不吞未知键。
+- **产物级判据**：真生成 PS1 比 `-PassThru` / `HasExited` / `verified` / `Remove-Item $Bak`
+  的先后顺序，catch 回滚分支仍在。
+- **矩阵与边界**：`aikar|auto × zgc|zgc_gen|g1_tuned|""`，默认 Aikar 组完整；
+  mock `requests.post` 校验 client_id 与 refresh_token；强制 `DeferredDelete` 后调
+  异步重排不抛、销毁前重排仍真改写文本。
+
+### 17.3 仍然开放的边界（诚实登记，别当已修）
+
+- `gc_mode="none"`：语义是「不指定 GC」，但 `aikar` 预设仍会带 `UseG1GC`；
+  若玩家同时手填 `UseZGC` 仍可能冲突。`normalize_gc_flags` 对 `none` 目前恒等
+  （保守不动），需要产品先定义「none 是否覆盖预设」再改。
+- `refresh_microsoft` 的 `_TOKEN_REFRESH_URL` 仍是 `/consumers/` 租户，与设备码登录
+  端点一致；玩家自建的多租户 Azure app 是否要换 `/common/` 未验证，本轮不动。
+- 备份事务的暂存区在 `mc_dir` **同级目录**；若该盘在同一时刻写满，
+  「搬回」也可能失败 → 此时暂存区会保留供人工恢复，但不会自动找回。
+- 自更新 3s 存活判据是保守近似：新 exe 若因单实例锁/用户主动关闭在 3s 内退出，
+  会被判失败并回滚到旧版（可再更新），不会造成启动器报废。
+
+### 17.4 门禁结果
+
+`regress.py` **80/80**（新增 1 套）；i18n 中英 **2000=2000**；PII `zero residual`；
+文案门禁禁用词 0 / allowlist 38 条无过期；IA `4 页 / 29 条 / 0 错误`；
+8 个改动模块 `py_compile` 全过。
+
+**运行轨（源码级）**：`AC_NO_TERMS=1 QT_QPA_PLATFORM=offscreen python main.py`
+离屏跑 8 秒存活（`timeout` 124 = 被外部杀，非崩溃）；`_startup.log` 记录
+`MainWindow built` → `nav ok` → `tray ok`，证明 8 个改动模块没把主窗口带崩；
+部署版 `data/crash.log` 零新增（157025 字节不变），源码侧未生成新 crash.log。
+
+> ⚠ 这次运行轨用的是**源码**，不是部署产物：`D:\Appdata\AC_Launcher` 仍是
+> round-209 的 `a8335bb` 打包版，本轮修复**尚未进 exe**。
+
+> ☠ 双轨验收欠账**未变**：以上都是代码轨 + 离屏/日志轨，
+> 没有联网真机跑「搜模组 → 下载 → 启动到主菜单」；也没有重新打包部署。
+> 发布清单 A 组两项仍待主理人真机执行。
+

@@ -247,11 +247,20 @@ try {{
     Write-UpdLog 'old files moved aside; extracting'
     Expand-Archive -Path $Zip -DestinationPath $AppDir -Force
     if (-not (Test-Path $exePath)) {{ throw 'updated exe missing after extract' }}
-    Write-UpdLog 'update applied'
+    Write-UpdLog 'update applied; verifying relaunch before dropping backups'
+    # round-210 P0：旧顺序是「先删 .upd_bak → 再 Start-Process」。Start-Process
+    # 只保证进程创建成功，exe 缺 DLL / _internal 不完整时进程立刻退出也不抛异常，
+    # 结果备份已被删光 → 一次坏更新让启动器永久起不来、且无法自动回滚。
+    # 现在先启动并观察 3 秒，确认新进程仍存活才删除备份；启动即退会 throw
+    # 并落到下面的 catch 回滚分支（备份此时还在）。
+    $proc = Start-Process -FilePath $exePath -WorkingDirectory $AppDir -PassThru
+    Start-Sleep -Seconds 3
+    if ($proc.HasExited) {{
+        throw ('updated exe exited immediately after launch, code=' + $proc.ExitCode)
+    }}
+    Write-UpdLog 'relaunch verified; removing backups'
     Remove-Item -Recurse -Force ($internal + $Bak) -ErrorAction SilentlyContinue
     Remove-Item -Force ($exePath + $Bak) -ErrorAction SilentlyContinue
-    Start-Process -FilePath $exePath -WorkingDirectory $AppDir
-    Write-UpdLog 'relaunched'
     Remove-Item -Force $Zip -ErrorAction SilentlyContinue
 }} catch {{
     Write-UpdLog ('FAILED: ' + $_)

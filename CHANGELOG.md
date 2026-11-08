@@ -8,6 +8,43 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-210（2026-11-08）— 全启动器审查 §十六 的 7 条 P0 返工
+
+> 主理人「行」= 按 §16.7 顺序开工。本轮**只做第 1、2 批 P0 + 第 4 批的行为断言**，
+> 资源中心分页 / SWR、隐私文案、历史 P0 仍未动（见 `docs/quality_punchlist.md` §17）。
+> 先补可证伪判据再改代码：`tests/test_round210_p0_regression.py` 46 项全绿。
+
+**P0 · 数据安全（不可逆丢档 / 坏包 / 启动器报废）**
+
+| 位置 | 修法 |
+|---|---|
+| `src/core/backup.py:122` | 还原改两阶段事务：摘联接 → 当前内容**整体搬进同盘暂存区**（不删）→ copytree + ensure_dirs → 全部成功才 `rmtree` 暂存区。任一步失败清半成品、原样搬回、重建联接后抛异常。确认框补「做备份之后新增的文件也会被删除」（中英同步） |
+| `src/net_api.py:511` | 分片 worker 原先接受 `200` 当成功 → 各段把整文件从自己 offset 写进 `.part` 互相覆盖。现在严格要求 `206` + `Content-Range` 起点匹配，段写入字节数必须**等于**段长（不允许超写污染邻段）；不满足即抛 `NetError` → 已有单流兜底接管，坏 jar 不会 `os.replace` 落盘 |
+| `src/core/update_install.py:247` | 自更新 PS1 改为 `Start-Process -PassThru` → 等 3s 查 `$proc.HasExited` → **确认新 exe 没秒退才删 `.upd_bak`**。启动即崩会落到 catch 回滚分支（备份此时还在），旧 exe 可被重新拉起 |
+
+**P0 · 点一下就崩 / 必然失败**
+
+| 位置 | 修法 |
+|---|---|
+| `src/settings_dialog.py:2422,2445` | 删掉两处 `from . import _SENSITIVE_CFG_KEYS`（常量定义在本模块 `:40`，包里没有 → 导出 `UnboundLocalError`、导入 `ImportError`）。改用模块级常量 |
+| `src/launch.py:44` | 新增纯函数 `normalize_gc_flags()`，在 `build_options` 返回前统一剔除互斥 JVM 参数。`aikar` / `auto` 预设组原先不受 `_gc_explicit` 保护，选 ZGC 仍带着 `UseG1GC` + `G1*` → JVM 拒启动秒退 |
+| `src/core/auth.py:273,316` | 登录时把签发 client_id 记进 `profile["ms_client_id"]`；静默刷新优先用它、老档案回退 `get_active_client_id()`，不再硬编码 `MICROSOFT_CLIENT_ID`。同时保住 `refresh_token`（微软刷新响应不回传，旧实现会把它清成空串） |
+| `src/mod_list.py:217,244` | `QTimer(0)` 改指向 `_relayout_desc_safe()`，且 `_relayout_desc()` 整体包 `RuntimeError` 守卫。行被 `deleteLater` 后回调不再写崩溃日志（真机同一位置累计 705 条） |
+
+**回归 / 门禁**
+
+- 新增 `tests/test_round210_p0_regression.py`（46 项），登记进 `regress.py`：
+  注入 `copytree` OSError 验证存档逐字节搬回、假服务端 200/206 双场景验证回退与正常拼装、
+  生成真实 PS1 比对语句顺序、离屏实例化 `SettingsPage` 真点导出/导入、
+  GC 参数矩阵、mock 微软刷新链路、强制 `DeferredDelete` 后调异步重排。
+  每条都配「旧能力没被改哑」的反向断言（正常 206 仍分片、默认 Aikar 组完整等）。
+- `regress.py` 80/80、i18n 2000=2000、PII zero residual、文案 / IA 门禁全过。
+- 源码级离屏冒烟 8s 存活，`_startup.log` 走到 `MainWindow built` / `nav ok` / `tray ok`，
+  `crash.log` 零新增。
+- **未打包、未部署、未提交**；部署目录仍是 round-209 的 `a8335bb` 产物。
+
+---
+
 ## round-209（2026-11-08）— 修复「一部分 mod 搜不到（FTB 系列）」
 
 > 主理人真机反馈：资源中心整页重做后，FTB 系列搜不到。

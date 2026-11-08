@@ -510,8 +510,19 @@ def parallel_download_file(
                 h["Range"] = f"bytes={s}-{e}"
                 rr = requests.get(url, headers=h, timeout=timeout, stream=True, proxies=_proxies())
                 try:
-                    if rr.status_code not in (206, 200):
+                    # round-210 P0：probe 阶段已确认服务端支持 Range，但部分 CDN /
+                    # 镜像只对首个请求返回 206，后续分片静默降级成 200 + 整文件。
+                    # 旧实现把 200 也当成分片成功 → 各段把整文件从自己的 offset
+                    # 写进去互相覆盖，.part 拼出一个坏 jar，还会 sha1 蒙混过关或
+                    # 被 os.replace 成正式文件，下次 isfile 判已装跳过修复。
+                    # 现在严格要求 206 且 Content-Range 起点与本段一致。
+                    if rr.status_code != 206:
                         rr.raise_for_status()
+                        raise NetError("服务端未返回 206，Range 被忽略")
+                    cr = (rr.headers.get("Content-Range") or "").strip()
+                    m = re.match(r"bytes\s+(\d+)-(\d+)/(\d+)", cr)
+                    if not m or int(m.group(1)) != s:
+                        raise NetError(f"分片范围不匹配：期望 {s}-，收到 {cr!r}")
                     seg_written = 0
                     with open(part, "r+b") as fh:
                         fh.seek(s)
@@ -523,11 +534,12 @@ def parallel_download_file(
                             fh.write(chunk)
                             seg_written += len(chunk)
                             _tick(seg, len(chunk))
-                    # 校验本段实际写满（.part 已 truncate 到全长，未写区域是零填充，
-                    # 所以必须以「写入字节数」判定，不能用 read 长度）
-                    if seg_written >= e - s + 1:
+                    # .part 已 truncate 到全长，未写区域是零填充，必须以「写入
+                    # 字节数」判定；且不能多于本段长度（多写会污染相邻段）。
+                    if seg_written == e - s + 1:
                         return
-                    raise NetError("段长度不足，重试")
+                    raise NetError(
+                        f"段长度不符：期望 {e - s + 1}，实际 {seg_written}")
                 finally:
                     rr.close()
             except NetError:
