@@ -824,14 +824,39 @@ class WallpaperWidget(QWidget):
         if self._movie_label is not None:
             self._movie_label.deleteLater()
             self._movie_label = None
+        # round-212 P0：player/audio/sink 都以 self 为父，只把 Python 引用置
+        # None 不会销毁 C++ 对象 —— 每次 apply() 都多留一套解码器 + 音频端点，
+        # 旧视频文件句柄也不关。这里必须 stop + 清 source + deleteLater。
         if self._player is not None:
             try:
                 self._player.stop()
+                self._player.setSource(QUrl())
+                self._player.setVideoOutput(None)
+                self._player.setAudioOutput(None)
+                self._player.positionChanged.disconnect(self._on_video_pos)
+            except Exception:  # noqa: BLE001 - 已销毁/未连接都继续
+                pass
+            try:
+                self._player.deleteLater()
             except Exception:  # noqa: BLE001
                 pass
             self._player = None
+        if self._audio is not None:
+            try:
+                self._audio.deleteLater()
+            except Exception:  # noqa: BLE001
+                pass
             self._audio = None
-        self._sink = None
+        if self._sink is not None:
+            try:
+                self._sink.videoFrameChanged.disconnect(self._on_video_frame)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self._sink.deleteLater()
+            except Exception:  # noqa: BLE001
+                pass
+            self._sink = None
         if self._video is not None:
             self._video.deleteLater()
             self._video = None

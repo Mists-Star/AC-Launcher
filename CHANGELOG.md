@@ -8,6 +8,55 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-213（2026-11-08）— 修 3 条安全/资源 P0·P1
+
+> 主理人「随便你，开吧」。按「能离线验证的先做」排序：壁纸泄漏 → authlib 旁路 →
+> EasyTier 信任根。每一条都先复现、改完再复验。
+
+**P0 · EasyTier 下载可执行文件零校验**
+
+- `src/core/easytier.py:46`：新增 `EASYTIER_ZIP_SIZE` / `EASYTIER_ZIP_SHA256`，
+  值取自 **GitHub Releases API 的 asset digest**（v2.6.4 的
+  `easytier-windows-x86_64-v2.6.4.zip`，32,657,720 字节，
+  `sha256:27af91e2…5f84`，不是从镜像自己算的）。
+- `download_easytier` 现在**先校验再解压**：大小或 sha256 不符 → 该镜像记为失败、
+  继续下一个；全部失败抛 `RuntimeError`，绝不 `Popen` 一个未校验的 exe。
+- 校验通过后写 `<exe>.verified` 标记；`find_easytier` 只信任带标记的 bundled 副本
+  （**旧版下载的未校验 exe 会被判为不可信，触发一次重新下载**）。
+- 复验：假 zip + 正确 size/sha → 返回路径且 marker 存在；错 sha / 错 size →
+  `RuntimeError: 发布包 sha256 校验失败 / 大小不符`。
+
+**P0 · 视频壁纸每次 apply 泄漏一套媒体对象**
+
+- `src/wallpaper.py:820` `_teardown_dynamic()` 现在 `stop → setSource(QUrl()) →
+  setVideoOutput(None) → setAudioOutput(None) → deleteLater()`，并断开
+  `positionChanged` / `videoFrameChanged`。旧实现只把 Python 引用置 `None`，
+  而对象以 `self` 为父，C++ 侧永远活着。
+- 复验（离屏，5 次 `apply`）：改前 `player=5 audio=5 sink=5`、teardown 后仍 5；
+  改后 **apply 5 次只剩 1 套（当前），teardown 后 0**。
+
+**P1 · authlib `.version` 旁路让固定 sha256 形同虚设**
+
+- `src/core/authlib.py`：删除 `_version_of` / `latest_authlib` / `_fetch_to`
+  三个函数 —— 它们构成「查 latest → 只验 zip 可解析 → 覆盖本地 jar → 写 .version →
+  `ensure_authlib` 凭 .version 信任」的完整旁路，而这个 jar 会作为 `-javaagent`
+  注入游戏 JVM。
+- `ensure_authlib` 只认 `AUTHLIB_VERSION` + `AUTHLIB_SHA256`；`update_authlib`
+  改为「确保固定版存在且校验通过」，不再自动追 latest。升级随启动器版本走。
+- 复验：坏 jar + `.version` + 离线 → 返回 `None`（旧实现返回该 jar）；sha 匹配 → 返回路径；
+  三个死函数已不存在。
+
+**本轮未做**
+
+- `aclive` 的鉴权（P1）：要同时改 `tools/aclive/live.py` 控制端（加 token 头），
+  否则调试流会断；默认 `AC_LIVE=1` 才监听，留到下一轮一起改。
+
+**门禁 / 打包 / 部署**：`regress.py` **81/81**；三个模块 `py_compile` 通过；
+打包 `BUILD_RC=0`（118.3 MB / 4184 文件），部署后 exe sha256 `877b5046…`、
+`data/` 保留；离屏冒烟 9s 存活、`crash.log` 零新增。
+
+---
+
 ## round-212（2026-11-08）— 补审「从没被碰过」的 40 个文件，修 4 条
 
 > 主理人问「确定整个启动器全部东西审查完了？」→ 机器核算：114 个 .py / 70,609 行里

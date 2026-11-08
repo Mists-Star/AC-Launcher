@@ -1465,9 +1465,22 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 复验：`clock_valid=True / elapsed=0`、三种坏 JSON 均 `OK skins=0`、
 深 List 抛 `NbtError: 递归深度超过上限：64`、`quit auto=False / continue default=True`。
 
-> ☠ 仍然欠：**易被投毒的可执行文件下载（P0-1）与 authlib 旁路（P1-1）都没修**，
-> 这两条要动信任根；`aclive` 需要产品决定「发布包是否剔除 / 是否要 token」。
-> 双轨验收欠账不变：本轮是静态 + 离屏探针，没有联网真机跑完整链路。
+> ☠ 双轨验收欠账不变：本轮是静态 + 离屏探针，没有联网真机跑完整链路。
+
+---
+
+## 二十、round-213：§十九 里 3 条安全/资源 P0·P1 的修复（2026-11-08 14:xx）
+
+| 级别 | 条目 | 修法 | 复验 |
+|---|---|---|---|
+| **P0** | EasyTier 从 5 个源（含 4 个第三方反代）下载 exe 零校验直接 `Popen` | `easytier.py:46` 加 `EASYTIER_ZIP_SIZE` + `EASYTIER_ZIP_SHA256`（值取自 **GitHub Releases API asset digest**，非镜像自算）；下载后**先校验再解压**；校验通过写 `.verified`，`find_easytier` 只信任带标记的副本 | 假 zip 正确 size/sha → 通过；错 sha → `发布包 sha256 校验失败`；错 size → `大小不符`；旧未校验 exe 自动判不可信 |
+| **P0** | 视频壁纸每次 `apply()` 泄漏 QMediaPlayer/QAudioOutput/QVideoSink | `wallpaper.py:820` `_teardown_dynamic` 改 `stop → setSource(QUrl()) → setVideoOutput(None) → setAudioOutput(None) → deleteLater()` + 断信号 | 改前 apply 5 次 = 5/5/5、teardown 后仍 5；改后 **5 次只剩 1 套、teardown 后 0** |
+| **P1** | authlib `.version` 旁路让固定 sha256 失效，且每次启动用「zip 能打开」覆盖 | `core/authlib.py` 删 `_version_of` / `latest_authlib` / `_fetch_to`；`ensure_authlib` 只认固定版 + 固定 sha；`update_authlib` 改为「确保固定版存在且校验通过」 | 坏 jar + `.version` + 离线 → `None`（旧实现返回该 jar）；sha 匹配 → 返回路径；三个死函数已不存在 |
+
+**本轮未修**：`aclive` 无鉴权 / 不校验 Origin（要同时改 `tools/aclive/live.py`
+控制端加 token，否则调试流断；默认不启用）。其余 §19.2 的 P1（地图静默空白、
+包围盒 2.7GB QImage、BGM 顺序播放、扫描 Worker、导入复制 N 份、模块 `..` 越界、
+联机密钥明文、节点生命周期、Worker 跨线程改控件）仍开放。
 
 > ☠ 双轨欠账仍在：以上是代码轨 + 离屏轨；没有联网真机跑完整链路。
 
