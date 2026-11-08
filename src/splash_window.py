@@ -66,10 +66,12 @@ class SplashWindow(QWidget):
         # 亮背景压深（前景可读），暗背景少压（保留图片细节）。
         self._bg_veil = self._estimate_veil(self._bg_pm)
 
-        # Wall-clock starts at mark_ready() — NOT at splash.show(). The main
-        # window is constructed while the splash plays and would otherwise eat
-        # the first ~30% of the animation.
+        # round-212：时钟必须在这里 start()。旧实现只创建不启动，而
+        # QElapsedTimer 未 start 时 elapsed() 是未定义值（实测 -9.2e12），
+        # `_phase` 恒 0 → MainWindow 构建期整块启动画面是空白，只剩进度槽。
+        # logo 从构造开始显现，进度条仍以 mark_ready() 记的基线起算。
         self._clock = QElapsedTimer()
+        self._clock.start()
         self._timer = QTimer(self)
         self._timer.setInterval(33)  # ~30fps — enough for smooth animation, less CPU
         self._timer.timeout.connect(self._tick)

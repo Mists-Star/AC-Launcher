@@ -1409,5 +1409,65 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 - 旧版保留在 `AC_Launcher.exe.prev_r210` + `_internal_prev_r210` +
   `dist_beta/AC_Launcher_prev_r210_20261108`（未删，等主理人确认）。
 
+---
+
+## 十九、round-212：补审「从未被测试/审查碰过」的 40 个文件（2026-11-08 14:xx）
+
+> 主理人质疑「确定整个启动器全部东西审查完了？」→ 机器核算：114 个 .py / 70,609 行里
+> 28 个 / 8,137 行从未进过审查记录，23 个模块从未被任何测试引用。
+> 本轮分 5 组只读审查（账号皮肤联机 / 扫描模块安装 / 地图投影 / 视觉窗口 / 调试通道与下载），
+> 关键结论逐条亲自复现后才登记。
+
+### 19.1 P0（正常使用即可触发）
+
+| # | 结论 | 证据 | 状态 |
+|---|---|---|---|
+| 1 | **EasyTier 可执行文件从 5 个源（含 4 个第三方反代）下载后零校验解压并 `Popen`** —— 任一镜像被投毒即等于任意代码执行；同仓库 authlib 有固定 sha、更新包有 Ed25519，唯独这条没有信任根 | `core/easytier.py:38-44,92-127,164-170`（grep 无 `sha256/hashlib/signature`） | **未修**（需固定 hash/签名，产品决策） |
+| 2 | **视频壁纸每次 `apply()` 泄漏一套 QMediaPlayer + QAudioOutput + QVideoSink**（以 `self` 为父，永不释放），旧视频句柄不关 | `wallpaper.py:870-873,820-837`；探针：apply 5 次 → `findChildren` 各 5 个，`_teardown_dynamic` 后仍 5 | **未修**（改动中等） |
+| 3 | **启动画面在 MainWindow 构建期 100% 空白**：`QElapsedTimer` 只创建不 `start()`，`elapsed()` 实测 `-9.2e12` → `_phase` 恒 0，字母/进度全不画 | `splash_window.py:72`；探针 `isValid=False, elapsed=-9223359610726` | ✅ 已修（构造时 `start()`） |
+
+### 19.2 P1（有前置条件但可达 / 后果重）
+
+| # | 结论 | 证据 | 状态 |
+|---|---|---|---|
+| 1 | **authlib `.version` 让固定 sha256 永久失效**：只要 `.version` 文件存在就直接信任，而每次启动都会用「zip 能打开」的新 jar 覆盖固定版 | `core/authlib.py:171-176`、`launch.py:1006` | **未修**（需版本→sha 白名单） |
+| 2 | **`skins.json` 一条坏记录让启动器完全打不开**：`raw.get` / `raw["id"]` 不在外层 except 覆盖内，而 `main_window` 在 import 期构造单例 | `skins.py:72-86`、`main_window.py:43`；探针 `null→AttributeError`、缺 id→`KeyError` | ✅ 已修（逐条 isinstance/必填键校验） |
+| 3 | **NBT 的 List 嵌套无深度上限**：2000 层 `TAG_LIST` 抛 `RecursionError`（非 `NbtError`），调用方 `except NbtError` 接不住 | `core/nbt.py:172,193`；探针复现 `RecursionError` | ✅ 已修（`payload` 加 `MAX_DEPTH` 检查，现抛 `NbtError`） |
+| 4 | **条款对话框勾选后按 Enter = 直接退出启动器**：两个按钮都是 autoDefault，Enter 命中第一个（quit） | `terms_dialog.py:57-66`；探针 `quit auto=True / continue auto=True` | ✅ 已修（`quit.setAutoDefault(False)` + `continue.setDefault(True)`） |
+| 5 | **`aclive` 无鉴权且 loopback 不是浏览器边界**：不校验 Origin/Content-Type，任意网页可用 `text/plain` 简单请求跨源 POST `/ctl`（含 `exec`），WS 也不校验 Origin → 可读屏 + 注入键鼠 | `aclive.py:362-378,381-404,489,1020-1034`；实测 `import_module('os')` 可穿透黑名单 | **未修**（默认不启用，但发布包含该代码） |
+| 6 | **地图解析失败被吞成「全透明 PNG」并写进缓存**：玩家看到一张看似正常、实际空白的地图，且被 mtime/size 键固化 | `core/world_map.py:148-151,415-423` | **未修** |
+| 7 | **`map_dialog` 包围盒只取最近 16 个 region 的极值**：两张相距 8000 方块的 region 就能申请 2.7 GB QImage → 无提示全白画布 | `map_dialog.py:50-57` | **未修** |
+| 8 | **BGM「顺序/随机播放」实际是单曲无限循环**：`setLoops(Infinite)` 在 `__init__` 设死后从未随 mode 变化 | `core/sound.py:84,121-129` | **未修** |
+| 9 | **扫描面板关闭后 Worker 不取消不等待**，回调落到已 `deleteLater` 的面板上；扫描体全程无中断点 | `scan_dialog.py:232-239`、`scan.py:553-646` | **未修** |
+| 10 | **「一键导入全部+复制」对同一个共享 `.minecraft` 的每个版本各整份复制一次**（无去重、无 ignore） | `scan_dialog.py:511-545`、`instances.py:1047-1088` | **未修** |
+| 11 | **旧版主题包转换绕过 id 校验**：`"id":".."` 会把两个 json 写进启动器 `data/` 根目录 | `modules.py:323-326`（对照 `:240` 走 `validate_manifest`） | **未修** |
+| 12 | **联机网络密钥明文落盘，且无 secret 时回退成邀请码**（邀请码本来是发人的） | `lobby.py:31,45-48,80`、`lobby_dialog.py:320` | **未修** |
+| 13 | **EasyTier 节点生命周期绑在对话框可见性上**：关窗即拆网卡，而模态期间无法启动游戏；强杀启动器则节点成孤儿 | `lobby_dialog.py:440-443`、`main_window.py:4880` | **未修** |
+| 14 | **下载进度回调在 Worker 线程直接改 `QProgressBar`** | `lobby_dialog.py:391-394`（lambda 由 `easytier.py:105` 在工作线程调用） | **未修** |
+
+### 19.3 P2（择要，完整清单在各组的审查记录里）
+
+- 单流续传只看 `206` 不看 `Content-Range` 起点（`net_api.py:302-305`，与 §17.1 分片修复是两条路径）；
+  `416` 分支把「比远端还大」的 `.part` 当成品（`:295-300`）；批下载 sha1 失败不删坏文件，下次被「大小相同」判成功（`batch_download.py:61-68`）。
+- `downloader.py` 全仓无生产调用方；`_DEFAULT_QUEUE` 在 `main.py:607` 取导入期值恒 `None` → 关窗钩子从未接上。
+- `proc_kill` 部分成功被报成整体失败（`failed` 恒等于全部 PID）。
+- `skins` 下载无大小上限、两条路径不校验 PNG 魔数；`file` 字段可 `..` 越界删（`skins.py:104-106,166`）。
+- `map_cache` 只增不删；`repair_log.json` 非原子写；`achievements._save` 无异常保护且非原子。
+- `win_rounded` 每次确认框在父窗口留一只隐藏 QDialog；`launch_dialog` 关闭后不销毁、部分槽无 `RuntimeError` 保护。
+- `icons.screen_dpr()` 取主屏 DPR → 副屏 150% 下头像/状态图标发虚。
+- 条款对话框没走深色标题栏；`win_acrylic` 的 import 保护是假的（非 Windows 直接 ImportError）。
+- `memopt` 的「已释放 XX MB」恒为 0（返回值被丢弃）；`sfx_*` 音效是未接线功能。
+
+### 19.4 本轮已修 4 条（均带复现判据）
+
+`splash_window.py:72`（时钟 start）、`terms_dialog.py:57-66`（Enter 目标）、
+`skins.py:72-86`（坏记录跳过）、`core/nbt.py:172`（List 深度上限）。
+复验：`clock_valid=True / elapsed=0`、三种坏 JSON 均 `OK skins=0`、
+深 List 抛 `NbtError: 递归深度超过上限：64`、`quit auto=False / continue default=True`。
+
+> ☠ 仍然欠：**易被投毒的可执行文件下载（P0-1）与 authlib 旁路（P1-1）都没修**，
+> 这两条要动信任根；`aclive` 需要产品决定「发布包是否剔除 / 是否要 token」。
+> 双轨验收欠账不变：本轮是静态 + 离屏探针，没有联网真机跑完整链路。
+
 > ☠ 双轨欠账仍在：以上是代码轨 + 离屏轨；没有联网真机跑完整链路。
 

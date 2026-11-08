@@ -146,6 +146,11 @@ class _Reader:
 
     def payload(self, tag: int, depth: int):
         """读取一个「无名称」的标签负载（List 元素用）。"""
+        # round-212：深度上限原来只在 ``named``（Compound）里检查，List 层
+        # 完全不设防 —— 2000 层 TAG_LIST 会抛 RecursionError（不是 NbtError），
+        # 调用方的 ``except NbtError`` 接不住，整张地图变成一个英文异常框。
+        if depth > MAX_DEPTH:
+            raise NbtError("递归深度超过上限：%d" % MAX_DEPTH)
         if tag == TAG_BYTE:
             return self._i8()
         if tag == TAG_SHORT:

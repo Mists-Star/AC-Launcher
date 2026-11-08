@@ -8,6 +8,39 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-212（2026-11-08）— 补审「从没被碰过」的 40 个文件，修 4 条
+
+> 主理人问「确定整个启动器全部东西审查完了？」→ 机器核算：114 个 .py / 70,609 行里
+> **28 个 / 8,137 行从未进过审查记录**、**23 个模块从未被任何测试引用**。
+> 分 5 组只读审查（账号皮肤联机 / 扫描模块 / 地图投影 / 视觉窗口 / 调试通道与下载），
+> 关键结论逐条亲自复现后登记到 `docs/quality_punchlist.md` §十九。
+
+**已修 4 条（都有复现判据）**
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `src/splash_window.py:72` | `QElapsedTimer` 只创建不 `start()`，`elapsed()` 实测 `-9.2e12` → `_phase` 恒 0，**MainWindow 构建期整块启动画面空白** | 构造时 `start()`；logo 从构造起显现，进度条仍按 `mark_ready()` 基线 |
+| `src/terms_dialog.py:57` | 两个按钮都是 autoDefault，**勾选条款后按 Enter 命中「退出」直接关掉启动器** | `quit.setAutoDefault(False)` + `continue.setDefault(True)` |
+| `src/skins.py:72` | `skins.json` 一条 `null`/缺 id 的记录 → `AttributeError`/`KeyError`，而 `main_window` 在 import 期构造单例 → **启动器完全打不开** | 逐条 `isinstance` + 必填键校验；根非 dict 直接返回 |
+| `src/core/nbt.py:147` | 深度上限只查 Compound，List 不设防 → 2000 层 `TAG_LIST` 抛 `RecursionError`（非 `NbtError`），地图/投影的 `except NbtError` 接不住 | `payload()` 加 `MAX_DEPTH` 检查 |
+
+**登记但未修（见 §十九）**
+
+- **P0**：EasyTier 从 5 个源（含 4 个第三方反代）下载可执行文件后**零校验**直接 `Popen`；
+  视频壁纸每次 `apply()` 泄漏一套 QMediaPlayer/QAudioOutput/QVideoSink（探针 5 次 = 5 套）。
+- **P1**：authlib 的 `.version` 让固定 sha256 永久失效且每次启动都会覆盖；
+  `aclive` 无鉴权 + 不校验 Origin（任意网页可 `text/plain` 跨源 POST `/ctl exec`，loopback 不是浏览器边界）；
+  地图解析失败被吞成「全透明 PNG」并写缓存；`map_dialog` 包围盒可申请 2.7 GB QImage；
+  BGM 顺序/随机播放实际是单曲循环；扫描面板关闭后 Worker 不取消；「一键导入全部」对同一 `.minecraft` 的每个版本各复制一份；
+  主题包 legacy 转换 `id=".."` 越界写；联机密钥明文落盘且无 secret 时回退邀请码；EasyTier 节点生命周期绑在对话框上。
+
+**门禁 / 打包 / 部署**：`regress.py` **81/81**；`test_terms` / `test_schematic_tools` 全过；
+PII / 文案 / IA 全过。打包 `BUILD_RC=0`（118.3 MB / 4184 文件），部署后 exe
+sha256 `f084da12…` 与产物一致、`data/` 保留；离屏冒烟 9s 存活、`crash.log` 零新增、
+`_startup.log` 走到 `tray ok`。
+
+---
+
 ## round-211（2026-11-08）— 整体设计比对 + 第 3/5/6 批一起返工
 
 > 主理人：「先 c/p，然后整体设计比对一下，一起干了」。

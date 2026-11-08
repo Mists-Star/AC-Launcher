@@ -75,15 +75,26 @@ class SkinManager:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError):
             return
+        # round-212：逐条校验。旧实现直接 raw.get / raw["id"]，而外层 except
+        # 只覆盖 JSONDecodeError / OSError —— 一条 null 或缺 id 的记录会让
+        # 模块级 SkinManager() 在 import 期抛异常，整个启动器打不开。
+        if not isinstance(data, dict):
+            return
         for raw in data.get("skins", []):
+            if not isinstance(raw, dict) or not raw.get("id"):
+                continue
             # drop skins whose file vanished
             if os.path.exists(os.path.join(self._dir, raw.get("file", ""))):
                 self._skins[raw["id"]] = raw
-        self._active = data.get("active", {})
+        self._active = data.get("active", {}) if isinstance(
+            data.get("active"), dict) else {}
         for raw in data.get("capes", []):
+            if not isinstance(raw, dict) or not raw.get("id"):
+                continue
             if os.path.exists(os.path.join(self._dir, raw.get("file", ""))):
                 self._capes[raw["id"]] = raw
-        self._active_cape = data.get("active_cape", {})
+        self._active_cape = data.get("active_cape", {}) if isinstance(
+            data.get("active_cape"), dict) else {}
 
     def _save(self) -> None:
         with open(self._meta, "w", encoding="utf-8") as f:

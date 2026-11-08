@@ -56,11 +56,15 @@ class TermsDialog(QDialog):
         row.addStretch(1)
         self.quit_btn = QPushButton(t("terms.quit"))
         self.quit_btn.setMinimumHeight(36)
+        # round-212：QDialog 里多个 autoDefault 按钮时 Enter 命中**第一个**——
+        # 两个按钮默认都是 autoDefault，勾选条款后按回车会直接「退出」启动器。
+        self.quit_btn.setAutoDefault(False)
         self.quit_btn.clicked.connect(self.reject)
         self.continue_btn = QPushButton(t("terms.continue"))
         self.continue_btn.setProperty("cls", "accent")
         self.continue_btn.setMinimumHeight(36)
         self.continue_btn.setEnabled(False)
+        self.continue_btn.setDefault(True)
         self.continue_btn.clicked.connect(self.accept)
         row.addWidget(self.quit_btn)
         row.addWidget(self.continue_btn)
