@@ -1497,5 +1497,19 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 EasyTier 节点生命周期绑对话框、下载进度跨线程改 QWidget、`aclive` 鉴权、
 `map_cache` 只增不删、区块级解压上限。
 
+---
+
+## 二十二、round-215：`aclive` 鉴权 + 联机密钥（2026-11-08 14:xx）
+
+| # | §19.2 条目 | 修法 | 复验 |
+|---|---|---|---|
+| 1 | `aclive` 无鉴权、不校验 Origin：任意网页可 `text/plain` 跨源 POST `/ctl exec`；WS 不受同源限制 | 每次启动生成 `token_urlsafe(24)` 写 `<data>/aclive.token`；GET/POST/WS 统一 `_reject()`：跨源 **403**、缺/错 token **401**，`hmac.compare_digest` 比较；控制端 `--token` / `AC_LIVE_TOKEN` / 读文件；面板从 URL 取 token 并带 header / `?token=` | 真起 server：坏 Origin+对 token→403、无 token→401、对 token 同源→200、面板无 token→401 |
+| 2 | 联机 `secret` 明文落盘 + 无 secret 时回退邀请码 + 非原子写 + `random.choices` | DPAPI 加密（失败不写）、`tmp+os.replace`、`secrets.choice`、`_lobby_from` 过滤未知字段、`join_lobby` 去重、路径函数内取 | 磁盘无明文且带 `dpapi:`；解密回读一致；重复加入成员仍 1；`[]` / 未知字段不崩 |
+| 3 | 下载进度在 Worker 线程改 `QProgressBar` | 类级 `Signal(int)`，Worker 只 emit | 类信号存在且连接 `et_progress.setValue` |
+| 4 | 成员列表硬编码中文 | `lobby.member_you` / `lobby.member_host` | 中英键对称 |
+
+**仍未修**：EasyTier 节点生命周期绑对话框、BGM 顺序播放、扫描 Worker、
+「一键导入全部」复制 N 份、模块 `id=".."` 越界、`map_cache` 只增不删、区块级解压上限。
+
 > ☠ 双轨欠账仍在：以上是代码轨 + 离屏轨；没有联网真机跑完整链路。
 

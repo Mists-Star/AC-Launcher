@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QComboBox, QGroupBox, QListWidget, QListWidgetItem,
     QWidget, QProgressBar, QCheckBox,
 )
-from PySide6.QtCore import Qt, QUrl, QTimer
+from PySide6.QtCore import Qt, QUrl, QTimer, Signal
 from PySide6.QtGui import QDesktopServices
 from .theme import COLORS
 from .i18n import t
@@ -126,6 +126,11 @@ class _ToolPicker(QDialog):
 
 
 class LobbyDialog(QDialog):
+    # round-215：下载进度由 Worker 线程 emit，Qt 负责排队到 GUI 线程再
+    # setValue。旧实现把 lambda 直接传给 download_easytier，等于在工作线程
+    # 里改 QProgressBar（未定义行为，下载联机工具时可能崩）。
+    etProgress = Signal(int)
+
     def __init__(self, parent=None, code: str = ""):
         """``code`` 非空时自动带编号并在显示后立即加入。
 
@@ -254,6 +259,7 @@ class LobbyDialog(QDialog):
         # ── EasyTier install progress (hidden unless downloading) ──
         self.et_progress = QProgressBar()
         self.et_progress.setVisible(False)
+        self.etProgress.connect(self.et_progress.setValue)
         lay.addWidget(self.et_progress)
 
         lay.addStretch(1)
@@ -317,7 +323,13 @@ class LobbyDialog(QDialog):
         self.et_status.setText(t("lobby.et_starting"))
         from .worker import Worker
         net_name = lob.code
-        secret = lob.secret or lob.code
+        # round-215：绝不能拿邀请码当网络口令。邀请码的定义就是「发给别人」的
+        # 字符串 —— 回退到它等于把虚拟局域网变成无密码网络，加入者能访问
+        # 宿主机的所有端口，而不只是 25565。
+        secret = (lob.secret or "").strip()
+        if not secret:
+            self.et_status.setText(t("lobby.et_no_secret"))
+            return
         self._et_worker = Worker(
             easytier.start_node, net_name, secret,
             hostname=self._player_name,
@@ -389,8 +401,9 @@ class LobbyDialog(QDialog):
         dest = easytier.bundled_dir()
 
         def _dl():
+            # round-215：进度只 emit，真正 setValue 在 GUI 线程（见 etProgress）
             return easytier.download_easytier(
-                dest, progress=lambda f: self.et_progress.setValue(int(f * 100))
+                dest, progress=lambda f: self.etProgress.emit(int(f * 100))
             )
 
         w = Worker(_dl)
@@ -416,10 +429,14 @@ class LobbyDialog(QDialog):
         self.lobby_code_lbl.setText(lob.code)
         self.member_list.clear()
         for m in lob.members:
+            if not isinstance(m, dict):
+                continue
             name = m.get("name", "?")
             item = QListWidgetItem(f"{name}")
-            if name == self._player_name or name == lob.host:
-                item.setText(f"{name}（你）" if name == self._player_name else f"{name}（主机）")
+            if name == self._player_name:
+                item.setText(t("lobby.member_you", name=name))
+            elif name == lob.host:
+                item.setText(t("lobby.member_host", name=name))
             self.member_list.addItem(item)
 
     def _copy_code(self):

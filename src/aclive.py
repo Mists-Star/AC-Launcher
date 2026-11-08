@@ -27,16 +27,19 @@ from __future__ import annotations
 import base64
 import builtins
 import hashlib
+import hmac
 import importlib
 import json
 import os
 import queue
+import secrets
 import select
 import struct
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QPoint, QPointF, Qt,
                             QTimer)
@@ -339,8 +342,50 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # noqa: A003 - 静默默认访问日志
         pass
 
+    # ── 鉴权（round-215）──
+    def _client_token(self) -> str:
+        got = (self.headers.get("X-AC-Token") or "").strip()
+        if got:
+            return got
+        try:
+            qs = parse_qs(urlparse(self.path).query)
+            return (qs.get("token") or [""])[0].strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _origin_ok(self) -> bool:
+        """纵深防御：即使 token 泄漏，也不让外部网页直接打进来。
+
+        面板同源是 ``http://127.0.0.1:<port>``；``file://`` 打开时浏览器
+        给的是 ``"null"``。其它 http(s) 来源一律拒绝。
+        """
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin or origin == "null":
+            return True
+        port = getattr(self.server.live, "port", 0)
+        return origin in ("http://127.0.0.1:%d" % port,
+                          "http://localhost:%d" % port)
+
+    def _auth_ok(self) -> bool:
+        want = getattr(self.server.live, "token", "")
+        if not want:
+            return False
+        return hmac.compare_digest(self._client_token(), want)
+
+    def _reject(self) -> bool:
+        """跨源 403 / 缺 token 401；返回 True 表示已拒绝。"""
+        if not self._origin_ok():
+            self.send_error(403, "aclive: cross-origin request denied")
+            return True
+        if not self._auth_ok():
+            self.send_error(401, "aclive: missing/invalid token")
+            return True
+        return False
+
     # ── GET：面板页 / WebSocket 升级 ──
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler 约定
+        if self._reject():
+            return
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
             self._handle_ws()
             return
@@ -362,6 +407,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         if self.path.split("?")[0] != "/ctl":
             self.send_error(404, "aclive: use GET / or POST /ctl")
+            return
+        if self._reject():
             return
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -480,9 +527,28 @@ class LiveServer:
         self._type_timer: QTimer | None = None
         self._type_done = threading.Event()
         self._type_done.set()
+        # round-215：控制口必须有鉴权。127.0.0.1 不是浏览器边界 —— 任意网页
+        # 都能用 `Content-Type: text/plain` 的简单请求跨源 POST /ctl（不触发
+        # CORS 预检），WS 也不受同源策略约束。token 每次启动重新生成，
+        # 只写到本机 data 目录并打印在控制台。
+        self.token = secrets.token_urlsafe(24)
+
+    def token_path(self) -> str:
+        from .paths import get_data_dir
+        return os.path.join(get_data_dir(), "aclive.token")
+
+    def _write_token(self) -> None:
+        try:
+            path = self.token_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.token + "\n")
+        except OSError:
+            pass
 
     # ── 生命周期 ──
     def start(self) -> None:
+        self._write_token()
         self._encoder.start()
         threading.Thread(target=self._sender_loop, daemon=True,
                          name="aclive-sender").start()
@@ -1095,7 +1161,12 @@ def attach_live(win: QWidget) -> LiveServer:
                      panel_path=panel)
     srv.start()
     win._aclive = srv  # 防 GC
-    print("[aclive] panel    → http://127.0.0.1:%d/" % port, flush=True)
-    print("[aclive] control  → POST http://127.0.0.1:%d/ctl" % port, flush=True)
+    # round-215：URL 自带 token；token 同时写到 <data>/aclive.token，
+    # tools/aclive/live.py 会自动去那里读。
+    print("[aclive] panel    → http://127.0.0.1:%d/?token=%s"
+          % (port, srv.token), flush=True)
+    print("[aclive] control  → POST http://127.0.0.1:%d/ctl （X-AC-Token: %s）"
+          % (port, srv.token), flush=True)
+    print("[aclive] token    → %s" % srv.token_path(), flush=True)
     print("[aclive] fps=%d quality=%d panel=%s" % (fps, quality, panel), flush=True)
     return srv

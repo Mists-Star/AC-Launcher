@@ -53,8 +53,12 @@ function fit() {
 }
 window.addEventListener('resize', fit);
 
+// round-215：控制口要 token。面板 URL 自带 ?token=…（live.py 会打印完整链接），
+// 这里把它同时用于 WS 与 /ctl。
+const AC_TOKEN = new URLSearchParams(location.search).get('token') || '';
+
 function connect() {
-  ws = new WebSocket('ws://' + location.host + '/ws');
+  ws = new WebSocket('ws://' + location.host + '/ws?token=' + encodeURIComponent(AC_TOKEN));
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { $('#stat').textContent = '已连接'; };
   ws.onclose = () => { $('#stat').textContent = '断开 · 1s 重连'; setTimeout(connect, 1000); };
@@ -124,7 +128,12 @@ window.addEventListener('keyup', (e) => {
 
 // ── 顶栏控制 ──
 async function ctl(body) {
-  const r = await fetch('/ctl', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await fetch('/ctl', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'X-AC-Token': AC_TOKEN },
+    body: JSON.stringify(body)
+  });
+  if (r.status === 401) return { ok: 0, err: 'token 无效：请用带 ?token= 的面板链接' };
   return r.json();
 }
 $('#reload').onclick = async () => {

@@ -8,6 +8,39 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-215（2026-11-08）— `aclive` 鉴权 + 联机密钥
+
+> 主理人「可以」= 按建议把两条安全面一起处理。共同点：**默认不可见，但一旦
+> 触发就是「别人能操作你的启动器 / 拿到你的网络口令」**。
+
+**`aclive` 控制口鉴权（P1）**
+
+| 位置 | 修法 |
+|---|---|
+| `src/aclive.py:485` | `LiveServer` 每次启动生成 `secrets.token_urlsafe(24)`，写到 `<data>/aclive.token`；`do_GET` / `do_POST` / WS 升级统一走 `_reject()`：**跨源 403、缺/错 token 401**，token 比较用 `hmac.compare_digest` |
+| `src/aclive.py:1146` | `attach_live` 打印带 `?token=` 的面板 URL 与 token 文件路径 |
+| `tools/aclive/live.py` | 加 `--token`；默认从 `AC_LIVE_TOKEN` 或 `<repo>/data/aclive.token` 读；`_ctl` 带 `X-AC-Token`；401 时给出明确提示；`start` 会等 token 出现再打印完整面板链接 |
+| `tools/aclive/panel.html` | 从 `location.search` 取 token，WS 用 `?token=`、`/ctl` 用 `X-AC-Token` 头；401 时显示可读提示 |
+
+复验（真起 server）：坏 Origin + 对 token → **403**；无 token → **401**；对 token 同源 → **200**；
+面板页无 token → **401**；token 文件已写。
+
+**联机密钥（P1）**
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `src/lobby.py` | `secret` 是 EasyTier 网络口令，却明文写 `data/lobbies.json`；写盘非原子；`random.choices` 生成；`Lobby(**raw)` 遇未知字段 TypeError；重复加入会重复成员 | secret 走 **DPAPI** 落盘（加密失败就不写该字段，绝不写明文）；`tmp + os.replace` 原子写；改用 `secrets.choice`；`_lobby_from()` 过滤未知字段/缺必填；`join_lobby` 按名字去重；路径改函数内取（`AC_DEV_TEMP` 下不再漂） |
+| `src/lobby_dialog.py:320` | `secret = lob.secret or lob.code` —— 没有 secret 时拿**邀请码当网络口令**，等于无密码联机，加入者能访问宿主所有端口 | 禁止回退：没有 secret 就停止启动节点，提示「请重新创建大厅」（新增 `lobby.et_no_secret` 中英） |
+| `src/lobby_dialog.py:398` | 下载进度由 Worker 线程直接 `et_progress.setValue()` | 加类级 `Signal(int)`，Worker 只 `emit`，GUI 线程 setValue |
+| `src/lobby_dialog.py:435` | 成员列表硬编码「（你）/（主机）」 | 走 i18n（`lobby.member_you` / `lobby.member_host`） |
+
+复验：`lobbies.json` 里 `secret` 不再等于明文且带 `dpapi:` 前缀；`list_lobbies()` 能解密回原值；
+重复 `join_lobby` 成员仍 1 条；`lobbies.json` 写成 `[]` 或记录多未知字段都不崩。
+
+**门禁 / 打包 / 部署**：见下节（本轮补跑）。
+
+---
+
 ## round-214（2026-11-08）— 地图链三条 P1
 
 > 主理人「行」= 按上一轮建议修地图链。共同点：**不崩，但静默给玩家错东西**。

@@ -1857,6 +1857,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "lobby.et_ready": "虚拟局域网已就绪！\n在游戏内开启局域网并让朋友连接：{ip}",
         "lobby.et_ready_noip": "虚拟局域网已启动（未检测到虚拟 IP，请稍后在设置中查看网络状态）。",
         "lobby.et_error": "虚拟局域网启动失败：{e}",
+        "lobby.et_no_secret": "这个大厅缺少网络密钥（旧记录或加密不可用），已停止启动联机；请重新创建大厅。",
+        "lobby.member_you": "{name}（你）",
+        "lobby.member_host": "{name}（主机）",
         "lobby.et_dl_error": "EasyTier 下载失败：{e}\n可前往 https://easytier.cn 手动下载。",
         # ---- 多联机工具选择（round-64）----
         "lobby.tool_missing": "未安装联机工具（虚拟局域网组件），跨网络联机需要先安装一种。",
@@ -4001,6 +4004,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "lobby.et_ready": "Virtual LAN ready!\nOpen LAN in-game and have friends connect to: {ip}",
         "lobby.et_ready_noip": "Virtual LAN started (virtual IP not detected yet — check network status in Settings later).",
         "lobby.et_error": "Virtual LAN failed: {e}",
+        "lobby.et_no_secret": "This lobby has no network secret (legacy record or encryption unavailable), so the virtual LAN was not started. Please create a new lobby.",
+        "lobby.member_you": "{name} (you)",
+        "lobby.member_host": "{name} (host)",
         "lobby.et_dl_error": "EasyTier download failed: {e}\nYou can also download manually at https://easytier.cn",
         # ---- multi-tool picker (round-64) ----
         "lobby.tool_missing": "No LAN-join tool (virtual-LAN component) is installed — cross-network lobbies need one.",

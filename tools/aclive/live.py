@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -34,14 +35,60 @@ def _python() -> str:
     return p if os.path.isfile(p) else sys.executable
 
 
-def _ctl(body: dict, port: int, timeout: float = 30.0) -> dict:
+TOKEN_FILE = os.path.join(ROOT, "data", "aclive.token")
+
+
+def _read_token(explicit: str = "") -> str:
+    """控制口的 token（round-215 起必需）。
+
+    来源优先级：``--token`` → ``AC_LIVE_TOKEN`` 环境变量 → 仓库 ``data/aclive.token``
+    （``live.py start`` 起的是源码实例，data 就在仓库里）。
+    部署版实例请用 ``--token`` 或环境变量。
+    """
+    tok = (explicit or "").strip()
+    if tok:
+        return tok
+    tok = (os.environ.get("AC_LIVE_TOKEN") or "").strip()
+    if tok:
+        return tok
+    try:
+        with open(TOKEN_FILE, "r", encoding="utf-8") as fh:
+            return (fh.read() or "").strip()
+    except OSError:
+        return ""
+
+
+def _wait_token(timeout: float = 10.0) -> str:
+    """启动器起来后才写 token；这里等它出现，用于打印带 token 的面板 URL。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        tok = _read_token()
+        if tok:
+            return tok
+        time.sleep(0.2)
+    return ""
+
+
+def _ctl(body: dict, port: int, timeout: float = 30.0,
+         token: str = "") -> dict:
+    headers = {"content-type": "application/json"}
+    tok = _read_token(token)
+    if tok:
+        headers["X-AC-Token"] = tok
     req = urllib.request.Request(
         "http://127.0.0.1:%d/ctl" % port,
         data=json.dumps(body).encode("utf-8"),
-        headers={"content-type": "application/json"},
+        headers=headers,
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise RuntimeError(
+                "控制口要求 token（401）：用 --token、AC_LIVE_TOKEN 或 "
+                "<data>/aclive.token 提供") from e
+        raise
 
 
 def cmd_start(args) -> int:
@@ -59,9 +106,16 @@ def cmd_start(args) -> int:
         env["QT_QPA_PLATFORM"] = "offscreen"
     # 离屏渲染时字体回退会变成方框，指到系统字体目录
     env.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
-    print("[aclive] 面板 → http://127.0.0.1:%d/" % args.port, flush=True)
+    proto = "http://127.0.0.1:%d/" % args.port
+    print("[aclive] 面板 → %s（token 写入后补全）" % proto, flush=True)
     proc = subprocess.Popen([_python(), os.path.join(ROOT, "main.py")],
                             env=env, cwd=ROOT)
+    tok = _wait_token(10.0)
+    if tok:
+        print("[aclive] 面板 → %s?token=%s" % (proto, tok), flush=True)
+    else:
+        print("[aclive] 警告：10s 内没读到 data/aclive.token，"
+              "控制口会返回 401", flush=True)
     try:
         with open(PID_FILE, "w", encoding="utf-8") as fh:
             fh.write(str(proc.pid))
@@ -137,7 +191,7 @@ def cmd_ctl(args) -> int:
         print("bad request: %s" % e, file=sys.stderr)
         return 2
     try:
-        result = _ctl(body, args.port)
+        result = _ctl(body, args.port, token=getattr(args, "token", ""))
     except Exception as e:  # noqa: BLE001
         print("ctl failed: %s" % e, file=sys.stderr)
         return 1
@@ -147,7 +201,8 @@ def cmd_ctl(args) -> int:
 
 def cmd_shot(args) -> int:
     try:
-        result = _ctl({"cmd": "shot", "path": args.path}, args.port)
+        result = _ctl({"cmd": "shot", "path": args.path}, args.port,
+                      token=getattr(args, "token", ""))
     except Exception as e:  # noqa: BLE001
         print("shot failed: %s" % e, file=sys.stderr)
         return 1
@@ -158,6 +213,8 @@ def cmd_shot(args) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="AC live view")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--token", default="",
+                    help="控制口 token（默认读 data/aclive.token 或 AC_LIVE_TOKEN）")
     sub = ap.add_subparsers(dest="cmd")
 
     sp = sub.add_parser("start", help="起一个 live 实例")
