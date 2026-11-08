@@ -1580,3 +1580,16 @@ N 份、模块 `id=".."` 越界、`map_cache` 只增不删、区块级解压上�
 | 3b | 版本选不到 | 版本下拉是写死的 12 条静态表（最新 1.21.11），主理人实例是 **26.3** | 新增 `modrinth_game_versions()` 拉 Modrinth 官方 `/tag/game_version`（922 条，含 26.3；30 分钟缓存，失败回退静态表）；筛选面板后台拉取重填；目标实例版本必定在可选项里（但仍不写进过滤值） | 下拉含 26.3/26.2/26.1.2…；`set_target` 后目标版本在列；过滤值仍为空 |
 
 `tests/test_round218_long_title_overflow.py` 24 项 + `tests/test_round218_crash_and_filter.py` 30 项。
+
+---
+
+## 二十六、round-219：「一键修复」点了没反应（2026-11-08 16:3x）
+
+> 主理人实机反馈（实例 26.3 / fabric）：崩溃分析里点「一键修复」毫无反应。
+
+| 现象 | 根因 | 修法 | 判据 |
+|---|---|---|---|
+| 按钮点了没反应 | 可用性写死 `("mod_dep_missing","java_version","out_of_memory")`，**漏 `loader_mismatch`**（规则表里它标着 `repairable=True`）→ 按钮**永久禁用**，禁用按钮不响应点击 | 可用性改用规则表的 `repairable` 标记（单一事实来源）；只有「不可自动修」的结论才禁用 | 只命中 loader_mismatch → 按钮 enabled=True；只命中 fatal_exception → 禁用 |
+| 反馈没信息量 | `_repair_all` 只留最后一句「已自动处理 0 项 · 失败 0 项 · 需手动处理 1 项」 | 逐条分流：能自动的真修；不能代劳的**点名**（标题 + 建议 + 可疑模组）；依赖那边的结论与手动清单**合并**成一条 | 真实实例点击后反馈条可见：「没有发现缺失依赖，无需补装。」+「• 加载器 / 版本不匹配：…」+「有 1 条结论需要你手动处理…」 |
+
+新增文案 `fix.need_manual` / `fix.nothing_to_do`；`tests/test_round219_repair_button.py` 14 项。

@@ -118,6 +118,7 @@ SUITES = [
     ("§19.3 P2 长尾行为回归（round-217）", "test_round217_p2_regression.py", "script"),
     ("资源中心长标题不撑破右栏（round-218）", "test_round218_long_title_overflow.py", "script"),
     ("崩溃面板与搜索/版本过滤（round-218b）", "test_round218_crash_and_filter.py", "script"),
+    ("一键修复按钮可用性与反馈（round-219）", "test_round219_repair_button.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

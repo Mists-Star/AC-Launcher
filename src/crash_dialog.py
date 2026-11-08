@@ -129,6 +129,20 @@ class _FindingCard(RoundedCard):
         lay.addLayout(acts)
 
 
+# round-219：一条崩溃结论「要不要玩家自己处理」的**唯一判定**。
+# 优先用规则表里的 repairable 标记（单一事实来源）；老对象没有这个属性时
+# 回退到历史 kind 名单（避免外部/旧代码构造的结论被静默丢掉）。
+_ACTIONABLE_KINDS = ("mod_dep_missing", "java_version", "out_of_memory",
+                     "loader_mismatch")
+
+
+def _is_actionable(f) -> bool:
+    rep = getattr(f, "repairable", None)
+    if rep is None:
+        return getattr(f, "kind", "") in _ACTIONABLE_KINDS
+    return bool(rep)
+
+
 class CrashAnalyzerPanel(QWidget):
     """崩溃分析面板（**页内**，round-197）。
 
@@ -213,7 +227,8 @@ class CrashAnalyzerPanel(QWidget):
         # 既会被异步 Worker 覆盖，也可能停在 hidden 状态；确认/告警弹窗在
         # frameless 窗口里还可能跑到后面，玩家就看到「点了没反应」。
         self.fix_note = attach(root, self)
-        self._repair_manual: list[str] = []
+        self._repair_manual: list = []
+        self._last_deps_note: str = ""
 
         # ☠ round-197：frameless 只在**窗口模式**启用 —— 页内面板套 frameless
         # 会把控件当成窗口处理（标题栏、圆角、拖拽），在页面里表现为布局跑偏。
@@ -304,7 +319,12 @@ class CrashAnalyzerPanel(QWidget):
             except Exception:  # noqa: BLE001 - 一张坏卡不能带塌整页
                 card_errors += 1
                 continue
-            if f.kind in ("mod_dep_missing", "java_version", "out_of_memory"):
+            # round-219：可用性以**规则表自己的 repairable 标记**为准。
+            # 原来写死 ("mod_dep_missing", "java_version", "out_of_memory")，
+            # 漏了 loader_mismatch —— 而它在 _RULES 里明明标着 repairable=True。
+            # 结果：玩家实例命中「加载器不匹配 + 致命异常」时按钮**永久禁用**，
+            # 点了像没反应（禁用按钮根本不响应点击）。
+            if _is_actionable(f):
                 repairable += 1
             self._vbox.addWidget(card)
         self.repair_all_btn.setEnabled(repairable > 0)
@@ -323,16 +343,19 @@ class CrashAnalyzerPanel(QWidget):
         让 ``_repair_all`` 能区分「异步中」与「当场就能汇总」。
         """
         if self.inst is None:
-            report(self, t("crash.no_instance"), "warn")
+            self._last_deps_note = t("crash.no_instance")
+            report(self, self._last_deps_note, "warn")
             return False
         from .core import mod_repair
         scan = mod_repair.scan_missing(self.inst)
         if scan["skipped"]:
-            report(self, t("crash.deps_skipped", n=scan["jar_count"]), "warn")
+            self._last_deps_note = t("crash.deps_skipped", n=scan["jar_count"])
+            report(self, self._last_deps_note, "warn")
             return False
         missing = scan["missing"]
         if not missing:
-            report(self, t("fix.deps_none"), "info")
+            self._last_deps_note = t("fix.deps_none")
+            report(self, self._last_deps_note, "info")
             return False
         if not _msgbox(
             self, t("crash.deps_found_title"),
@@ -341,7 +364,8 @@ class CrashAnalyzerPanel(QWidget):
             icon="question",
             buttons=(t("crash.btn_download"), t("common.cancel")),
         ) == t("crash.btn_download"):
-            report(self, t("common.cancel"), "info")
+            self._last_deps_note = t("common.cancel")
+            report(self, self._last_deps_note, "info")
             return False
         report(self, t("fix.deps_start", n=len(missing)), "busy")
         self.bar.setVisible(True)
@@ -372,11 +396,15 @@ class CrashAnalyzerPanel(QWidget):
                    instance=inst_name)
             _ach.unlock("first_repair")
         # round-209：结构化汇总终态写进页内反馈条；status 那行小灰字只是兼容。
-        manual = len(getattr(self, "_repair_manual", []) or [])
+        manual_findings = list(getattr(self, "_repair_manual", []) or [])
+        manual = len(manual_findings)
         text, tone = summarize(len(downloaded), len(failed), manual)
         if failed:
             from .core.mod_repair import failed_lines
             text += "\n" + "\n".join(failed_lines(result))
+        # round-219：把要玩家自己处理的条目也列出来（原来只给个数字）
+        for line in self._manual_lines(manual_findings):
+            text += "\n" + line
         report(self, text, tone)
         self._repair_manual = []
 
@@ -409,21 +437,71 @@ class CrashAnalyzerPanel(QWidget):
         2. 异步还没跑完就写「已自动补装缺失依赖」——谎报成功。
         3. java_version / out_of_memory / loader_mismatch 什么都不做也不说。
 
+        round-219：把「哪些能自动、哪些要玩家配合」改成**按结论逐条分流**，
+        并且**每条都要有话说**：
+        - ``mod_dep_missing`` → 真能自动补装（走 _repair_deps）；
+        - ``java_version`` / ``out_of_memory`` / ``loader_mismatch`` →
+          启动器不能替玩家改 Java / 内存 / 换成对的模组，但可以**点名说清**
+          哪一条、为什么、该做什么（带建议与可疑模组名）；
+        - 其余（致命异常等）→ 明确告知「需人工查看」，并指向可疑模组。
+
         交互型动作（切 Java、改内存）不塞进异步流程，但会明确列进汇总，
         玩家不会再以为「按钮没用」。
         """
-        kinds = {f.kind for f in (getattr(self, "_findings", None) or [])}
-        manual = [k for k in ("java_version", "out_of_memory",
-                              "loader_mismatch") if k in kinds]
+        findings = list(getattr(self, "_findings", None) or [])
+        auto_kinds = ("mod_dep_missing",)
+        manual = [f for f in findings
+                  if f.kind not in auto_kinds and _is_actionable(f)]
+        other = [f for f in findings
+                 if f.kind not in auto_kinds and not _is_actionable(f)]
         self._repair_manual = manual
         report(self, t("fix.progress"), "busy")
-        started = self._repair_deps()
+
+        self._last_deps_note = ""
+        started = False
+        if any(f.kind in auto_kinds for f in findings):
+            started = self._repair_deps()
+
         if not started:
             # 没有后台任务 = 当场就能给终态；异步路径由 _on_deps_done 汇总。
-            if manual:
-                text, tone = summarize(0, 0, len(manual))
-                report(self, text, tone)
+            # round-219：把「依赖那边说了什么」「哪些要玩家自己处理」「其它结论」
+            # **合并成一条**反馈，别互相覆盖（原来只留最后一句，玩家看到的是
+            # 「已自动处理 0 项」这种没有信息量的话）。
+            parts = []
+            note = getattr(self, "_last_deps_note", "") or ""
+            if note:
+                parts.append(note)
+            lines = self._manual_lines(manual)
+            if lines:
+                parts.append("\n".join(lines))
+            if other:
+                parts.append(t("fix.need_manual", n=len(other)))
+            tone = "warn" if (lines or other) else "info"
+            report(self, "\n".join(parts) if parts else
+                   t("fix.nothing_to_do"), tone)
             self._repair_manual = []
+
+    @staticmethod
+    def _manual_lines(findings) -> list[str]:
+        """把「要玩家自己处理」的结论逐条说清楚（含建议与可疑模组）。"""
+        lines = []
+        for f in findings:
+            try:
+                title = t(f.title) if getattr(f, "title", "") else ""
+                sug = t(f.suggestion) if getattr(f, "suggestion", "") else ""
+            except Exception:  # noqa: BLE001 - 缺键就退化成 kind
+                title = ""
+                sug = ""
+            if not title:
+                title = getattr(f, "kind", "") or "?"
+            line = "• %s" % title
+            culprit = getattr(f, "culprit", "") or ""
+            if culprit:
+                line += "（%s）" % culprit
+            if sug:
+                line += "：%s" % sug
+            lines.append(line)
+        return lines
 
 
 class CrashAnalyzerDialog(QDialog):

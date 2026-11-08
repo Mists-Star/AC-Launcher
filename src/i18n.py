@@ -955,6 +955,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         # round-209：三条一键修复入口共用的可见反馈条文案。
         "fix.title": "修复结果",
         "fix.progress": "正在处理一键修复…",
+        "fix.need_manual": "有 {n} 条结论需要你手动处理（启动器无法代劳），详情见上方各条说明。",
+        "fix.nothing_to_do": "没有可自动修复的项目——请按上面各条建议手动处理。",
         "fix.summary": "已自动处理 {ok} 项 · 失败 {fail} 项 · 需手动处理 {manual} 项",
         "fix.manual_hint": "另有 {n} 项请点上方卡片分别处理。",
         "fix.deps_start": "正在补装 {n} 个缺失依赖…",
@@ -3112,6 +3114,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         # round-209: shared visible feedback strip for all one-click repairs.
         "fix.title": "Repair result",
         "fix.progress": "Working on one-click repairs…",
+        "fix.need_manual": "{n} finding(s) need you to handle them manually (the launcher can't do it for you) — see the details above.",
+        "fix.nothing_to_do": "Nothing can be auto-fixed — please follow the suggestions above manually.",
         "fix.summary": "Applied {ok} · failed {fail} · needs manual action {manual}",
         "fix.manual_hint": "{n} more item(s) need the matching card above.",
         "fix.deps_start": "Installing {n} missing dependencies…",

@@ -144,9 +144,12 @@ pi = read("src/pages_instances.py")
 # round-209：汇总终态改由共享 fix_feedback.summarize 生成，并写进页内反馈条；
 # 判据按新链路等价化（仍要求区分「可自动 / 需手动」，不再只钉字面 key）。
 check("崩溃弹窗一键修复有汇总终态（不再只调 deps）",
+      # round-219：可用性改用规则表的 repairable 标记，manual 清单改成
+      # 逐条点名（_manual_lines），不再维护 kind 名单 —— 断言按新链路等价化：
+      # 仍要求「有汇总（summarize）+ 手动清单 + 立即可见反馈」三件都在。
       "summarize(" in cd and "_repair_all" in cd
-      and "for k in (\"java_version\", \"out_of_memory\"" in cd
-      and "report(self, t(\"fix.progress\"), \"busy\")" in cd)
+      and "_manual_lines(" in cd
+      and 'report(self, t("fix.progress"), "busy")' in cd)
 check("崩溃弹窗跳过扫描时给明确提示",
       "crash.deps_skipped" in cd and "mod_repair.scan_missing" in cd)
 check("崩溃弹窗失败明细用结构化阶段",
