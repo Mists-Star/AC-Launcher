@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 
 WINDOWS_KILL_TIMEOUT = 3.0
 
@@ -66,15 +67,38 @@ def terminate_all(procs, timeout: float = WINDOWS_KILL_TIMEOUT) -> dict:
     if not args:
         return {"attempted": len(alive), "failed": pids,
                 "errors": errors + ["no valid pid"]}
+    rc = 0
     try:
         done = subprocess.run(args, capture_output=True, timeout=timeout)
-        if done.returncode != 0:
+        rc = done.returncode
+        if rc != 0:
             raw = (done.stderr or done.stdout or b"")
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", "replace")
-            errors.append(str(raw).strip() or "taskkill exit=%s" % done.returncode)
-            return {"attempted": len(alive), "failed": pids, "errors": errors}
+            errors.append(str(raw).strip() or "taskkill exit=%s" % rc)
     except Exception as e:  # noqa: BLE001 - 超时 / 无权限都要回报给 UI
         errors.append(str(e))
-        return {"attempted": len(alive), "failed": pids, "errors": errors}
-    return {"attempted": len(alive), "failed": [], "errors": errors}
+
+    # round-217：taskkill 只要有一个 PID 报错（已退出 / 无权限 / PID 被复用）
+    # 整体 returncode 就是非 0。原实现据此把**整批**都算失败，UI 于是显示
+    # 「3 个都没关掉」，而实际只挂了 1 个。这里改为逐个复核存活状态——
+    # 进程对象是我们自己 Popen 出来的，poll() 判据最准。
+    failed = []
+    deadline = time.monotonic() + 1.0
+    pending = list(alive)
+    while True:
+        failed = []
+        for proc in pending:
+            try:
+                if proc.poll() is None:
+                    failed.append(proc)
+            except Exception:  # noqa: BLE001 - 句柄坏了按「没关掉」处理
+                failed.append(proc)
+        if not failed or time.monotonic() >= deadline:
+            break
+        pending = failed
+        time.sleep(0.05)      # 给 terminated 的进程一点回收时间
+    failed_pids = [getattr(p, "pid", "?") for p in failed]
+    if failed_pids and rc == 0:
+        errors.append("taskkill exit=0 但仍有进程存活：%s" % failed_pids)
+    return {"attempted": len(alive), "failed": failed_pids, "errors": errors}

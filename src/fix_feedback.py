@@ -74,6 +74,15 @@ def report(owner, text: str, tone: str = "info") -> None:
     page inside the main window works); last resort -> the themed info box.
     """
     bar = getattr(owner, "fix_note", None)
+    # round-217：成功 / 失败落定时播一下设置页配的音效（sfx_success / sfx_error）。
+    # 只在结论性 tone 上触发，中间步骤（info）不响，避免修复过程变成音效连发。
+    if tone in ("ok", "warn"):
+        try:
+            from .core.sound import play_ui_sound
+            from .settings_dialog import load_config
+            play_ui_sound("success" if tone == "ok" else "error", load_config())
+        except Exception:  # noqa: BLE001 - 音效失败绝不影响反馈
+            pass
     if bar is not None and hasattr(bar, "show_message"):
         bar.show_message(text, tone)
         return

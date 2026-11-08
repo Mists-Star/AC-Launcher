@@ -605,10 +605,11 @@ def main():
     except Exception:
         pass
     # round-37 轴心2：关窗时关闭默认下载队列（终止消费线程）
+    # round-217：原来在这里读模块级 `_DEFAULT_QUEUE`，那是导入期快照恒为 None，
+    # 钩子等于没接。改调函数，运行时再取。
     try:
-        from src.downloader import _DEFAULT_QUEUE
-        if _DEFAULT_QUEUE is not None:
-            app.aboutToQuit.connect(lambda: _DEFAULT_QUEUE.shutdown(4000))
+        from src.downloader import shutdown_default_queue
+        app.aboutToQuit.connect(lambda: shutdown_default_queue(4000))
     except Exception:
         pass
 

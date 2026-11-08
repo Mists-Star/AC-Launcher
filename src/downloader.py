@@ -142,6 +142,19 @@ def default_queue() -> DownloadQueue:
     return _DEFAULT_QUEUE
 
 
+def shutdown_default_queue(wait_ms: int = 4000) -> None:
+    """关窗钩子：**运行时**取默认队列再收尾。
+
+    round-217：`main.py` 原先是 ``from src.downloader import _DEFAULT_QUEUE``
+    再判 ``is not None`` —— 那是**导入期快照**，模块刚导入时必然是 None，
+    所以这个钩子从来没接上过。改成函数后，队列真被 `default_queue()` 创建过
+    才会 shutdown（幂等）。
+    """
+    q = _DEFAULT_QUEUE
+    if q is not None:
+        q.shutdown(wait_ms)
+
+
 def enqueue(url: str, dest: str, name: str = "", progress=None,
             headers: dict | None = None) -> DownloadTask:
     """快捷入队。返回 task（可用来连 finished/failed 信号）。"""

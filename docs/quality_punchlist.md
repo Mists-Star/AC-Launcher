@@ -1445,18 +1445,18 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 | 13 | **EasyTier 节点生命周期绑在对话框可见性上**：关窗即拆网卡，而模态期间无法启动游戏；强杀启动器则节点成孤儿 | `lobby_dialog.py:440-443`、`main_window.py:4880` | ✅ 已修（round-216：改非模态单窗口 `show()`，可边联机边启动游戏；关闭时给「保持联机 / 断开并关闭」确认） |
 | 14 | **下载进度回调在 Worker 线程直接改 `QProgressBar`** | `lobby_dialog.py:391-394`（lambda 由 `easytier.py:105` 在工作线程调用） | ✅ 已修（round-215：类级 `Signal(int)`，Worker 只 emit） |
 
-### 19.3 P2（择要，完整清单在各组的审查记录里）
+### 19.3 P2（✅ round-217 全部结清，见 §二十四）
 
-- 单流续传只看 `206` 不看 `Content-Range` 起点（`net_api.py:302-305`，与 §17.1 分片修复是两条路径）；
-  `416` 分支把「比远端还大」的 `.part` 当成品（`:295-300`）；批下载 sha1 失败不删坏文件，下次被「大小相同」判成功（`batch_download.py:61-68`）。
-- `downloader.py` 全仓无生产调用方；`_DEFAULT_QUEUE` 在 `main.py:607` 取导入期值恒 `None` → 关窗钩子从未接上。
-- `proc_kill` 部分成功被报成整体失败（`failed` 恒等于全部 PID）。
-- `skins` 下载无大小上限、两条路径不校验 PNG 魔数；`file` 字段可 `..` 越界删（`skins.py:104-106,166`）。
-- ~~`map_cache` 只增不删~~ ✅ round-216（同块留最新 + 每维度 128 块 + 整树 256 MB）；`repair_log.json` 非原子写；`achievements._save` 无异常保护且非原子。
-- `win_rounded` 每次确认框在父窗口留一只隐藏 QDialog；`launch_dialog` 关闭后不销毁、部分槽无 `RuntimeError` 保护。
-- `icons.screen_dpr()` 取主屏 DPR → 副屏 150% 下头像/状态图标发虚。
-- 条款对话框没走深色标题栏；`win_acrylic` 的 import 保护是假的（非 Windows 直接 ImportError）。
-- `memopt` 的「已释放 XX MB」恒为 0（返回值被丢弃）；`sfx_*` 音效是未接线功能。
+- ~~单流续传只看 `206` 不看 `Content-Range` 起点、`416` 把「比远端还大」的 `.part` 当成品~~ ✅
+- ~~批下载 sha1 失败不删坏文件，下次被「大小相同」判成功~~ ✅
+- ~~`_DEFAULT_QUEUE` 在 `main.py` 取导入期值恒 `None` → 关窗钩子从未接上~~ ✅
+- ~~`proc_kill` 部分成功被报成整体失败~~ ✅
+- ~~`skins` 下载无大小上限 / 不校验 PNG 魔数 / `file` 可 `..` 越界删~~ ✅
+- ~~`map_cache` 只增不删~~ ✅ round-216；~~`repair_log.json` 非原子写~~ ✅；~~`achievements._save` 无保护~~ ✅
+- ~~`win_rounded` 每次确认框留一只隐藏 QDialog；`launch_dialog` 关闭不销毁、部分槽无保护~~ ✅
+- ~~`icons.screen_dpr()` 只取主屏~~ ✅
+- ~~条款框没走深色标题栏；`win_acrylic` 的 import 保护是假的~~ ✅
+- ~~`memopt` 的「已释放 XX MB」恒为 0~~ ✅（真因是 ctypes 默认 restype 把 64 位伪句柄截断，`EmptyWorkingSet` 从未成功）；~~`sfx_*` 未接线~~ ✅
 
 ### 19.4 本轮已修 4 条（均带复现判据）
 
@@ -1534,3 +1534,32 @@ N 份、模块 `id=".."` 越界、`map_cache` 只增不删、区块级解压上�
 **至此 §19.2 全清**。剩下的是：`§14` 的「详情预取 / 下载与搜索共用项目缓存」（性能
 增强，不是缺陷）、§19.3 的 P2 长尾、以及发布清单 A 组的联网真机全链路。
 
+
+---
+
+## 二十四、round-217：§19.3 P2 长尾 13 条清完（2026-11-08 15:0x）
+
+> 主理人「可以」= 把 P2 那批小尾巴扫掉。没有一条是新功能，全是「该做的没做到位」。
+
+| # | 位置 | 问题 | 修法 | 判据 |
+|---|---|---|---|---|
+| 1 | `skins.py` | `file` 字段来自可写的 skins.json，`join(dir,"../x")` 后 `remove` → 越界删 | `_media_path()`（realpath 父目录校验）用于 path/active/两处 remove/`_load` | 越界记录不加载、path None、外部文件不动 |
+| 2 | `skins.py` | 网络下载无大小上限、不校验 PNG 魔数 | `_http_bytes(max_bytes=8MB)` + `add_bytes/add_cape_bytes/add_file` 统一魔数+大小；`_save` 原子写 | 非 PNG 拒收、64MB 响应拒收、正常 PNG 入库 |
+| 3 | `net_api.py` | 单流续传不看 `Content-Range` 起点；416 把过大残包当成品 | `_parse_content_range()` 校验起点，不符从头写；416 用 `bytes */total` 核对，不符删残包重下 | 起点不符/残包过大 → 结果仍是完整文件；正常续传不变 |
+| 4 | `batch_download.py` | 「大小相同」即跳过，sha1 不符也不重下；失败不删文件 | 有 sha1 只认 sha1；不符重下；仍不符删文件抛错 | 坏文件被真重下；坏文件被删 |
+| 5 | `core/proc_kill.py` | taskkill rc!=0 时整批都算失败 | 跑完逐个 `poll()` 复核，只报真正存活的 | rc=1 只挂 1 个 → failed 只含该 PID |
+| 6 | `repair_log.py` | 高频小文件直写，半截丢全部历史 | `tmp + os.replace` | 半截 JSON 不抛、无 .tmp 残渣 |
+| 7 | `achievements.py` | `_save` 不接异常（异常进 UI 槽）；`_load` 遇 list 崩 | 原子写 + 全吞；`_load` isinstance | 写盘失败不抛；`[]` 不崩 |
+| 8 | `downloader.py` / `main.py` | `_DEFAULT_QUEUE` 导入期快照恒 None，关窗钩子从未接上 | `shutdown_default_queue()`，main 调函数 | 队列存在时真 shutdown；没建过无害 |
+| 9 | `win_rounded.py` | 5 处 `exec()` 后不回收 → 每次确认多一只隐藏 QDialog | 统一 `deleteLater()` | 连点 4 次后 `findChildren(QDialog)==0` |
+| 10 | `launch_dialog.py` | 5 个 setter 无 RuntimeError 保护；排队回调打到已删对象；完成框永久挂父窗口 | `_guard_dead` + `_fit_text_heights` 守卫；`_finished` + `WA_DeleteOnClose` | 销毁后 5 个 setter 零异常；完成后关闭即销毁 |
+| 11 | `icons.py` | `screen_dpr()` 只取主屏 → 副屏 150% 图标发虚 | 支持 widget DPR → 鼠标所在屏 → 主屏 | 给 widget 返回 1.75 而非 1.0 |
+| 12 | `terms_dialog.py` | 首屏条款框无深色标题栏 | 补 `enable_dark_titlebar` | 与其它对话框一致 |
+| 13 | `win_acrylic.py` | `ctypes=None` 后仍无条件 `class _MARGINS(ctypes.Structure)` → import 保护是假的 | 三个结构体进同一个 `if ctypes is not None:` | 屏蔽 ctypes 子进程仍能 import 且返回 False |
+| 14 | `core/memopt.py` | `GetCurrentProcess()` 用默认 restype(c_int)，64 位伪句柄被截断 → `EmptyWorkingSet`/`GetProcessMemoryInfo` 全部失败，「已释放 0 MB」且优化从未生效 | `_kernel32()` 设 `restype=c_void_p` + 两个 API 的 argtypes/restype | 实测 RSS 92 MB → 优化后下降、freed 非 0 |
+| 15 | `sfx_*` | 四个音效键只有 UI、没有消费方 | `sound.play_ui_sound()` + 主窗口应用级事件过滤器（点击/悬停 90ms 节流）+ `fix_feedback.report` 触发成功/失败 | 开关关/文件空/不存在 → 都不响；ok/warn 各一次 |
+
+`tests/test_round217_p2_regression.py` **47 项**，已登记 `regress.py`。
+
+**至此 §19.3 也全清。** 全仓只剩：§14 的详情预取（已写明「有意不做」的理由）与
+发布清单 A 组的联网真机全链路。

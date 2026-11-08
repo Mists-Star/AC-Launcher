@@ -236,11 +236,32 @@ def on_accent(name: str) -> QIcon:
     return icon(name, COLORS.get("text_on_accent") or "#FFFFFF")
 
 
-def screen_dpr() -> float:
-    """Device pixel ratio of the primary screen (>= 1.0)."""
+def screen_dpr(widget=None) -> float:
+    """Device pixel ratio of the screen where rendering is happening (>= 1.0).
+
+    round-217：原来只取 `primaryScreen()` —— 主屏 100% + 副屏 150% 的多屏
+    环境下，副屏上的头像/侧栏图标会按 1.0 渲染再被放大 1.5 倍，边缘发虚。
+    现在优先用「发起渲染的窗口所在屏幕」，其次用鼠标所在屏幕（新建图标的
+    位置基本等于用户正在看的屏幕），最后才回退主屏。
+    """
     try:
+        if widget is not None:
+            try:
+                fn = getattr(widget, "devicePixelRatioF", None)
+                v = float(fn()) if callable(fn) else float(widget.devicePixelRatio())
+                if v > 0:
+                    return max(1.0, v)
+            except Exception:  # noqa: BLE001 - 窗口还没上屏
+                pass
         from PySide6.QtGui import QGuiApplication
-        scr = QGuiApplication.primaryScreen()
+
+        scr = None
+        try:
+            from PySide6.QtGui import QCursor
+            scr = QGuiApplication.screenAt(QCursor.pos())
+        except Exception:  # noqa: BLE001 - offscreen 平台没有光标
+            scr = None
+        scr = scr or QGuiApplication.primaryScreen()
         return max(1.0, float(scr.devicePixelRatio()) if scr else 1.0)
     except Exception:  # noqa: BLE001 - no screen yet
         return 1.0

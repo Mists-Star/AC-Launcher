@@ -260,6 +260,24 @@ class _TransientDownloadError(NetError):
     """网络抖动 / 内容不完整：值得清空重试或续传；4xx 等确定性错误不抛它。"""
 
 
+def _parse_content_range(value: str) -> tuple[int | None, int | None]:
+    """``bytes 100-999/1000`` → ``(100, 1000)``；``bytes */1000`` → ``(None, 1000)``。
+
+    round-217：单流续传原来看见 206 就 append，完全不核对服务器实际返回的
+    区间起点。带 Range 的请求经代理/CDN（或服务端 Range 归一化）回来一个
+    「从 0 开始」的 206 时，就会把文件头接到 .part 尾部 —— 一个字节数看起来
+    合理、内容彻底错位的坏文件，而且还会被 os.replace 转正。
+    """
+    if not value:
+        return None, None
+    m = re.match(r"bytes\s+(?:(\d+)-(\d+)|\*)/(\d+|\*)", value.strip())
+    if not m:
+        return None, None
+    start = int(m.group(1)) if m.group(1) is not None else None
+    total = int(m.group(3)) if m.group(3) not in (None, "*") else None
+    return start, total
+
+
 def _download_once(
     url: str,
     dest: str,
@@ -293,13 +311,38 @@ def _download_once(
         r = requests.get(
             url, headers=hdrs, timeout=timeout, stream=True, proxies=_proxies())
         if start and r.status_code == 416:
-            # Range 不满足 = 本地 .part 已等于完整大小 → 验完再收尾
+            # Range 不满足：可能是「本地 .part 已经是完整文件」，也可能是
+            # 「本地 .part 比远端还大」（旧版本残留 / 远端换了个更小的文件）。
+            # round-217：原实现一律当成品直接 os.replace，后一种情况会把一个
+            # 尺寸错误的文件转正，而后续「大小相同 → 认为已安装」的判据再也
+            # 修不了它。这里先用 Content-Range 的总长核对，对不上就清掉重下。
+            _s, total_remote = _parse_content_range(
+                r.headers.get("Content-Range", ""))
+            size_local = os.path.getsize(dest_tmp)
+            r.close()
+            if total_remote is None or size_local != total_remote:
+                try:
+                    os.remove(dest_tmp)
+                except OSError:
+                    pass
+                return _download_once(
+                    url, dest, dest_tmp, resume=False, progress=progress,
+                    headers=headers, timeout=timeout, cancel=cancel,
+                    expected_sha1=expected_sha1)
             if expected_sha1:
                 _verify_sha1(dest_tmp, expected_sha1)
             os.replace(dest_tmp, dest)
             return dest
         r.raise_for_status()
-        resume_ok = bool(start and r.status_code == 206)
+        # 只有「确实是 206，且服务器声明的区间起点 == 本地已有长度」才允许 append
+        resume_ok = False
+        if start and r.status_code == 206:
+            seg_start, _seg_total = _parse_content_range(
+                r.headers.get("Content-Range", ""))
+            resume_ok = seg_start == start
+            if not resume_ok:
+                # 起点对不上 → 丢弃本地 .part 从头写，绝不允许拼接错位内容
+                start = 0
         total = start + int(r.headers.get("Content-Length", 0) or 0)
         sofar = start
         mode = "ab" if resume_ok else "wb"

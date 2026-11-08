@@ -245,6 +245,26 @@ def play_launch_sound(trigger: str, cfg: dict) -> None:
     _instance().play(custom, vol)
 
 
+def play_ui_sound(kind: str, cfg: dict) -> bool:
+    """播放设置页里配的交互音效（click / hover / success / error）。
+
+    round-217：这四个键（`sfx_enabled` / `sfx_click` / `sfx_hover` /
+    `sfx_success` / `sfx_error`）原来**只有 UI、没有任何消费方** —— 玩家配好
+    文件也没有一声响。现在由 MainWindow 的全局事件过滤器与修复反馈调用。
+    ``sfx_enabled`` 关闭、或对应文件为空时直接返回 False（默认就是空，
+    所以对没配置过的玩家完全无副作用）。
+    """
+    if not cfg.get("sfx_enabled", False):
+        return False
+    path = (cfg.get("sfx_%s" % kind) or "").strip()
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        return _instance().play(path, float(cfg.get("sfx_vol", 0.6)))
+    except Exception:  # noqa: BLE001 - 音效失败绝不影响交互
+        return False
+
+
 # ---------------------------------------------------------------- background
 def start_bgm(cfg: dict) -> bool:
     """Start (or restart) background music from settings.

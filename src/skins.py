@@ -37,12 +37,29 @@ class SkinUploadError(Exception):
         self.status = status
 
 
-def _http_bytes(url: str, timeout: int = 20) -> bytes:
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+# round-217：皮肤 64×64、披风 64×32，正常几十 KB。给 8 MB 上限既是给第三方
+# CDN 留余量，也防「贴了个 500 MB 的链接」把内存和磁盘一起打爆。
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _http_bytes(url: str, timeout: int = 20,
+                max_bytes: int = _MAX_IMAGE_BYTES) -> bytes:
+    """GET 一个小文件，带**硬性大小上限**（超出即中止，不读完）。"""
     import urllib.request
 
     req = urllib.request.Request(url, headers=_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+        try:
+            length = int(r.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length > max_bytes:
+            raise ValueError("图片过大（%d MB）" % (length // 1024 // 1024))
+        buf = r.read(max_bytes + 1)
+    if len(buf) > max_bytes:
+        raise ValueError("图片超过 %d MB 上限" % (max_bytes // 1024 // 1024))
+    return buf
 
 
 def _http_json(url: str, timeout: int = 20):
@@ -84,26 +101,48 @@ class SkinManager:
             if not isinstance(raw, dict) or not raw.get("id"):
                 continue
             # drop skins whose file vanished
-            if os.path.exists(os.path.join(self._dir, raw.get("file", ""))):
+            mp = self._media_path(raw.get("file"))
+            if mp and os.path.exists(mp):
                 self._skins[raw["id"]] = raw
         self._active = data.get("active", {}) if isinstance(
             data.get("active"), dict) else {}
         for raw in data.get("capes", []):
             if not isinstance(raw, dict) or not raw.get("id"):
                 continue
-            if os.path.exists(os.path.join(self._dir, raw.get("file", ""))):
+            mp = self._media_path(raw.get("file"))
+            if mp and os.path.exists(mp):
                 self._capes[raw["id"]] = raw
         self._active_cape = data.get("active_cape", {}) if isinstance(
             data.get("active_cape"), dict) else {}
 
     def _save(self) -> None:
-        with open(self._meta, "w", encoding="utf-8") as f:
+        # round-217：改原子写（原实现直接覆盖，写一半断电就丢整个皮肤库）
+        tmp = self._meta + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(
                 {"skins": list(self._skins.values()), "active": self._active,
                  "capes": list(self._capes.values()),
                  "active_cape": self._active_cape},
                 f, ensure_ascii=False, indent=2,
             )
+        os.replace(tmp, self._meta)
+
+    def _media_path(self, fname) -> str | None:
+        """``<data>/skins`` 下的媒体文件路径；越界/为空一律 None。
+
+        round-217：``file`` 字段来自 skins.json，是可被任何本机程序改写的
+        数据。原实现直接 ``os.path.join(self._dir, s["file"])`` 再
+        ``os.remove`` —— 一条 ``"file": "../../重要文件"`` 的记录就能删到
+        皮肤目录之外。这里统一 realpath 后校验父目录。
+        """
+        name = str(fname or "").strip()
+        if not name or os.path.isabs(name):
+            return None
+        base = os.path.realpath(self._dir)
+        p = os.path.realpath(os.path.join(base, name))
+        if os.path.dirname(p) != base:
+            return None
+        return p
 
     # ---- queries ----
     def list(self) -> list[dict]:
@@ -114,7 +153,7 @@ class SkinManager:
 
     def path_of(self, skin_id: str) -> str | None:
         s = self._skins.get(skin_id)
-        return os.path.join(self._dir, s["file"]) if s else None
+        return self._media_path(s.get("file")) if s else None
 
     def active_of(self, account_id: str) -> dict | None:
         sid = self._active.get(account_id)
@@ -122,11 +161,21 @@ class SkinManager:
 
     def active_path(self, account_id: str) -> str | None:
         s = self.active_of(account_id)
-        return os.path.join(self._dir, s["file"]) if s else None
+        return self._media_path(s.get("file")) if s else None
 
     # ---- mutations ----
     def add_file(self, src_path: str, name: str | None = None) -> dict:
         ext = os.path.splitext(src_path)[1].lower() or ".png"
+        try:
+            size = os.path.getsize(src_path)
+        except OSError as e:
+            raise ValueError("无法读取皮肤文件：%s" % e) from e
+        if size > _MAX_IMAGE_BYTES:
+            raise ValueError("皮肤文件过大（%d MB）" % (size // 1024 // 1024))
+        if ext == ".png":
+            with open(src_path, "rb") as f:
+                if f.read(8) != _PNG_MAGIC:
+                    raise ValueError("不是有效的 PNG 皮肤")
         sid = _new_id()
         fname = sid + ext
         shutil.copyfile(src_path, os.path.join(self._dir, fname))
@@ -144,6 +193,14 @@ class SkinManager:
 
     def add_bytes(self, data: bytes, name: str, source: str,
                   player: str = "", model: str = "auto") -> dict:
+        # round-217：所有网络/字节入口统一校验（PNG 魔数 + 大小），
+        # 免得非图片内容落进皮肤库、渲染时才炸。
+        if not data or len(data) < 64:
+            raise ValueError("皮肤数据为空或过小")
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise ValueError("皮肤文件过大（%d MB）" % (len(data) // 1024 // 1024))
+        if data[:8] != _PNG_MAGIC:
+            raise ValueError("皮肤数据不是有效的 PNG")
         sid = _new_id()
         fname = sid + ".png"
         with open(os.path.join(self._dir, fname), "wb") as f:
@@ -173,10 +230,12 @@ class SkinManager:
     def remove(self, skin_id: str) -> None:
         s = self._skins.pop(skin_id, None)
         if s:
-            try:
-                os.remove(os.path.join(self._dir, s["file"]))
-            except OSError:
-                pass
+            p = self._media_path(s.get("file"))
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
         for acc, sid in list(self._active.items()):
             if sid == skin_id:
                 self._active.pop(acc, None)
@@ -339,7 +398,7 @@ class SkinManager:
 
     def cape_path_of(self, cape_id: str) -> str | None:
         c = self._capes.get(cape_id)
-        return os.path.join(self._dir, c["file"]) if c else None
+        return self._media_path(c.get("file")) if c else None
 
     def active_cape_of(self, account_id: str) -> dict | None:
         cid = self._active_cape.get(account_id)
@@ -347,10 +406,16 @@ class SkinManager:
 
     def active_cape_path(self, account_id: str) -> str | None:
         c = self.active_cape_of(account_id)
-        return os.path.join(self._dir, c["file"]) if c else None
+        return self._media_path(c.get("file")) if c else None
 
     def add_cape_bytes(self, data: bytes, name: str, source: str = "download",
                        player: str = "") -> dict:
+        if not data or len(data) < 64:
+            raise ValueError("披风数据为空或过小")
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise ValueError("披风文件过大（%d MB）" % (len(data) // 1024 // 1024))
+        if data[:8] != _PNG_MAGIC:
+            raise ValueError("披风数据不是有效的 PNG")
         cid = _new_id()
         fname = cid + ".png"
         with open(os.path.join(self._dir, fname), "wb") as f:
@@ -380,10 +445,12 @@ class SkinManager:
     def remove_cape(self, cape_id: str) -> None:
         c = self._capes.pop(cape_id, None)
         if c:
-            try:
-                os.remove(os.path.join(self._dir, c["file"]))
-            except OSError:
-                pass
+            p = self._media_path(c.get("file"))
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
         for acc, cid in list(self._active_cape.items()):
             if cid == cape_id:
                 self._active_cape.pop(acc, None)

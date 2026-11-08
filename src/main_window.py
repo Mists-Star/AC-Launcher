@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QProgressBar, QMenu, QComboBox, QScrollArea, QSizePolicy,
     QLineEdit, QStyledItemDelegate, QStyleOptionViewItem, QStyle, QListView,
-    QApplication,
+    QApplication, QAbstractButton,
 )
 from PySide6.QtCore import (Qt, QSize, QPoint, QPointF, QTimer, QEvent, QObject,
                             QRectF, QByteArray, Signal)
@@ -1799,6 +1799,50 @@ class _IconNavDelegate(QStyledItemDelegate):
         return QSize(s.width(), self.ROW_H)
 
 
+class _UiSoundFilter(QObject):
+    """应用级交互音效（round-217 接线）。
+
+    设置页有 `sfx_click` / `sfx_hover` / `sfx_success` / `sfx_error` 四个文件键
+    和一个总开关，但此前没有任何消费者：配了也不会响。这里在应用级事件过滤器
+    里统一处理「按钮点击」「按钮悬停」两种最常用的触发；成功/失败音由
+    ``fix_feedback.report`` 触发。
+
+    默认 `sfx_enabled=False` 且文件为空 → 直接返回，零开销、零副作用。
+    悬停做了 90ms 节流，扫过一排按钮不会变成机关枪。
+    """
+
+    _HOVER_MIN_S = 0.09
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+        self._last_hover = 0.0
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 约定
+        try:
+            et = event.type()
+            if et not in (QEvent.Type.MouseButtonRelease, QEvent.Type.Enter):
+                return False
+            if not isinstance(obj, QAbstractButton):
+                return False
+            cfg = getattr(self._window, "cfg", None) or {}
+            if not cfg.get("sfx_enabled", False):
+                return False
+            from .core.sound import play_ui_sound
+            if et == QEvent.Type.Enter:
+                import time as _t
+                now = _t.monotonic()
+                if now - self._last_hover < self._HOVER_MIN_S:
+                    return False
+                self._last_hover = now
+                play_ui_sound("hover", cfg)
+            elif event.button() == Qt.LeftButton and obj.isEnabled():
+                play_ui_sound("click", cfg)
+        except Exception:  # noqa: BLE001 - 过滤器绝不能抛（会打断整个事件分发）
+            return False
+        return False
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1853,6 +1897,16 @@ class MainWindow(QMainWindow):
         self._active_toasts = []
         self.cfg = load_config()
         _boot_trace("5 cfg ok")
+        # round-217：交互音效接线。设置页的 sfx_click / sfx_hover / sfx_success /
+        # sfx_error 四个键以前只有 UI、无人消费（配了也不响）。这里装一个**应用级**
+        # 事件过滤器统一触发；sfx_enabled 默认关、文件默认空 → 对默认玩家零影响。
+        try:
+            self._sfx_filter = _UiSoundFilter(self)
+            _qapp = QApplication.instance()
+            if _qapp is not None:
+                _qapp.installEventFilter(self._sfx_filter)
+        except Exception:  # noqa: BLE001 - 音效绝不影响启动
+            self._sfx_filter = None
         # round-136：窗口/任务栏图标（用户自定义图优先，回落内置 logo）
         self._apply_window_icon()
 
@@ -5279,7 +5333,12 @@ class MainWindow(QMainWindow):
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(900, _dlg.close)
             except Exception:  # noqa: BLE001
-                _dlg.close()
+                # round-217：close() 本身也可能因为 C++ 对象已销毁再抛一次，
+                # 原实现把 close 放在 except 里裸调 → 二次异常直接冒泡到 Qt。
+                try:
+                    _dlg.close()
+                except RuntimeError:
+                    pass
             self._launch_dlg = None
         # round-34：游戏进程生命周期——保存 proc 引用并轮询退出状态
         self._track_game_process(_proc, inst.name, _log_path, inst)

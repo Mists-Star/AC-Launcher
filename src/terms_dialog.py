@@ -72,6 +72,14 @@ class TermsDialog(QDialog):
 
         self.agree.toggled.connect(self.continue_btn.setEnabled)
 
+        # round-217：条款框是**首次启动看到的第一屏**，原来没画深色标题栏，
+        # 深色主题下顶部是一条刺眼的白条（其它对话框都走 enable_dark_titlebar）。
+        try:
+            from .win_rounded import enable_dark_titlebar
+            enable_dark_titlebar(self)
+        except Exception:  # noqa: BLE001 - 非 Windows / 无 DWM 时忽略
+            pass
+
     def accept(self) -> None:
         if not self.agree.isChecked():
             return

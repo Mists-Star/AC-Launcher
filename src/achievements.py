@@ -56,14 +56,32 @@ class Achievements(QObject):
         try:
             with open(_path(), "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._unlocked = {k: float(v) for k, v in data.get("unlocked", {}).items()}
-        except (OSError, json.JSONDecodeError, ValueError):
+            raw = data.get("unlocked", {}) if isinstance(data, dict) else {}
+            self._unlocked = {k: float(v) for k, v in raw.items()}
+        except (OSError, json.JSONDecodeError, ValueError, TypeError,
+                AttributeError):
             self._unlocked = {}
 
     def _save(self) -> None:
-        os.makedirs(os.path.dirname(_path()), exist_ok=True)
-        with open(_path(), "w", encoding="utf-8") as f:
-            json.dump({"unlocked": self._unlocked}, f, ensure_ascii=False, indent=2)
+        """原子写 + 永不抛。
+
+        round-217：原实现直接覆盖且不接异常——成就解锁发生在事件回调里，
+        磁盘满 / 文件被占用会把异常抛进 UI 槽函数（Qt 里就是一条控制台
+        traceback + 该回调后续逻辑全断）。成就丢了只是少个徽章，不该影响主流程。
+        """
+        p = _path()
+        tmp = p + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"unlocked": self._unlocked}, f,
+                          ensure_ascii=False, indent=2)
+            os.replace(tmp, p)
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     # ---- queries ----
     def is_unlocked(self, aid: str) -> bool:

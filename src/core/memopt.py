@@ -22,6 +22,22 @@ import gc
 import os
 
 
+def _kernel32():
+    """带正确签名的 kernel32。
+
+    round-217：原来直接 ``ctypes.WinDLL("kernel32")`` 用默认签名调
+    ``GetCurrentProcess()`` —— ctypes 默认 restype 是 **c_int（32 位）**，在
+    64 位进程里伪句柄 ``-1`` 会被截成 ``0xFFFFFFFF``，于是
+    ``GetProcessMemoryInfo`` / ``EmptyWorkingSet`` 全部失败：
+    前者让「已释放 XX MB」恒为 0，后者让内存优化**从来没真正生效过**。
+    """
+    import ctypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = ctypes.c_void_p
+    return k32
+
+
 def _current_rss_bytes() -> int:
     """当前进程常驻内存（字节）。用 ctypes 读 ProcessMemoryCounters。"""
     import ctypes
@@ -42,12 +58,15 @@ def _current_rss_bytes() -> int:
 
     try:
         psapi = ctypes.WinDLL("psapi")
-        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32 = _kernel32()
         counter = _PMC()
         counter.cb = ctypes.sizeof(_PMC)
-        handle = kernel32.GetCurrentProcess()
-        if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counter),
-                                     ctypes.sizeof(_PMC)):
+        psapi.GetProcessMemoryInfo.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(_PMC), ctypes.c_ulong]
+        psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+        if psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(),
+                                      ctypes.byref(counter),
+                                      ctypes.sizeof(_PMC)):
             return int(counter.WorkingSetSize)
     except Exception:  # noqa: BLE001 - 非 Windows / API 失败
         pass
@@ -63,16 +82,24 @@ def optimize_memory() -> int:
     try:
         import ctypes
 
-        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32 = _kernel32()
+        handle = kernel32.GetCurrentProcess()
+        ok = False
         # EmptyWorkingSet 在 psapi；老系统上退回 SetProcessWorkingSetSize(-1,-1)
         try:
             psapi = ctypes.WinDLL("psapi")
-            psapi.EmptyWorkingSet(kernel32.GetCurrentProcess())
+            psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+            psapi.EmptyWorkingSet.restype = ctypes.c_int
+            ok = bool(psapi.EmptyWorkingSet(handle))
         except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
             try:
-                kernel32.SetProcessWorkingSetSize(kernel32.GetCurrentProcess(),
-                                                  ctypes.c_size_t(-1),
-                                                  ctypes.c_size_t(-1))
+                kernel32.SetProcessWorkingSetSize.argtypes = [
+                    ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
+                kernel32.SetProcessWorkingSetSize.restype = ctypes.c_int
+                kernel32.SetProcessWorkingSetSize(
+                    handle, ctypes.c_size_t(-1), ctypes.c_size_t(-1))
             except Exception:  # noqa: BLE001
                 pass
     except Exception:  # noqa: BLE001 - 非 Windows

@@ -170,8 +170,13 @@ def _msgbox(
 
     enable_dark_titlebar(dlg)
     result = dlg.exec()
-    if result and clicked[0]:
-        return clicked[0]
+    picked = clicked[0]
+    # round-217：QDialog 以 parent 为父，exec() 之后 C++ 对象仍然挂在父窗口
+    # 下面（只是隐藏）。原来没有回收，确认框点得越多、父窗口底下累积的隐藏
+    # 对话框就越多（每个还带图标/按钮/布局）。这里用完即删。
+    dlg.deleteLater()
+    if result and picked:
+        return picked
     return None
 
 
@@ -215,8 +220,10 @@ def pick_files(parent, title: str, start_dir: str = "", filt: str = "",
     else:
         dlg.setFileMode(QFileDialog.ExistingFile)
     enable_dark_titlebar(dlg)
-    if dlg.exec():
-        files = dlg.selectedFiles()
+    ok = bool(dlg.exec())
+    files = dlg.selectedFiles() if ok else []
+    dlg.deleteLater()      # round-217：同 _msgbox，别把文件对话框留在父窗口下
+    if ok:
         if multi:
             return files
         return files[0] if files else ""
@@ -229,10 +236,11 @@ def pick_folder(parent, title: str, start_dir: str = "") -> str:
     d = QFileDialog(parent, title, start_dir)
     d.setFileMode(QFileDialog.Directory)
     d.setOption(QFileDialog.ShowDirsOnly, True)
-    if d.exec():
-        sel = d.selectedFiles()
-        if sel:
-            return sel[0]
+    ok = bool(d.exec())
+    sel = d.selectedFiles() if ok else []
+    d.deleteLater()        # round-217
+    if sel:
+        return sel[0]
     return ""
 
 
@@ -280,7 +288,9 @@ def text_input(parent, title: str, label: str, default: str = "",
 
     enable_dark_titlebar(dlg)
     ok = dlg.exec() == 1
-    return edit.text(), ok
+    value = edit.text()
+    dlg.deleteLater()      # round-217
+    return value, ok
 
 
 def dark_color(parent, start: str = "#000000") -> str:
@@ -295,9 +305,10 @@ def dark_color(parent, start: str = "#000000") -> str:
     dlg.setOption(QColorDialog.DontUseNativeDialog)
     dlg.setCurrentColor(QColor(start))
     enable_dark_titlebar(dlg)
-    if dlg.exec():
-        return dlg.selectedColor().name()
-    return ""
+    ok = bool(dlg.exec())
+    picked = dlg.selectedColor().name() if ok else ""
+    dlg.deleteLater()      # round-217
+    return picked
 
 
 def warn(parent, title: str, text: str, detail: str = "", **kw) -> None:

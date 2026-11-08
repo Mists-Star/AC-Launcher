@@ -8,6 +8,34 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-217（2026-11-08）— §19.3 P2 长尾 13 条清完
+
+> 主理人「可以」= 把 P2 那批小尾巴扫掉。没有一条是「新功能」，全是
+> **该做的没做到位**：删错文件、坏文件判成功、状态误报、写盘半截、
+> 对象泄漏、功能没接线。
+
+| # | 位置 | 问题 | 修法 | 判据 |
+|---|---|---|---|---|
+| 1 | `src/skins.py:104-106,166,177` | `file` 字段来自 skins.json（可被任何本机程序改写），`join(dir, "../x")` 后 `os.remove` → 越界删玩家文件 | 新增 `_media_path()`（realpath 父目录校验），用于 path_of / active_path / cape_path / 两处 remove / `_load` | 越界记录不加载、`path_of` 返回 None、删除不动外部文件 |
+| 2 | `src/skins.py:40,145,343` | 皮肤/披风两条网络路径无大小上限、不校验 PNG 魔数 | `_http_bytes(max_bytes=8MB)` 读前查 Content-Length、读时截断；`add_bytes` / `add_cape_bytes` / `add_file` 统一魔数+大小校验；`_save` 改原子写 | 非 PNG 拒收；64 MB 响应直接拒；正常 PNG 入库 |
+| 3 | `src/net_api.py:295-305` | 单流续传看见 206 就 append，不核对 Content-Range 起点 → 服务端/代理回「从 0 开始」的 206 时把文件头接到尾部 = 内容错位却尺寸合理的坏文件；416 分支把「比远端还大」的残包直接转正 | `_parse_content_range()` + 起点必须等于本地长度才 append，否则从头写；416 时用 `bytes */total` 核对，不符就删残包重下 | 起点不符 → 结果仍是完整文件；残包过大 → 重下而非转正；正常续传不受影响 |
+| 4 | `src/batch_download.py:61-68` | 「已存在且大小相同」直接跳过，即使 sha1 不符 → 坏文件被永久固化；sha1 失败也不删文件 | 有 sha1 时只认 sha1；不符就重下；重下后仍不符则删文件并抛错 | 大小相同但内容坏 → 真重下；坏文件被删 |
+| 5 | `src/core/proc_kill.py:69-80` | taskkill 只要有一个 PID 报错整体 returncode 非 0 → 把整批都算失败 | 跑完逐个 `poll()` 复核存活，只报真正没关掉的 | rc=1 但只挂 1 个 → failed 只含那一个 |
+| 6 | `src/repair_log.py:39` | 高频小文件直接覆盖写，半截即丢全部历史 | `tmp + os.replace` 原子写 | 半截 JSON 不抛、无 .tmp 残渣 |
+| 7 | `src/achievements.py:71` | `_save` 不接异常 → 磁盘满时异常抛进 UI 槽；`_load` 遇根是 list 会 AttributeError | 原子写 + 全部吞掉；`_load` 加 isinstance 判断 | 写盘失败不抛；`[]` 不崩 |
+| 8 | `src/downloader.py:111`、`main.py:609` | `main.py` 读 `_DEFAULT_QUEUE` 是**导入期快照**恒 None → 关窗钩子从未接上 | 新增 `shutdown_default_queue()`，main 调函数 | 队列存在时真的 shutdown；没建过时无害 |
+| 9 | `src/win_rounded.py:116,218,232,248,298` | 确认框/文件框/取色框以 parent 为父，`exec()` 后不回收 → 每次确认在父窗口下多一个隐藏 QDialog | 五处 `exec()` 后统一 `deleteLater()` | 连点 4 次后父窗口 `findChildren(QDialog) == 0` |
+| 10 | `src/launch_dialog.py:305,340-410` | 5 个 setter 无 `RuntimeError` 保护（关掉进度框后 worker 继续发进度就刷 traceback）；`_fit_text_heights` 的排队回调打到已删对象；完成后的进度框永久挂在主窗口下 | `_guard_dead` 装饰器 + `_fit_text_heights` 内 try/except；`mark_done/mark_cancelled` 置 `_finished`，关闭时 `WA_DeleteOnClose` | 销毁后 5 个 setter 零异常；完成后关闭即销毁 |
+| 11 | `src/icons.py:239` | `screen_dpr()` 只取主屏 → 副屏 150% 下图标按 1.0 渲染再放大 = 发虚 | 支持传 widget（用其 `devicePixelRatioF`），否则用鼠标所在屏，最后回退主屏 | 给 widget 时返回 1.75 而非 1.0 |
+| 12 | `src/terms_dialog.py:73` | 首次启动第一屏没有深色标题栏（深色主题下顶部一条白） | 补 `enable_dark_titlebar(self)` | 与其它对话框一致 |
+| 13 | `src/win_acrylic.py:58` | `except ImportError: ctypes=None` 之后仍无条件 `class _MARGINS(ctypes.Structure)` → 「import 保护」是假的 | 三个结构体定义进同一个 `if ctypes is not None:` | 屏蔽 ctypes 后子进程仍能 import 且 `enable_acrylic` 返回 False |
+| 14 | `src/core/memopt.py:52-77` | `GetCurrentProcess()` 用 ctypes 默认 restype(c_int) → 64 位下伪句柄被截断，`EmptyWorkingSet` / `GetProcessMemoryInfo` **全部失败** → 「已释放 XX MB」恒 0，内存优化从未真正生效 | `_kernel32()` 设 `restype=c_void_p`，并给两个 API 设 argtypes/restype | 实测 RSS 92 MB → 优化后明显下降、freed 非 0 |
+| 15 | `settings_dialog` 的 `sfx_*` | 四个交互音效键只有 UI、**没有任何消费方**（配了不响） | `sound.play_ui_sound()` + MainWindow 应用级事件过滤器（点击/悬停，悬停 90ms 节流）+ `fix_feedback.report` 触发成功/失败音 | 开关关/文件空/文件不存在 → 都不出声；ok/warn 各触发一次 |
+
+**新增回归**：`tests/test_round217_p2_regression.py` **47 项**，已登记 `regress.py`。
+
+**门禁**：`regress.py` **83/83**；i18n 中英对称；PII / 文案 / IA 全过。
+
 ## round-216（2026-11-08）— 清掉最后 8 条 P1：磁盘边界 / 生命周期 / 缓存预算
 
 > 主理人「随便你，做完所有的」= 把 §19.2 里剩下的 P1 全清。共同点：

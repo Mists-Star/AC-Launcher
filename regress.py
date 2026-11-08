@@ -115,6 +115,7 @@ SUITES = [
     ("全启动器审查七条 P0 行为回归（round-210）", "test_round210_p0_regression.py", "script"),
     ("设计比对第 3/5/6 批行为回归（round-211）", "test_round211_regression.py", "script"),
     ("磁盘边界/生命周期/缓存预算回归（round-216）", "test_round216_regression.py", "script"),
+    ("§19.3 P2 长尾行为回归（round-217）", "test_round217_p2_regression.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

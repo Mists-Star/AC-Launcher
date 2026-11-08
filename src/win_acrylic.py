@@ -53,26 +53,31 @@ _BORDER_COLOR_NONE = 0xFFFFFFFE
 _ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
 
 
-class _MARGINS(ctypes.Structure):
-    _fields_ = [("Left", ctypes.c_int), ("Right", ctypes.c_int),
-                ("Top", ctypes.c_int), ("Bottom", ctypes.c_int)]
+# round-217：这三个结构体原来无条件定义。上面的 ``except ImportError:
+# ctypes = None`` 只挡住了「导入失败」这一半——真到没有 ctypes 的平台上，
+# 模块级 ``class _MARGINS(ctypes.Structure)`` 会直接 AttributeError，
+# 所谓「import 保护」根本兜不住。结构体定义也必须进同一个 if。
+if ctypes is not None:
+    class _MARGINS(ctypes.Structure):
+        _fields_ = [("Left", ctypes.c_int), ("Right", ctypes.c_int),
+                    ("Top", ctypes.c_int), ("Bottom", ctypes.c_int)]
 
+    class _ACCENT_POLICY(ctypes.Structure):
+        _fields_ = [
+            ("AccentState", ctypes.c_int),
+            ("AccentFlags", ctypes.c_int),
+            ("GradientColor", ctypes.c_uint),  # ABGR
+            ("AnimationId", ctypes.c_int),
+        ]
 
-class _ACCENT_POLICY(ctypes.Structure):
-    _fields_ = [
-        ("AccentState", ctypes.c_int),
-        ("AccentFlags", ctypes.c_int),
-        ("GradientColor", ctypes.c_uint),  # ABGR
-        ("AnimationId", ctypes.c_int),
-    ]
-
-
-class _WINCOMPATTRDATA(ctypes.Structure):
-    _fields_ = [
-        ("Attribute", ctypes.c_int),
-        ("Data", ctypes.c_void_p),
-        ("SizeOfData", ctypes.c_size_t),
-    ]
+    class _WINCOMPATTRDATA(ctypes.Structure):
+        _fields_ = [
+            ("Attribute", ctypes.c_int),
+            ("Data", ctypes.c_void_p),
+            ("SizeOfData", ctypes.c_size_t),
+        ]
+else:  # pragma: no cover - 只有完全无 ctypes 的平台会走到
+    _MARGINS = _ACCENT_POLICY = _WINCOMPATTRDATA = None
 
 
 def _set_attr(hwnd: int, attr: int, value: int) -> bool:

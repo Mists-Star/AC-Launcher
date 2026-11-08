@@ -59,6 +59,23 @@ def _wrap(text: str, width: int = 60) -> str:
     return text[: width - 1] + "…"
 
 
+def _guard_dead(fn):
+    """槽函数保护：对话框的 C++ 对象被销毁后再收到 worker 信号，一律静默。
+
+    round-217：`set_progress` / `set_speed` / `set_step` / `set_status_text` /
+    `set_sources` 之前没有这层保护，而其它几个 setter 有 —— 关掉进度框之后
+    worker 还在发进度（下载要几秒才收尾）就会在控制台刷 RuntimeError。
+    """
+    def _inner(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except RuntimeError:      # C++ 对象已删除
+            return None
+    _inner.__name__ = getattr(fn, "__name__", "guarded")
+    _inner.__doc__ = fn.__doc__
+    return _inner
+
+
 class LaunchProgressDialog(QDialog):
     status = Signal(str)
     progress = Signal(int, int)  # value, max
@@ -78,6 +95,7 @@ class LaunchProgressDialog(QDialog):
         self.mode = mode
         self._fitting = False
         self._cancelling = False
+        self._finished = False      # 成功/失败/取消后关闭即销毁（round-217）
         self._paused = False
         self._failed = False
         self._steps = list(_DL_STEPS if mode == "download" else STEPS)
@@ -231,6 +249,7 @@ class LaunchProgressDialog(QDialog):
         self._apply_static_heights()
 
     # ── public API (driven from the UI thread via worker signals) ─────────
+    @_guard_dead
     def set_step(self, key: str):
         """Worker.step slot — light up the given stage, done-ify the previous."""
         key = key if key in self._modes else self._steps[0]
@@ -242,6 +261,7 @@ class LaunchProgressDialog(QDialog):
         if prev_running and prev_running != key:
             self._mark(prev_running, self._MODE_DONE)
 
+    @_guard_dead
     def set_status_text(self, text: str):
         """Worker.status slot — show the latest (truncated) status message."""
         self.status_lbl.setText(_wrap(text))
@@ -292,14 +312,30 @@ class LaunchProgressDialog(QDialog):
                 h = min(max(need, lo), hi)
                 if h != lbl.minimumHeight():
                     lbl.setMinimumHeight(h)
+        except RuntimeError:
+            # round-217：本函数既在 resizeEvent 里跑、也被 QTimer.singleShot(0)
+            # 排队 —— 对话框已经销毁时那拍仍会到，访问 self.width() 就抛。
+            return
         finally:
             self._fitting = False
+
+    def closeEvent(self, event):  # noqa: N802 - Qt 约定
+        # round-217：已结束的进度框没有召回价值（任务中心另有记录），关掉就销毁，
+        # 别让每个实例的进度框永久挂在主窗口下面。进行中的仍然只 hide()，
+        # 以便状态栏点击召回。
+        try:
+            if self._finished:
+                self.setAttribute(Qt.WA_DeleteOnClose, True)
+        except RuntimeError:
+            pass
+        super().closeEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
         # 等首次布局完成、对话框宽度确定后再算一次（延后一拍避免 0 宽）。
         QTimer.singleShot(0, self._fit_text_heights)
 
+    @_guard_dead
     def set_progress(self, value: int, maximum: int):
         """Worker.progress slot — determinate bar while installing."""
         self.bar.setVisible(True)
@@ -313,11 +349,13 @@ class LaunchProgressDialog(QDialog):
             self.bar.setMaximum(0)  # indeterminate
             self.pct_lbl.setText(t("launch.status_unknown"))
 
+    @_guard_dead
     def set_speed(self, text: str):
         """Worker.speed slot — 显示「1.2 MB/s · 已下载 34.5 MB」。"""
         self.speed_lbl.setText(_wrap(text or ""))
         self.speed_lbl.setVisible(bool(text))
 
+    @_guard_dead
     def set_sources(self, text: str):
         """round-155：显示来源链（失败源 + 最后成功源）；空串隐藏。"""
         text = (text or "").strip()
@@ -438,6 +476,7 @@ class LaunchProgressDialog(QDialog):
 
     def mark_cancelled(self, text: str = ""):
         """round-168：任务已取消——只改状态文案，不点亮步骤（避免假「完成」）。"""
+        self._finished = True
         try:
             self.cancel_btn.setEnabled(False)
             self.pause_btn.setVisible(False)
@@ -454,6 +493,7 @@ class LaunchProgressDialog(QDialog):
 
     def mark_done(self, subtitle: str = ""):
         """All steps done + optional subtitle (下载任务完成时也走这里）。"""
+        self._finished = True
         for k in self._steps:
             self._mark(k, self._MODE_DONE)
         try:

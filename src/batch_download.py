@@ -59,13 +59,27 @@ def make_download_task(url: str, dest: str, sha1: str = "", size: int = 0,
     """
     def _run() -> None:
         if os.path.isfile(dest):
-            if size and os.path.getsize(dest) == size:
-                return
-            if sha1 and _sha1_of(dest) == sha1:
+            # round-217：**给了 sha1 就不能只凭大小判成功**。上次 sha1 校验失败
+            # 留下的坏文件大小经常正好等于期望值（截断/错位后长度被补齐），
+            # 于是「存在即跳过」会把它永久固化，而且再也不会重下。
+            if sha1:
+                try:
+                    if _sha1_of(dest) == sha1:
+                        return
+                except OSError:
+                    pass
+            elif size and os.path.getsize(dest) == size:
                 return
         download_file(url, dest, headers=headers, resume=True)
-        if sha1 and _sha1_of(dest) != sha1:
-            raise RuntimeError(f"sha1 校验失败: {dest}")
+        if sha1:
+            got = _sha1_of(dest)
+            if got != sha1:
+                # 删掉坏文件：否则下次「大小相同」又会被判成功
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                raise RuntimeError(f"sha1 校验失败: {dest}")
     return _run
 
 

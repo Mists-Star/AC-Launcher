@@ -31,9 +31,25 @@ def _load() -> list[dict]:
 
 
 def _save(entries: list[dict]) -> None:
-    os.makedirs(os.path.dirname(_path()), exist_ok=True)
-    with open(_path(), "w", encoding="utf-8") as f:
-        json.dump({"entries": entries[-_MAX_ENTRIES:]}, f, ensure_ascii=False, indent=2)
+    """原子写：先写 .tmp 再 os.replace。
+
+    round-217：原实现直接 open(...,"w") 覆盖。修复日志是**每次自动修复都会写**
+    的高频小文件，写到一半被杀（关窗 / 崩溃 / 断电）就留下半截 JSON，下一次
+    `_load()` 解析失败返回 []，玩家之前攒的整条修复记录全部消失。
+    """
+    p = _path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"entries": entries[-_MAX_ENTRIES:]}, f,
+                      ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def append(kind: str, summary: str, *, instance: str = "", detail: str = "") -> None:
