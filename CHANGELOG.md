@@ -8,6 +8,65 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-211（2026-11-08）— 整体设计比对 + 第 3/5/6 批一起返工
+
+> 主理人：「先 c/p，然后整体设计比对一下，一起干了」。
+> 先推 `56452d2`（round-210），再产出 `docs/specs/round-211-design-alignment/spec.md`
+> （8 域对照矩阵 + 结构性差距 Top5 + 故意的 1% + 上游自己的 6 个坑），
+> 然后按 §16.7 剩余批次动手。**产品语义决策项没替主理人拍板**（见文末）。
+
+**批 3 · 资源中心（6 项）**
+
+| 位置 | 修法 |
+|---|---|
+| `src/store_search.py:87` | `filters_key()` 补 `language` + `hide_installed`：切中英文后 MR 标题要不要走 `cn_name`、隐藏已装是否生效，都会改变结果集，漏进 key 就复用错误快照 |
+| `src/store_search.py:273` | `store_can_continue()` 两态化：`total=-1`（未知）不再恒 True。字段不存在=从没请求过→放行；`last_count=0`=上轮空页/超时→到底。页码器不再能无限翻空页 |
+| `src/store_search.py:335` | 8s 预算超时后 `abandoned` 事件冻结共享 `box/errs`（迟到线程不再写），但**仍允许 emit**，保住 round-207「慢源不阻塞快源」的渐进渲染 |
+| `src/pages_browse.py:690` | `_partial_keys[gen] = request_key`，迟到回调改 `(gen, key)` 联合判据：`gen` 相同不代表请求相同（`_load` 去重提前 return 不递增 gen） |
+| `src/pages_browse.py:1015` | 迟到补卡同时写回 `_store_results`（旧实现只写 `_mods`/`_vbox`，翻下一页这批卡凭空消失）。游标刻意不重复推进，注释说明超时源判到底是有意降级 |
+| `src/pages_browse.py:849` | SWR fresh 命中不再走 `_store_swr` 重写 signet 时间戳。旧实现每次命中都 `_na._store(time.time())` → `_cached` 恒 fresh，stale/miss 在会话内不可达 |
+
+**批 3 · 护栏与假断言**
+
+- `tools/gen_paths.py:38`：`REQUIRED_PAGES` 从 4 页补到 **8 页**（对齐 `STACK_INDEX`），
+  新增 `mods/versions/lobby/toolbox` 在各自 `_build_*` 入口补 12 条真实路径标记；
+  `docs/ia/paths.md` 从 4 页 29 条 → **8 页 41 条**。
+- 删掉 3 条纯源码字面量断言（`"No upstream source text is copied"`、
+  `"key == self._last_request_key"`、`"if gen == self._load_gen:"`、SWR 字符串），
+  换成离屏运行时判据：连发两次 `_load` 只发一次请求、旧 gen / 错 key 的迟到回调
+  不污染列表、迟到补卡真的进 `_store_results`。
+
+**批 5 · 隐私与合规（4 项）**
+
+| 位置 | 修法 |
+|---|---|
+| `src/accounts.py:108` | DPAPI 失败时**绝不把 token 明文写盘**（降级为不写该字段，置 `LAST_SAVE_DEGRADED`），并改 tmp + `os.replace` 原子写；写盘失败旧文件字节不变 |
+| `src/log_mask.py:74` | 脱敏从 1 种形态扩到 5 种（命令行 `accessToken x`、JSON `"access_token":"…"`、`refresh_token=…`、`client_secret: …`、`Authorization: Bearer …`），保持首尾各留 5 位；不泛匹配裸 `token/password` 以免误伤可读性 |
+| `src/core/support_bundle.py:38` | 敏感键清单改为**唯一口径**（设置导出/导入与诊断包共用，保留 `settings_dialog._SENSITIVE_CFG_KEYS` 别名），补齐 `win_geometry / ms_client_id / authlib_path / update_manifest_url / download_proxy` |
+| `src/terms.py:11` | 隐私协议升到 v2（`2026-11-08`）：写明「自动触发」的更新检查、authlib 版本检查、皮肤 CDN、翻译服务，删掉被证伪的「仅与 Mojang 官方 API 通信」；README §Privacy 同步 |
+
+**批 6 · 历史 P0/P1（4 项）**
+
+| 位置 | 修法 |
+|---|---|
+| `src/launch.py:1099` | 补库 relpath 基准从 `mc_dir/libraries` 改为 **`vroot/libraries`**（与 `get_command(version, vroot, …)` 同源）。iso/外来布局下旧基准让整批路径以 `..` 开头被 `continue` 跳过，缺失库永远补不上 |
+| `src/worker.py:365` | `ProgressWorker` 异常 + 取消时补发唯一终态 `cancelled`（旧实现三个信号一个都不发，任务中心永远停在 running） |
+| `src/onboarding.py:774` | 教程「跳过」先落盘（`_save_step` + `_commit_appearance` + 显式 `save_config`），**写盘成功才** `mark_onboarding_done`；失败保留下次重来 |
+| `tests/test_round211_regression.py` | 新增 37 项行为回归并登记 `regress.py` |
+
+**明确没做（不替主理人拍板 / 风险过高）**
+
+- 结构性差距 Top5（每源一实现的 `StoreSource` 接口、统一导航返回栈、缓存收口、
+  实例资源对象、依赖三态模型）：属架构改造，见规格 §2 的切口，本轮不动。
+- 缺库秒退是否记 `degraded`、启动前缺前置是否**拦截**、Java 四套判据一次性统一、
+  `save_config` merge-on-write（4 份快照 + 5 套测试钉住）—— 产品语义 / 牵一发动全身。
+- CF 分支接依赖树（`store_detail.py:1180`）：要改下载契约 + 撞
+  `test_round178/201` 依赖断言，单独一轮做。
+- 弹窗收敛 4 处：`CrashAnalyzerDialog`/`NewInstanceDialog`/`DiagnosticsDialog`/
+  `JavaManagerDialog` 的 QDialog 壳被 `smoke_all.py` 与 4 套测试钉住，页内栈改造需单独验收。
+
+---
+
 ## round-210（2026-11-08）— 全启动器审查 §十六 的 7 条 P0 返工
 
 > 主理人「行」= 按 §16.7 顺序开工。本轮**只做第 1、2 批 P0 + 第 4 批的行为断言**，

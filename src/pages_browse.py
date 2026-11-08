@@ -431,6 +431,8 @@ class StorePage(QWidget):
         self.sourcePartial.connect(self._on_source_partial)
         self._partial_enabled = False
         self._partial_done_gen = -1
+        # round-211：gen -> request_key，供迟到回调做 (gen, key) 联合判据。
+        self._partial_keys: dict[int, str] = {}
 
         # round-208 §2.5/§2.6：PCL-CE 真分页状态（ProjectStorage.cs:5-22）。
         self._store_page = 0
@@ -848,7 +850,10 @@ class StorePage(QWidget):
         state, snap = self._swr_snapshot()
         if state == "fresh" and isinstance(snap, dict) and not force:
             self._swr = "fresh"
-            self._on_loaded(snap, reset)
+            # round-211：缓存命中绝不能重写 signet 时间戳。旧实现在这里走
+            # _on_loaded → _store_swr → _na._store 刷 time.time()，于是
+            # _cached 永远 fresh，SWR 的 stale/miss 两态在会话内不可达。
+            self._on_loaded(snap, reset, cache_hit=True)
             return
         if state == "stale" and isinstance(snap, dict):
             self._swr = "stale"
@@ -862,6 +867,12 @@ class StorePage(QWidget):
         gen = self._load_gen
         meta = {}
         self._search_meta = meta
+        # round-211：记录本轮请求的完整 key；迟到回调要同时匹配 gen 与 key，
+        # 否则「切语言 / 切来源 / 改筛选」后旧请求的结果会补进新列表。
+        self._partial_keys[gen] = key
+        if len(self._partial_keys) > 16:
+            for old in sorted(self._partial_keys)[:-16]:
+                self._partial_keys.pop(old, None)
         # §2.6 拍板：按源渐进渲染保留，只负责「同一页内两源先后到达」的首帧。
         self._partial_enabled = bool(reset and self._source == "all"
                                      and self._store_page == 0)
@@ -877,7 +888,8 @@ class StorePage(QWidget):
         self._track(worker, gen, reset)
 
     def _on_loaded(self, result, reset: bool, partial: bool = False,
-                   swr: bool = False, empty_hint: str | None = None):
+                   swr: bool = False, empty_hint: str | None = None,
+                   cache_hit: bool = False):
         """渲染入口：dict = 完整分页结果；list = 渐进首帧 / CF 链接结果。"""
         if isinstance(result, dict) and not partial:
             data = result
@@ -887,7 +899,7 @@ class StorePage(QWidget):
             self._store_page = data["page"]
             mods = list(data["hits"])
             self._update_pager(data)
-            if not swr:
+            if not swr and not cache_hit:
                 self._store_swr(data)
         else:
             mods = list(result)
@@ -954,16 +966,31 @@ class StorePage(QWidget):
         """
         if not self._partial_enabled or gen != self._load_gen or not hits:
             return
+        # round-211：gen 相同不代表请求相同 —— ``_load`` 在 key 未变时会提前
+        # return 而不递增 gen。必须再用 request_key 校验，否则切语言 / 切来源
+        # 后旧请求的慢源结果会补进新列表。
+        try:
+            if self._partial_keys.get(gen) != self._request_key():
+                return
+        except RuntimeError:
+            return
         if self._partial_done_gen == gen:
             # 最终结果（或另一个源）已上屏 → 只做去重增量补卡。这样即使
             # 慢源在 8s 预算之后才回来，结果也不会被静默丢弃。
-            self._append_source_rows(hits)
+            self._append_source_rows(hits, label)
             return
         self._partial_done_gen = gen
         self._on_loaded(list(hits), True, partial=True)
 
-    def _append_source_rows(self, hits: list[dict]):
-        """去重后把迟到 / 后到的源结果追加到当前列表。"""
+    def _append_source_rows(self, hits: list[dict], label: str = ""):
+        """去重后把迟到 / 后到的源结果追加到当前列表。
+
+        round-211：补卡必须**同时写回分页结果集**。旧实现只写 ``_mods`` 和
+        ``_vbox``，翻到下一页时 ``search_store_page`` 收到的 ``results`` 不含
+        这批卡 → 它们凭空消失、页码器与真实数据量脱节。
+        游标（cursors）刻意不在这里推进：数据层已按实际返回数推进过；超时源
+        被判定「到底」是有意降级，重复推进会造成 offset 翻倍、下一页重拉。
+        """
         known = {
             str(m.get("project_id") or m.get("slug") or "").lower()
             for m in self._mods
@@ -978,6 +1005,19 @@ class StorePage(QWidget):
         if not added:
             return
         self._mods = self._mods + added
+        if isinstance(self._store_results, list):
+            seen = {
+                str(m.get("project_id") or m.get("slug") or "").lower()
+                for m in self._store_results
+            }
+            extra = []
+            for m in added:
+                k = str(m.get("project_id") or m.get("slug") or "").lower()
+                if k and k not in seen:
+                    seen.add(k)
+                    extra.append(m)
+            if extra:
+                self._store_results = self._store_results + extra
         for m in added:
             self._vbox.addWidget(self._make_card(m))
         QTimer.singleShot(0, self._pump_icons)

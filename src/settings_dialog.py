@@ -37,12 +37,10 @@ from .win_rounded import info, warn, confirm, pick_files, dark_color
 
 CONFIG_FILE = get_config_path("launcher_config.json")
 # round-83 设置导出/导入：这些键永不写入/还原备份文件（密钥/脏开关）。
-_SENSITIVE_CFG_KEYS = frozenset({
-    "dev_mode_key",        # 开发者模式密钥
-    "win_geometry",        # 窗口几何是本机 UI 态，跨机还原会飘出屏幕
-    # round-108：第三方服务密钥是本机凭证，导出/导入备份一律不带
-    "curseforge_api_key",
-})
+# round-211：单一口径改由 Qt-free 的 core.support_bundle 提供，避免与诊断包
+# 的敏感键清单漂移（旧两份缺 win_geometry / 代理凭据等）。保留别名，
+# 因为 tests/test_functional.py 等回归按这个名字取常量。
+from .core.support_bundle import SENSITIVE_CONFIG_KEYS as _SENSITIVE_CFG_KEYS  # noqa: E402
 _DEFAULTS = {
     # ---- quick ----
     "ram_mb": 4096,

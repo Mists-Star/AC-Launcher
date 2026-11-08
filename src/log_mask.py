@@ -8,6 +8,7 @@ the on-disk game log is left untouched so crash analysis keeps raw truth.
 from __future__ import annotations
 
 import os
+import re
 
 __all__ = ["mask_launch_text", "mask_secret"]
 
@@ -42,6 +43,37 @@ def _mask_access_token(text: str) -> str:
         out.append(_mask_middle(rest[:j]))
         i = idx + len("accessToken ") + j
     return "".join(out)
+
+
+# round-211：旧版只认 ``accessToken <空格><值>`` 一种形态，而日志/配置/诊断包里
+# 常见的是 JSON ``"access_token": "…"``、``refresh_token=…``、``client_secret: …``、
+# ``Authorization: Bearer …``。以下正则覆盖这些形态，沿用同一「首尾各留 5 位」
+# 打码风格（test_support_bundle.py 依赖该风格）。刻意不泛匹配裸 ``token`` /
+# ``password``，避免把正常日志文字打成一片星号。
+_JSON_SECRET = re.compile(
+    r'("(?:access[_-]?token|refresh[_-]?token|ms_access_token|'
+    r'client[_-]?secret)"\s*:\s*")([^"]+)(")',
+    re.IGNORECASE,
+)
+_PAIR_SECRET = re.compile(
+    r'(\b(?:access[_-]?token|refresh[_-]?token|ms_access_token|'
+    r'client[_-]?secret)\s*[:=]\s*)([^\s,;"\'}]+)',
+    re.IGNORECASE,
+)
+_BEARER_SECRET = re.compile(
+    r'(Authorization\s*:\s*Bearer\s+)([^\s,;"\']+)',
+    re.IGNORECASE,
+)
+
+
+def _mask_secret_forms(text: str) -> str:
+    text = _JSON_SECRET.sub(
+        lambda m: m.group(1) + _mask_middle(m.group(2)) + m.group(3), text)
+    text = _BEARER_SECRET.sub(
+        lambda m: m.group(1) + _mask_middle(m.group(2)), text)
+    text = _PAIR_SECRET.sub(
+        lambda m: m.group(1) + _mask_middle(m.group(2)), text)
+    return text
 
 
 def _mask_user_name(text: str) -> str:
@@ -81,6 +113,7 @@ def mask_launch_text(text: str, token: str = "") -> str:
     if not text:
         return text
     text = _mask_access_token(text)
+    text = _mask_secret_forms(text)
     if token:
         text = mask_secret(text, token)
     return _mask_user_name(text)

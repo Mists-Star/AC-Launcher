@@ -365,6 +365,11 @@ class ProgressWorker(TrackedThread):
         except Exception as e:  # noqa: BLE001 - surface to UI
             if not self._is_cancelled():
                 self.error.emit(str(e))
+            else:
+                # round-211 P1：异常 + 取消时旧实现不发 error（正确的），
+                # 但 ``else`` 分支也不执行 → 三个终态信号一个都不发，
+                # 任务中心永远停在 running、进度条不收。这里补唯一终态。
+                self.cancelled.emit(None)
         else:
             if self._is_cancelled():
                 # 取消时不发 finished（原语义），但仍把 fn 的结果交给 UI：

@@ -772,7 +772,17 @@ class OnboardingDialog(QDialog):
             self.accept()
 
     def reject(self):
-        # User skipped — same effect as finishing: don't show it again.
+        # round-211 P2：旧实现「跳过 = 直接 mark_done」，既不保存当前页已选的
+        # 语言/主题，也不管写盘是否成功 → 玩家选了中文却没生效，下次还不再弹
+        # 教程。现在先落盘再标记；写盘失败就不标记，下次启动仍可重来。
+        try:
+            self._save_step()
+            self._commit_appearance()
+            # _commit_appearance 内部会吞掉写盘异常，这里显式再确认一次。
+            save_config(self.cfg)
+        except Exception:  # noqa: BLE001 - 只读目录等，保留下次重来的机会
+            super().reject()
+            return
         mark_onboarding_done()
         super().reject()
 

@@ -50,8 +50,16 @@ check("源码标注 Prism / HMCL / PCL-CE 上游行号",
       and "ModrinthAPI.cpp:105-144" in src
       and "ProjectStorage.cs:5-22" in src
       and "HttpCacheHandler.cs:23-99" in src)
-check("不复制上游源码文本，只复刻行为",
-      "No upstream source text is copied" in src)
+# round-211：原来这条只查 docstring 里有没有一句话（删注释即假失败、
+# 留注释却改坏逻辑照样通过）。换成可证伪的分页行为判据。
+check("未知总数但上一轮空页 -> 不能再翻（无限空页回归）",
+      not ss.store_can_continue(
+          {"mr": {"offset": 20, "total": -1, "last_count": 0},
+           "cf": {"offset": 20, "total": -1, "last_count": 0}}, "all"))
+check("未知总数且上一轮有结果 -> 仍可继续（中文名库不误伤）",
+      ss.store_can_continue(
+          {"mr": {"offset": 20, "total": -1, "last_count": 5},
+           "cf": {"offset": 0, "total": 0}}, "all"))
 check("没有复活 _cf_pool 本地重排池",
       "_cf_pool" not in src and "_cf_relevance" not in src)
 check("真分页 PageSize=40（PCL-CE 口径）", ss.STORE_PAGE_SIZE == 40)
@@ -246,9 +254,13 @@ finally:
 
 
 # ── 7. CanContinue 闸门 ──
-check("total=-1（未知）允许继续",
+check("total=-1 且从未请求过 -> 首轮必须放行",
       ss.store_can_continue({"mr": {"offset": 0, "total": -1},
                              "cf": {"offset": 0, "total": 0}}, "all"))
+check("total=-1 且上轮空页 -> 到底（两态语义）",
+      not ss.store_can_continue(
+          {"mr": {"offset": 0, "total": -1, "last_count": 0},
+           "cf": {"offset": 0, "total": 0}}, "all"))
 check("两源都到顶则停止",
       not ss.store_can_continue({"mr": {"offset": 20, "total": 20},
                                  "cf": {"offset": 20, "total": 20}}, "all"))

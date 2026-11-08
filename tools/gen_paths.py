@@ -26,16 +26,24 @@ MARK = re.compile(r"^\s*#\s*ia\[([a-z0-9_-]+)\]:\s*(.+)$")
 PAGE_TITLES = {
     "home": "首页",
     "instances": "实例",
-    "settings": "设置",
-    "diagnostics": "诊断",
+    "mods": "模组",
     "store": "资源中心",
+    "versions": "版本库",
+    "lobby": "联机大厅",
+    "settings": "设置",
+    "toolbox": "工具箱",
+    "diagnostics": "诊断",
 }
 
 # round-208 §3-11：以前 --check 只比「文档有没有过期」，即使某页一条路径
 # 都不写也能全绿 —— 典型的假护栏。这里补三类真校验：
 #   1) 关键页面必须存在；2) 每页至少 N 条路径；
 #   3) 备注里手写的 `src/xxx.py` 引用必须真实存在（防指向已删文件）。
-REQUIRED_PAGES = ("home", "instances", "settings", "store")
+# round-211：护栏原来只覆盖 4/8 个主页面（另外 4 页一条路径没写也能全绿）。
+# 以 src/main_window.py 的 STACK_INDEX 为唯一口径补齐，新增 4 页各在
+# 对应的 _build_* 入口处补了 3 条真实路径标记。
+REQUIRED_PAGES = ("home", "instances", "mods", "store",
+                  "versions", "lobby", "settings", "toolbox")
 MIN_PATHS_PER_PAGE = 3
 
 

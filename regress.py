@@ -113,6 +113,7 @@ SUITES = [
     ("FTB 搜索回归/切来源缓存键（round-209）", "test_round209_store_regression.py", "script"),
     ("一键修复反馈统一（round-209）", "test_round209_fix_feedback.py", "script"),
     ("全启动器审查七条 P0 行为回归（round-210）", "test_round210_p0_regression.py", "script"),
+    ("设计比对第 3/5/6 批行为回归（round-211）", "test_round211_regression.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

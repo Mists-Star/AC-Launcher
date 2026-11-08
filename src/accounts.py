@@ -105,10 +105,15 @@ class AccountsManager:
                 changed = True
         return changed
 
+    # round-211：DPAPI 不可用（非 Windows / CryptProtectData 失败）时
+    # ``_save`` 会降级成「不写该 token」，绝不明文落盘。诊断与测试可读此标志。
+    LAST_SAVE_DEGRADED = False
+
     def _save(self) -> None:
         # round-35：落盘前加密敏感 token 字段（内存保持明文，写盘加密）
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
         snap = []
+        degraded = False
         for acct in self._accounts.values():
             copy = dict(acct)
             for key in self._TOKEN_KEYS:
@@ -117,12 +122,24 @@ class AccountsManager:
                     enc = dpapi_encrypt(val)
                     if enc:
                         copy[key] = "dpapi:" + enc
+                    else:
+                        # 宁可让玩家下次重新登录，也不把 refresh_token 明文写盘。
+                        copy.pop(key, None)
+                        degraded = True
             snap.append(copy)
-        with open(self._path, "w", encoding="utf-8") as f:
-            json.dump(
-                {"current": self._current, "accounts": snap},
-                f, ensure_ascii=False, indent=2,
-            )
+        AccountsManager.LAST_SAVE_DEGRADED = degraded
+        # round-211：原子写（tmp + os.replace），避免写盘途中崩溃留下半个
+        # accounts.json；写失败时旧文件字节保持不变。
+        payload = json.dumps(
+            {"current": self._current, "accounts": snap},
+            ensure_ascii=False, indent=2,
+        )
+        tmp = self._path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self._path)
 
     # ---- api ----
     def add(self, profile: dict) -> dict:

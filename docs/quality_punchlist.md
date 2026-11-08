@@ -1356,3 +1356,58 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 > 没有联网真机跑「搜模组 → 下载 → 启动到主菜单」；也没有重新打包部署。
 > 发布清单 A 组两项仍待主理人真机执行。
 
+---
+
+## 十八、round-211：整体设计比对 + 第 3/5/6 批（2026-11-08 13:xx）
+
+> 主理人：「先 c/p，然后整体设计比对一下，一起干了」。
+> 设计比对产物 = `docs/specs/round-211-design-alignment/spec.md`
+> （8 域 × 上游源码，含证据边界：域 5–8 上游快照零覆盖，明确标「未核实」）。
+
+### 18.1 已修（对照 §16.7 第 3/5/6 批）
+
+| 批次 | 条目 | 落点 | 判据 |
+|---|---|---|---|
+| 3 | 中文搜索未知总数导致无限空页 | `store_search.py:273` 两态 `store_can_continue` | 空页/超时 `can_next=False`，有结果仍 True |
+| 3 | 缓存键漏语言 / 隐藏已装 | `store_search.py:87` `filters_key` | 切语言 / 勾选后 key 与 HTTP 请求都变 |
+| 3 | 8s 超时后迟到回调写共享容器 | `store_search.py:335` `abandoned` 冻结（仍 emit 保渐进渲染） | 返回后 `cursors/results` 不被写；慢源仍 emit |
+| 3 | 迟到回调未写回分页状态 | `pages_browse.py:1015` 写回 `_store_results`；`(gen,key)` 联合判据 | 错 key 不污染；补卡进 results |
+| 3 | SWR fresh 恒真 | `pages_browse.py:849` fresh 命中不重写 signet | 命中后 `_store` 调用 0 次 |
+| 3 | IA 护栏只覆盖 4/8 页 | `tools/gen_paths.py:38` + 12 条新标记 | 8 页 / 41 条 / 0 错误；`STACK_INDEX` 口径一致 |
+| 3 | 4 条假断言 | 3 个测试文件 | 换成运行时判据（连发去重 / 错 key 丢弃 / 补卡入 results） |
+| 5 | DPAPI 失败静默明文 | `accounts.py:108` 不明文 + 原子写 + `LAST_SAVE_DEGRADED` | 桩加密失败 → 磁盘无明文；`os.replace` 失败旧文件不变 |
+| 5 | 脱敏只认 1 种形态 | `log_mask.py:74` 5 种形态 | 5 种原值全不出现，首尾 5 位保留，普通文本不误伤 |
+| 5 | 敏感键两份且漂移 | `support_bundle.py:38` 唯一口径 + 别名 | 两处集合相等；代理/Azure/私有源全 redact |
+| 5 | 条款与 README 宣称被证伪 | `terms.py:11` v2 + `README.md` | 正文含翻译/GitHub/皮肤 CDN，删「仅 Mojang」 |
+| 6 | 补库基准错位 | `launch.py:1099` 改 `vroot/libraries` | AST：赋值基准含 vroot、不含 `inst.mc_dir` |
+| 6 | Worker 异常+取消无终态 | `worker.py:365` 补 `cancelled` | 取消丢异常：cancelled=1、error=0、finished=0 |
+| 6 | 教程 reject 不提交却 mark_done | `onboarding.py:774` 先落盘再标记 | 顺序契约 + 异常分支不标记 |
+
+### 18.2 明确未做（等拍板 / 风险过高）
+
+- **结构性差距 Top5**：资源平台接口层、统一返回栈、缓存收口、实例资源对象、
+  依赖三态模型 —— 见规格 §2，属架构改造。
+- **产品语义**：缺库秒退记 `degraded`、启动前缺前置是否拦截、Java 四套判据统一、
+  `save_config` merge-on-write。
+- **CF 依赖树**（`store_detail.py:1180`）：改下载契约，会撞 `test_round178/201`。
+- **弹窗收敛 4 处**：QDialog 壳被 `smoke_all.py` + 4 套测试钉住，需单独一轮页内栈改造。
+- `refresh_microsoft` 仍用 `/consumers/` 租户（与设备码登录一致），多租户 Azure app 未验证。
+
+### 18.3 门禁 / 打包 / 部署
+
+- `regress.py` **81/81**（新增 round-211 一套 37 项）。
+- i18n 中英对称、PII zero residual、文案禁用词 0、IA 8 页 41 条 0 错误。
+- 打包：`BUILD_RC=0`，**118.3 MB / 4185 文件**（trim 有 85 个翻译文件被沙箱
+  批量删除保护拦住，只瘦了 31 个 / 5.3 MB，产物可用）。
+- 部署：`D:\Appdata\AC_Launcher` exe sha256 `51931bf5…` 与产物一致，
+  `_internal` 4184 文件，`data/` 与 `launcher_config.json` 保留。
+  ⚠ 部署时 `Start-Process robocopy` 在 PS 5.1 报「字典关键字冲突」导致首次
+  未复制（旧目录已改名）→ 改 `& robocopy` 直接调用后补齐；**部署脚本以后
+  一律直接调用 robocopy，不要过 Start-Process**。
+- 冒烟：部署版离屏 9s 存活（timeout 124 = 外部杀），`crash.log` 零新增，
+  `_startup.log` 走到 `nav ok` / `transparent ok` / `tray ok`。
+- 旧版保留在 `AC_Launcher.exe.prev_r210` + `_internal_prev_r210` +
+  `dist_beta/AC_Launcher_prev_r210_20261108`（未删，等主理人确认）。
+
+> ☠ 双轨欠账仍在：以上是代码轨 + 离屏轨；没有联网真机跑完整链路。
+

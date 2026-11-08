@@ -84,6 +84,15 @@ _MAX_ROUNDS = 4  # guard: never spin forever on a broken mirror
 
 
 # ── filter / cache helpers ──────────────────────────────────────────────────
+def _current_language() -> str:
+    """r208/r211：缓存键必须随界面语言变化，否则中文标题会串到英文界面。"""
+    try:
+        from .i18n import get_language
+        return get_language() or "zh-CN"
+    except Exception:
+        return "zh-CN"
+
+
 def filters_key(filters: dict | None) -> str:
     """Stable cache-key fragment. Sort and every filter must enter the key,
     otherwise changing sort/filter silently keeps showing the old page."""
@@ -92,11 +101,16 @@ def filters_key(filters: dict | None) -> str:
     # and the request-dedupe key both derive from this fragment. Without it,
     # switching "All / Modrinth / CurseForge" reuses the previous source's
     # snapshot and never issues a new request — the filter looks dead.
-    return ":".join(
+    # round-211：``language`` 与 ``hide_installed`` 同理 —— 前者决定 MR 标题
+    # 是否走 cn_name，后者决定列表是否剔除已装项；漏了都会复用错误快照。
+    parts = [
         "%s=%s" % (k, str(f.get(k) or ""))
         for k in ("source", "game_version", "loader", "category_id",
                   "category_tag", "sort")
-    )
+    ]
+    parts.append("language=%s" % str(f.get("language") or _current_language()))
+    parts.append("hide_installed=%s" % ("1" if f.get("hide_installed") else "0"))
+    return ":".join(parts)
 
 
 def _category_pair(filters: dict | None) -> tuple[str, str]:
@@ -271,10 +285,23 @@ def new_store_cursors() -> dict:
 
 
 def store_can_continue(cursors: dict, source: str = "all") -> bool:
-    """pclce:.../ProjectRequest.cs:77-91 ``CanContinue``."""
+    """pclce:.../ProjectRequest.cs:77-91 ``CanContinue``.
+
+    round-211 P1：``total == -1`` 表示「服务端没给总数」（中文名库反查 /
+    keyless slug probe / 8s 预算超时后的未返回源），**不等于「还有下一页」**。
+    旧实现让它恒 True，page1/page5 空页仍可无限点「下一页」。
+    现在只有「上一轮该源确实吐出过非空行」才允许继续翻；空页 / 超时即到底。
+    ``last_count`` 由 :func:`search_store_page` 每轮写回，缺省 0 视为已到底。
+    """
     for key in _SOURCE_KEYS.get(source, ("mr", "cf")):
         cur = (cursors or {}).get(key) or {"offset": 0, "total": -1}
-        if cur["total"] == -1 or cur["offset"] < cur["total"]:
+        total = cur.get("total", -1)
+        if total >= 0:
+            if cur.get("offset", 0) < total:
+                return True
+        elif "last_count" not in cur or cur.get("last_count", 0) > 0:
+            # 字段不存在 = 这个源还一次都没请求过，首轮必须放行；
+            # 字段为 0 = 上一轮空页 / 超时，判定到底。
             return True
     return False
 
@@ -337,6 +364,11 @@ def search_store_page(query: str = "", page: int = 0,
         rounds += 1
         box: dict[str, tuple[list[dict], int]] = {}
         errs: list[Exception] = []
+        lock = threading.Lock()
+        # round-211 P1：8s 预算一到主线程就返回，旧实现里 daemon 线程仍会写
+        # 栈上的 box/errs 并 emit on_source（实测返回后 60ms 两源都回调）。
+        # 用 abandoned 事件 + 锁把「本轮容器」冻结，迟到结果一律丢弃。
+        abandoned = threading.Event()
 
         def _run(k):
             c = cur[k]
@@ -345,14 +377,24 @@ def search_store_page(query: str = "", page: int = 0,
             try:
                 hits, total = search_store_source(
                     k, query, c["offset"], per, category, filters)
-                box[k] = (hits, total)
-                if on_source is not None:
-                    try:
-                        on_source(_SOURCE_LABELS[k], hits or [])
-                    except Exception:
-                        pass
             except Exception as e:  # noqa: BLE001 - one source must not kill the other
-                errs.append(e)
+                with lock:
+                    if not abandoned.is_set():
+                        errs.append(e)
+                return
+            with lock:
+                late = abandoned.is_set()
+                if not late:
+                    box[k] = (hits, total)
+            # round-211：超时后主线程已带着快源结果返回，共享容器必须冻结
+            # （不再写 box/errs），但**慢源仍可以 emit**：round-207 的「按源
+            # 渐进渲染 / 慢源不阻塞快源」能力要保住。是否采纳由页面用
+            # (generation, request_key) 联合判据决定，见 pages_browse。
+            if on_source is not None:
+                try:
+                    on_source(_SOURCE_LABELS[k], hits or [])
+                except Exception:
+                    pass
 
         threads = []
         for k in keys:
@@ -365,20 +407,32 @@ def search_store_page(query: str = "", page: int = 0,
             th.join(max(0.0, deadline - time.monotonic()))
         timed_out = [th.name for th in threads if th.is_alive()]
         if timed_out:
+            abandoned.set()
             out_meta["partial"] = True
             out_meta["timed_out"] = timed_out
-        if errs:
-            out_meta["errors"] = [str(e) for e in errs]
+        with lock:
+            snapshot = dict(box)
+            err_snapshot = list(errs)
+        if err_snapshot:
+            out_meta["errors"] = [str(e) for e in err_snapshot]
 
-        if not box:
-            break
         # pclce:.../ProjectQuery.cs:649-651,680-681 — advance each source by
         # the number of rows it actually returned and record its own total.
-        for k, (hits, total) in box.items():
+        # round-211：未返回（超时）的源 last_count=0 → 判定到底，不再无限翻空页；
+        # 返回空页且 total 未知的源把 total 收敛成 offset（已知到底）。
+        for k in keys:
+            item = snapshot.get(k)
+            hits = item[0] if item else []
+            total = item[1] if item else -1
+            cur[k]["last_count"] = len(hits)
             cur[k]["offset"] += len(hits)
-            cur[k]["total"] = total
-        merged = na._dedupe_two_sources(box.get("mr", ([], 0))[0],
-                                        box.get("cf", ([], 0))[0])
+            cur[k]["total"] = (total if (total >= 0 or hits)
+                               else cur[k]["offset"])
+        if not snapshot:
+            break
+        merged = na._dedupe_two_sources(
+            snapshot.get("mr", ([], 0))[0],
+            snapshot.get("cf", ([], 0))[0])
         before = len(all_rows)
         all_rows = _merge_unique(all_rows, merged)
         if len(all_rows) == before:

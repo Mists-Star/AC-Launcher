@@ -137,20 +137,15 @@ check("请求 key 含关键词/分类/页码/全部筛选/隐藏已装",
       "_request_key" in methods
       and "filters_key(f)" in page_src
       and "hide_installed" in page_src)
-check("相同条件不重复发请求", "key == self._last_request_key" in page_src)
-check("旧 gen 迟到结果被丢弃",
-      "if gen == self._load_gen:" in page_src)
+# round-211：以上两条原先只查源码字符串（改实现即假失败、留字符串却
+# 改坏行为照样绿）。等价的行为判据移到下面 [6] 离屏运行时段。
 check("占位图立即上屏（断网不空白）",
       "thumb.setPixmap(fallback)" in page_src)
 check("视口内才 load，且图标回来不重建卡片",
       "_pump_icons" in methods and "vh + 240" in page_src
       and "self._icon_pending = rest" in page_src
       and "self._img.load(url, size, target, fallback)" in page_src)
-check("SWR 三态：先画旧数据 / 刷新中 / 失败保留",
-      "cache_lookup(self._swr_key())" in page_src
-      and "swr=True" in page_src
-      and "store.swr_refreshing" in page_src
-      and "store.swr_keep_old" in page_src)
+# round-211：SWR 三态同样改为运行时验证（见 [6]），不再靠源码字面量。
 check("徽章复用列表既有判定，不另写一套",
       "self._is_installed(m)" in page_src
       and "self._compat_of_card(m)" in page_src)
@@ -171,8 +166,10 @@ check("store.fetching 双源文案已修正（不再只说 Modrinth）",
       "Modrinth" not in zh["store.fetching"])
 import tools.gen_paths as gp  # noqa: E402
 pages, errs = gp.collect()
-check("IA 路径表覆盖 4 个关键页 / 0 错误",
-      all(p in pages for p in gp.REQUIRED_PAGES) and not errs,
+check("IA 路径表覆盖全部 8 个主页面 / 0 错误（round-211）",
+      len(pages) == len(gp.REQUIRED_PAGES) == 8
+      and all(p in pages for p in gp.REQUIRED_PAGES) and not errs
+      and sum(len(v) for v in pages.values()) >= 41,
       "%d 页 / %d 条" % (len(pages), sum(len(v) for v in pages.values())))
 check("资源中心路径 >= 8 条", len(pages.get("store", [])) >= 8)
 _saved = gp.REQUIRED_PAGES
@@ -244,7 +241,33 @@ try:
 
     before = len(calls)
     p._load(reset=True)
-    check("相同筛选重复 _load 不重复发请求", len(calls) == before)
+    check("相同筛选重复 _load 不重复发请求（运行时）", len(calls) == before)
+
+    # round-211：迟到回调的行为判据，替代原先「源码里有没有某句话」的假断言。
+    late_hit = {"project_id": "late-1", "slug": "late-1",
+                "title": "Late", "description": "", "downloads": 0,
+                "icon_url": "", "author": "", "source": "modrinth"}
+    n0 = len(p._mods)
+    p.sourcePartial.emit("Modrinth", [late_hit], p._load_gen - 3)
+    app.processEvents()
+    check("旧 gen 的迟到回调被丢弃（不污染列表）", len(p._mods) == n0)
+
+    real_key = p._partial_keys.get(p._load_gen)
+    p._partial_keys[p._load_gen] = "r211-mismatched-key"
+    p.sourcePartial.emit("Modrinth", [late_hit], p._load_gen)
+    app.processEvents()
+    check("gen 相同但 request_key 不同也丢弃（切语言/来源不串）",
+          len(p._mods) == n0)
+    if real_key is not None:
+        p._partial_keys[p._load_gen] = real_key
+
+    r0 = len(p._store_results or [])
+    p._partial_done_gen = p._load_gen
+    p.sourcePartial.emit("Modrinth", [late_hit], p._load_gen)
+    app.processEvents()
+    check("迟到补卡同时写回分页 results（翻页不丢卡）",
+          len(p._mods) > n0 and len(p._store_results or []) > r0)
+    p._partial_done_gen = -1
 
     p.page_next_btn.click()
     for _ in range(30):

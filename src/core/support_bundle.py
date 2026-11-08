@@ -32,12 +32,18 @@ __all__ = [
     "build_support_bundle",
 ]
 
-# Keys whose values must never leave the machine. Mirrors
-# ``settings_dialog._SENSITIVE_CFG_KEYS`` at the export boundary (kept local so
-# this module stays Qt-free).
+# round-211：敏感键的**唯一口径**，放在 Qt-free 模块里让设置导出/导入
+# 与诊断包共用。此前 settings_dialog 与这里各写一份且已漂移（缺 win_geometry），
+# 而 download_proxy 可含 ``user:pass@``、ms_client_id 是 Azure 应用标识、
+# update_manifest_url 可能带内网地址，都不该原样进诊断包。
 SENSITIVE_CONFIG_KEYS = frozenset({
     "dev_mode_key",          # developer unlock key
     "curseforge_api_key",    # user's own third-party API key
+    "win_geometry",          # 本机 UI 态，跨机还原会飘出屏幕
+    "ms_client_id",          # 玩家自填的 Azure 应用 ID
+    "authlib_path",          # 本地路径，外带会暴露目录结构
+    "update_manifest_url",   # 可含内网 / 私有更新源
+    "download_proxy",        # 可含 http://user:pass@host
 })
 
 _REDACTED = "<redacted>"

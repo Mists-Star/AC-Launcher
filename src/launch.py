@@ -1096,7 +1096,10 @@ def launch_instance(
     #      回退官方源）；只写 jar 文件，不动 json / versions 目录，不碰布局。
     #   2) 仍补不齐（库不在官方仓库 / 网络失败）→ 宽容启动：JVM 会静默忽略缺失的
     #      classpath 条目（可选平台包缺了通常不影响进主菜单），仅提示不拦截。
-    _libs_root = os.path.join(inst.mc_dir, "libraries") if inst else ""
+    # round-211 P1：classpath 条目由 ``get_command(version, vroot, ...)`` 以
+    # **vroot** 为根生成，旧实现却拿 ``mc_dir/libraries`` 算 relpath —— iso /
+    # 外来布局下整批路径以 ``..`` 开头被下一行 continue 跳过，缺失库永远补不上。
+    _libs_root = os.path.join(vroot, "libraries") if inst else ""
     if abort_requested():
         # round-172：玩家在安装/补全期间点了「取消启动」——不再进入任何补全下载。
         raise InstallCancelled("launch cancelled by user")

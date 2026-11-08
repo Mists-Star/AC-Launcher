@@ -31,13 +31,13 @@
 | 点「打开文件夹」 | 详情「管理与诊断」网格 | 用系统文件管理器打开实例目录 | `src/pages_instances.py` |
 | 点「设为当前」 | 详情底部操作行 | 切换当前实例并刷新列表/首页 | `src/pages_instances.py` |
 
-## 设置（`settings`）
+## 模组（`mods`）
 
 | 操作 | 层/组件 | 结果与反馈 | 备注 |
 | --- | --- | --- | --- |
-| 点「从文件安装」 | 模块分区 | 选择 .zip 安装模块，成功/失败弹窗后刷新列表 | `src/modules_page.py` |
-| 点左侧分区 | 设置左栏 | 首次进入时构建该分区，之后只切换（未保存草稿保留） | `src/settings_dialog.py` |
-| 点「保存」 | 底部操作条 | 写配置并即时应用主题/音效/壁纸，然后回到首页 | `src/settings_dialog.py` |
+| 切换当前实例 | 模组页实例选择 | 重新读取该实例 mods 目录并刷新列表 | `src/pages_instances.py` `src/main_window.py` |
+| 点模组行启停按钮 | 模组页列表行 | 重命名 .disabled 后缀并即时刷新状态 | `src/mod_list.py` `src/main_window.py` |
+| 批量勾选后删除/启用 | 模组页批量操作条 | 确认后批量落盘并给出结果反馈 | `src/pages_instances.py` `src/main_window.py` |
 
 ## 资源中心（`store`）
 
@@ -51,3 +51,35 @@
 | 点「上一页 / 下一页 / 回到首页」 | 资源中心页码器 | 按双源 offset/total 游标切片，结果已缓存则零请求 | `src/pages_browse.py` |
 | 点资源卡片 | 资源中心结果卡片 | 页内栈切到详情（全部版本 / 前置 / 下载），不新开窗口 | `src/pages_browse.py` |
 | 点「下载 / 安装」 | 资源中心卡片按钮 | 按目标实例下载，缺前置时先询问补齐 | `src/pages_browse.py` |
+
+## 版本库（`versions`）
+
+| 操作 | 层/组件 | 结果与反馈 | 备注 |
+| --- | --- | --- | --- |
+| 选择游戏版本 | 版本库页版本列表 | 展示该版本可用加载器与推荐构建 | `src/pages_browse.py` `src/main_window.py` |
+| 点「安装此版本」 | 版本库页安装按钮 | 页内创建实例并跳到实例页 | `src/pages_browse.py` `src/main_window.py` |
+| 点「资源中心」返回 | 版本库页页头 | 切回资源中心列表并保留搜索词 | `src/pages_browse.py` `src/main_window.py` |
+
+## 联机大厅（`lobby`）
+
+| 操作 | 层/组件 | 结果与反馈 | 备注 |
+| --- | --- | --- | --- |
+| 输入大厅编号并回车 | 联机大厅页编号输入框 | 加入指定大厅 | `src/lobby_dialog.py` `src/main_window.py` |
+| 点「创建大厅」 | 联机大厅页主按钮 | 打开联机配置并生成大厅 | `src/lobby_dialog.py` `src/main_window.py` |
+| 查看加入帮助 | 联机大厅页说明卡 | 展示编号获取与联机前置说明 | `src/lobby.py` `src/main_window.py` |
+
+## 设置（`settings`）
+
+| 操作 | 层/组件 | 结果与反馈 | 备注 |
+| --- | --- | --- | --- |
+| 点「从文件安装」 | 模块分区 | 选择 .zip 安装模块，成功/失败弹窗后刷新列表 | `src/modules_page.py` |
+| 点左侧分区 | 设置左栏 | 首次进入时构建该分区，之后只切换（未保存草稿保留） | `src/settings_dialog.py` |
+| 点「保存」 | 底部操作条 | 写配置并即时应用主题/音效/壁纸，然后回到首页 | `src/settings_dialog.py` |
+
+## 工具箱（`toolbox`）
+
+| 操作 | 层/组件 | 结果与反馈 | 备注 |
+| --- | --- | --- | --- |
+| 点工具箱快捷入口 | 工具箱页工具卡 | 页内打开对应工具或跳到目标页 | `src/main_window.py` `src/main_window.py` |
+| 打开诊断工具 | 工具箱页工具卡 | 生成诊断报告并展示可修复项 | `src/diagnostics.py` `src/main_window.py` |
+| 打开 Java 管理 | 工具箱页工具卡 | 跳到设置页并定位 Java 分区 | `src/settings_dialog.py` `src/main_window.py` |

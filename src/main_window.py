@@ -4147,6 +4147,9 @@ class MainWindow(QMainWindow):
         self.instances_page.instance_created.connect(self._on_instance_created)
         return self.instances_page
 
+    # ia[mods]: 切换当前实例 | 模组页实例选择 | 重新读取该实例 mods 目录并刷新列表 | `src/pages_instances.py`
+    # ia[mods]: 点模组行启停按钮 | 模组页列表行 | 重命名 .disabled 后缀并即时刷新状态 | `src/mod_list.py`
+    # ia[mods]: 批量勾选后删除/启用 | 模组页批量操作条 | 确认后批量落盘并给出结果反馈 | `src/pages_instances.py`
     def _build_mods(self):
         self.mods_page = ModsPage(
             list_instances=lambda: self.inst_mgr.list(),
@@ -4164,11 +4167,17 @@ class MainWindow(QMainWindow):
             lambda: self._show_page("versions"))
         return self.store_page
 
+    # ia[versions]: 选择游戏版本 | 版本库页版本列表 | 展示该版本可用加载器与推荐构建 | `src/pages_browse.py`
+    # ia[versions]: 点「安装此版本」 | 版本库页安装按钮 | 页内创建实例并跳到实例页 | `src/pages_browse.py`
+    # ia[versions]: 点「资源中心」返回 | 版本库页页头 | 切回资源中心列表并保留搜索词 | `src/pages_browse.py`
     def _build_versions(self):
         self.versions_page = VersionsPage()
         self.versions_page.instance_created.connect(self._on_instance_created)
         return self.versions_page
 
+    # ia[lobby]: 输入大厅编号并回车 | 联机大厅页编号输入框 | 加入指定大厅 | `src/lobby_dialog.py`
+    # ia[lobby]: 点「创建大厅」 | 联机大厅页主按钮 | 打开联机配置并生成大厅 | `src/lobby_dialog.py`
+    # ia[lobby]: 查看加入帮助 | 联机大厅页说明卡 | 展示编号获取与联机前置说明 | `src/lobby.py`
     def _build_lobby(self):
         self.lobby_widget = QWidget()
         ll = QVBoxLayout(self.lobby_widget)
@@ -4230,6 +4239,9 @@ class MainWindow(QMainWindow):
         self.settings_page.open_page.connect(self._show_page)
         return self.settings_page
 
+    # ia[toolbox]: 点工具箱快捷入口 | 工具箱页工具卡 | 页内打开对应工具或跳到目标页 | `src/main_window.py`
+    # ia[toolbox]: 打开诊断工具 | 工具箱页工具卡 | 生成诊断报告并展示可修复项 | `src/diagnostics.py`
+    # ia[toolbox]: 打开 Java 管理 | 工具箱页工具卡 | 跳到设置页并定位 Java 分区 | `src/settings_dialog.py`
     def _build_toolbox(self):
         """round-79b：工具箱从“敬请期待”占位升级为真实快捷工具。"""
         self.toolbox_widget = QWidget()
