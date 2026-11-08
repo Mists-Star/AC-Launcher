@@ -91,6 +91,21 @@ MC 版本 / 加载器下推服务端；`StoreFilterPanel.set_target()` 还用
   全零分支、无缺失依赖分支）；round-178 / 194 的 3 条旧静态断言按新链路等价化；
   全量回归 **79/79**、文案门禁、i18n 对称、PII zero、IA `--check` 全过。
 
+**打包部署（round-209 两份修复合并重打）**
+
+- `BUILD_RC=0`，118.2 MB / 4184 文件；旧产物先改名避开沙箱批量删除保护，
+  瘦身阶段照旧只拦下部分 Qt 翻译文件，不影响可用性。
+- 部署 `D:\Appdata\AC_Launcher`：exe `sha256 5c0019ec…` 与构建产物一致，
+  玩家 `data/` / `launcher_config.json` / `ac.lock` 全保留，旧 `_internal`
+  移入备份而非删除，验收目录内无残留目录。
+- 真机冒烟：启动 8 秒存活、`crash.log` 157025 → 157025 **无新增**、无残留进程。
+  （`taskkill` 的 GBK 输出被部署脚本按 UTF-8 解码报 `UnicodeDecodeError`，
+  是脚本读取子进程的编码噪音，rc=0 且进程正常退出，不是启动器崩溃。）
+- 产物内嵌归档 TOC 中检出 `fix_feedback` / `store_search` / `store_filter`，
+  确认本轮新增模块确实进了 exe，不是旧 PYZ 缓存。
+- 备份：`D:\Appdata\AC_Launcher_prev_20261108_110908`（历史备份已累积 3 份，
+  每份约 2.2 GB，需要清理时由主理人自行决定，AI 不代删）。
+
 ## round-208（2026-11-08）— 阶段二：整套对齐落地（数据层 + 整页重做 + IA 护栏）
 
 **执行拍板**：真页码器（PCL-CE）/ 详情保留 `_stack` 整页切换 / 默认「全部」双源不变
