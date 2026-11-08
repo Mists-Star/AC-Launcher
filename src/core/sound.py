@@ -81,13 +81,39 @@ class MusicPlayer(QObject):
         self._player = QMediaPlayer(self)
         self._audio = QAudioOutput(self)
         self._player.setAudioOutput(self._audio)
-        self._player.setLoops(QMediaPlayer.Loops.Infinite)
         self._path: str = ""
         self.files: list[str] = []
-        self.mode: str = "loop"
+        self._mode: str = "loop"
         self._idx: int = -1
         self._shuffle_history: list[int] = []
         self._player.mediaStatusChanged.connect(self._on_status)
+        self._apply_loops()   # 默认 loop → Infinite
+
+    # ── mode ───────────────────────────────────────────────────────────
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @mode.setter
+    def mode(self, value: str) -> None:
+        self.set_mode(value)
+
+    def set_mode(self, mode: str) -> None:
+        """切换播放模式，并**立刻**把 Qt 的循环策略同步过去。
+
+        round-216：原实现在 ``__init__`` 里一次性 ``setLoops(Infinite)`` 且
+        此后再不改——循环模式下 ``EndOfMedia`` 永远不触发（代码注释自己也写了
+        这点），于是 sequential / shuffle 全都退化成「单曲无限循环」。
+        这里让 loop 用原生 Infinite（最省事、不依赖状态信号），其余模式用
+        Once，靠 ``_on_status`` 手动换下一首。
+        """
+        self._mode = mode if mode in ("loop", "sequential", "shuffle") else "loop"
+        self._apply_loops()
+
+    def _apply_loops(self) -> None:
+        self._player.setLoops(
+            QMediaPlayer.Loops.Infinite if self._mode == "loop"
+            else QMediaPlayer.Loops.Once)
 
     def set_playlist(self, files: list[str]) -> None:
         """Replace the playlist. Keeps playback position if current file
@@ -106,6 +132,7 @@ class MusicPlayer(QObject):
             self.stop()
             return False
         self._audio.setVolume(max(0.0, min(1.0, volume)))
+        self._apply_loops()   # 模式可能在播放中途被改过
         if path != self._path:
             self._path = path
             self._player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))

@@ -4877,7 +4877,22 @@ class MainWindow(QMainWindow):
     def _open_lobby(self, code: str = ""):
         from .lobby_dialog import LobbyDialog
 
-        LobbyDialog(self, code=code).exec()
+        # round-216：改成非模态单窗口。以前是 exec()，玩家必须先关掉联机窗口
+        # 才能点「启动游戏」，而关窗会停掉 EasyTier 节点 → 一启动就断线。
+        prev = getattr(self, "_lobby_dlg", None)
+        if prev is not None:
+            try:
+                if not prev.isHidden():
+                    prev.raise_()
+                    prev.activateWindow()
+                    return
+            except RuntimeError:   # 已被销毁
+                self._lobby_dlg = None
+        dlg = LobbyDialog(self, code=code)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.finished.connect(lambda *_: setattr(self, "_lobby_dlg", None))
+        self._lobby_dlg = dlg
+        dlg.show()
 
     def _open_diagnostics(self):
         from .diagnostics_dialog import DiagnosticsDialog

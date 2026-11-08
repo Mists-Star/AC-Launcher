@@ -550,7 +550,8 @@ class _Collector:
         return True
 
 
-def discover_instances(progress=None) -> list[ScannedInstance]:
+def discover_instances(progress=None, should_stop=None) -> list[ScannedInstance]:
+    """扫描可导入的实例。``should_stop()`` 返回 True 时尽快返回已发现结果。"""
     col = _Collector()
     appdata = os.environ.get("APPDATA", "")
     local = os.environ.get("LOCALAPPDATA", "")
@@ -640,9 +641,11 @@ def discover_instances(progress=None) -> list[ScannedInstance]:
 
     # ---- 6) Disk sweep: portable launchers + stray game dirs ------------
     tick("扫描磁盘")
-    _sweep(profile, col, max_depth=5, progress=progress)
+    _sweep(profile, col, max_depth=5, progress=progress, should_stop=should_stop)
     for drive in _drive_roots():
-        _sweep(drive, col, max_depth=4, progress=progress)
+        if should_stop is not None and should_stop():
+            break
+        _sweep(drive, col, max_depth=4, progress=progress, should_stop=should_stop)
 
     return col.results
 
@@ -673,16 +676,23 @@ def _looks_like_mmc_root(path: str) -> bool:
     return False
 
 
-def _sweep(root: str, col: _Collector, max_depth: int, progress=None) -> None:
+def _sweep(root: str, col: _Collector, max_depth: int, progress=None,
+           should_stop=None) -> None:
     """Depth-capped walk looking for game dirs *and* portable launcher roots.
 
     Portable installs (third-party launchers unzipped anywhere) are the common
     case on Chinese setups, so a name-only lookup in %APPDATA% misses most of
     them. We instead recognise the on-disk markers each launcher leaves.
+
+    round-216：加 ``should_stop`` 轮询。整盘扫描在大硬盘上能跑几十秒，
+    面板/对话框关了以后原实现照样扫完（还占着 CPU 与句柄），关窗后
+    重开又会叠一层扫描。
     """
     stack = [(root, 0)]
     visited = 0
     while stack:
+        if should_stop is not None and should_stop():
+            return
         path, depth = stack.pop()
         visited += 1
         if progress and visited % 500 == 0:

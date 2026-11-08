@@ -85,6 +85,20 @@ _SCAN_TTL_DEEP = 300.0   # deep 全盘扫：5 分钟复用
 _SCAN_TTL_FAST = 30.0    # 浅扫：30s 复用
 
 
+def invalidate_scan_cache() -> None:
+    """丢掉 scan_javas 的进程级缓存。
+
+    round-216：``install_java()`` 装完新运行时后缓存仍是旧的（deep 槽 TTL 5 分钟），
+    于是「刚装好的 Java」在自动选择 / 体检 / Cleanroom 安装器里最长 5 分钟不可见，
+    玩家只能重启启动器。安装/卸载完主动调用这里。
+    """
+    global _SCAN_CACHE_DEEP, _SCAN_CACHE_DEEP_AT, _SCAN_CACHE_FAST, _SCAN_CACHE_FAST_AT
+    _SCAN_CACHE_DEEP = None
+    _SCAN_CACHE_DEEP_AT = 0.0
+    _SCAN_CACHE_FAST = None
+    _SCAN_CACHE_FAST_AT = 0.0
+
+
 def scan_javas(deep: bool = True) -> list[dict]:
     """Return list of installed JREs: {path, name, version, major, is_64bit}.
 

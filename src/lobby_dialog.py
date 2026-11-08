@@ -455,6 +455,21 @@ class LobbyDialog(QDialog):
             self._status("")
 
     def closeEvent(self, event):
-        # Stop the virtual-LAN node when the lobby window closes.
+        # round-216：虚拟局域网节点跟着**这个窗口**走，而窗口以前是 exec() 的
+        # 模态框——玩家必须先关窗才能去启动游戏，一关就断线。现在窗口改成
+        # 非模态（main_window._open_lobby 用 show()），开窗也能启动游戏；
+        # 但关闭仍然是真断开，所以给一次确认，避免手滑杀掉别人的连接。
+        if easytier.is_running():
+            from .win_rounded import _msgbox
+            pick = _msgbox(
+                self, t("lobby.close_confirm_title"),
+                t("lobby.close_confirm_body"),
+                icon="warning",
+                buttons=(t("lobby.close_confirm_cancel"),
+                         t("lobby.close_confirm_ok")),
+            )
+            if pick != t("lobby.close_confirm_ok"):
+                event.ignore()
+                return
         easytier.stop_node()
         super().closeEvent(event)

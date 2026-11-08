@@ -1422,28 +1422,28 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 
 | # | 结论 | 证据 | 状态 |
 |---|---|---|---|
-| 1 | **EasyTier 可执行文件从 5 个源（含 4 个第三方反代）下载后零校验解压并 `Popen`** —— 任一镜像被投毒即等于任意代码执行；同仓库 authlib 有固定 sha、更新包有 Ed25519，唯独这条没有信任根 | `core/easytier.py:38-44,92-127,164-170`（grep 无 `sha256/hashlib/signature`） | **未修**（需固定 hash/签名，产品决策） |
-| 2 | **视频壁纸每次 `apply()` 泄漏一套 QMediaPlayer + QAudioOutput + QVideoSink**（以 `self` 为父，永不释放），旧视频句柄不关 | `wallpaper.py:870-873,820-837`；探针：apply 5 次 → `findChildren` 各 5 个，`_teardown_dynamic` 后仍 5 | **未修**（改动中等） |
+| 1 | **EasyTier 可执行文件从 5 个源（含 4 个第三方反代）下载后零校验解压并 `Popen`** —— 任一镜像被投毒即等于任意代码执行；同仓库 authlib 有固定 sha、更新包有 Ed25519，唯独这条没有信任根 | `core/easytier.py:38-44,92-127,164-170`（grep 无 `sha256/hashlib/signature`） | ✅ 已修（round-213：`EASYTIER_ZIP_SIZE/SHA256` 取自 GitHub Releases API 的 asset digest，先校验再解压，`.verified` 标记才可信） |
+| 2 | **视频壁纸每次 `apply()` 泄漏一套 QMediaPlayer + QAudioOutput + QVideoSink**（以 `self` 为父，永不释放），旧视频句柄不关 | `wallpaper.py:870-873,820-837`；探针：apply 5 次 → `findChildren` 各 5 个，`_teardown_dynamic` 后仍 5 | ✅ 已修（round-213：stop→setSource(QUrl())→输出置 None→deleteLater+断信号；现 1 套 / teardown 后 0） |
 | 3 | **启动画面在 MainWindow 构建期 100% 空白**：`QElapsedTimer` 只创建不 `start()`，`elapsed()` 实测 `-9.2e12` → `_phase` 恒 0，字母/进度全不画 | `splash_window.py:72`；探针 `isValid=False, elapsed=-9223359610726` | ✅ 已修（构造时 `start()`） |
 
 ### 19.2 P1（有前置条件但可达 / 后果重）
 
 | # | 结论 | 证据 | 状态 |
 |---|---|---|---|
-| 1 | **authlib `.version` 让固定 sha256 永久失效**：只要 `.version` 文件存在就直接信任，而每次启动都会用「zip 能打开」的新 jar 覆盖固定版 | `core/authlib.py:171-176`、`launch.py:1006` | **未修**（需版本→sha 白名单） |
+| 1 | **authlib `.version` 让固定 sha256 永久失效**：只要 `.version` 文件存在就直接信任，而每次启动都会用「zip 能打开」的新 jar 覆盖固定版 | `core/authlib.py:171-176`、`launch.py:1006` | ✅ 已修（round-213：删掉 `_version_of/latest_authlib/_fetch_to` 整条旁路，固定版 + 固定 sha 是唯一信任源） |
 | 2 | **`skins.json` 一条坏记录让启动器完全打不开**：`raw.get` / `raw["id"]` 不在外层 except 覆盖内，而 `main_window` 在 import 期构造单例 | `skins.py:72-86`、`main_window.py:43`；探针 `null→AttributeError`、缺 id→`KeyError` | ✅ 已修（逐条 isinstance/必填键校验） |
 | 3 | **NBT 的 List 嵌套无深度上限**：2000 层 `TAG_LIST` 抛 `RecursionError`（非 `NbtError`），调用方 `except NbtError` 接不住 | `core/nbt.py:172,193`；探针复现 `RecursionError` | ✅ 已修（`payload` 加 `MAX_DEPTH` 检查，现抛 `NbtError`） |
 | 4 | **条款对话框勾选后按 Enter = 直接退出启动器**：两个按钮都是 autoDefault，Enter 命中第一个（quit） | `terms_dialog.py:57-66`；探针 `quit auto=True / continue auto=True` | ✅ 已修（`quit.setAutoDefault(False)` + `continue.setDefault(True)`） |
-| 5 | **`aclive` 无鉴权且 loopback 不是浏览器边界**：不校验 Origin/Content-Type，任意网页可用 `text/plain` 简单请求跨源 POST `/ctl`（含 `exec`），WS 也不校验 Origin → 可读屏 + 注入键鼠 | `aclive.py:362-378,381-404,489,1020-1034`；实测 `import_module('os')` 可穿透黑名单 | **未修**（默认不启用，但发布包含该代码） |
-| 6 | **地图解析失败被吞成「全透明 PNG」并写进缓存**：玩家看到一张看似正常、实际空白的地图，且被 mtime/size 键固化 | `core/world_map.py:148-151,415-423` | **未修** |
-| 7 | **`map_dialog` 包围盒只取最近 16 个 region 的极值**：两张相距 8000 方块的 region 就能申请 2.7 GB QImage → 无提示全白画布 | `map_dialog.py:50-57` | **未修** |
-| 8 | **BGM「顺序/随机播放」实际是单曲无限循环**：`setLoops(Infinite)` 在 `__init__` 设死后从未随 mode 变化 | `core/sound.py:84,121-129` | **未修** |
-| 9 | **扫描面板关闭后 Worker 不取消不等待**，回调落到已 `deleteLater` 的面板上；扫描体全程无中断点 | `scan_dialog.py:232-239`、`scan.py:553-646` | **未修** |
-| 10 | **「一键导入全部+复制」对同一个共享 `.minecraft` 的每个版本各整份复制一次**（无去重、无 ignore） | `scan_dialog.py:511-545`、`instances.py:1047-1088` | **未修** |
-| 11 | **旧版主题包转换绕过 id 校验**：`"id":".."` 会把两个 json 写进启动器 `data/` 根目录 | `modules.py:323-326`（对照 `:240` 走 `validate_manifest`） | **未修** |
-| 12 | **联机网络密钥明文落盘，且无 secret 时回退成邀请码**（邀请码本来是发人的） | `lobby.py:31,45-48,80`、`lobby_dialog.py:320` | **未修** |
-| 13 | **EasyTier 节点生命周期绑在对话框可见性上**：关窗即拆网卡，而模态期间无法启动游戏；强杀启动器则节点成孤儿 | `lobby_dialog.py:440-443`、`main_window.py:4880` | **未修** |
-| 14 | **下载进度回调在 Worker 线程直接改 `QProgressBar`** | `lobby_dialog.py:391-394`（lambda 由 `easytier.py:105` 在工作线程调用） | **未修** |
+| 5 | **`aclive` 无鉴权且 loopback 不是浏览器边界**：不校验 Origin/Content-Type，任意网页可用 `text/plain` 简单请求跨源 POST `/ctl`（含 `exec`），WS 也不校验 Origin → 可读屏 + 注入键鼠 | `aclive.py:362-378,381-404,489,1020-1034`；实测 `import_module('os')` 可穿透黑名单 | ✅ 已修（round-215：token + Origin 校验，跨源 403 / 缺错 token 401，控制端与面板同步带 token） |
+| 6 | **地图解析失败被吞成「全透明 PNG」并写进缓存**：玩家看到一张看似正常、实际空白的地图，且被 mtime/size 键固化 | `core/world_map.py:148-151,415-423` | ✅ 已修（round-214：`chunks==0 and failed>0` 返回 None；`.meta` 升 3 值，旧格式判无效重渲染） |
+| 7 | **`map_dialog` 包围盒只取最近 16 个 region 的极值**：两张相距 8000 方块的 region 就能申请 2.7 GB QImage → 无提示全白画布 | `map_dialog.py:50-57` | ✅ 已修（round-214：只铺锚点周围连续 4×4 窗口 + 256 MB 硬上限） |
+| 8 | **BGM「顺序/随机播放」实际是单曲无限循环**：`setLoops(Infinite)` 在 `__init__` 设死后从未随 mode 变化 | `core/sound.py:84,121-129` | ✅ 已修（round-216：`set_mode()` 同步 `setLoops`，loop=Infinite / 其余=Once） |
+| 9 | **扫描面板关闭后 Worker 不取消不等待**，回调落到已 `deleteLater` 的面板上；扫描体全程无中断点 | `scan_dialog.py:232-239`、`scan.py:553-646` | ✅ 已修（round-216：`should_stop` 轮询 + `ScanPanel.shutdown()`，关窗 0.01s 停线程且不再回调） |
+| 10 | **「一键导入全部+复制」对同一个共享 `.minecraft` 的每个版本各整份复制一次**（无去重、无 ignore） | `scan_dialog.py:511-545`、`instances.py:1047-1088` | ✅ 已修（round-216：按目录去重 + 只有成功才标记已导入；顺带修了「失败也标已导入、行内按钮禁用无法重试」） |
+| 11 | **旧版主题包转换绕过 id 校验**：`"id":".."` 会把两个 json 写进启动器 `data/` 根目录 | `modules.py:323-326`（对照 `:240` 走 `validate_manifest`） | ✅ 已修（round-216：`_safe_module_dir()` + legacy 包补 `_RE_ID` 校验；卸载前也校验目录归属） |
+| 12 | **联机网络密钥明文落盘，且无 secret 时回退成邀请码**（邀请码本来是发人的） | `lobby.py:31,45-48,80`、`lobby_dialog.py:320` | ✅ 已修（round-215：DPAPI 加密落盘 + 原子写 + secrets，禁止回退邀请码） |
+| 13 | **EasyTier 节点生命周期绑在对话框可见性上**：关窗即拆网卡，而模态期间无法启动游戏；强杀启动器则节点成孤儿 | `lobby_dialog.py:440-443`、`main_window.py:4880` | ✅ 已修（round-216：改非模态单窗口 `show()`，可边联机边启动游戏；关闭时给「保持联机 / 断开并关闭」确认） |
+| 14 | **下载进度回调在 Worker 线程直接改 `QProgressBar`** | `lobby_dialog.py:391-394`（lambda 由 `easytier.py:105` 在工作线程调用） | ✅ 已修（round-215：类级 `Signal(int)`，Worker 只 emit） |
 
 ### 19.3 P2（择要，完整清单在各组的审查记录里）
 
@@ -1452,7 +1452,7 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 - `downloader.py` 全仓无生产调用方；`_DEFAULT_QUEUE` 在 `main.py:607` 取导入期值恒 `None` → 关窗钩子从未接上。
 - `proc_kill` 部分成功被报成整体失败（`failed` 恒等于全部 PID）。
 - `skins` 下载无大小上限、两条路径不校验 PNG 魔数；`file` 字段可 `..` 越界删（`skins.py:104-106,166`）。
-- `map_cache` 只增不删；`repair_log.json` 非原子写；`achievements._save` 无异常保护且非原子。
+- ~~`map_cache` 只增不删~~ ✅ round-216（同块留最新 + 每维度 128 块 + 整树 256 MB）；`repair_log.json` 非原子写；`achievements._save` 无异常保护且非原子。
 - `win_rounded` 每次确认框在父窗口留一只隐藏 QDialog；`launch_dialog` 关闭后不销毁、部分槽无 `RuntimeError` 保护。
 - `icons.screen_dpr()` 取主屏 DPR → 副屏 150% 下头像/状态图标发虚。
 - 条款对话框没走深色标题栏；`win_acrylic` 的 import 保护是假的（非 Windows 直接 ImportError）。
@@ -1492,10 +1492,9 @@ body 也误用了 title 键；未映射的 `feature:xxx` 会把内部 key 原样
 
 `tests/test_schematic_tools.py` **76 项全过**（新增 4 条）。
 
-**仍开放（§19.2）**：BGM 顺序播放实际单曲循环、扫描面板关闭后 Worker 不取消、
-「一键导入全部」复制 N 份、模块 legacy `id=".."` 越界写、联机密钥明文 + 回退邀请码、
-EasyTier 节点生命周期绑对话框、下载进度跨线程改 QWidget、`aclive` 鉴权、
-`map_cache` 只增不删、区块级解压上限。
+**§19.2 剩余项**：BGM 顺序播放、扫描面板 Worker、一键导入复制 N 份、模块 `id=".."`、
+EasyTier 节点生命周期、`map_cache` 只增不删、区块级解压上限 —— 全部由 round-216
+结清（见 §二十三）。
 
 ---
 
@@ -1508,8 +1507,30 @@ EasyTier 节点生命周期绑对话框、下载进度跨线程改 QWidget、`ac
 | 3 | 下载进度在 Worker 线程改 `QProgressBar` | 类级 `Signal(int)`，Worker 只 emit | 类信号存在且连接 `et_progress.setValue` |
 | 4 | 成员列表硬编码中文 | `lobby.member_you` / `lobby.member_host` | 中英键对称 |
 
-**仍未修**：EasyTier 节点生命周期绑对话框、BGM 顺序播放、扫描 Worker、
-「一键导入全部」复制 N 份、模块 `id=".."` 越界、`map_cache` 只增不删、区块级解压上限。
+**§19.2 剩余项**：EasyTier 节点生命周期、BGM 顺序播放、扫描 Worker、一键导入复制
+N 份、模块 `id=".."` 越界、`map_cache` 只增不删、区块级解压上限 —— 见 §二十三。
 
 > ☠ 双轨欠账仍在：以上是代码轨 + 离屏轨；没有联网真机跑完整链路。
+
+---
+
+## 二十三、round-216：最后 8 条 P1 结清（2026-11-08 14:3x）
+
+> 主理人「随便你，做完所有的」。这 8 条的共同点不是崩溃，而是**静默做错事**。
+
+| # | §19.2 条目 | 修法 | 复验 |
+|---|---|---|---|
+| 1 | 旧主题包 `id=".."` 越界写 | `modules._safe_module_dir()`（realpath 后必须是 modules 直接子目录）+ legacy 包补 `_RE_ID`；`uninstall_module` 也校验目录归属 | `id=".."` → `ModuleError`，`<data>/manifest.json` 未生成；正常 id 装/卸照旧 |
+| 2 | 一键导入全部复制 N 份 + 失败也标已导入 | 按 `normcase(abspath)` 去重；只有成功才写 `_imported` 并 `mark_imported()` | 3 条结果（同目录 2 + 另目录 1）→ 只调 2 次；失败目录不在 `_imported`；汇总「成功 1 失败 1」 |
+| 3 | BGM 顺序/随机实际单曲循环 | `MusicPlayer.set_mode()` 每次同步 `setLoops`：loop→Infinite，其余→Once；`play()` 前再同步 | loop→Infinite / sequential→Once；投递 `EndOfMedia` 后 `_idx` 0→1；未知模式回退 loop |
+| 4 | 区块级解压无上限（2MB→2GB） | `nbt.inflate/load_bytes` 增 `max_bytes`；`world_map._CHUNK_MAX_BYTES = 24 MB` | 6 MB 全零 gzip + 1 MB 上限 → `NbtError`；伪 region 膨胀区块 → `_chunk_nbt` 返回 `None` |
+| 5 | `map_cache` 只增不删 | `_prune_tile_versions()` 同块留最新；`_prune_dir_budget()` 每维度 ≤128 块；`prune_cache_budget()` 整树 ≤256 MB（进程内一次） | 两次渲染 → 1 png + 1 meta；3 MB junk + 1 MB 预算 → 清到预算内；预算内不误删 |
+| 6 | 扫描面板关闭后 Worker 不停 | `discover_instances(should_stop=)` + `_sweep` 轮询；`ScanPanel.shutdown()`；`ScanDialog.closeEvent/done` 调它 | 3000 步模拟扫描 → shutdown 0.01s 停线程、体内收到停止、`_on_done` 未触发 |
+| 7 | EasyTier 节点生命周期绑模态对话框 | `_open_lobby` 改非模态单窗口（`show()` + `WA_DeleteOnClose` + 已有窗口前置）；关闭时给「保持联机 / 断开并关闭」确认 | 「保持联机」→ 窗口仍可见、未拆节点；「断开并关闭」→ 关窗且拆节点；未联机直接关不弹框 |
+| 8 | 装完 Java 不失效 `scan_javas` 缓存 | `core/java.invalidate_scan_cache()`；`install_java` 返回前调用 | 两档缓存槽清空；顺序断言「失效在 `return path` 之前」 |
+
+`tests/test_round216_regression.py` **40 项**（含反向对照），已登记 `regress.py`。
+
+**至此 §19.2 全清**。剩下的是：`§14` 的「详情预取 / 下载与搜索共用项目缓存」（性能
+增强，不是缺陷）、§19.3 的 P2 长尾、以及发布清单 A 组的联网真机全链路。
 

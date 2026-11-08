@@ -121,6 +121,21 @@ def _sanitize_id(raw_id) -> str:
     return "".join(c for c in str(raw_id) if c.isalnum() or c in "-._")
 
 
+def _safe_module_dir(mid: str) -> str:
+    """``<data>/modules/<mid>``，且必须**恰好**是 modules 的直接子目录。
+
+    round-216：``_sanitize_id`` 允许 ``.``，所以 legacy 主题包的 ``id=".."``
+    会原样通过净化 → ``os.path.join(modules_dir, "..")`` 等于 ``<data>``，
+    安装时把 manifest.json / theme-pack.json 直接写进数据根目录（覆盖玩家配置
+    目录里的同名文件）。这里用 realpath 后比对父目录做最后一道闸。
+    """
+    base = os.path.realpath(get_modules_dir())
+    dest = os.path.realpath(os.path.join(base, mid))
+    if os.path.dirname(dest) != base or dest == base:
+        raise ModuleError(f"模块 id 非法：{mid!r}（不得指向模块目录之外）")
+    return dest
+
+
 def validate_manifest(m: dict, folder_name: str = "") -> str:
     """校验清单，返回模块 id；不合法抛 ModuleError。"""
     if not isinstance(m, dict):
@@ -238,7 +253,7 @@ def _install_from_folder(src: str, check_dir_name: bool = True) -> ModuleInfo:
     m = _read_json(mpath)
     folder = os.path.basename(os.path.normpath(src)) if check_dir_name else ""
     mid = validate_manifest(m, folder_name=folder)
-    dest = os.path.join(get_modules_dir(), mid)
+    dest = _safe_module_dir(mid)
     if os.path.exists(dest):
         raise ModuleError(f"已安装模块 id 冲突：{mid}（请先卸载或换个包）")
     os.makedirs(dest, exist_ok=True)
@@ -323,7 +338,11 @@ def install_legacy_theme_pack(json_path: str) -> ModuleInfo:
     mid = _sanitize_id(pack.get("id", ""))
     if not mid:
         raise ModuleError("旧主题包缺少 id，无法转换")
-    dest = os.path.join(get_modules_dir(), mid)
+    # round-216：净化只删非法字符、不校验形态。``".."`` 净化后仍是 ``".."``，
+    # 会被当成模块目录 → 写进 <data> 根。必须按正式规则再校验一次。
+    if not _RE_ID.match(mid):
+        raise ModuleError(f"旧主题包 id 非法：{mid!r}")
+    dest = _safe_module_dir(mid)
     if os.path.exists(dest):
         raise ModuleError(f"已存在同名模块：{mid}")
     os.makedirs(dest, exist_ok=True)
@@ -356,6 +375,10 @@ def uninstall_module(mid: str) -> None:
     mod = find_module(mid)
     if not mod:
         return
+    # 防御：删除前确认目录仍是 modules 的直接子目录（防注册表/清单被改坏后误删）
+    expect = _safe_module_dir(mid)
+    if os.path.realpath(mod.folder) != expect:
+        raise ModuleError(f"模块目录异常，已拒绝删除：{mod.folder!r}")
     shutil.rmtree(mod.folder, ignore_errors=True)
     reg = _load_registry()
     enabled = set(reg["enabled"])

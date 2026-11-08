@@ -43,8 +43,13 @@ class NbtError(ValueError):
     """NBT 数据损坏，或触发了安全上限。"""
 
 
-def inflate(data: bytes) -> bytes:
-    """按魔数解压 gzip / zlib；未压缩数据原样返回（带安全上限）。"""
+def inflate(data: bytes, max_bytes: int = MAX_BYTES) -> bytes:
+    """按魔数解压 gzip / zlib；未压缩数据原样返回（带安全上限）。
+
+    ``max_bytes`` 允许调用方收紧上限。region 的单个区块本来就被 2 MB 压缩长度
+    限死，但 deflate 能到 ~1000:1，2 MB 恶意数据可以膨胀到 2 GB —— 用整文件
+    的 512 MB 上限去兜区块等于没兜（round-216）。
+    """
     if not data:
         raise NbtError("空数据")
     if data[:2] == b"\x1f\x8b":
@@ -52,7 +57,7 @@ def inflate(data: bytes) -> bytes:
     elif data[:1] == b"\x78":
         wbits = 15          # zlib
     else:
-        if len(data) > MAX_BYTES:
+        if len(data) > max_bytes:
             raise NbtError("未压缩数据超过上限")
         return data
     d = zlib.decompressobj(wbits)
@@ -60,15 +65,15 @@ def inflate(data: bytes) -> bytes:
     buf = data
     try:
         while True:
-            room = MAX_BYTES + 1 - len(out)
+            room = max_bytes + 1 - len(out)
             if room <= 0:
                 raise NbtError(
-                    "解压后超过 %d MB 上限" % (MAX_BYTES // 1024 // 1024))
+                    "解压后超过 %d MB 上限" % (max_bytes // 1024 // 1024))
             chunk = d.decompress(buf, room)
             out += chunk
-            if len(out) > MAX_BYTES:
+            if len(out) > max_bytes:
                 raise NbtError(
-                    "解压后超过 %d MB 上限" % (MAX_BYTES // 1024 // 1024))
+                    "解压后超过 %d MB 上限" % (max_bytes // 1024 // 1024))
             buf = d.unconsumed_tail
             if not buf:
                 break
@@ -227,13 +232,14 @@ def _f64(raw: bytes) -> float:
     return struct.unpack(">d", raw)[0]
 
 
-def load_bytes(data: bytes) -> dict:
+def load_bytes(data: bytes, max_bytes: int = MAX_BYTES) -> dict:
     """解析一段 NBT（自动识别 gzip/zlib），返回根 Compound。
 
     多数 MC 文件根标签名为空或 ``Schematic`` / ``Level``；这里统一返回
     **根 Compound 的键值**，调用方直接取字段即可。
+    ``max_bytes`` 用于收紧缩上限（region 单区块用），默认整文件上限。
     """
-    raw = inflate(data)
+    raw = inflate(data, max_bytes)
     r = _Reader(raw)
     tag = r._u8()
     if tag != TAG_COMPOUND:

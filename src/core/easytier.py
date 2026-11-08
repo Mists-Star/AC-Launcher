@@ -232,6 +232,12 @@ def start_node(network_name: str, network_secret: str,
     return {"ok": True, "ip": ip or "", "pid": _node_proc.pid}
 
 
+def is_running() -> bool:
+    """当前是否有存活的节点进程（供联机窗口判断「关闭会不会断线」）。"""
+    with _node_lock:
+        return _node_proc is not None and _node_proc.poll() is None
+
+
 def stop_node() -> None:
     """Stop the currently running easytier node (if any)."""
     global _node_proc

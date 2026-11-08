@@ -25,6 +25,10 @@ REGION_BLOCKS = 512
 CHUNKS_PER_SIDE = 32
 CHUNK_BLOCKS = 16
 
+# 单个区块解压后的上限（normal 区块撑死几 MB；这里给足但仍远小于整文件 512MB，
+# 防止 「2MB 压缩 → 2GB 膨胀」把内存打爆）
+_CHUNK_MAX_BYTES = 24 * 1024 * 1024
+
 # 维度 → world_dir 下的子目录（主世界直接在 world_dir/region）
 DIMENSIONS = {
     "overworld": "",
@@ -146,7 +150,7 @@ def _chunk_nbt(fh, sector: int, count: int) -> dict | None:
         except NbtError:
             return None
     try:
-        return nbt.load_bytes(payload)
+        return nbt.load_bytes(payload, max_bytes=_CHUNK_MAX_BYTES)
     except NbtError:
         return None
 
@@ -393,6 +397,97 @@ def image_cache_path(world_dir: str, dim: str, rx: int, rz: int,
     return os.path.join(d, "%d.%d.%d.%d.png" % (rx, rz, st.st_mtime_ns, st.st_size))
 
 
+# round-216：缓存治理。文件名带 mtime+size，意味着**每次区块变动都会新生成
+# 一份**，而旧的那份从来没被删过——逛一圈地图就能在 data/map_cache 里堆出几百
+# MB。两级清理：① 同一块（rx.rz）只留最新一份；② 整棵缓存树按总大小封顶，
+# 超了就删最久没读过的。
+_CACHE_TILE_KEEP = 128           # 每个维度目录最多保留的缓存块数
+_CACHE_TOTAL_MB = 256            # map_cache 总大小上限
+_cache_swept = False
+
+
+def _prune_tile_versions(d: str, keep: str, rx: int, rz: int) -> None:
+    """删掉同一块旧版本的缓存文件（不同 mtime/size 的同名族）。"""
+    prefix = "%d.%d." % (rx, rz)
+    keep_set = {os.path.basename(keep), os.path.basename(keep) + ".meta"}
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for n in names:
+        if n.startswith(prefix) and n not in keep_set:
+            try:
+                os.remove(os.path.join(d, n))
+            except OSError:
+                pass
+
+
+def _prune_dir_budget(d: str, keep_name: str) -> None:
+    """单个维度目录按**块数**封顶，超出部分按 mtime 从旧到新删。"""
+    try:
+        names = [n for n in os.listdir(d) if n.endswith(".png")]
+    except OSError:
+        return
+    if len(names) <= _CACHE_TILE_KEEP:
+        return
+    rows = []
+    for n in names:
+        if n == keep_name:
+            continue
+        try:
+            rows.append((os.path.getmtime(os.path.join(d, n)), n))
+        except OSError:
+            continue
+    rows.sort()
+    excess = len(names) - _CACHE_TILE_KEEP
+    for _mt, n in rows[:max(0, excess)]:
+        for p in (os.path.join(d, n), os.path.join(d, n) + ".meta"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def prune_cache_budget(max_mb: int = _CACHE_TOTAL_MB) -> int:
+    """整棵 map_cache 按总大小封顶，返回删除的文件数。
+
+    进程内只跑一次（地图对话框每次打开都会触发写入路径，没必要回回全树统计）。
+    """
+    global _cache_swept
+    if _cache_swept:
+        return 0
+    _cache_swept = True
+    root = os.path.join(get_data_dir(), "map_cache")
+    if not os.path.isdir(root):
+        return 0
+    entries = []
+    total = 0
+    for base, _dirs, files in os.walk(root):
+        for fn in files:
+            p = os.path.join(base, fn)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            entries.append((st.st_mtime, st.st_size, p))
+            total += st.st_size
+    if total <= max_mb * 1024 * 1024:
+        return 0
+    entries.sort()          # 最久未改写的先删
+    limit = max_mb * 1024 * 1024
+    removed = 0
+    for _mt, size, p in entries:
+        if total <= limit:
+            break
+        try:
+            os.remove(p)
+            total -= size
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def load_region_image(world_dir: str, dim: str, rx: int, rz: int,
                       *, with_stats: bool = False):
     """取 region 顶视图（带磁盘缓存）。返回 QImage 或 None。
@@ -440,6 +535,10 @@ def load_region_image(world_dir: str, dim: str, rx: int, rz: int,
             img.save(cache, "PNG")
             with open(cache + ".meta", "w", encoding="utf-8") as fh:
                 fh.write("%d,%d,%d" % (unknown, chunks, failed))
+            _d = os.path.dirname(cache)
+            _prune_tile_versions(_d, cache, rx, rz)
+            _prune_dir_budget(_d, os.path.basename(cache))
+            prune_cache_budget()
         except Exception:  # noqa: BLE001 - 缓存失败不影响显示
             pass
     if with_stats:

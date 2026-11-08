@@ -321,4 +321,11 @@ def install_java(major: int, progress=None, image_type: str = "jre",
             os.chmod(path, 0o755)
         except OSError:
             pass
+    # round-216：装了新运行时就把 scan_javas 缓存清掉，否则自动选择 / 体检
+    # 在 TTL（deep 5 分钟）内仍然看不到它。
+    try:
+        from .java import invalidate_scan_cache
+        invalidate_scan_cache()
+    except Exception:  # noqa: BLE001 - 缓存失效失败不影响安装结果
+        pass
     return path

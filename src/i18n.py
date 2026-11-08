@@ -1860,6 +1860,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "lobby.et_no_secret": "这个大厅缺少网络密钥（旧记录或加密不可用），已停止启动联机；请重新创建大厅。",
         "lobby.member_you": "{name}（你）",
         "lobby.member_host": "{name}（主机）",
+        "lobby.close_confirm_title": "仍在联机",
+        "lobby.close_confirm_body": "关闭这个窗口会断开虚拟局域网，其他玩家将无法继续连接。\n\n要继续关闭吗？（可以先把游戏启动起来，窗口开着不影响启动）",
+        "lobby.close_confirm_ok": "断开并关闭",
+        "lobby.close_confirm_cancel": "保持联机",
         "lobby.et_dl_error": "EasyTier 下载失败：{e}\n可前往 https://easytier.cn 手动下载。",
         # ---- 多联机工具选择（round-64）----
         "lobby.tool_missing": "未安装联机工具（虚拟局域网组件），跨网络联机需要先安装一种。",
@@ -4007,6 +4011,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "lobby.et_no_secret": "This lobby has no network secret (legacy record or encryption unavailable), so the virtual LAN was not started. Please create a new lobby.",
         "lobby.member_you": "{name} (you)",
         "lobby.member_host": "{name} (host)",
+        "lobby.close_confirm_title": "Still connected",
+        "lobby.close_confirm_body": "Closing this window shuts down the virtual LAN and other players will drop.\n\nClose anyway? (You can launch the game first — leaving this window open does not block it.)",
+        "lobby.close_confirm_ok": "Disconnect & close",
+        "lobby.close_confirm_cancel": "Stay connected",
         "lobby.et_dl_error": "EasyTier download failed: {e}\nYou can also download manually at https://easytier.cn",
         # ---- multi-tool picker (round-64) ----
         "lobby.tool_missing": "No LAN-join tool (virtual-LAN component) is installed — cross-network lobbies need one.",

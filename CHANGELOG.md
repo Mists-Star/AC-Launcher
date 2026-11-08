@@ -8,6 +8,29 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-216（2026-11-08）— 清掉最后 8 条 P1：磁盘边界 / 生命周期 / 缓存预算
+
+> 主理人「随便你，做完所有的」= 把 §19.2 里剩下的 P1 全清。共同点：
+> **都不是崩溃，而是「静默做错事」——写错目录、复制 N 份、放错歌、扫不完、
+> 缓存无限长、解压把内存打爆、关窗就断线、装完 Java 看不见。**
+
+| # | 位置 | 问题 | 修法 | 判据 |
+|---|---|---|---|---|
+| 1 | `src/modules.py:120-140` | 旧主题包 `id=".."` 净化后仍是 `..`，`os.path.join(modules, "..")` = `<data>` → 两个 json 写进数据根目录 | 新增 `_safe_module_dir()`（realpath 后必须是 modules 直接子目录）并给 legacy 包补 `_RE_ID` 校验；卸载前也校验目录归属 | `id=".."` → `ModuleError`，`<data>/manifest.json` 不存在；正常 id 安装/卸载照旧 |
+| 2 | `src/scan_dialog.py:553` | 「一键导入全部 + 复制」对同一个共享 `.minecraft` 的每个版本各整份复制一次；**导入失败也标记「已导入」**，行内按钮禁用、无法重试 | 按 `normcase(abspath)` 去重；只有成功才写 `_imported` 并标记行 | 3 条扫描结果（同目录 2 + 另目录 1）→ 只调 2 次导入；失败目录不在 `_imported` |
+| 3 | `src/core/sound.py:84` | `setLoops(Infinite)` 在 `__init__` 设死后从不随 `mode` 变 → `EndOfMedia` 永不触发，sequential / shuffle 全退化成单曲循环 | 加 `mode` 属性 + `set_mode()`，loop 用 `Infinite`、其余 `Once`；`play()` 前再同步一次 | loop→Infinite；sequential/shuffle→Once；投递 EndOfMedia 后 `_idx` 0→1；未知模式回退 loop |
+| 4 | `src/core/nbt.py:46` | 整文件上限 512 MB 被当成区块上限：2 MB 压缩的区块可膨胀到 2 GB | `inflate/load_bytes` 支持 `max_bytes`；`world_map._CHUNK_MAX_BYTES = 24 MB` | 6 MB 全零 gzip + 1 MB 上限 → `NbtError`；伪 region 的膨胀区块 → `_chunk_nbt` 返回 `None`（不 MemoryError） |
+| 5 | `src/core/world_map.py:385` | 缓存名含 mtime+size → **每次区块变动都新生成一份，旧的永不删**，`data/map_cache` 无限长 | `_prune_tile_versions()` 同块只留最新；`_prune_dir_budget()` 每维度 ≤128 块；`prune_cache_budget()` 整树 ≤256 MB（进程内一次） | 两次渲染 → 1 png + 1 meta；3 MB junk + 1 MB 预算 → 删除并回到预算内；预算内不误删 |
+| 6 | `src/scan_dialog.py:232` | 面板/对话框关了扫描照跑（整盘 walk 几十秒），回调打到已删列表；关掉再开会叠一层 | `discover_instances(should_stop=)` + `_sweep` 轮询；`ScanPanel.shutdown()` 置位、断信号、`requestInterruption`、`wait(1.5s)`；`ScanDialog.closeEvent/done` 调它 | 模拟 3000 步扫描 → shutdown 0.01s 停线程、体内收到停止、`_on_done` 未触发 |
+| 7 | `src/lobby_dialog.py:457`、`src/main_window.py:4877` | 联机窗口是 `exec()` 模态 → 想启动游戏必须先关窗，而关窗 `stop_node()` 拆网卡 = **一启动就断线** | 改非模态单窗口（`show()` + `WA_DeleteOnClose` + 已有窗口前置）；关闭时若节点在跑给「保持联机 / 断开并关闭」确认 | 「保持联机」→ 窗口仍可见、`stop_node` 未调；「断开并关闭」→ 关窗且拆节点；未联机直接关不弹框 |
+| 8 | `src/core/java.py:88`、`src/core/java_install.py:316` | `install_java()` 装完不失效 `scan_javas` 缓存（deep TTL 5 分钟）→ 新装的 Java 在自动选择/体检/Cleanroom 里长时间不可见 | 新增 `invalidate_scan_cache()`，安装成功返回前调用 | 缓存槽清空；源码顺序断言「失效在 `return path` 之前」 |
+
+**新增回归**：`tests/test_round216_regression.py` **40 项**（每条都有反向对照，能跑真对象的一律跑真对象），已登记 `regress.py`。
+
+**门禁**：`regress.py` **82/82**；i18n 中英对称；PII / 文案 / IA 全过。
+
+**没动的**：`§14` 的「详情预取 / 下载与搜索共用项目缓存」（性能增强，不是缺陷），以及发布清单 A 组的联网真机全链路。
+
 ## round-215（2026-11-08）— `aclive` 鉴权 + 联机密钥
 
 > 主理人「可以」= 按建议把两条安全面一起处理。共同点：**默认不可见，但一旦

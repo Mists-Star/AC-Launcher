@@ -14,8 +14,10 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QWidget, QProgressBar, QLineEdit,
     QScrollArea, QApplication, QProgressDialog, QToolButton,
 )
-from PySide6.QtCore import Qt, QSize, QTimer, Signal
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QThread
 
+import os
+import threading
 import time
 
 from .icons import icon
@@ -120,6 +122,9 @@ class ScanPanel(QWidget):
     def __init__(self, parent=None, auto_scan: bool = True):
         super().__init__(parent)
         self._imported: set[str] = set()
+        self._scan_cancelled = False
+        self._scan_stop = threading.Event()
+        self._worker = None
         self._build_ui()
         if auto_scan:
             QTimer.singleShot(50, self._run_scan)
@@ -233,16 +238,47 @@ class ScanPanel(QWidget):
         self.scan_btn.setEnabled(False)
         self.progress.setVisible(True)
         self.summary.setText(t("scan.scanning"))
-        self._worker = Worker(self._do_scan)
+        self._scan_cancelled = False
+        self._scan_stop = threading.Event()
+        self._worker = Worker(self._do_scan, self._scan_stop)
         self._worker.finished.connect(self._on_done)
-        self._worker.error.connect(lambda e: self.summary.setText(f"Error: {e}"))
+        self._worker.error.connect(self._on_scan_error)
         self._worker.start()
 
-    @staticmethod
-    def _do_scan():
+    def _do_scan(self, stop: threading.Event):
         # Java scanning now lives in Settings → Manage / Download Java.
         # The instance scanner only finds importable .minecraft instances.
-        return discover_instances()
+        cur = QThread.currentThread()   # 退出时的 drain_workers() 也靠这个停
+        return discover_instances(
+            should_stop=lambda: stop.is_set() or cur.isInterruptionRequested())
+
+    def _on_scan_error(self, err: str) -> None:
+        self.progress.setVisible(False)
+        self.scan_btn.setEnabled(True)
+        self.summary.setText(f"Error: {err}")
+
+    def shutdown(self) -> None:
+        """面板/对话框销毁前调用：让磁盘扫描尽快收工，别再回调已删控件。
+
+        round-216：扫描是整盘深度遍历，大硬盘上能跑几十秒。原实现在窗口关闭
+        后既不停线程、也不解绑信号——关掉再打开会叠一层扫描，回调还会打到
+        已经 deleteLater 的列表上。
+        """
+        self._scan_cancelled = True
+        self._scan_stop.set()
+        w = self._worker
+        if w is None:
+            return
+        for sig, slot in ((w.finished, self._on_done), (w.error, self._on_scan_error)):
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        try:
+            w.requestInterruption()
+            w.wait(1500)
+        except RuntimeError:   # C++ 对象已销毁
+            pass
 
     def _on_done(self, instances):
         self._populate(instances)
@@ -511,6 +547,18 @@ class ScanPanel(QWidget):
         pending = [
             i for i in self._all_instances if i.mc_dir not in self._imported
         ]
+        # round-216：同一目录可能在扫描结果里出现多条（同一 .minecraft 下多个
+        # version 被识别成多个「待导入实例」）。原实现按列表逐条导入，等于把
+        # 同一个目录复制成 N 份实例、白占 N 倍磁盘。按 mc_dir 去重，保留首条。
+        _seen = set()
+        _deduped = []
+        for inst in pending:
+            key = os.path.normcase(os.path.abspath(inst.mc_dir))
+            if key in _seen:
+                continue
+            _seen.add(key)
+            _deduped.append(inst)
+        pending = _deduped
         if not pending:
             return
         detail = t("scan.import_all_hint") + "\n\n" + \
@@ -534,15 +582,17 @@ class ScanPanel(QWidget):
             if self._do_import(inst, self._dummy_btn(), mode):
                 self._imported.add(inst.mc_dir)
                 ok += 1
+                # 只有成功才标记「已导入」：原实现失败也标，玩家看到成功的
+                # 绿标却根本没有实例，且行内按钮被禁用、无法重试。
+                for i in range(self.inst_list.count()):
+                    w = self.inst_list.itemWidget(self.inst_list.item(i))
+                    if isinstance(w, _InstanceRow) and w.path == inst.mc_dir:
+                        w.mark_imported()
+                        break
             else:
                 fail += 1
                 if getattr(self, "_copy_cancelled", False):
                     break  # user cancelled mid-copy — stop the rest
-            for i in range(self.inst_list.count()):
-                w = self.inst_list.itemWidget(self.inst_list.item(i))
-                if isinstance(w, _InstanceRow) and w.path == inst.mc_dir:
-                    w.mark_imported()
-                    break
         self.import_all_btn.setEnabled(False)
         if fail:
             self.summary.setText(t("scan.import_all_done_partial", ok=ok, fail=fail))
@@ -674,3 +724,11 @@ class ScanDialog(QDialog):
         self._frameless.set_titlebar(self.titlebar)
         from .win_rounded import enable_win11_round_corners
         enable_win11_round_corners(self)
+
+    def closeEvent(self, ev):  # noqa: N802 - Qt 约定
+        self.panel.shutdown()
+        super().closeEvent(ev)
+
+    def done(self, r: int):
+        self.panel.shutdown()
+        super().done(r)
