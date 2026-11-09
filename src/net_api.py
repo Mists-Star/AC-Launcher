@@ -2458,7 +2458,10 @@ def _curseforge_versions(project_id: str, limit: int | None = None,
     key = _curseforge_key()
     if not key:
         raise NetError("未配置 CurseForge API Key（设置 → 第三方服务）")
-    cache_key = f"cfv:{project_id}:{limit}:{offset}"
+    # round-221：key 升级到 cfv2: ——旧缓存的版本条目没有 sha1 字段，
+    # 且是「只取第一页 50 条」时切片的结果（offset 越界即空），磁盘缓存
+    # 是持久化的，不换 key 会让分页拉全 + sha1 透传的改动白做一半。
+    cache_key = f"cfv2:{project_id}:{limit}:{offset}"
     cached = _cached(cache_key)
     if cached is not None:
         return cached
@@ -2497,7 +2500,8 @@ def _curseforge_versions_keyless(proj: str, limit: int | None = None,
     """
     if not proj:
         raise NetError("缺少 CurseForge 项目标识")
-    cache_key = f"cfvw:{proj}:{limit}:{offset}"
+    # round-221：同 cfv2:，旧 cfvw: 缓存是旧的 50 条切片且条目无 sha1。
+    cache_key = f"cfvw2:{proj}:{limit}:{offset}"
     cached = _cached(cache_key)
     if cached is not None:
         return cached

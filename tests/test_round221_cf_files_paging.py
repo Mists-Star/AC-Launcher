@@ -156,6 +156,15 @@ check("缓存 key 为 cffi2:（旧 cffi: 缓存失效）",
       bool(stored) and stored[0].startswith("cffi2:"), str(stored))
 _restore(orig)
 
+# ── 5b) 版本列表自身缓存也要换 key（否则旧的无 sha1 / 50 条切片会复活）───
+import inspect  # noqa: E402
+_ver_src = inspect.getsource(na._curseforge_versions)
+_vkl_src = inspect.getsource(na._curseforge_versions_keyless)
+check("官方版本列表缓存 key 升到 cfv2:",
+      'cache_key = f"cfv2:' in _ver_src)
+check("keyless 版本列表缓存 key 升到 cfvw2:",
+      'cache_key = f"cfvw2:' in _vkl_src)
+
 # ── 6) 官方 keyed 分支也分页 + sortField ─────────────────────────────────
 orig = _snapshot()
 fake = _FakeGet(120)

@@ -20,7 +20,9 @@
   新增 `_cf_files_all`（按 `index` 分页、按 id 去重、无新增/失败/满 12 页即收敛）；
   镜像 `pageSize=200` **一次请求拿全 183**，不增加往返；官方 keyed 通道同样
   分页（`pageSize=50` + `sortField=2`）。缓存 key 升到 `cffi2:` 让旧的 50 条
-  磁盘缓存失效。顺带修掉 `str(f.get("id") or "")` 在 id=0 时绕过去重的问题。
+  磁盘缓存失效；版本列表自身的持久化缓存 key 同步升到 `cfv2:` / `cfvw2:`
+  （旧缓存的条目没有 sha1、且是 50 条切片的结果）。顺带修掉
+  `str(f.get("id") or "")` 在 id=0 时绕过去重的问题。
 - **P1 sha1 回归**：round-220 把详情页 CF 下载改走 `download_cf_with_deps` 后，
   版本结构里从没写过 `sha1` 字段，详情页 `f0.get("sha1")` 一直是死值 →
   官方 keyed 通道**本体下载不再校验 sha1**。`_cf_version_entry` 现在带上从
@@ -31,7 +33,7 @@
   去重收敛、失败降级、缓存 key、官方分支、老版本线、sha1 端到端、翻页）；
   `test_round178_mod_integrity.py` 那条过期的源码字面量断言改为对新接口的
   判据 + 在 round-221 补真行为断言；两个 round-220/221 测试挂进 `regress.py`
-  → **全量 88/88**。
+  → **全量 88/88**（round-221 测试 24 项）。
 
 > 附：本轮查实「FTB Library 26.3.0.1」并非镜像落后，官方 CF / cfwidget /
 > mcimirror 三源一致只到 `26.1.2.12`（MC `26.1.2+2`），26.3 线从未发布；
