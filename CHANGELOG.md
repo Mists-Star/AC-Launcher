@@ -8,6 +8,37 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-221（2026-11-09）— CF 文件列表被截断到 50 条 + 详情页本体 sha1 校验回归
+
+排查「FTB Library 26.3.0.1 从哪来」时顺带挖出的两个真 bug，均离线回归覆盖。
+
+- **P1 文件列表截断**：`_cf_files_mirror` 硬编码 `pageSize=50` 且只取第一页。
+  老项目文件数远超 50（FTB Library / NeoForge 404465 实测 **183** 个），按日期
+  倒序时 MC `1.21 / 1.20.6 / 1.19 / 1.18.1 / 1.16.2~4 / 1.15.2` 整条版本线被截掉
+  → 详情页看不到对应版本、`offset` 翻页越界即空、`_cf_resolve_dep_file` 挑不到
+  匹配前置（装完缺库崩游戏）、keyless 按 fileID 找不到老文件。
+  新增 `_cf_files_all`（按 `index` 分页、按 id 去重、无新增/失败/满 12 页即收敛）；
+  镜像 `pageSize=200` **一次请求拿全 183**，不增加往返；官方 keyed 通道同样
+  分页（`pageSize=50` + `sortField=2`）。缓存 key 升到 `cffi2:` 让旧的 50 条
+  磁盘缓存失效。顺带修掉 `str(f.get("id") or "")` 在 id=0 时绕过去重的问题。
+- **P1 sha1 回归**：round-220 把详情页 CF 下载改走 `download_cf_with_deps` 后，
+  版本结构里从没写过 `sha1` 字段，详情页 `f0.get("sha1")` 一直是死值 →
+  官方 keyed 通道**本体下载不再校验 sha1**。`_cf_version_entry` 现在带上从
+  文件元数据 hashes 取的真 sha1（不拿 MD5 冒充），详情页透传给
+  `download_cf_with_deps(primary_sha1=...)`。keyless 通道原本就按 fileID
+  自取 sha1，不受影响。
+- **测试**：新增 `tests/test_round221_cf_files_paging.py` 22/22（拉全、分页、
+  去重收敛、失败降级、缓存 key、官方分支、老版本线、sha1 端到端、翻页）；
+  `test_round178_mod_integrity.py` 那条过期的源码字面量断言改为对新接口的
+  判据 + 在 round-221 补真行为断言；两个 round-220/221 测试挂进 `regress.py`
+  → **全量 88/88**。
+
+> 附：本轮查实「FTB Library 26.3.0.1」并非镜像落后，官方 CF / cfwidget /
+> mcimirror 三源一致只到 `26.1.2.12`（MC `26.1.2+2`），26.3 线从未发布；
+> 该版本号来自社区移植版 Parker Ultimate FTB Ultimine Port 的依赖声明。
+> 与 CF API key 无关（下载 CDN 免 key）。结论已记入工作日志，故未做
+> 「官方兜底」改造。
+
 ## round-220（2026-11-08）— 资源中心装 FTB Ultimine 缺 FTB Library → 启动崩退出码 1
 
 > 主理人反馈：装 FTB Ultimine（及其「移植修复版」Ultimine Unchained）后启动直接

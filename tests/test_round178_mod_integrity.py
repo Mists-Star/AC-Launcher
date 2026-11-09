@@ -255,8 +255,11 @@ try:
                   encoding="utf-8").read()
     check("资源中心三路 CF 卡片下载都带版本 / 加载器",
           browse.count("mc_version=mc, loader=ld") == 3)
+    # round-221：详情页 CF 分支已改走 download_cf_with_deps，判据随之改为
+    # 「版本条目的 sha1 透传给本体下载」。真行为断言见
+    # tests/test_round221_cf_files_paging.py（打桩验证 _cf_download_one 收到 sha1）。
     check("详情页 CF 指定版本下载带 sha1",
-          "sha1=f0.get(\"sha1\", \"\")" in detail)
+          "primary_sha1=f0.get(\"sha1\", \"\")" in detail)
 finally:
     restore()
 

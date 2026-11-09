@@ -1414,19 +1414,73 @@ def _cf_file_required_deps(project_id: str, file_id) -> list[str]:
     return []
 
 
+# round-221：CF 文件列表必须**分页拉全**。
+# 老项目动辄上百个文件（FTB Library / NeoForge 404465 实测 183 个），此前
+# 只取第一页 50 条，按日期倒序会把旧 MC 版本线整条截掉（1.21 / 1.20.6 /
+# 1.19 / 1.18.1 / 1.16.2~4 / 1.15.2 全都落在 index>50），表现为：
+#   * 详情页版本列表看不到该 MC 版本的任何文件、offset 翻页越界即空；
+#   * 依赖解析 _cf_resolve_dep_file 挑不到匹配前置 → 装完缺库崩游戏。
+# 镜像实测支持 pageSize=200 一次拿全；官方 API pageSize 上限 50，需按 index 翻页。
+_CF_FILES_PAGE_MIRROR = 200
+_CF_FILES_PAGE_OFFICIAL = 50
+_CF_FILES_MAX_PAGES = 12
+
+
+def _cf_files_all(base: str, project_id: str, headers: dict,
+                  page_size: int) -> list[dict]:
+    """按 ``index`` 分页拉全某 CF 项目的文件列表（官方形状行）。
+
+    直到某页不满 ``page_size`` / 无新增 / 达 ``_CF_FILES_MAX_PAGES`` 上限为止。
+    中途失败把已拿到的页照常返回——宁可少几条，也不要整个列表失败；
+    按 id 去重同时兜住「服务端忽略 index 反复返回同一页」的死循环。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for page in range(_CF_FILES_MAX_PAGES):
+        params = {"pageSize": page_size, "index": page * page_size}
+        if base == CURSEFORGE_API:
+            params.update({"sortField": 2, "sortOrder": "desc"})
+        try:
+            r = requests.get(f"{base}/mods/{project_id}/files",
+                             params=params, headers=headers,
+                             timeout=_REQUEST_TIMEOUT, proxies=_proxies())
+            r.raise_for_status()
+            rows = r.json().get("data") or []
+        except requests.RequestException:
+            break
+        if not isinstance(rows, list):
+            break
+        fresh = 0
+        for f in rows:
+            if not isinstance(f, dict):
+                continue
+            raw_id = f.get("id")
+            # 不能用 `or ""`：id 为 0 时会被吞成空串，绕过去重，
+            # 让「服务端忽略 index 反复返回同一页」的收敛判断失效。
+            fid = "" if raw_id is None else str(raw_id)
+            if fid and fid in seen:
+                continue
+            if fid:
+                seen.add(fid)
+            out.append(f)
+            fresh += 1
+        if len(rows) < page_size or fresh == 0:
+            break
+    return out
+
+
 def _cf_raw_files(project_id: str) -> list[dict]:
-    """某 CF 项目的文件列表（原始形状），官方 API 优先、免 key 镜像兜底。"""
+    """某 CF 项目的文件列表（原始形状、分页拉全），官方 API 优先、镜像兜底。"""
     pid = str(project_id)
     key = _curseforge_key()
     if key:
         try:
-            r = requests.get(
-                f"{CURSEFORGE_API}/mods/{pid}/files",
-                params={"pageSize": 50, "sortField": 2, "sortOrder": "desc"},
-                headers={**_HEADERS, "x-api-key": key, "Accept": "application/json"},
-                timeout=_REQUEST_TIMEOUT, proxies=_proxies())
-            if r.status_code == 200:
-                return r.json().get("data") or []
+            rows = _cf_files_all(
+                CURSEFORGE_API, pid,
+                {**_HEADERS, "x-api-key": key, "Accept": "application/json"},
+                _CF_FILES_PAGE_OFFICIAL)
+            if rows:
+                return rows
         except requests.RequestException:
             pass
     try:
@@ -1586,16 +1640,20 @@ def _cf_download_one(pid: str, fid, dest_dir: str, callback, manifest_out,
 
 def download_cf_with_deps(project_id, file_id, dest_dir, mc_version: str = "",
                           loader: str = "", callback=None, manifest_out=None,
-                          with_deps: bool = True, inst=None) -> str:
+                          with_deps: bool = True, inst=None,
+                          primary_sha1: str = "") -> str:
     """下载 CF 模组本体 + 其 required 依赖树（含跨源覆盖）。
 
     round-220：CF 通道终于和 MR 一样会自动拉前置；依赖重下时删掉同 mod 旧版本
     jar，防止「新旧 FTB Library 共存」继续崩游戏。返回本体文件路径。
+    round-221：``primary_sha1`` 把详情页版本条目里的 sha1 透传给本体下载，
+    修复 round-220 重构后「官方 keyed 通道本体不再校验 sha1」的回归。
     """
     os.makedirs(dest_dir, exist_ok=True)
     existing_by_pid = _cf_existing_pid_map(inst, dest_dir) if inst else {}
     primary = _cf_download_one(str(project_id), file_id, dest_dir, callback,
-                               manifest_out, existing_by_pid)
+                               manifest_out, existing_by_pid,
+                               sha1=primary_sha1)
     if not with_deps:
         return primary
     for d in resolve_cf_dependencies(str(project_id), str(file_id),
@@ -2214,20 +2272,20 @@ def _cfwidget_info(proj: str) -> dict:
 
 
 def _cf_files_mirror(project_id: str) -> list[dict]:
-    """镜像文件列表 ``/mods/{id}/files``（同官方 API 契约、免 key）→ 官方形状行。"""
-    key = f"cffi:{project_id}"
+    """镜像文件列表（同官方 API 契约、免 key）→ 官方形状行，**分页拉全**。
+
+    round-221：pageSize 从 50 提到 200（镜像实测一次返回全部 183 个文件），
+    并由 ``_cf_files_all`` 兜住 >200 文件的项目按 index 继续翻页。缓存 key
+    同步升到 ``cffi2:``——否则磁盘里那份旧的 50 条缓存会继续生效，改了白改。
+    """
+    key = f"cffi2:{project_id}"
     cached = _cached(key)
     if cached is not None:
         return cached
-    try:
-        r = requests.get(f"{_CF_MIRROR}/mods/{project_id}/files",
-                         params={"pageSize": 50},
-                         headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
-                         proxies=_proxies())
-        r.raise_for_status()
-        rows = r.json().get("data") or []
-    except requests.RequestException as e:
-        raise NetError(f"无法获取 CurseForge 文件：{e}") from e
+    rows = _cf_files_all(_CF_MIRROR, project_id, _HEADERS,
+                         _CF_FILES_PAGE_MIRROR)
+    if not rows:
+        raise NetError(f"无法获取 CurseForge 文件：{project_id}")
     _store(key, rows)
     return rows
 
@@ -2364,8 +2422,13 @@ _CF_LOADER_NAMES = {
 
 
 def _cf_version_entry(entry_id, display, filename, size, date,
-                      game_versions, url="") -> dict:
-    """Map one CurseForge file onto the Modrinth version shape."""
+                      game_versions, url="", sha1="") -> dict:
+    """Map one CurseForge file onto the Modrinth version shape.
+
+    round-221：带上 ``sha1``（从文件元数据的 hashes 取），详情页下载本体时
+    要用它做完整性校验。round-220 改走 ``download_cf_with_deps`` 后，详情页
+    那个 ``f0.get("sha1")`` 一直是死值——版本结构里从没写过这个字段。
+    """
     gv = [g for g in (game_versions or []) if isinstance(g, str)]
     return {
         "id": str(entry_id or ""),
@@ -2378,6 +2441,7 @@ def _cf_version_entry(entry_id, display, filename, size, date,
             "size": size or 0,
             "url": url,
             "primary": True,
+            "sha1": sha1 or "",
         }],
         "date_published": (date or "")[:19],
         "source": "curseforge",
@@ -2415,7 +2479,8 @@ def _curseforge_versions(project_id: str, limit: int | None = None,
     out = [
         _cf_version_entry(f.get("id"), f.get("displayName"), f.get("fileName"),
                           f.get("fileLength"), f.get("fileDate"),
-                          f.get("gameVersions"), f.get("downloadUrl", ""))
+                          f.get("gameVersions"), f.get("downloadUrl", ""),
+                          _cf_sha1(f))
         for f in data if isinstance(f, dict)
     ]
     _store(cache_key, out)
@@ -2448,7 +2513,7 @@ def _curseforge_versions_keyless(proj: str, limit: int | None = None,
                 _cf_version_entry(f.get("id"), f.get("displayName"),
                                   f.get("fileName"), f.get("fileLength"),
                                   f.get("fileDate"), f.get("gameVersions"),
-                                  f.get("downloadUrl", ""))
+                                  f.get("downloadUrl", ""), _cf_sha1(f))
                 for f in rows if isinstance(f, dict)
             ]
         except NetError:
@@ -2461,7 +2526,8 @@ def _curseforge_versions_keyless(proj: str, limit: int | None = None,
         out = [
             _cf_version_entry(f.get("id"), f.get("display"), f.get("name"),
                               f.get("filesize"), f.get("uploaded_at"),
-                              f.get("versions"), f.get("url") or "")
+                              f.get("versions"), f.get("url") or "",
+                              _cf_sha1(f))
             for f in files
         ]
     _store(cache_key, out)

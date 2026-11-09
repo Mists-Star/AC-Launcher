@@ -1212,12 +1212,15 @@ class StoreDetailPanel(QWidget):
             # 并把同 mod 旧版本 jar 删掉，避免新旧 FTB Library 共存崩游戏。
             f0 = (v.get("files") or [{}])[0]
             fid = f0.get("id") or v.get("id")
+            # round-221：版本条目现在带 sha1（从 CF 文件元数据取），透传给
+            # 本体下载做完整性校验；round-220 重构时这个值一度是死值。
             w = ProgressWorker(
                 download_cf_with_deps,
                 str(self._card.get("project_id", "")), fid, dest,
                 mc_version, loader,
                 manifest_out=self._dl_manifest,
-                with_deps=with_deps, inst=self._current_inst())
+                with_deps=with_deps, inst=self._current_inst(),
+                primary_sha1=f0.get("sha1", ""))
         else:
             # round-191：详情页「选择版本下载」同样登记来源，模组列表才能标出来
             self._dl_manifest = []
