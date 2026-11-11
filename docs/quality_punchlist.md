@@ -1710,3 +1710,23 @@ N 份、模块 `id=".."` 越界、`map_cache` 只增不删、区块级解压上�
 
 **门禁**：`tests/test_round223_dedup.py` 35/35；`regress.py` **90/90**；
 round-195 / 197 三条 `class X(QWidget)` 字面量断言改真实继承判据。
+
+## 三十、round-224：原生标题栏跟随主题（2026-11-11）
+
+> 用户目视：「浅色主题里用户条款窗口顶部是一条黑栏」。本轮把「标题栏配色」
+> 从**写死深色**改成**跟随主题**，并把判定做成行为断言。
+
+| 级别 | 现象 | 根因 | 修法 | 判据 |
+|---|---|---|---|---|
+| **P1** | 浅色主题下条款 / 登录 / 消息框的**原生标题栏是纯黑**，与白色正文断层 | `win_rounded.enable_dark_titlebar()` 无条件 `DWMWA_USE_IMMERSIVE_DARK_MODE=1`（round-217 为深色主题加，浅色被连带） | 新函数 `apply_titlebar_theme(widget, dark=None)`：缺省读 `theme.get_theme_mode()` 双向设 0/1；Win11 再对 `CAPTION_COLOR(35)` / `TEXT_COLOR(36)`；`enable_dark_titlebar` 留兼容别名 | 假 ctypes 记录实际下发的属性值：浅色=0 / 深色=1 / `dark=` 显式覆盖 / 20 号失败回退 19 号 / hwnd=0 不调用；**真窗口端到端**构造条款框，浅色下发 0 |
+
+☠ 本轮教训：
+1. **「为了深色好看」不能写成单向开关**：只要有一个模式被写死，另一个模式就会
+   出现反色断层。配色类 DWM 调用一律「传布尔 + 缺省读主题」，不要写死 1。
+2. **控件 `grab()` 抓不到原生标题栏**：非客户区由 DWM 画，只能
+   `screen.grabWindow(0, x, y, w, h)` 从真实屏幕截。这也是上一轮「主窗取色全
+   白」没抓到这条的原因——取的是窗身，栏在外面。
+3. **口径统一后要顺手做兼容别名**：`enable_dark_titlebar` 在外部脚本/历史
+   文档里都出现过，直接删名会静默失效（try/except 里更查不出来）。
+
+**门禁**：`tests/test_round224_titlebar.py` 22/22；`regress.py` **91/91**。

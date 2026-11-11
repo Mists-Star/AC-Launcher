@@ -8,6 +8,24 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-224（2026-11-11）— 原生标题栏跟随主题（修浅色下一条黑栏）
+
+用户截图反馈：浅色主题里「用户条款」窗口**顶部是一条纯黑标题栏**，与白色
+正文断层。根因不是渲染问题 —— `win_rounded.enable_dark_titlebar()` 无条件
+把 `DWMWA_USE_IMMERSIVE_DARK_MODE` 设成 1。这是 round-217 为「深色主题下
+条款框顶白条」加的，结果把浅色主题一起拖下水：
+
+- 新增 `win_rounded.apply_titlebar_theme(widget, dark=None)`：`dark` 缺省时
+  读 `theme.get_theme_mode()`，**双向**设 0/1（此前只有单向的 1）；主题模块
+  异常按浅色处理，不让窗口创建失败。
+- Win11 22000+ 顺带把 `DWMWA_CAPTION_COLOR(35)` / `DWMWA_TEXT_COLOR(36)`
+  对到主题 token（`bg_app` / `text_main`），避免「白栏 + 白窗身」两段白；
+  旧系统这两个属性会失败，静默跳过，靠 dark 标志拿系统配色。
+- 4 个内部消息框 + `terms_dialog` / `login_dialog` / `settings_dialog` 三处
+  调用点统一改名到新函数；`enable_dark_titlebar` 保留为兼容别名。
+- 真机像素实测（`grabWindow(0, …)` 抓真实屏幕，不是控件自绘）：浅色栏
+  `#FFFFFF` + 文字 `#1A1A2E`，与正文同色；深色栏 `#1E1E1E` + `#E5E5E5`。
+
 ## round-223（2026-11-11）— 第二轮解耦 + 修「窗口模式弹窗全空白」
 
 round-222 之后重跑同一套静态摸底（归一化 AST 指纹 + 跨模块同名实现对比），

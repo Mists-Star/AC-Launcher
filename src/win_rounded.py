@@ -2,11 +2,12 @@
 
 Calls DwmSetWindowAttribute for:
   - DWMWA_WINDOW_CORNER_PREFERENCE (33) → round corners
-  - DWMWA_USE_IMMERSIVE_DARK_MODE (20) → dark native title bar / border
+  - DWMWA_USE_IMMERSIVE_DARK_MODE (20) → dark/light native title bar
+  - DWMWA_CAPTION_COLOR (35) / DWMWA_TEXT_COLOR (36) → 标题栏配色跟随主题
 
 Also provides confirm() / warn() / info() helpers that build QDialog-based
-message boxes with dark title bars (replacing raw QMessageBox which shows a
-white Windows-native chrome against the dark launcher theme).
+message boxes with theme-matched title bars (replacing raw QMessageBox, whose
+native chrome does not follow the launcher theme).
 """
 import sys
 
@@ -47,40 +48,99 @@ def enable_win11_round_corners(widget) -> bool:
         return False  # old Windows, missing DLL, or no DWM — just skip
 
 
-# DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Win10 20H1+ / Win11). Tells DWM to paint
-# the native title bar + 1px window border in dark mode, so a standard QDialog
-# (which we use for the login dialog) blends with the launcher's dark theme
-# instead of showing an un-themed white title bar.
+# DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Win10 20H1+ / Win11), 19 on older builds.
+# Tells DWM to paint the native title bar + 1px window border in dark mode, so a
+# standard QDialog blends with the launcher theme instead of showing un-themed
+# chrome. round-224：以前这个开关是**写死 1** 的，浅色主题下顶部就是一条黑栏
+# （用户报的就是这个）——现在跟随 theme.get_theme_mode() 双向切换。
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+_DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
+# Win11 22000+：标题栏底色 / 文字色（让白栏与白窗身不再是两段白）
+_DWMWA_CAPTION_COLOR = 35
+_DWMWA_TEXT_COLOR = 36
+
+def _theme_is_dark() -> bool:
+    """当前启动器主题是不是深色（取不到主题模块时按浅色处理）。"""
+    try:
+        from .theme import get_theme_mode
+
+        return get_theme_mode() == "dark"
+    except Exception:  # noqa: BLE001 - 主题模块坏了不该拖垮窗口创建
+        return False
 
 
-def enable_dark_titlebar(widget) -> bool:
-    """Paint the native title bar / border dark. No-op off Windows or pre-20H1.
+def _colorref(hex_color: str) -> int | None:
+    """``#RRGGBB`` → Win32 COLORREF（0x00BBGGRR）。"""
+    try:
+        h = hex_color.strip().lstrip("#")
+        if len(h) == 8:  # #AARRGGBB
+            h = h[2:]
+        if len(h) != 6:
+            return None
+        return (int(h[4:6], 16) << 16) | (int(h[2:4], 16) << 8) | int(h[0:2], 16)
+    except (TypeError, ValueError):
+        return None
 
-    Must be called after the widget has a native handle (winId() creates one),
-    e.g. at the end of __init__ or in showEvent.
+
+def apply_titlebar_theme(widget, dark: bool | None = None) -> bool:
+    """让**原生**标题栏跟随启动器主题（浅色主题给浅色栏）。成功返回 True。
+
+    ``dark=None`` 时读当前主题；显式传 ``True/False`` 可强制。非 Windows /
+    无 DWM 时静默跳过。必须在拿到原生句柄之后调用（``winId()`` 会创建它），
+    放在 ``__init__`` 末尾或 ``showEvent`` 里都可以。
     """
     if sys.platform != "win32" or ctypes is None:
         return False
+    if dark is None:
+        dark = _theme_is_dark()
     try:
         hwnd = int(widget.winId())
         if hwnd == 0:
             return False
-        value = ctypes.c_int(1)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+        value = ctypes.c_int(1 if dark else 0)
+        hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
             hwnd,
             _DWMWA_USE_IMMERSIVE_DARK_MODE,
             ctypes.byref(value),
             ctypes.sizeof(value),
         )
-        return True
+        if hr != 0:  # Win10 20H1 之前的属性号
+            hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                _DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY,
+                ctypes.byref(value),
+                ctypes.sizeof(value),
+            )
+        # Win11：把栏底色/文字色也对到主题。失败（旧系统）就不管 —— 系统会按
+        # dark 标志自己给一套合适的配色。
+        try:
+            from .theme import COLORS
+
+            bg = COLORS.get("bg_app") or ("#1E1E1E" if dark else "#FFFFFF")
+            fg = COLORS.get("text_main") or ("#E8E8EC" if dark else "#1A1A2E")
+            for attr, hexv in ((_DWMWA_CAPTION_COLOR, bg), (_DWMWA_TEXT_COLOR, fg)):
+                ref = _colorref(hexv)
+                if ref is None:
+                    continue
+                c = ctypes.c_int(ref)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(c), ctypes.sizeof(c)
+                )
+        except Exception:  # noqa: BLE001 - 配色是锦上添花，失败不影响可用性
+            pass
+        return hr == 0
     except Exception:
         return False
 
 
+def enable_dark_titlebar(widget, dark: bool | None = None) -> bool:
+    """兼容旧名 —— 实际行为已是「跟随主题」。新代码请用 ``apply_titlebar_theme``。"""
+    return apply_titlebar_theme(widget, dark)
+
+
 # ── Themed message-box helpers (replace raw QMessageBox) ──────────────────
 # QMessageBox uses the OS-native title bar which is white on dark theme.
-# These helpers build lightweight QDialogs with enable_dark_titlebar so all
+# These helpers build lightweight QDialogs with theme-matched title bars so all
 # confirmations / warnings / info dialogs blend with the launcher theme.
 
 # Custom SVG icons (no emoji) — assets/icons/<name>.svg, loaded via .icons.icon
@@ -168,7 +228,7 @@ def _msgbox(
         btn_row.addWidget(btn)
     root.addLayout(btn_row)
 
-    enable_dark_titlebar(dlg)
+    apply_titlebar_theme(dlg)
     result = dlg.exec()
     picked = clicked[0]
     # round-217：QDialog 以 parent 为父，exec() 之后 C++ 对象仍然挂在父窗口
@@ -219,7 +279,7 @@ def pick_files(parent, title: str, start_dir: str = "", filt: str = "",
         dlg.setFileMode(QFileDialog.ExistingFiles)
     else:
         dlg.setFileMode(QFileDialog.ExistingFile)
-    enable_dark_titlebar(dlg)
+    apply_titlebar_theme(dlg)
     ok = bool(dlg.exec())
     files = dlg.selectedFiles() if ok else []
     dlg.deleteLater()      # round-217：同 _msgbox，别把文件对话框留在父窗口下
@@ -286,7 +346,7 @@ def text_input(parent, title: str, label: str, default: str = "",
     btn_row.addWidget(ok_btn)
     lay.addLayout(btn_row)
 
-    enable_dark_titlebar(dlg)
+    apply_titlebar_theme(dlg)
     ok = dlg.exec() == 1
     value = edit.text()
     dlg.deleteLater()      # round-217
@@ -304,7 +364,7 @@ def dark_color(parent, start: str = "#000000") -> str:
     dlg = QColorDialog(parent)
     dlg.setOption(QColorDialog.DontUseNativeDialog)
     dlg.setCurrentColor(QColor(start))
-    enable_dark_titlebar(dlg)
+    apply_titlebar_theme(dlg)
     ok = bool(dlg.exec())
     picked = dlg.selectedColor().name() if ok else ""
     dlg.deleteLater()      # round-217

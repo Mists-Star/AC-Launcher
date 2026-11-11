@@ -123,6 +123,7 @@ SUITES = [
     ("CF 文件列表分页/sha1 透传（round-221）", "test_round221_cf_files_paging.py", "script"),
     ("全项目解耦/查重/修复（round-222）", "test_round222_decouple.py", "script"),
     ("第二轮解耦/打开目录统一（round-223）", "test_round223_dedup.py", "script"),
+    ("原生标题栏跟随主题（round-224）", "test_round224_titlebar.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

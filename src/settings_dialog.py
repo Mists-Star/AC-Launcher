@@ -2938,8 +2938,8 @@ class SettingsPage(QWidget):
         from PySide6.QtWidgets import QMessageBox
         msg = QMessageBox(self)
         try:
-            from .win_rounded import enable_dark_titlebar
-            enable_dark_titlebar(msg)
+            from .win_rounded import apply_titlebar_theme
+            apply_titlebar_theme(msg)
         except Exception:
             pass
         msg.setIcon(QMessageBox.Warning)

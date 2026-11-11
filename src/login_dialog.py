@@ -26,7 +26,7 @@ from .i18n import t
 from .worker import Worker
 from .core import auth
 from .brand import MS_CLIENT_ID as BRAND_MS_CLIENT_ID
-from .win_rounded import enable_dark_titlebar, info
+from .win_rounded import apply_titlebar_theme, info
 from .accounts import manager as accounts_manager, type_label
 from .settings_dialog import load_config
 from .skins import manager as skin_manager
@@ -96,7 +96,7 @@ class LoginDialog(QDialog):
         # doesn't show a white bar against the launcher's dark theme. (The
         # frameless route was dropped because its DWM shadow hack fought the
         # round-corner attribute and mis-aligned clicks in a modal dialog.)
-        enable_dark_titlebar(self)
+        apply_titlebar_theme(self)
 
     # ----------------------------------------------------------- choice view
     def _build_choice(self) -> QWidget:
