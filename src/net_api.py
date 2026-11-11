@@ -1663,6 +1663,74 @@ def download_cf_with_deps(project_id, file_id, dest_dir, mc_version: str = "",
     return primary
 
 
+def download_cf_card(project_id, slug: str = "", cf_file: dict | None = None,
+                     dest_dir: str = "", mc_version: str = "",
+                     loader: str = "", callback=None, manifest_out=None,
+                     with_deps: bool = True, inst=None) -> str:
+    """资源中心**列表页卡片直下**统一入口（round-222）。
+
+    round-220 只把详情页改走 ``download_cf_with_deps``，列表页仍分三条并行
+    通道（cfwidget_file / cfwidget_slug / keyed project_id）——它们只下本体、
+    不解析 required 依赖、也不删同 mod 旧 jar。结果：从列表页装 FTB Ultimine
+    照样缺 FTB Library 崩游戏，同一个 bug 有两条入口，玩家随机踩中。
+
+    这里把「挑文件」和「下载」拆开：先归一出数字 project_id + file_id，再统一
+    委托 ``download_cf_with_deps``。三条通道收敛成一处，行为与详情页对齐。
+    整合包逐文件安装走 ``download_curseforge_mod``（modpack_import.py:294），
+    不经过这里——那份文件由 manifest 精确指定，不能替它补依赖。
+    """
+    pid = str(project_id or "")
+    fid = ""
+    sha1 = ""
+
+    # 1) cfwidget 命中已带文件 id → 沿用 round-178 的兼容校验口径。
+    #    判空用显式比较，不能 `if cf_file.get("id")`（id=0 会被吞，
+    #    与 round-221/222 修的是同一类坑）。
+    raw_cf_id = cf_file.get("id") if isinstance(cf_file, dict) else None
+    if raw_cf_id is not None and raw_cf_id != "":
+        if (mc_version or loader) and not _cf_filter_files(
+                [cf_file], mc_version, loader):
+            raise NetError("该文件声明的游戏版本 / 加载器与当前实例不匹配"
+                           "（已放弃下载）")
+        fid = str(raw_cf_id)
+        sha1 = _cf_sha1(cf_file)
+
+    # 2) 只有 project_id / slug → 按实例版本挑最新匹配文件（round-178 语义，
+    #    不再盲取「最新一条」把不兼容 jar 装进实例）。复用 _cf_resolve_dep_file，
+    #    不写第四套解析。
+    if not fid:
+        picked = _cf_resolve_dep_file(pid or slug, mc_version, loader)
+        if picked:
+            fid, sha1 = picked["file_id"], picked["sha1"]
+
+    # 3) 依赖端点 /mods/{id}/files/{fid} 只认数字 project_id；slug 需反查。
+    info = None
+    if not pid.isdigit():
+        try:
+            info = _cfwidget_info(slug or pid)
+        except NetError:
+            info = None
+        if info and info.get("id"):
+            pid = str(info["id"])
+        # 文件列表还没挑到 → 用 cfwidget 的文件表按版本再挑一次
+        if not fid and info:
+            rows = [f for f in (info.get("files") or [])
+                    if isinstance(f, dict)]
+            rows = _cf_filter_files(rows, mc_version, loader)
+            if rows:
+                fid = str(rows[0].get("id") or "")
+                sha1 = _cf_sha1(rows[0])
+
+    if not fid:
+        raise NetError(_t_err("err.curseforge_no_file",
+                              default="该 mod 没有匹配当前版本的可下载文件"))
+
+    return download_cf_with_deps(
+        pid or slug, fid, dest_dir, mc_version, loader,
+        callback=callback, manifest_out=manifest_out,
+        with_deps=with_deps, inst=inst, primary_sha1=sha1)
+
+
 # ── 模组翻译（round-66）───────────────────────────────────────────────
 # 资源中心详情页"获取翻译"：免费接口，无需 API key。
 # round-125：Google gtx 在国内网络直接超时（用户「资源中心获取翻译失败」），

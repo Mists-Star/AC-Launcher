@@ -20,6 +20,50 @@ from typing import Callable
 from .i18n import t
 
 
+def tick_import_progress(state: dict, progress) -> None:
+    """整合包导入进度的 200ms 轮询回调（round-222 抽取公共实现）。
+
+    ``pages_browse`` / ``pages_instances`` 曾各有一份逐字相同的 32 行闭包，
+    只靠 ``state``（跨线程零信号管道）和 ``QProgressDialog`` 驱动。两处逻辑
+    分叉的风险很实：下面这些坑都是踩过才补上的——
+
+    * ``done < 0`` = 不定长阶段（装游戏版本 / 加载器），用回调自定义文案；
+    * 满值后**不能**再 ``setValue(max)``：QProgressDialog 会自动关 → reset
+      清空 label → 再 show，玩家看到「导入包」空提示一直闪（round-150）。
+      改为一次性切不定长转圈 + 收尾文案，稳定显示到完成；
+    * label 只在文案变化时写，避免每 200ms 无谓重绘。
+
+    ``state`` 键：``done`` / ``total`` / ``label`` / ``txt`` / ``finishing``。
+    """
+    d, tot = state["done"], state["total"]
+    if d < 0:
+        txt = state.get("label") or t("modpack.finishing")
+        if progress.maximum() != 0:
+            progress.setRange(0, 0)
+        if state.get("txt") != txt:
+            state["txt"] = txt
+            progress.setLabelText(txt)
+        if not progress.isVisible():
+            progress.show()
+        return
+    if not tot:
+        return
+    if d < tot:
+        if progress.maximum() != tot:
+            progress.setRange(0, tot)
+        if progress.value() != d:
+            progress.setValue(d)
+        txt = f"{t('modpack.importing')}（{d}/{tot} · {d * 100 // tot}%）"
+        if state.get("txt") != txt:
+            state["txt"] = txt
+            progress.setLabelText(txt)
+    elif not state.get("finishing"):
+        state["finishing"] = True
+        progress.setRange(0, 0)
+        progress.setLabelText(t("modpack.finishing"))
+        progress.show()
+
+
 def detect_pack_format(path: str) -> str | None:
     """Return one of 'mrpack'/'curseforge'/'zip_mc'/'folder'/None."""
     if os.path.isdir(path):

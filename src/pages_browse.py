@@ -1242,11 +1242,10 @@ class StorePage(QWidget):
         # round-140：合并源下按卡片归属分流（card.source 优先于页面源）
         src = (card or {}).get("source") or self._source
         if src == "curseforge":
-            from .net_api import (download_cfwidget_file, download_curseforge_mod,
-                                  download_cfwidget_slug, curseforge_available,
-                                  curseforge_keyless_enabled)
-            # round-178：卡片「直接下载」没有选版本环节，必须带实例的
-            # MC 版本 / 加载器过滤，否则会装进最新版不兼容的 jar。
+            # round-222：三条并行通道（cfwidget_file / cfwidget_slug / keyed
+            # project_id）收敛到 download_cf_card。此前它们只下本体，不解析
+            # required 依赖、不删同 mod 旧 jar —— 从列表页装 FTB Ultimine
+            # 照样缺 FTB Library 崩游戏（round-220 只修了详情页入口）。
             # ⚠ ProgressWorker 用 keyword 注入 callback，新增参数一律走
             #   kwargs，别占位置参数位（会撞 multiple values）。
             mc = getattr(inst, "game_version", "") or ""
@@ -1260,25 +1259,12 @@ class StorePage(QWidget):
                 "title": (card or {}).get("title", "") or slug,
                 "source": "curseforge",
             }
-            if cf_file:
-                # 免 key 通道解析出的文件（含 id/name）→ forgecdn 直链
-                self._dworker = ProgressWorker(
-                    download_cfwidget_file, cf_file, dest,
-                    mc_version=mc, loader=ld,
-                    manifest_out=self._dl_manifest,
-                    project_id=str(project_id or slug))
-            elif not curseforge_available() and curseforge_keyless_enabled():
-                # 免 key 镜像搜索的命中只有 slug → slug → cfwidget → forgecdn
-                self._dworker = ProgressWorker(
-                    download_cfwidget_slug, slug, dest,
-                    mc_version=mc, loader=ld,
-                    manifest_out=self._dl_manifest)
-            else:
-                # 官方 API 搜索命中只有 project_id → 走官方下载接口
-                self._dworker = ProgressWorker(
-                    download_curseforge_mod, project_id, dest,
-                    mc_version=mc, loader=ld,
-                    manifest_out=self._dl_manifest)
+            from .net_api import download_cf_card
+            self._dworker = ProgressWorker(
+                download_cf_card, str(project_id or ""), slug, cf_file, dest,
+                mc_version=mc, loader=ld,
+                manifest_out=self._dl_manifest,
+                inst=inst, with_deps=True)
         else:
             # round-37：传入实例的 MC 版本 + 加载器，让 Modrinth 过滤兼容版本
             # 并自动拉取 required 依赖树（download_mod_to 已支持依赖解析）
@@ -1402,7 +1388,8 @@ class StorePage(QWidget):
         self._dl_speed.setVisible(False)
         from PySide6.QtWidgets import QProgressDialog
         from .win_rounded import warn
-        from .modpack_import import detect_pack_format, import_curseforge_zip
+        from .modpack_import import (detect_pack_format, import_curseforge_zip,
+                                  tick_import_progress)
         from .net_api import NetError
         if detect_pack_format(path) != "curseforge":
             info(self, t("mrpack.title"), t("mrpack.bad_file"))
@@ -1436,37 +1423,7 @@ class StorePage(QWidget):
         tick.setInterval(200)
 
         def _on_tick():
-            d, tot = state["done"], state["total"]
-            if d < 0:
-                # round-150：不定长阶段（装游戏版本/加载器）用回调的自定义文案。
-                txt = state.get("label") or t("modpack.finishing")
-                if progress.maximum() != 0:
-                    progress.setRange(0, 0)
-                if state.get("txt") != txt:
-                    state["txt"] = txt
-                    progress.setLabelText(txt)
-                if not progress.isVisible():
-                    progress.show()
-                return
-            if not tot:
-                return
-            if d < tot:
-                if progress.maximum() != tot:
-                    progress.setRange(0, tot)
-                if progress.value() != d:
-                    progress.setValue(d)
-                txt = f"{t('modpack.importing')}（{d}/{tot} · {d * 100 // tot}%）"
-                if state.get("txt") != txt:
-                    state["txt"] = txt
-                    progress.setLabelText(txt)
-            elif not state.get("finishing"):
-                # 收尾阶段（补全版本/装加载器）：不再 setValue(max) 触发
-                # 自动关→reset→show 循环（「导入包」空提示闪烁的根因）。
-                #一次性切不定长转圈 + 收尾文案，稳定显示到完成。
-                state["finishing"] = True
-                progress.setRange(0, 0)
-                progress.setLabelText(t("modpack.finishing"))
-                progress.show()
+            tick_import_progress(state, progress)
 
         def _done(inst):
             tick.stop()

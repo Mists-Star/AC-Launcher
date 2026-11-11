@@ -1628,3 +1628,44 @@ N 份、模块 `id=".."` 越界、`map_cache` 只增不删、区块级解压上�
   持久化磁盘缓存不换会让改动白做一半 → 一并升到 `cfv2:` / `cfvw2:`。
 
 `tests/test_round221_cf_files_paging.py` 24 项。
+
+---
+
+## 二十八、round-222：全项目解耦 / 功能查重（2026-11-11）
+
+> 用户要求「对整个项目查看一遍进行解耦和功能查重/修复等」。静态摸底：
+> `src/` 113 个 .py、顶层导入 **0 环**、AST 精确重复函数体 **3 组**、
+> 跨模块显式私有调用 22 处。三路并行人工复核后按收益/风险比取 4 项。
+
+| 级别 | 现象 | 根因 | 修法 | 判据 |
+|---|---|---|---|---|
+| P0 | 从**列表页**装 FTB Ultimine 仍缺 FTB Library 崩游戏 | round-220 只修详情页；列表页三条并行通道（cfwidget_file / cfwidget_slug / keyed pid）只下本体、不解析 required 依赖、不删旧 jar | 新增 `download_cf_card` 收敛三通道，归一出数字 pid + file_id 后统一委托 `download_cf_with_deps`；`inst`/`with_deps`/`primary_sha1` 全透传 | 三通道分别打桩验证委托参数；整合包链路 `modpack_import.py:294`、`pages_browse.py:1338` 保持原样 |
+| P1 | 清单 id 静默变形 | `modules.validate_manifest` 净化后直接用（`ok/../evil` → `ok..evil` 放行），与 `features` 明确拒绝的口径分叉；`install_legacy_theme_pack` 同源 | 类型检查 + strip + 拒绝 `mid != raw_id`；legacy 路径同步 | 6 组 id 两处口径一致；真实写临时 legacy 包被拒且数据根目录未污染 |
+| P1 | `fid = f0.get("id") or v.get("id")` | id=0 / 空串会掉到版本显示串（非 fileID），与 round-221 同类坑 | 改显式判空 | 行为断言 |
+| 解耦 | 5 个对话框壳三段转发逐字重复 | 历史复制粘贴 | 抽 `src/panel_shell.py:PanelShellMixin`，单独小模块不塞 `ui_kit.py` | 真 Qt 离屏：5 壳 MRO 正确、可构造、`__setattr__` 不干扰 Qt 属性、`JavaManagerDialog.done()` 保留 |
+| 查重 | `_on_tick` 32 行 ×2 逐字重复 | 两处导入流程各复制一份 | 抽 `modpack_import.tick_import_progress`，两处留极薄包装闭包 | 状态机 6 项（进行中/不重绘/满值不 setValue(max)/不闪烁/不定长文案） |
+
+☠ 三条教训：
+1. **源码字面量断言随重构静默失效**——本轮 round-178/195/197 共 3 项全绿
+   被打成 FAIL，行为其实没坏（真 Qt 构造验证过）。已改成真实继承 / 行为
+   判据。**别把字面量改回去糊过去**（round-221 已记过一次）。
+2. **多继承 mixin 必须真机构造验证**：`__setattr__` 覆盖会介入 Qt 对象整个
+   构造过程，只检查 MRO / import 成功不够。
+3. **`or` 吞 0 是家族性坑**：round-221 修了 `_cf_files_all`，本轮又发现
+   `store_detail.fid` 和 `download_cf_card` 的 `cf_file.get("id")` 两处同类。
+   改代码时见到 `x.get(k) or fallback` 且 x[k] 可能是数字就要警觉。
+
+**审查后明确不动的**（避免下轮重复挖）：
+- `downloader.py` **不是死代码**：`main.py:611` 关窗钩子在用
+  `shutdown_default_queue`（子代理误报，已交叉验证纠正）。
+- **顶层导入 0 环**；合并延迟导入后的 35 模块 SCC 是正常解环手段，不是病。
+- `search_all` / `_cf_page` 生产零调用，但被 round-206/207 多处回归依赖，保留。
+- 22 处跨模块私有调用多为同包刻意协作（`store_search` ↔ `net_api` 等），
+  收益低风险高。`_msgbox` 是已抽好的公共实现，不是重复封装。
+- **未做大手术候选（并列两条，有依赖）**：① `core/config.py` 收敛
+  `load_config/save_config`、切断 `settings_dialog` import 枢纽（20+ 调用点）；
+  ② `core/utils.py` 统一 JSON 持久化骨架（7 组 15+ 调用点）。
+  **① 应复用 ②，建议先 ② 后 ①**，各需独立一轮专项。
+
+结果：AST 精确重复函数体 **3 组 → 0 组**；`regress.py` **89/89**，
+`smoke_all.py` 17/17。`tests/test_round222_decouple.py` 31 项。

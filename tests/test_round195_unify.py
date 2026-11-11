@@ -77,10 +77,16 @@ check("编辑不再 exec 弹窗",
       "InstanceEditorDialog(self, inst)" not in pages_src)
 check("体检不再 exec 弹窗", "open_health_dialog(self, inst" not in pages_src)
 check("增强包不再 exec 弹窗", "EnhanceDialog(self, inst).exec()" not in pages_src)
-check("窗口壳仍保留（兼容旧调用点）",
-      "class InstanceEditorDialog(QDialog)" in editor_src
-      and "class HealthDialog(QDialog)" in health_src
-      and "class EnhanceDialog(QDialog)" in enh_src)
+# round-222：HealthDialog / EnhanceDialog 的转发三件套已抽到
+# PanelShellMixin，基类声明随之变化。改成真实 import 的行为判据——
+# 「壳还在、仍是 QDialog 子类」才是兼容性契约，基类写法不是。
+from src.instance_editor import InstanceEditorDialog  # noqa: E402
+from src.mod_check_dialog import HealthDialog  # noqa: E402
+from src.enhance_dialog import EnhanceDialog  # noqa: E402
+from PySide6.QtWidgets import QDialog  # noqa: E402
+check("窗口壳仍保留且都是 QDialog 子类（兼容旧调用点）",
+      all(issubclass(c, QDialog) for c in
+          (InstanceEditorDialog, HealthDialog, EnhanceDialog)))
 
 print("④ 运行时：页内栈能开合")
 from PySide6.QtWidgets import QApplication  # noqa: E402

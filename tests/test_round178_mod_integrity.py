@@ -253,8 +253,15 @@ try:
                   encoding="utf-8").read()
     detail = open(os.path.join(ROOT, "src", "store_detail.py"),
                   encoding="utf-8").read()
-    check("资源中心三路 CF 卡片下载都带版本 / 加载器",
-          browse.count("mc_version=mc, loader=ld") == 3)
+    # round-222：三条并行 CF 卡片通道已收敛到 download_cf_card 单一入口，
+    # 版本/加载器由它统一透传（并额外带上依赖解析与删旧 jar）。
+    # 不再数 `mc_version=mc, loader=ld` 出现次数——那是实现细节，重构即失效。
+    # 真行为断言见 tests/test_round222_decouple.py（打桩验证各通道委托参数）。
+    check("CF 卡片下载收敛到单一入口且带版本 / 加载器",
+          "download_cf_card" in browse
+          and "mc_version=mc, loader=ld" in browse
+          and "download_cfwidget_slug" not in browse
+          and "inst=inst, with_deps=True" in browse)
     # round-221：详情页 CF 分支已改走 download_cf_with_deps，判据随之改为
     # 「版本条目的 sha1 透传给本体下载」。真行为断言见
     # tests/test_round221_cf_files_paging.py（打桩验证 _cf_download_one 收到 sha1）。

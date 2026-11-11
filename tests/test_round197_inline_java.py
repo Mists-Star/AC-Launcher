@@ -56,7 +56,12 @@ modlist_src = io.open(os.path.join(HERE, "src", "mod_list.py"),
 
 print("① 崩溃分析页内化")
 check("面板是 QWidget", "class CrashAnalyzerPanel(QWidget)" in crash_src)
-check("窗口壳保留", "class CrashAnalyzerDialog(QDialog)" in crash_src)
+# round-222：壳的转发三件套抽到 PanelShellMixin，基类声明变了。
+# 用真实继承关系判定「壳还在、仍是 QDialog 子类」，别数源码字面量。
+from src.crash_dialog import CrashAnalyzerDialog  # noqa: E402
+from PySide6.QtWidgets import QDialog  # noqa: E402
+check("窗口壳保留且仍是 QDialog 子类",
+      issubclass(CrashAnalyzerDialog, QDialog))
 check("实例页走页内栈",
       "CrashAnalyzerPanel(inst, parent=self)" in pages_src
       and "CrashDialog(inst, parent=self).exec()" not in pages_src)
@@ -78,14 +83,38 @@ check("三处不再各开一个管理器",
       or "JavaManagerDialog(" not in pages_src)
 
 print("③ 壳包面板的结构性坑")
-for name, src in (("java", java_src), ("crash", crash_src)):
-    check("%s 壳有 __setattr__ 转发" % name,
-          "def __setattr__(self, name, value)" in src)
-    check("%s 壳有 closeEvent 转发" % name, "def closeEvent(self, ev)" in src)
+# round-222：转发逻辑统一在 PanelShellMixin，判据改为「继承链上真的有
+# 这些方法」+ 一次真实写入验证，比检查 def 字面量更能挡住行为回归。
+from src.java_manager_dialog import JavaManagerDialog  # noqa: E402
+from src.panel_shell import PanelShellMixin  # noqa: E402
+for name, cls in (("java", JavaManagerDialog),
+                  ("crash", CrashAnalyzerDialog)):
+    check("%s 壳继承 __setattr__ 转发" % name,
+          issubclass(cls, PanelShellMixin)
+          and "__setattr__" in PanelShellMixin.__dict__)
+    check("%s 壳继承 closeEvent 转发" % name,
+          "closeEvent" in PanelShellMixin.__dict__
+          and cls.__dict__.get("closeEvent") is None)
 check("Java 壳显式转发 done()（QDialog 自带同名会遮蔽）",
-      "def done(self, r):" in java_src)
+      "done" in JavaManagerDialog.__dict__)
 check("done 转发有递归守卫",
       "_in_done" in java_src)
+
+# 真行为：写入必须落到 panel，否则状态行永远停在旧状态（round-197 原始坑）
+class _P:
+    def __init__(self):
+        self._dl_phase = "idle"
+
+
+class _S(PanelShellMixin):
+    pass
+
+
+_s = _S()
+_s.panel = _P()
+_s._dl_phase = "download"
+check("写入确实转发到 panel（round-197 原始坑不复现）",
+      _s.panel._dl_phase == "download")
 
 print("④ 来源记录：整合包 / 导入")
 check("record 不再强制要求 project_id",

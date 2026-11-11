@@ -2710,6 +2710,7 @@ class InstancesPage(QWidget):
         from .modpack_import import (
             detect_pack_format, import_curseforge_zip,
             import_zip_as_instance, import_folder_as_instance,
+            tick_import_progress,
         )
         from .net_api import NetError
 
@@ -2781,39 +2782,7 @@ class InstancesPage(QWidget):
         tick.setInterval(200)
 
         def _on_tick():
-            d, tot = state["done"], state["total"]
-            if d < 0:
-                # round-150：不定长阶段（装游戏版本/加载器）用回调带来的自定义文案，
-                # 不再只显示笼统的「正在收尾」。
-                txt = state.get("label") or t("modpack.finishing")
-                if progress.maximum() != 0:
-                    progress.setRange(0, 0)
-                if state.get("txt") != txt:
-                    state["txt"] = txt
-                    progress.setLabelText(txt)
-                if not progress.isVisible():
-                    progress.show()
-                return
-            if not tot:
-                return
-            if d < tot:
-                if progress.maximum() != tot:
-                    progress.setRange(0, tot)
-                if progress.value() != d:
-                    progress.setValue(d)
-                txt = f"{t('modpack.importing')}（{d}/{tot} · {d * 100 // tot}%）"
-                if state.get("txt") != txt:
-                    state["txt"] = txt
-                    progress.setLabelText(txt)
-            elif not state.get("finishing"):
-                # 文件下完后的收尾阶段（补全游戏版本 / 装加载器，可能较久）。
-                # 此前这里每 200ms 反复 setValue(总值) → QProgressDialog
-                # 自动关→reset(清空 label)→再 show 循环 —— 用户看到
-                # 「导入包」空提示一直闪。改为一次性切不定长转圈+收尾文案。
-                state["finishing"] = True
-                progress.setRange(0, 0)
-                progress.setLabelText(t("modpack.finishing"))
-                progress.show()
+            tick_import_progress(state, progress)
 
         def _done(inst):
             tick.stop()

@@ -8,6 +8,57 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-222（2026-11-11）— 全项目解耦 / 功能查重 / 修复
+
+对 `src/` 全部 113 个 .py 做静态摸底（导入图 + AST 重复函数体 + 私有调用），
+并三路并行人工复核下载/缓存/版本/校验/UI/依赖/耦合。量化结论：**顶层导入
+0 环**（合并函数内延迟导入后的 35 模块大环属正常解环手段）、**精确重复函数体
+3 组**、跨模块显式私有调用 22 处。本轮做 4 项低风险改动：
+
+- **P0 修 CF 列表页卡片直下缺依赖**：round-220 只把详情页改走
+  `download_cf_with_deps`，列表页仍分三条并行通道（cfwidget_file /
+  cfwidget_slug / keyed project_id），只下本体、不解析 required 依赖、不删
+  同 mod 旧 jar → 从列表页装 FTB Ultimine 照样缺 FTB Library 崩游戏，
+  同一个 bug 有两条入口。新增 `download_cf_card` 收敛三通道，归一化出数字
+  project_id + file_id 后统一委托；`inst` / `with_deps` / `primary_sha1`
+  全部透传。整合包逐文件链路（`modpack_import.py:294`、`pages_browse.py:1338`）
+  **原样保留**——那份文件由 manifest 精确指定，不能替它补依赖。
+- **P1 修 manifest id 静默清洗**：`modules.validate_manifest` 曾把
+  `ok/../evil` 净化成 `ok..evil` 后放行，与 `features.validate_manifest`
+  明确拒绝的口径不一致（清单声明 id 与实际落盘目录名悄悄分叉）。
+  对齐为「类型检查 + strip + 拒绝 `mid != raw_id`」；`install_legacy_theme_pack`
+  同源遗漏一并收。顺手修 `store_detail.py` 的 `fid = f0.get("id") or v.get("id")`
+  （id=0 会掉到版本显示串，与 round-221 同类坑）。
+- **解耦**：5 个对话框壳的 `__getattr__ / __setattr__ / closeEvent` 三段逐字
+  重复，抽成 `src/panel_shell.py:PanelShellMixin`（独立小模块，不塞进
+  `ui_kit.py` 以免引入 QDialog 依赖）。`JavaManagerDialog` 的 `done()` 保留。
+- **查重**：`pages_browse` / `pages_instances` 各一份逐字相同的 32 行
+  `_on_tick`（归一化哈希一致），抽成 `modpack_import.tick_import_progress`；
+  两处保留极薄包装闭包，`timeout.connect` 与闭包语义不变。
+
+结果：**AST 精确重复函数体 3 组 → 0 组**。
+
+**测试**：新增 `tests/test_round222_decouple.py` 31/31（三通道委托参数、
+依赖树、id 严格性、mixin 真行为、tick 状态机）；把 round-178 / 195 / 197
+三条**源码字面量断言**改成真实继承/行为判据（字面量会随重构静默失效，
+round-221 已记过教训）；round-222 挂进 `regress.py` → **全量 89/89**。
+另做真 Qt 离屏验证：5 个壳 MRO 正确、可实际构造、`__setattr__` 不干扰
+Qt 属性、`done()` 仍在；`smoke_all.py` 17/17。
+
+> **本轮审查后明确不动的**（记录以免下轮重复挖）：
+> * `downloader.py` **不是死代码**——`main.py:611` 关窗钩子在用
+>   `shutdown_default_queue`（只是 `DownloadQueue` 未被用于下载）。
+> * **顶层导入 0 环**；那个 35 模块 SCC 全是函数内延迟导入，是解环手段不是病。
+> * `search_all` / `_cf_page` 生产零调用但被 round-206/207 多处回归依赖，保留。
+> * 22 处跨模块私有调用多为同包内刻意协作（如 `store_search` ↔ `net_api`），
+>   收益低风险高，不动。
+> * `_msgbox` 是已抽好的公共实现，不是重复封装。
+> * **未做的大手术候选（并列两条，有依赖）**：① 抽 `core/config.py` 收敛
+>   `load_config/save_config` 到单一入口，切断 `settings_dialog` 作为
+>   import 枢纽（20+ 调用点）；② 抽 `core/utils.py` 统一 JSON 持久化骨架
+>   （`_load/_save/_atomic_write` 7 组 15+ 调用点）。**① 应复用 ②**，
+>   建议先做 ② 再做 ①。两者都需独立一轮专项，本轮不碰。
+
 ## round-221（2026-11-09）— CF 文件列表被截断到 50 条 + 详情页本体 sha1 校验回归
 
 排查「FTB Library 26.3.0.1 从哪来」时顺带挖出的两个真 bug，均离线回归覆盖。

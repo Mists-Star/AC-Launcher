@@ -1211,7 +1211,10 @@ class StoreDetailPanel(QWidget):
             # round-220：CF 通道终于自动拉前置（FTB Ultimine → FTB Library 等），
             # 并把同 mod 旧版本 jar 删掉，避免新旧 FTB Library 共存崩游戏。
             f0 = (v.get("files") or [{}])[0]
-            fid = f0.get("id") or v.get("id")
+            # round-222：不能用 `or` 回退——文件 id 是数字，0 / 空串会掉到
+            # v["id"]（版本显示串，不是 fileID），与 round-221 修的 id=0 同源坑。
+            raw_fid = f0.get("id")
+            fid = v.get("id") if raw_fid is None or raw_fid == "" else raw_fid
             # round-221：版本条目现在带 sha1（从 CF 文件元数据取），透传给
             # 本体下载做完整性校验；round-220 重构时这个值一度是死值。
             w = ProgressWorker(

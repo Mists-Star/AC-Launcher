@@ -121,6 +121,7 @@ SUITES = [
     ("一键修复按钮可用性与反馈（round-219）", "test_round219_repair_button.py", "script"),
     ("FTB 依赖解析（round-220）", "test_round220_ftb_deps.py", "script"),
     ("CF 文件列表分页/sha1 透传（round-221）", "test_round221_cf_files_paging.py", "script"),
+    ("全项目解耦/查重/修复（round-222）", "test_round222_decouple.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

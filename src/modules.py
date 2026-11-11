@@ -137,15 +137,23 @@ def _safe_module_dir(mid: str) -> str:
 
 
 def validate_manifest(m: dict, folder_name: str = "") -> str:
-    """校验清单，返回模块 id；不合法抛 ModuleError。"""
+    """校验清单，返回模块 id；不合法抛 ModuleError。
+
+    round-222：与 ``features.validate_manifest`` 对齐——**不做静默清洗**。
+    旧实现把原始 id 净化后直接用（``"ok/../evil"`` 会变成 ``"ok..evil"``
+    并放行），导致清单声明的 id 与实际落盘目录名悄悄不一致；虽然
+    ``_safe_module_dir`` 挡住了 ``".."`` 越界写，但语义分叉仍在（调用方拿
+    到的 mid 不是作者写的 id）。非法 id 一律明确拒绝，与 features 同一口径。
+    """
     if not isinstance(m, dict):
         raise ModuleError("模块清单格式无效（应为 JSON 对象）")
-    mid = m.get("id")
-    if not mid:
-        raise ModuleError("模块清单缺少 id")
-    mid = _sanitize_id(mid)
-    if not _RE_ID.match(mid):
-        raise ModuleError(f"模块 id 非法：{mid!r}")
+    raw_id = m.get("id", "")
+    if not isinstance(raw_id, str):
+        raise ModuleError("模块 id 必须是字符串")
+    raw_id = raw_id.strip()
+    mid = _sanitize_id(raw_id)
+    if not mid or mid != raw_id or not _RE_ID.match(mid):
+        raise ModuleError(f"模块 id 非法：{raw_id!r}")
     if folder_name and folder_name != mid:
         raise ModuleError(
             f"模块目录名（{folder_name}）与 manifest.id（{mid}）不一致")
@@ -335,13 +343,19 @@ def _strip_secret_dirs(folder: str) -> None:
 def install_legacy_theme_pack(json_path: str) -> ModuleInfo:
     """把旧版主题包 .json 转成一个 theme_pack 模块（不破坏旧主题下拉）。"""
     pack = _read_json(os.path.abspath(json_path))
-    mid = _sanitize_id(pack.get("id", ""))
+    raw_id = pack.get("id", "")
+    if not isinstance(raw_id, str):
+        raise ModuleError("旧主题包 id 必须是字符串")
+    raw_id = raw_id.strip()
+    mid = _sanitize_id(raw_id)
     if not mid:
         raise ModuleError("旧主题包缺少 id，无法转换")
     # round-216：净化只删非法字符、不校验形态。``".."`` 净化后仍是 ``".."``，
     # 会被当成模块目录 → 写进 <data> 根。必须按正式规则再校验一次。
-    if not _RE_ID.match(mid):
-        raise ModuleError(f"旧主题包 id 非法：{mid!r}")
+    # round-222：与 validate_manifest 对齐，补上「不做静默清洗」——
+    # 旧实现会让 "ok/../evil" 变成 "ok..evil" 后写入清单，id 与作者声明不符。
+    if mid != raw_id or not _RE_ID.match(mid):
+        raise ModuleError(f"旧主题包 id 非法：{raw_id!r}")
     dest = _safe_module_dir(mid)
     if os.path.exists(dest):
         raise ModuleError(f"已存在同名模块：{mid}")

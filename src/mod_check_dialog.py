@@ -22,6 +22,7 @@ from .core import mod_check
 from .frameless import FramelessHelper, TitleBar
 from .fix_feedback import FeedbackBar, report
 from .win_rounded import enable_win11_round_corners
+from .panel_shell import PanelShellMixin
 
 _SEV_COLOR = {
     mod_check.SEV_CRITICAL: "#EF4444",
@@ -408,7 +409,7 @@ class _FindingCard(QFrame):
 # 兼容别名：既有调用点继续可用。
 
 
-class HealthDialog(QDialog):
+class HealthDialog(PanelShellMixin, QDialog):
     """**兼容壳**：窗口模式（历史调用点）。内部就是 :class:`HealthPanel`。"""
 
     def __init__(self, inst, result: dict, mgr=None, parent=None):
@@ -423,37 +424,6 @@ class HealthDialog(QDialog):
         lay.addWidget(self.panel)
         self.panel.closed.connect(self.accept)
 
-    def __getattr__(self, name):
-        if name == "panel":
-            raise AttributeError(name)
-        return getattr(self.panel, name)
-
-    def __setattr__(self, name, value):
-        """属性写入转发给内部面板。
-
-        ☠ 只转发**读取**是不够的：``dlg._dl_phase = "download"`` 会把值设在
-        壳上，而面板读的是自己的 ``_dl_phase`` → 状态行永远停在旧状态
-        （round-197 Java 下载测试当场抓出来）。
-        """
-        if name in ("panel",):
-            object.__setattr__(self, name, value)
-            return
-        panel = self.__dict__.get("panel")
-        if panel is not None and hasattr(panel, name):
-            setattr(panel, name, value)
-            return
-        object.__setattr__(self, name, value)
-
-    def closeEvent(self, ev):  # noqa: N802 - Qt 命名
-        """关闭事件转发给面板（面板里可能有后台线程要收）。"""
-        panel = self.__dict__.get("panel")
-        if panel is not None:
-            try:
-                panel.closeEvent(ev)
-                return
-            except Exception:  # noqa: BLE001
-                pass
-        super().closeEvent(ev)
 
 
 # 兼容别名（放在壳类之后，避免前向引用）
