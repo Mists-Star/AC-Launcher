@@ -27,7 +27,21 @@ test). Read-only forwarding alone is a real bug.
 """
 
 
-class PanelShellMixin:
+class PanelCloseMixin:
+    """页内面板的「关闭 / 返回」回调：``self.closed.emit()``。
+
+    ☠ 这个方法属于**面板**（``CrashAnalyzerPanel`` / ``HealthPanel`` …），
+    不属于套在外面的 ``QDialog`` 壳。round-223 第一版误判成「壳的重复代码」
+    从 4 个文件里删掉，面板被页内模式直接使用时立刻 AttributeError
+    （``smoke_all`` + 5 个回归当场炸）。壳通过 ``PanelShellMixin.__getattr__``
+    转发到面板的同名方法，所以壳自己不需要再写一份。
+    """
+
+    def _on_close(self) -> None:
+        self.closed.emit()
+
+
+class PanelShellMixin(PanelCloseMixin):
     """Forward attribute access and closeEvent to ``self.panel``."""
 
     def __getattr__(self, name):

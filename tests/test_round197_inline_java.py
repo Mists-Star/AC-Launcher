@@ -55,7 +55,14 @@ modlist_src = io.open(os.path.join(HERE, "src", "mod_list.py"),
                       encoding="utf-8").read()
 
 print("① 崩溃分析页内化")
-check("面板是 QWidget", "class CrashAnalyzerPanel(QWidget)" in crash_src)
+# round-223：面板接了 PanelCloseMixin，源码字面量不再成立 → 用真实继承判。
+from PySide6.QtWidgets import QDialog, QWidget            # noqa: E402
+from src.crash_dialog import CrashAnalyzerPanel           # noqa: E402
+
+check("面板是 QWidget（页内面板，不是 QDialog）",
+      issubclass(CrashAnalyzerPanel, QWidget)
+      and not issubclass(CrashAnalyzerPanel, QDialog),
+      CrashAnalyzerPanel.__mro__[1].__name__)
 # round-222：壳的转发三件套抽到 PanelShellMixin，基类声明变了。
 # 用真实继承关系判定「壳还在、仍是 QDialog 子类」，别数源码字面量。
 from src.crash_dialog import CrashAnalyzerDialog  # noqa: E402
@@ -69,7 +76,12 @@ check("frameless 只在窗口模式",
       "def enable_window_chrome" in crash_src)
 
 print("② Java 管理三入口合一")
-check("面板是 QWidget", "class JavaManagerPanel(QWidget)" in java_src)
+from src.java_manager_dialog import JavaManagerPanel      # noqa: E402
+
+check("面板是 QWidget（页内面板，不是 QDialog）",
+      issubclass(JavaManagerPanel, QWidget)
+      and not issubclass(JavaManagerPanel, QDialog),
+      JavaManagerPanel.__mro__[1].__name__)
 check("设置页内嵌面板",
       "JavaManagerPanel(self" in settings_src
       and "_java_host" in settings_src)

@@ -1669,3 +1669,44 @@ N 份、模块 `id=".."` 越界、`map_cache` 只增不删、区块级解压上�
 
 结果：AST 精确重复函数体 **3 组 → 0 组**；`regress.py` **89/89**，
 `smoke_all.py` 17/17。`tests/test_round222_decouple.py` 31 项。
+
+## 二十九、round-223：第二轮解耦 + 修「窗口模式弹窗全空白」（2026-11-11）
+
+> 承接 round-222 的静态摸底再跑一遍：**精确重复函数体已归零**，剩下的都是
+> 「同一件事写了好几遍」。做完 refactor 照例跑目视巡检，反而抓到一个
+> **P1 真 bug**（不是本轮引入的，一直没人目视过窗口模式）。
+
+| 级别 | 现象 | 根因 | 修法 | 判据 |
+|---|---|---|---|---|
+| **P1** | 体检 / 崩溃分析 / Java 管理三个**窗口模式**入口全是**一片空白**（页内模式正常） | `panel.enable_window_chrome()` 把 `FramelessHelper` 挂在**面板自己**身上；`_apply_flags()` 给控件打 `Qt.Window`，子控件一带这个标志就被 Qt 脱离父窗口，且 `setWindowFlags` 会隐藏它 → 壳里什么都不剩 | 新增 `frameless.enable_panel_window_chrome(panel)`，一律作用于 `panel.window()`（套壳时是 QDialog、独立使用时才是面板）；三处调用点收敛 | 离屏实测 `panel.isWindow()` True→False、面板 `isVisible()` True、弹窗抓图 1 种颜色 → 6~13 种；截图里标题栏/分组/底部按钮齐全 |
+| 查重 | `_loader_vivid` 两份逐字相同（列表页 / 详情页） | 同一开关抄了两遍，改口径只改一边 → 列表彩色、详情中性 | 收归 `theme.loader_vivid()`，两处直接引用同一函数对象；加按 pack id 的记忆（原来每张徽章都 `find_theme_pack()` 扫目录解析全部 JSON），在 `apply_theme_pack` / `import_theme_pack_file` 失效 | 归属断言 + 缓存命中（find 只调 1 次）+ `apply_theme_pack` 后记忆清空 |
+| 查重 | `_on_close` 四份 `self.closed.emit()` | 复制粘贴 | 抽 `panel_shell.PanelCloseMixin` | 面板侧自己可 emit、壳侧经 `__getattr__` 落到同一信号、连点两次发两次 |
+| 查重 | `_center_on_screen` 两份（splash / welcome） | 复制粘贴 | 抽 `win_geometry.center_on_screen()`；刻意不 import Qt，启动路径导入图不变 | 1920×1080 可用区 + 480×320 窗口 → move(720,380)；无屏幕时不移动不抛 |
+| 查重 | 「打开目录」全项目 4 套实现、4 种体验 | 各页面自己写；`pages_instances` 那份**只在目录已存在时才动**，不存在时点按钮毫无反应 | 统一 `os_open.open_local_path(parent, path, create=False)`：缺失/拒绝都明确提示，`create=True` 先建再开；新增 i18n `common.open_missing` / `common.open_failed` | 空路径不弹框、缺失→提示、create 建目录、系统拒绝→提示带原因、三个调用点接线（含 `create=True` 语义） |
+| 死代码 | `instance_editor._reveal_path` 零引用 | 历史遗留 | 删除；顺手清 `QUrl` / `INSTANCE_FORMATS` / `QSize` / `QColor` / `QPushButton` 失效导入 | 全仓零引用扫描 |
+
+☠ 本轮教训：
+
+1. **「归属」判断错了比不改还糟**：第一版把 `_on_close` 当成「壳的重复代码」
+   从 4 个文件删掉，结果面板（页内模式真正的调用方）当场 AttributeError，
+   `smoke_all` + 5 个回归一起炸。**改之前先确认这个方法是被谁调的**——
+   壳能用只是因为 `__getattr__` 转发。
+2. **refactor 完必须目视**：这轮 90/90 全绿时窗口模式弹窗还是空白。灯光
+   照不到的角落靠「跑一遍截图」才露出来（`isWindow()` / 抓图颜色数是最便宜
+   的判据）。
+3. **`Qt.Window` 打在子控件上 = 静默脱离父窗口**：不是布局问题、不是样式
+   问题、不报任何错，界面就是空的。以后见到「弹窗空白」先查
+   `child.isWindow()`。
+
+**明确不做 / 留待下轮**：
+- `instance_editor.InstanceEditorDialog.__getattr__` 与 `PanelShellMixin` 仍
+  重复一条：接 mixin 会同时引入 `__setattr__` 写透与 `closeEvent` 转发，
+  实例编辑是核心链路，值一次专项 + 真机验证，别顺手改。
+- `pages_browse` / `pages_instances` 的 `_pr` / `_err` 闭包（各 3、5 行）
+  刻意保留：它们绑的是各自页面的局部控件与 `_done` 分支，抽出去只会多一层
+  间接。
+- round-222 留的 `core/config.py` / `core/utils.py` 收敛（需 ② → ① 顺序）
+  仍未动。
+
+**门禁**：`tests/test_round223_dedup.py` 35/35；`regress.py` **90/90**；
+round-195 / 197 三条 `class X(QWidget)` 字面量断言改真实继承判据。

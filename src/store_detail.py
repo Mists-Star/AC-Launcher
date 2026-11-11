@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import QDesktopServices, QPixmap
 
-from .theme import COLORS, with_alpha
+from .theme import COLORS, with_alpha, loader_vivid
 from . import ui_kit
 from .i18n import t
 from .worker import ProgressWorker, Worker
@@ -70,7 +70,7 @@ PAGE_SIZE = 50
 # 加载器 → 徽章配色（对齐各加载器自身的品牌色，让加载器一眼可辨）。
 # round-99 极简重构：**默认不使用**——13 个品牌色同屏时页面花而杂，加载器
 # 徽章默认走全局中性 ``badge`` 类。只有主题包显式声明 ``"loader_vivid": true``
-# （见 ``_loader_vivid()``）时才恢复品牌色（vivid 模式）。
+# （见 ``theme.loader_vivid()``）时才恢复品牌色（vivid 模式）。
 LOADER_BADGE_COLORS = {
     "fabric":     "#B0633A",   # Fabric 沙金棕
     "forge":      "#E04E14",   # Forge 橙红
@@ -87,23 +87,6 @@ LOADER_BADGE_COLORS = {
     "datapack":   "#0D9488",
 }
 LOADER_DEFAULT = "#6B7280"
-
-
-def _loader_vivid() -> bool:
-    """是否启用加载器品牌彩章（默认关；主题包可开）。
-
-    主题包 JSON 里写 ``"loader_vivid": true`` 即恢复旧观感（品牌色徽章）。
-    主题色板 token 保持零新增，避免破坏自定义主题包兼容性。
-    """
-    try:
-        from .theme import get_active_theme_pack_id, find_theme_pack
-        pid = get_active_theme_pack_id()
-        if not pid:
-            return False
-        pack = find_theme_pack(pid) or {}
-        return bool(pack.get("loader_vivid"))
-    except Exception:
-        return False
 
 
 def _human_size(n) -> str:
@@ -224,7 +207,7 @@ class _VersionRow(QFrame):
         loaders = ver.get("loaders", [])
         if loaders:
             ld_lbl = QLabel(loaders[0])
-            if _loader_vivid():
+            if loader_vivid():
                 colr = LOADER_BADGE_COLORS.get(loaders[0].lower(), LOADER_DEFAULT)
                 ld_lbl.setStyleSheet(
                     f"color: {colr}; background: {with_alpha(colr, 0x1F)};"
@@ -905,7 +888,7 @@ class StoreDetailPanel(QWidget):
             self.latest_ver.setToolTip(files[0].get("filename", ""))
         loaders = v.get("loaders", [])
         if loaders:
-            if _loader_vivid():
+            if loader_vivid():
                 text = ""
                 for ld in loaders[:2]:
                     colr = LOADER_BADGE_COLORS.get(ld.lower(), LOADER_DEFAULT)
@@ -1180,8 +1163,7 @@ class StoreDetailPanel(QWidget):
             dest = os.path.join(inst.game_dir, self._subdir)
             mc_version = getattr(inst, "game_version", "") or ""
             loader = getattr(inst, "loader", "") or ""
-        from .net_api import (curseforge_available, download_cfwidget_file,
-                              download_curseforge_file, download_mod_version_to,
+        from .net_api import (curseforge_available, download_mod_version_to,
                               download_cf_with_deps)
         # round-193：下载前问一句「前置要不要一起装」——玩家不该在进游戏报
         # 缺前置之后才知道这事。

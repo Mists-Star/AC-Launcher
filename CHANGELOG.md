@@ -8,6 +8,51 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-223（2026-11-11）— 第二轮解耦 + 修「窗口模式弹窗全空白」
+
+round-222 之后重跑同一套静态摸底（归一化 AST 指纹 + 跨模块同名实现对比），
+精确重复函数体已归零，剩下的都是**同一件事写了好几遍**的性质：
+
+- **P1 修窗口模式弹窗全空白**（目视巡检抓到，非本轮引入）：`HealthDialog` /
+  `CrashAnalyzerDialog` / `JavaManagerDialog` 三个兼容壳在 `__init__` 里调
+  `panel.enable_window_chrome()`，而它把 `FramelessHelper` 挂在**面板自己**
+  身上；`_apply_flags()` 会给控件打 `Qt.Window`，子控件一带上这个标志就被
+  Qt 脱离父窗口 → 壳只剩一片纯色背景，面板作为独立窗口在别处（且因
+  `setWindowFlags` 隐藏后不会被重新 show）。改为新函数
+  `frameless.enable_panel_window_chrome(panel)`：作用于 `panel.window()`
+  （套壳时是 QDialog、独立使用时才是面板自己）。离屏实测三窗
+  `panel.isWindow()` 由 True → False、抓图 1 种颜色 → 6~13 种。
+- **查重 `_loader_vivid`**：资源中心列表页与详情页各一份逐字相同的实现（读
+  主题包开关），口径只改一边就会「列表彩色、详情中性」。收归
+  `theme.loader_vivid()`，并加按 pack id 的记忆——每个加载器徽章原来都要
+  `find_theme_pack()` 扫目录 + 解析全部主题 JSON，上百张模组卡就是上百次
+  磁盘 IO。记忆在 `apply_theme_pack` / `import_theme_pack_file` 里失效。
+- **查重 `_on_close`**：4 个面板各写一份 `self.closed.emit()`。抽出
+  `panel_shell.PanelCloseMixin`。☠ 归属搞反过一次：`_on_close` 属于**面板**
+  （页内模式的调用方），不属于套在外面的 QDialog 壳，第一版从壳里删掉直接
+  让 `smoke_all` + 5 个回归炸掉；现在壳靠 `__getattr__` 转发到面板的同名方法。
+- **查重 `_center_on_screen`**：splash / welcome 各一份，抽到
+  `win_geometry.center_on_screen()`（刻意不引 Qt，保持启动路径导入图不变）。
+- **查重「打开目录」**：全项目 4 套写法、4 种体验——`instance_editor` 建目录
+  后打开；`pages_instances` **只在目录已存在时才动**，不存在时点按钮毫无反应
+  （最容易被当成「按钮坏了」）；`mod_list` startfile + warn。统一到
+  `os_open.open_local_path()`：目录缺失 / 系统拒绝都明确提示，`create=True`
+  先建再开。新增 i18n 键 `common.open_missing` / `common.open_failed`（中英对称）。
+- **死代码**：删 `instance_editor._reveal_path`（零引用）；顺手清掉
+  `QUrl` / `INSTANCE_FORMATS` / `QSize` / `QColor` / `QPushButton` 等
+  已失效导入。
+
+结果：跨模块**短函数逐字重复** 7 组 → 3 组（剩余为 `__getattr__` 转发、
+两处 `_pr` / `_err` 闭包、一处 `_open_diagnostics`，均为刻意保留）。
+
+**测试**：新增 `tests/test_round223_dedup.py` **35/35**（单一来源归属、缓存
+失效、面板/壳两侧 `_on_close` 行为、居中计算、打开目录四种分支、调用点接线、
+i18n 占位符）；round-195 / 197 三条 `class X(QWidget)` 源码字面量断言改成
+真实继承判据（面板接了 `PanelCloseMixin` 后字面量必然失效）；round-223 挂进
+`regress.py` → **全量 90/90**。另做离屏目视巡检：三个窗口模式弹窗修复后
+标题栏 / 分组 / 底部按钮齐全。
+
+
 ## round-222（2026-11-11）— 全项目解耦 / 功能查重 / 修复
 
 对 `src/` 全部 113 个 .py 做静态摸底（导入图 + AST 重复函数体 + 私有调用），

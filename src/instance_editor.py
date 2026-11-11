@@ -32,6 +32,7 @@ from .icons import icon
 from .instances import (INSTANCE_FORMATS, LOADERS, detect_format, layout_of,
                         manager)
 from .theme import COLORS
+from .os_open import open_local_path
 from .win_rounded import confirm, info, toast, warn
 from .worker import Worker
 
@@ -1656,20 +1657,8 @@ def _java_choices() -> list[dict]:
 
 
 def _open_path(parent, path: str) -> None:
-    if not path:
-        return
-    try:
-        os.makedirs(path, exist_ok=True)
-    except OSError:
-        pass
-    try:
-        import subprocess
-        if os.name == "nt":
-            os.startfile(os.path.normpath(path))  # noqa: S606 - 用户主动打开目录
-        else:
-            subprocess.Popen(["xdg-open", path])
-    except OSError as exc:
-        warn(parent, t("inst.open_folder"), str(exc))
+    """打开目录（round-223：实现收敛到 ``os_open.open_local_path``）。"""
+    open_local_path(parent, path, create=True)
 
 
 class InstanceEditorDialog(QDialog):
@@ -1719,15 +1708,3 @@ class InstanceEditorDialog(QDialog):
         if name == "panel":
             raise AttributeError(name)
         return getattr(self.panel, name)
-
-
-def _reveal_path(parent, path: str) -> None:
-    try:
-        import subprocess
-        if os.name == "nt":
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)],
-                             creationflags=0x08000000)
-        else:
-            _open_path(parent, os.path.dirname(path))
-    except OSError:
-        _open_path(parent, os.path.dirname(path))

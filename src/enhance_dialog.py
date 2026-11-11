@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 from .i18n import t
 from .theme import COLORS
 from .worker import Worker
-from .panel_shell import PanelShellMixin
+from .panel_shell import PanelCloseMixin, PanelShellMixin
 
 _BTN_W = 92
 _GROUP_TITLE = {
@@ -74,7 +74,7 @@ def _mk_label(text: str, *, pt: int = 9, bold: bool = False,
     return lb
 
 
-class EnhancePanel(QWidget):
+class EnhancePanel(PanelCloseMixin, QWidget):
     """实例的客户端增强包面板（**页内**，round-195）。
 
     原来是 QDialog 弹窗 —— 它与"实例编辑""实例体检"一样是实例相关页面，
@@ -147,10 +147,6 @@ class EnhancePanel(QWidget):
     # ------------------------------------------------------------------ #
     # 数据加载
     # ------------------------------------------------------------------ #
-    def _on_close(self) -> None:
-        """关闭：页内模式通知外层返回。"""
-        self.closed.emit()
-
     def reload(self):
         from .core import enhance as EH
 

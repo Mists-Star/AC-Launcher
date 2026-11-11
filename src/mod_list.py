@@ -21,10 +21,10 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -33,6 +33,7 @@ from .core import modmeta
 from .i18n import loader_name, t
 from .icons import pixmap as icon_pixmap, pixmap_large
 from .theme import COLORS
+from .os_open import open_local_path
 from .win_rounded import confirm, toast, warn
 from .worker import Worker
 
@@ -561,10 +562,7 @@ class ModListPanel(QWidget):
         if self._on_open_folder is not None:
             self._on_open_folder(self._inst.mods_dir)
             return
-        try:
-            os.startfile(self._inst.mods_dir)  # noqa: S606 - Windows 打开目录
-        except Exception as exc:  # noqa: BLE001
-            warn(self, t("inst.open_folder"), str(exc))
+        open_local_path(self, self._inst.mods_dir, create=True)
 
     def _add_files(self) -> None:
         from PySide6.QtWidgets import QFileDialog

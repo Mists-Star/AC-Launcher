@@ -66,9 +66,24 @@ check("折行随宽度重排", "def resizeEvent" in modlist_src)
 check("描述有全文 tooltip", "setToolTip(self._desc_full)" in modlist_src)
 
 print("③ 弹窗改页内")
-check("编辑面板是 QWidget", "class InstanceEditorPanel(QWidget)" in editor_src)
-check("体检面板是 QWidget", "class HealthPanel(QWidget)" in health_src)
-check("增强包面板是 QWidget", "class EnhancePanel(QWidget)" in enh_src)
+# round-223：面板接了 PanelCloseMixin（`_on_close` 的唯一实现），源码字面量
+# "class X(QWidget)" 不再成立 —— 改用真实继承关系判「它是页内面板，不是弹窗」。
+from PySide6.QtWidgets import QDialog, QWidget          # noqa: E402
+from src.instance_editor import InstanceEditorPanel      # noqa: E402
+from src.mod_check_dialog import HealthPanel             # noqa: E402
+from src.enhance_dialog import EnhancePanel              # noqa: E402
+
+
+def _is_panel(cls):
+    return issubclass(cls, QWidget) and not issubclass(cls, QDialog)
+
+
+check("编辑面板是 QWidget（不是 QDialog）", _is_panel(InstanceEditorPanel),
+      InstanceEditorPanel.__mro__[1].__name__)
+check("体检面板是 QWidget（不是 QDialog）", _is_panel(HealthPanel),
+      HealthPanel.__mro__[1].__name__)
+check("增强包面板是 QWidget（不是 QDialog）", _is_panel(EnhancePanel),
+      EnhancePanel.__mro__[1].__name__)
 check("实例页有页内栈", "def _push_feature" in pages_src)
 check("编辑走页内", "InstanceEditorPanel(self, inst)" in pages_src)
 check("体检走页内", "HealthPanel(self, result" in pages_src)

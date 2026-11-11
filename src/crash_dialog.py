@@ -19,7 +19,7 @@ from .i18n import t
 from .win_rounded import _msgbox
 from .fix_feedback import attach, report, summarize
 from .worker import Worker
-from .panel_shell import PanelShellMixin
+from .panel_shell import PanelCloseMixin, PanelShellMixin
 from . import crash_analysis as crash
 from .instances import manager
 
@@ -144,7 +144,7 @@ def _is_actionable(f) -> bool:
     return bool(rep)
 
 
-class CrashAnalyzerPanel(QWidget):
+class CrashAnalyzerPanel(PanelCloseMixin, QWidget):
     """崩溃分析面板（**页内**，round-197）。
 
     原来�� QDialog 弹窗。它是**实例相关**的分析（崩溃日志、缺前置修复），
@@ -242,16 +242,9 @@ class CrashAnalyzerPanel(QWidget):
         """窗口模式：补上 frameless 标题栏与圆角（页内模式不需要）。"""
         if self._frameless is not None:
             return
-        from .frameless import FramelessHelper
-        from .win_rounded import enable_win11_round_corners
+        from .frameless import enable_panel_window_chrome
         self.titlebar.setVisible(True)
-        self._frameless = FramelessHelper(self)
-        self._frameless.set_titlebar(self.titlebar)
-        enable_win11_round_corners(self)
-
-    def _on_close(self) -> None:
-        """关闭：页内模式通知外层返回。"""
-        self.closed.emit()
+        self._frameless = enable_panel_window_chrome(self)
 
     # ------------------------------------------------------------- analyze
     def _update_header(self):

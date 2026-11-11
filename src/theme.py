@@ -243,6 +243,8 @@ FONT_FAMILY_BASE = '"Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
 FONT_FAMILY = FONT_FAMILY_BASE
 # Currently applied theme pack id ("" = none)
 _theme_pack_id = ""
+# 主题包「加载器彩章」开关的解析结果（key = pack id）。见 loader_vivid()。
+_VIVID_CACHE: dict[str, bool] = {}
 
 # Theme-change listeners (e.g. title-bar icons that need re-rendering)
 _theme_change_listeners: list = []
@@ -486,6 +488,8 @@ def import_theme_pack_file(path: str) -> dict:
     safe_id = "".join(c for c in str(pack["id"]) if c.isalnum() or c in "-_")
     dest = _os_module.path.join(get_theme_pack_dir(), f"{safe_id}.json")
     _shutil.copyfile(path, dest)
+    # 同名主题包被覆盖 → 旧解析结果（含 loader_vivid）必须失效。
+    _VIVID_CACHE.clear()
     return pack
 
 
@@ -500,6 +504,8 @@ def apply_theme_pack(pack: dict | None) -> None:
     table. Passing None clears the pack override (back to built-in theme)."""
     global _theme_pack_id, _QSS_CACHE
     _theme_pack_id = pack.get("id", "") if pack else ""
+    # 换了主题包（或同一包内容被重新导入）→ 彩章开关要重新解析。
+    _VIVID_CACHE.clear()
     # Reset to base table, then merge pack overrides.
     if _theme_mode == "dark":
         COLORS.update(THEME_DARK)
@@ -526,6 +532,35 @@ def apply_theme_pack(pack: dict | None) -> None:
 
 def get_active_theme_pack_id() -> str:
     return _theme_pack_id
+
+
+# 每个加载器徽章都会问一次 loader_vivid()；find_theme_pack() 要扫目录 +
+# 解析全部 JSON，上百张模组卡会把它变成上百次磁盘 IO（round-223）。
+
+
+def loader_vivid() -> bool:
+    """主题包是否启用「加载器品牌彩章」（默认关）。
+
+    主题包 JSON 写 ``"loader_vivid": true`` 才恢复品牌色徽章；10+ 个品牌色
+    同屏会花，默认走中性 badge 类。round-223：此前资源中心列表页与详情页
+    各存一份逐字相同的实现，改口径容易只改一边 —— 收归此处单一来源。
+
+    ☠ 缓存只在 ``apply_theme_pack`` / ``import_theme_pack_file`` 里失效；
+    新增「改主题包」的入口必须一起清 ``_VIVID_CACHE``，否则开关要重启才生效。
+    """
+    pid = get_active_theme_pack_id()
+    if not pid:
+        return False
+    cached = _VIVID_CACHE.get(pid)
+    if cached is not None:
+        return cached
+    try:
+        pack = find_theme_pack(pid) or {}
+        val = bool(pack.get("loader_vivid"))
+    except Exception:  # noqa: BLE001 - 主题包坏了不该拖垮列表渲染
+        val = False
+    _VIVID_CACHE[pid] = val
+    return val
 
 # ---- QSS template ($token substitution) ------------------------------------
 QSS_TEMPLATE = Template("""

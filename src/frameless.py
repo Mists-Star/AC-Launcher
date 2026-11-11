@@ -316,6 +316,28 @@ _CURSOR_FOR_EDGE = {
 }
 
 
+def enable_panel_window_chrome(panel):
+    """把「页内面板」当独立窗口用：frameless + 圆角 + 可拖拽标题栏。
+
+    ☠ 必须作用在 ``panel.window()``（套壳时是 QDialog，独立使用时就是面板
+    自己），**绝不能** ``FramelessHelper(panel)``：``_apply_flags()`` 会给
+    控件打 ``Qt.Window``，子控件一旦带上这个标志就会被 Qt 脱离父窗口 →
+    弹窗只剩一片空白背景。round-223 实测体检 / 崩溃分析 / Java 管理三个
+    「窗口模式」入口全中，页内模式反而是好的（不调这里）。
+
+    返回 FramelessHelper（调用方存到 ``self._frameless`` 防止重复挂）。
+    """
+    from .win_rounded import enable_win11_round_corners
+
+    host = panel.window()
+    helper = FramelessHelper(host)
+    bar = getattr(panel, "titlebar", None)
+    if bar is not None:
+        helper.set_titlebar(bar)
+    enable_win11_round_corners(host)
+    return helper
+
+
 class FramelessHelper(QObject):
     """Attach to any top-level widget to make it frameless.
 

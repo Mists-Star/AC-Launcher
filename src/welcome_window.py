@@ -19,6 +19,7 @@ from PySide6.QtGui import QPainter, QColor
 
 from . import brand
 from .theme import COLORS, get_theme_mode
+from .win_geometry import center_on_screen
 
 
 class WelcomeWindow(QWidget):
@@ -49,7 +50,7 @@ class WelcomeWindow(QWidget):
         # 透明背景：画布完全透出桌面，只画 AC 字母
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.resize(320, 200)
-        self._center_on_screen()
+        center_on_screen(self)
 
         # 主题感知：仅决定文字颜色
         dark = get_theme_mode() == "dark"
@@ -92,15 +93,6 @@ class WelcomeWindow(QWidget):
         self._watchdog.setSingleShot(True)
         self._watchdog.timeout.connect(self._on_watchdog)
         self._watchdog.start(15000)
-
-    # ---------- 定位 ----------
-    def _center_on_screen(self):
-        screen = self.screen().availableGeometry() if self.screen() else None
-        if screen is None:
-            return
-        x = screen.x() + (screen.width() - self.width()) // 2
-        y = screen.y() + (screen.height() - self.height()) // 2
-        self.move(x, y)
 
     # ---------- 淡入 / 淡出 ----------
     def _fade_in(self):

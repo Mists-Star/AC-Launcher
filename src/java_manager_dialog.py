@@ -21,13 +21,13 @@ from PySide6.QtCore import Qt, QTimer, Signal
 
 from .i18n import t
 from .theme import COLORS, RoundedCard, with_alpha
-from .win_rounded import enable_win11_round_corners, confirm, warn, info
-from .frameless import FramelessHelper, TitleBar
+from .win_rounded import confirm, warn, info
+from .frameless import TitleBar, enable_panel_window_chrome
 from .core import java_install
 from .core.java import scan_javas
 from .onboarding import _JavaInstallThread, _fmt_size, _fmt_speed
 from .worker import Worker
-from .panel_shell import PanelShellMixin
+from .panel_shell import PanelCloseMixin, PanelShellMixin
 
 
 class _JavaDetectedRow(RoundedCard):
@@ -154,7 +154,7 @@ class _JavaDetectedRow(RoundedCard):
             self.dlg.refresh_all()
 
 
-class JavaManagerPanel(QWidget):
+class JavaManagerPanel(PanelCloseMixin, QWidget):
     """扫描 / 选择 / 删除 / 下载任意版本 Java 运行时（**页内**，round-197）。
 
     原来是个 QDialog 弹窗，而且**三个入口**都能打开它（实例页 / 设置页 /
@@ -320,13 +320,7 @@ class JavaManagerPanel(QWidget):
         if getattr(self, "_frameless", None) is not None:
             return
         self.titlebar.setVisible(True)
-        self._frameless = FramelessHelper(self)
-        self._frameless.set_titlebar(self.titlebar)
-        enable_win11_round_corners(self)
-
-    def _on_close(self) -> None:
-        """关闭：页内模式通知外层返回。"""
-        self.closed.emit()
+        self._frameless = enable_panel_window_chrome(self)
 
     # ---------- version combo ----------
     def _populate_majors(self):

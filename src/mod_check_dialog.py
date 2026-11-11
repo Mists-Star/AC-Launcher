@@ -19,10 +19,9 @@ from .theme import COLORS
 from .i18n import t, loader_name
 from . import ui_kit
 from .core import mod_check
-from .frameless import FramelessHelper, TitleBar
+from .frameless import TitleBar, enable_panel_window_chrome
 from .fix_feedback import FeedbackBar, report
-from .win_rounded import enable_win11_round_corners
-from .panel_shell import PanelShellMixin
+from .panel_shell import PanelCloseMixin, PanelShellMixin
 
 _SEV_COLOR = {
     mod_check.SEV_CRITICAL: "#EF4444",
@@ -51,7 +50,7 @@ def _localize(f) -> tuple[str, str, str]:
     return title, reason, suggestion
 
 
-class HealthPanel(QWidget):
+class HealthPanel(PanelCloseMixin, QWidget):
     """实例体检面板（**页内**）。
 
     round-195：原来是 QDialog 弹窗。用户诉求「实用功能直接换页，别用窗口」——
@@ -124,17 +123,11 @@ class HealthPanel(QWidget):
 
         self._render(self._result)
 
-    def _on_close(self) -> None:
-        """关闭：页内模式通知外层返回。"""
-        self.closed.emit()
-
     def enable_window_chrome(self) -> None:
         """窗口模式：补上 frameless 标题栏与圆角（页内模式不需要）。"""
         if self._frameless is not None:
             return
-        self._frameless = FramelessHelper(self)
-        self._frameless.set_titlebar(self.titlebar)
-        enable_win11_round_corners(self)
+        self._frameless = enable_panel_window_chrome(self)
 
     # ── 渲染 ──────────────────────────────────────────────────────────────
     def _clear_list(self) -> None:

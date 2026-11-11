@@ -19,6 +19,7 @@ from PySide6.QtGui import QPainter, QColor, QRadialGradient
 from . import brand
 from .brand import APP_DISPLAY
 from .theme import COLORS
+from .win_geometry import center_on_screen
 
 _TOTAL = 1.6  # seconds for the full intro sequence
 
@@ -45,7 +46,7 @@ class SplashWindow(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.resize(480, 320)
-        self._center_on_screen()
+        center_on_screen(self)
 
         self._phase = 0.0
         self._ready = False
@@ -87,15 +88,6 @@ class SplashWindow(QWidget):
         self._watchdog.setSingleShot(True)
         self._watchdog.timeout.connect(self._on_watchdog)
         self._watchdog.start(15000)
-
-    # ---------- positioning ----------
-    def _center_on_screen(self):
-        screen = self.screen().availableGeometry() if self.screen() else None
-        if screen is None:
-            return
-        x = screen.x() + (screen.width() - self.width()) // 2
-        y = screen.y() + (screen.height() - self.height()) // 2
-        self.move(x, y)
 
     # ---------- animation driver ----------
     def _tick(self):

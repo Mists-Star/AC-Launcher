@@ -20,10 +20,11 @@ from PySide6.QtWidgets import (
     QStackedWidget, QButtonGroup, QSplitter, QGraphicsOpacityEffect, QMenu,
     QFileDialog,
 )
-from PySide6.QtCore import Qt, Signal, QSize, QTimer, QUrl
+from PySide6.QtCore import Qt, Signal, QSize, QTimer
 from PySide6.QtGui import QIcon, QTransform
 
-from .theme import COLORS, RoundedCard, with_alpha
+from .theme import COLORS, RoundedCard, with_alpha, loader_vivid
+from .os_open import open_local_path
 from .effects import LightTrailCard, fade_in_widget  # round-50 卡片混合：实例详情卡流光；round-100 列表淡入
 from . import ui_kit
 from .icons import icon, on_accent
@@ -32,7 +33,6 @@ from .win_rounded import confirm, pick_files, info, warn, toast
 from .i18n import t, loader_name
 from . import instance_art
 from .instances import (sorted_instances, manager, Instance, LOADERS,
-                        INSTANCE_FORMATS,
                        detect_format, launcher_label)
 from .net_api import fetch_versions
 from .settings_dialog import load_config
@@ -82,27 +82,11 @@ def _badge_style(color: str) -> str:
     )
 
 
-def _loader_vivid() -> bool:
-    """是否启用加载器品牌彩章（默认关；主题包声明 ``loader_vivid`` 才开）。
-
-    与 store_detail 同一开关：10+ 个品牌色同屏会花，默认走中性 badge 类。
-    """
-    try:
-        from .theme import get_active_theme_pack_id, find_theme_pack
-        pid = get_active_theme_pack_id()
-        if not pid:
-            return False
-        pack = find_theme_pack(pid) or {}
-        return bool(pack.get("loader_vivid"))
-    except Exception:
-        return False
-
-
 def _loader_badge(text: str, loader_id: str) -> "QLabel":
     """加载器徽章：默认中性 ``badge`` 类；主题包 loader_vivid 时走品牌色。"""
     from PySide6.QtWidgets import QLabel
     b = QLabel(text)
-    if _loader_vivid():
+    if loader_vivid():
         b.setStyleSheet(
             _badge_style(LOADER_BADGE.get(loader_id, LOADER_BADGE["vanilla"])))
     else:
@@ -142,7 +126,7 @@ def _fmt_badge(inst) -> "QLabel":
     fmt = detect_format(inst)
     key = _fmt_keys.get(fmt, "instances.fmt_auto")
     b = QLabel(t(key))
-    if _loader_vivid():
+    if loader_vivid():
         b.setStyleSheet(_badge_style(FORMAT_BADGE.get(fmt, FORMAT_BADGE["auto"])))
     else:
         b.setProperty("cls", "badge")
@@ -2309,19 +2293,15 @@ class InstancesPage(QWidget):
 
     # ia[instances]: 点「打开文件夹」 | 详情「管理与诊断」网格 | 用系统文件管理器打开实例目录
     def _open_folder(self, inst: Instance):
-        from PySide6.QtGui import QDesktopServices
-        p = inst.mc_dir
-        if os.path.isdir(p):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(p))
+        """打开实例目录（round-223：统一走 os_open，目录缺失会明确提示，
+        不再像以前那样点了没反应）。"""
+        open_local_path(self, inst.mc_dir)
 
     def _open_saves(self, inst: Instance):
         """打开存档目录（不存在则创建）。round-42 新增，round-57 修：版本隔离
         下游戏存档实际读写 <game_dir>/saves，之前固定 mc_dir/saves 打开的是
         错误目录（同 round-56 mods_dir 的脱节）。"""
-        from PySide6.QtGui import QDesktopServices
-        p = os.path.join(inst.game_dir, "saves")
-        os.makedirs(p, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(p))
+        open_local_path(self, os.path.join(inst.game_dir, "saves"), create=True)
 
     # ── round-171 投影材料清单 / 存档地图（右侧菜单入口）──
     def _export_materials(self, inst: Instance):
@@ -3009,7 +2989,7 @@ class ModCard(RoundedCard):
         # round-100：图标块默认中性（品牌色仅主题包 loader_vivid 时启用）
         tile = ui_kit.tile(
             tile_key, 44, 22,
-            bg=(LOADER_BADGE.get(loader) if _loader_vivid() else None))
+            bg=(LOADER_BADGE.get(loader) if loader_vivid() else None))
         lay.addWidget(tile)
 
         # ── info column: name + meta (loader pill · state) ──
