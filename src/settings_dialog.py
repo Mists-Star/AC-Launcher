@@ -44,6 +44,8 @@ from .core.support_bundle import SENSITIVE_CONFIG_KEYS as _SENSITIVE_CFG_KEYS  #
 _DEFAULTS = {
     # ---- quick ----
     "ram_mb": 4096,
+    # round-226：侧栏收起状态会被写盘，不登记就会被导出/导入/重置丢掉。
+    "nav_collapsed": False,
     # round-111 修：`jvm_aikars` 是 **派生键**（_sync_ui_to_cfg 里
     # `target["jvm_aikars"] = target["jvm_preset"] == "aikar"`），必须与
     # `jvm_preset` 一致。原先这里是 True 而 jvm_preset 默认是 "default"，
@@ -269,19 +271,29 @@ def load_config() -> dict:
     return cfg
 
 
+_CONFIG_WRITE_LOCK = threading.Lock()
+
+
 def save_config(cfg: dict) -> None:
-    tmp_path = CONFIG_FILE + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, CONFIG_FILE)
-    except Exception:
-        if os.path.exists(tmp_path):
+    """原子写：唯一临时文件 + os.replace，且整段写入持有进程内锁。
+
+    round-226：旧实现固定 ``CONFIG_FILE + ".tmp"``，两个 save_config 重叠时
+    后者会覆盖前者的 tmp、或把对方刚写好的 tmp 删掉。
+    """
+    import tempfile
+    with _CONFIG_WRITE_LOCK:
+        d = os.path.dirname(CONFIG_FILE) or "."
+        fd, tmp_path = tempfile.mkstemp(prefix=".cfg-", suffix=".tmp", dir=d)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, CONFIG_FILE)
+        except Exception:
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
-        raise
+            raise
 
 
 def _cfg_float(cfg: dict, key: str, default: float) -> float:
@@ -2029,8 +2041,11 @@ class SettingsPage(QWidget):
         try:
             self._sync_ui_to_cfg()
             save_config(self.cfg)
-        except Exception:  # noqa: BLE001 - never block the install
-            pass
+        except Exception as _e:  # noqa: BLE001 - 写盘失败必须中止升级
+            self._reset_update_ui()
+            warn(self, t("settings.update"),
+                 t("settings.update_save_failed", err=str(_e)))
+            return
         self.update_status.setText(t("settings.update_restarting"))
         self.update_progress.setValue(100)
         from .core import update_install as upd_i, update_trust as upd
@@ -2452,16 +2467,37 @@ class SettingsPage(QWidget):
             if not isinstance(data, dict):
                 raise ValueError("bad config payload")
         except Exception as e:  # noqa: BLE001
-            warn(self, t("settings.cfg_import_fail"), str(e))
+            warn(self, t("settings.cfg_import_fail", err=str(e)),
+                 t("settings.cfg_import_hint"))
             return
-        # 只取已知键（防脏 json 塞入未知字段污染 cfg）；敏感键一律不还原
+        # 只取已知键（防脏 json 塞入未知字段污染 cfg）；敏感键一律不还原。
+        # round-226：还要挡类型污染 —— 外部 json 把 ram_mb 写成字符串会一路
+        # 写进配置，int/str 混用会把启动链路搞坏。
         n = 0
-        for k in _DEFAULTS:
+        skipped = 0
+        for k, default in _DEFAULTS.items():
             if k in _SENSITIVE_CFG_KEYS:
                 continue
-            if k in data and data[k] is not None:
-                self.cfg[k] = data[k]
-                n += 1
+            if k not in data or data[k] is None:
+                continue
+            v = data[k]
+            if isinstance(default, bool):
+                ok = isinstance(v, bool)
+            elif isinstance(default, int):
+                ok = isinstance(v, int) and not isinstance(v, bool)
+            elif isinstance(default, float):
+                ok = isinstance(v, (int, float)) and not isinstance(v, bool)
+            elif isinstance(default, str):
+                ok = isinstance(v, str)
+            elif isinstance(default, (list, tuple)):
+                ok = isinstance(v, (list, tuple))
+            else:
+                ok = True
+            if not ok:
+                skipped += 1
+                continue
+            self.cfg[k] = v
+            n += 1
         save_config(self.cfg)
         # 重建设置页（控件取新值）并即时套用外观
         try:
@@ -2471,9 +2507,14 @@ class SettingsPage(QWidget):
             set_theme_mode(self.cfg.get("theme_mode", "light"))
             set_accent_color(self.cfg.get("accent_color", "#7C3AED"))
             apply_qss()
-        except Exception:  # noqa: BLE001 - 外观失败不阻断导入本身
-            pass
-        info(self, t("settings.cfg_import"), t("settings.cfg_import_done", n=n))
+        except Exception as _e:  # noqa: BLE001 - 外观失败不阻断导入本身
+            warn(self, t("settings.cfg_import"),
+                 t("settings.cfg_import_appearance_failed", err=str(_e)))
+            return
+        msg = t("settings.cfg_import_done", n=n)
+        if skipped:
+            msg += "\n" + t("settings.cfg_import_type_skipped", n=skipped)
+        info(self, t("settings.cfg_import"), msg)
 
     def _clear_cache(self):
         """清理下载/图标缓存（不删配置与实例数据）。round-42。"""
@@ -2631,8 +2672,9 @@ class SettingsPage(QWidget):
             # 重启后 load_config 读旧值 → 看似切不回去。改为切语言即时落盘。
             try:
                 save_config(self.cfg)
-            except Exception:
-                pass
+            except Exception as _e:  # noqa: BLE001 - 写盘失败不能装作已生效
+                warn(self, t("settings.update"),
+                     t("err.config_save_failed", err=str(_e)))
             self._rebuild()
             # round-44 E2：切语言即时同步主窗口 retranslate（否则
             # 「设置页英文 / 主页中文」割裂，需要手动重启才会统一）。

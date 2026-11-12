@@ -108,19 +108,34 @@ def _load_disk_cache():
 
 
 def _save_disk_cache():
-    """Persist current in-memory cache to disk."""
+    """Persist current in-memory cache to disk.
+
+    round-226：写盘也要在锁内 + 唯一临时文件 + os.replace。以前锁只包住
+    dict 拷贝，8 个下载线程并发写同一个 JSON 会交错截断；下次启动解析
+    失败又被 ``except: pass`` 吞掉，整份缓存无声丢失。
+    """
     path = _disk_cache_path()
     try:
         import json as _json
+        import tempfile as _tempfile
         now = time.time()
-        # drop expired entries before writing
         with _CACHE_LOCK:
             data = {
                 k: (ts, v) for k, (ts, v) in _cache.items()
                 if now - ts < _DISK_CACHE_MAX_AGE
             }
-        with open(path, "w", encoding="utf-8") as f:
-            _json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            d = os.path.dirname(path) or "."
+            fd, tmp = _tempfile.mkstemp(prefix=".cache-", suffix=".tmp", dir=d)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    _json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+                os.replace(tmp, path)
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
     except Exception:  # noqa: BLE001
         pass
 
@@ -1283,7 +1298,8 @@ def download_mod_to(
         # round-37：统一断点续传下载器（中断后 .part 续传）
         try:
             download_file(item["url"], dest, progress=prog,
-                          expected_sha1=item.get("sha1", ""))
+                          expected_sha1=item.get("sha1", ""),
+                          cancel=_cb_cancel(callback))
         except NetError as e:
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
         if prog is not None:
@@ -1335,7 +1351,8 @@ def download_mod_version_to(
         dest = os.path.join(dest_dir, _safe_filename(item["filename"]))
         try:
             download_file(item["url"], dest, progress=prog,
-                          expected_sha1=item.get("sha1", ""))
+                          expected_sha1=item.get("sha1", ""),
+                          cancel=_cb_cancel(callback))
         except NetError as e:
             raise NetError(f"下载失败（{item['filename']}）：{e}") from e
         if prog is not None:
@@ -1516,7 +1533,8 @@ def _cf_resolve_dep_file(project_id: str, mc_version: str, loader: str) -> dict 
 
 def resolve_cf_dependencies(project_id: str, file_id: str,
                             mc_version: str = "", loader: str = "",
-                            _seen: set | None = None, _depth: int = 0) -> list[dict]:
+                            _seen: set | None = None, _depth: int = 0,
+                            unresolved_out: list | None = None) -> list[dict]:
     """递归解析 CF required 依赖，返回去重文件清单（**不含本体**）。
 
     每项 {"project_id","file_id","filename","url","sha1"}，与 MR 解析器同形状，
@@ -1533,10 +1551,15 @@ def resolve_cf_dependencies(project_id: str, file_id: str,
             continue
         df = _cf_resolve_dep_file(dpid, mc_version, loader)
         if not df:
+            # round-226 P1-3：声明了 required 却挑不到匹配文件，以前静默
+            # continue → 本体照常安装、UI 显示「已下载」，进游戏缺前置崩。
+            if unresolved_out is not None:
+                unresolved_out.append(str(dpid))
             continue
         out.append(df)
         out.extend(resolve_cf_dependencies(dpid, df["file_id"], mc_version,
-                                           loader, _seen, _depth + 1))
+                                           loader, _seen, _depth + 1,
+                                           unresolved_out))
     return out
 
 
@@ -1616,7 +1639,8 @@ def _cf_existing_pid_map(inst, dest_dir: str) -> dict[str, list[str]]:
 
 
 def _cf_download_one(pid: str, fid, dest_dir: str, callback, manifest_out,
-                     existing_by_pid: dict, sha1: str = "") -> str:
+                     existing_by_pid: dict, sha1: str = "",
+                     cancel=None) -> str:
     """下载一个 CF 文件；下载前删掉同 mod 的旧版本 jar，避免双 jar 共存崩游戏。"""
     for fn in existing_by_pid.get(str(pid), []):
         p = os.path.join(dest_dir, fn)
@@ -1628,13 +1652,14 @@ def _cf_download_one(pid: str, fid, dest_dir: str, callback, manifest_out,
     key = _curseforge_key()
     if key and fid:
         path = download_curseforge_file(str(pid), fid, dest_dir,
-                                       callback=callback, sha1=sha1)
+                                       callback=callback, sha1=sha1,
+                                       cancel=cancel)
         if manifest_out is not None and path:
             manifest_out.append({"filename": os.path.basename(path),
                                 "project_id": str(pid)})
     else:
         path = _download_cf_keyless(str(pid), fid, dest_dir, callback=callback,
-                                   manifest_out=manifest_out)
+                                   manifest_out=manifest_out, cancel=cancel)
     return path
 
 
@@ -1651,15 +1676,25 @@ def download_cf_with_deps(project_id, file_id, dest_dir, mc_version: str = "",
     """
     os.makedirs(dest_dir, exist_ok=True)
     existing_by_pid = _cf_existing_pid_map(inst, dest_dir) if inst else {}
+    cancel = _cb_cancel(callback)
+    # round-226：依赖先解析完再落盘。缺前置时**不装本体**，避免留下一个
+    # 「下载成功但进游戏就崩」的半成品；提示里带上项目 ID 方便玩家手动补。
+    deps: list[dict] = []
+    if with_deps:
+        unresolved: list[str] = []
+        deps = resolve_cf_dependencies(str(project_id), str(file_id),
+                                       mc_version, loader,
+                                       unresolved_out=unresolved)
+        if unresolved:
+            ids = "、".join(unresolved[:6])
+            raise NetError(f"以下必需前置没有匹配当前版本/加载器的文件，已放弃下载：{ids}")
     primary = _cf_download_one(str(project_id), file_id, dest_dir, callback,
                                manifest_out, existing_by_pid,
-                               sha1=primary_sha1)
-    if not with_deps:
-        return primary
-    for d in resolve_cf_dependencies(str(project_id), str(file_id),
-                                     mc_version, loader):
+                               sha1=primary_sha1, cancel=cancel)
+    for d in deps:
         _cf_download_one(d["project_id"], d["file_id"], dest_dir, callback,
-                         manifest_out, existing_by_pid, sha1=d.get("sha1", ""))
+                         manifest_out, existing_by_pid, sha1=d.get("sha1", ""),
+                         cancel=cancel)
     return primary
 
 
@@ -2103,7 +2138,9 @@ def search_curseforge(query: str = "", offset: int = 0, limit: int = 20,
         headers = {**_HEADERS, "Accept": "application/json"}
     else:
         raise NetError("未配置 CurseForge API Key（设置 → 第三方服务）")
-    cache_key = f"cf:{category}:{query}:{offset}:{limit}"
+    # round-226：keyed / keyless 是两套数据源，切换 CF Key 后 TTL 内
+    # 不该继续吃另一套的快照。
+    cache_key = f"cf:{category}:{query}:{offset}:{limit}:{'keyed' if key else 'keyless'}"
     cached = _cached(cache_key)
     if cached is not None:
         return cached
@@ -2372,8 +2409,8 @@ def _cf_direct_url(u: str) -> bool:
 
 def _download_cf_keyless(project_id: str, file_id: int | str | None,
                          dest_dir: str, callback=None, mc_version: str = "",
-                         loader: str = "",
-                         manifest_out: list | None = None) -> str:
+                         loader: str = "", manifest_out: list | None = None,
+                         cancel=None) -> str:
     """免 key 下载：镜像拿元数据（1 次）→ forgecdn 直链下载（1 次）。
 
     round-142 初版每个文件最多要问 4 个地方（精确端点/文件列表/cfwidget/下载），
@@ -2385,7 +2422,10 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
     round-178：指定 fileID 找不到时**不再静默退回最新文件**——整合包装出
     来的模组版本会与作者声明不一致且玩家无感知；改为明确报错。
     """
-    meta_key = f"cfx:{project_id}:{file_id or 'latest'}"
+    # round-226：没有 fileID 时 rows[0] 是按 mc_version/loader 筛出来的，
+    # 键里必须带上这两个维度，否则 A 实例挑的 jar 会喂给 B 实例。
+    meta_key = (f"cfx:{project_id}:{file_id or 'latest'}"
+                f":{mc_version}:{loader}")
     cached = _cached(meta_key)
     url, filename, sha1 = ("", "", "")
     if isinstance(cached, (list, tuple)) and len(cached) >= 2:
@@ -2474,7 +2514,8 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
     os.makedirs(dest_dir, exist_ok=True)
     path = download_file(
         url, os.path.join(dest_dir, _safe_filename(filename)),
-        timeout=300, progress=_cb_progress(callback), expected_sha1=sha1)
+        timeout=300, progress=_cb_progress(callback), expected_sha1=sha1,
+        cancel=cancel)
     if manifest_out is not None:
         manifest_out.append({"filename": os.path.basename(path),
                               "project_id": str(project_id)})
@@ -2608,7 +2649,8 @@ def _curseforge_versions_keyless(proj: str, limit: int | None = None,
 
 def download_curseforge_file(project_id: str, file_id, dest_dir: str,
                              filename: str = "", url: str = "",
-                             callback=None, sha1: str = "") -> str:
+                             callback=None, sha1: str = "",
+                             cancel=None) -> str:
     """Download one specific CurseForge file into ``dest_dir``.
 
     Uses the official ``download-url`` endpoint when a key is configured
@@ -2635,7 +2677,7 @@ def download_curseforge_file(project_id: str, file_id, dest_dir: str,
     os.makedirs(dest_dir, exist_ok=True)
     return download_file(link, os.path.join(dest_dir, _safe_filename(name)),
                          timeout=120, progress=_cb_progress(callback),
-                         expected_sha1=sha1)
+                         expected_sha1=sha1, cancel=cancel)
 
 
 # ---- CurseForge 免 key 通道（cfwidget 详情 + forgecdn 直链）----
@@ -2884,24 +2926,28 @@ def download_optifine_to(filename: str, dest_dir: str) -> str:
     s.headers.update(_HEADERS)
     # 1) adloadx page embeds a fresh downloadx token
     try:
-        r = s.get(OPTIFINE_ADLOADX.format(file=filename), timeout=15)
+        from urllib.parse import quote as _q
+        r = s.get(OPTIFINE_ADLOADX.format(file=_q(filename, safe="")), timeout=15)
         r.raise_for_status()
     except requests.RequestException as e:
         raise NetError(f"无法获取 OptiFine 下载信息：{e}") from e
     m = re.search(r"downloadx\?f=([^\"&]+)&x=([0-9a-f]+)", r.text)
     if not m:
         raise NetError("OptiFine 下载链接解析失败")
+    from urllib.parse import quote as _q
     f2, token = m.group(1), m.group(2)
 
+    # round-226 P0：f2 来自远端页面，绝不能直接拼进落盘路径 —— ../、超长名、
+    # ?/# 都可能把 .part 写到 mods/ 之外。全仓其它落盘点都走 _safe_filename。
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, f2)
+    dest = os.path.join(dest_dir, _safe_filename(f2))
     # round-37：走通用断点续传下载器（session 带 OptiFine cookie/token）
     # round-48：改走分块多线程，单文件大 jar 并行更快；Cookie 头透传
-    from urllib.parse import quote as _q
     cookie_hdr = "; ".join(
         f"{_q(str(k), safe='')}={_q(str(v), safe='')}" for k, v in s.cookies.items())
     return parallel_download_file(
-        OPTIFINE_DOWNLOADX.format(file=f2, token=token),
+        OPTIFINE_DOWNLOADX.format(file=_q(f2, safe=""),
+                                  token=_q(token, safe="")),
         dest,
         timeout=120,
         headers={"Cookie": cookie_hdr},
@@ -3197,6 +3243,28 @@ def _cb_progress(callback, nfiles: int = 1):
     return None
 
 
+def _modpack_primary_sha1(project_id: str, version_id: str = "") -> str:
+    """取 Modrinth 整合包主文件的 sha1（版本列表有缓存，不额外发请求）。"""
+    try:
+        versions = _modrinth_versions(project_id)
+        if not versions:
+            return ""
+        target = versions[0]
+        if version_id:
+            target = next((v for v in versions if v.get("id") == version_id), {})
+        return str(_primary_hashes(target or {}).get("sha1") or "")
+    except Exception:  # noqa: BLE001 - 拿不到 hash 就退回无校验
+        return ""
+
+
+def _cb_cancel(callback):
+    """从 ProgressWorker 注入的 callback 取取消判定（无则 None）。"""
+    if isinstance(callback, dict):
+        fn = callback.get("cancel")
+        return fn if callable(fn) else None
+    return None
+
+
 def download_modpack_to(project_id: str, dest_dir: str, callback=None,
                         version_id: str = "") -> str:
     """Download a Modrinth modpack's primary file (a .mrpack) into dest_dir.
@@ -3234,7 +3302,12 @@ def download_modpack_to(project_id: str, dest_dir: str, callback=None,
 
             progress_cb = _on_progress
 
-    return download_file(url, dest, timeout=120, progress=progress_cb)
+    # round-226 P2-12：.mrpack 被 CDN 截断以前只按 Content-Length 判完整，
+    # 现在把版本列表里的 sha1 透给下载器做落盘前校验。
+    return download_file(url, dest, timeout=120, progress=progress_cb,
+                         expected_sha1=_modpack_primary_sha1(project_id,
+                                                             version_id),
+                         cancel=_cb_cancel(callback))
 
 
 

@@ -303,13 +303,21 @@ def analyze_instance(inst) -> list[CrashFinding]:
     mc_dir = getattr(inst, "mc_dir", None) or ""
     if not mc_dir:
         return []
+    # round-226 P1-6：游戏按 --gameDir 把 logs/ crash-reports/ mods/ 写进
+    # game_dir（版本隔离 / 自定义目录），以前这里固定读 mc_dir → 隔离实例
+    # 崩溃后一条日志都读不到，面板反而显示绿色「最近一次运行正常」。
+    # Instance.game_dir 与 launch.resolve_game_dir 是同一套口径。
+    try:
+        root = getattr(inst, "game_dir", "") or mc_dir
+    except Exception:  # noqa: BLE001 - 属性异常时退回旧口径
+        root = mc_dir
     findings: list[CrashFinding] = []
     seen_kinds: set[str] = set()
     evidence: dict[str, list[str]] = {}
     texts: list[str] = []
 
     # ---- latest.log (the run the game died on) ----
-    log = _read_text(latest_log_path(mc_dir))
+    log = _read_text(latest_log_path(root))
     if log:
         texts.append(log)
         for kind, sev, tkey, rkey, fkey, rep, rx in _RULES:
@@ -326,7 +334,7 @@ def analyze_instance(inst) -> list[CrashFinding]:
                     evidence.setdefault("fatal_exception", []).append(tail[-160:])
 
     # ---- crash-reports (structured dumps are more specific) ----
-    for cp in crash_report_paths(mc_dir):
+    for cp in crash_report_paths(root):
         text = _read_text(cp, limit=1_500_000)
         if not text:
             continue
@@ -352,7 +360,7 @@ def analyze_instance(inst) -> list[CrashFinding]:
     # round-204：整段日志找一个「最可疑的 mod / jar」，所有结论都带上它。
     # 没有它时玩家只知道「崩溃了」，无法判断该删哪个模组。
     joined = "\n".join(texts)
-    culprit = guess_culprit(joined, os.path.join(mc_dir, "mods"))
+    culprit = guess_culprit(joined, os.path.join(root, "mods"))
 
     # ---- build findings ----
     for kind, sev, tkey, rkey, fkey, rep, _rx in _RULES:

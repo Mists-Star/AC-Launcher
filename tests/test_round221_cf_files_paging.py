@@ -233,7 +233,7 @@ seen_sha1 = []
 
 
 def _fake_one(pid, fid, dest_dir, callback, manifest_out, existing_by_pid,
-              sha1=""):
+              sha1="", cancel=None):
     seen_sha1.append(sha1)
     return "/fake/%s.jar" % fid
 

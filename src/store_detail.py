@@ -1266,8 +1266,17 @@ class StoreDetailPanel(QWidget):
             self.dl_bar.setVisible(False)
             self.dl_speed.setVisible(False)
 
+        def _cancelled(_result=None):
+            # round-226：abort() 时 worker 只发 cancelled；以前没人接，
+            # 进度条永远停在「下载中」。
+            _finish_gate()
+            self.status.setText(t("store.download_cancelled"))
+            self.dl_bar.setVisible(False)
+            self.dl_speed.setVisible(False)
+
         w.finished.connect(_ok)
         w.error.connect(_err)
+        w.cancelled.connect(_cancelled)
         self._track(w)
         w.start()
 

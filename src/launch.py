@@ -69,6 +69,38 @@ def normalize_gc_flags(args: list[str], gc_mode: str) -> list[str]:
     return list(args)
 
 
+def effective_java_auto(settings: dict, inst) -> bool:
+    """是否走自动 Java 探测（round-226 P1-1 的单一口径）。
+
+    实例固定了 java_path 时，即使全局「自动检测」开着也必须让位 ——
+    ``select_java(java_auto=True)`` 会整段跳过 user_path 分支，玩家的
+    实例级设置会被静默忽略（UI 却显示「已固定 Java X」）。
+    """
+    inst_java = (getattr(inst, "java_path", "") or "").strip()
+    return bool(settings.get("java_auto", True)) and not inst_java
+
+
+def split_args(text: str) -> list[str]:
+    """按 shell 语义分词，但**保留 Windows 反斜杠**。
+
+    shlex.split(posix=True) 把反斜杠当转义符吃掉：
+    ``-Djava.library.path=C:\\Program Files\\natives`` 会变成
+    ``['-Djava.library.path=C:Program', 'Filesnatives']``，JVM 直接报
+    ``Unrecognized option``（round-226 P1-4 实测）。做法：先把反斜杠换成
+    一个不可能出现在参数里的私有字符，交给 shlex 处理引号，再换回来 ——
+    这样 ``-Dfoo="a b"`` 的引号语义完全不变，路径里的反斜杠也原样保留。
+    含空格且未加引号的路径仍按标准 shell 语义拆开（用户需自己加引号）。
+    """
+    import shlex
+    guard = "\uE000"
+    src = (text or "").replace("\\", guard)
+    try:
+        toks = shlex.split(src)
+    except ValueError:
+        toks = src.split()  # 引号不闭合时降级
+    return [t.replace(guard, "\\") for t in toks]
+
+
 def parse_game_args(text: str) -> tuple[str | None, str | None, list[str]]:
     """把「游戏附加参数」字符串拆成 (server, port, extra)。
 
@@ -77,11 +109,7 @@ def parse_game_args(text: str) -> tuple[str | None, str | None, list[str]]:
     两段式启动参数），其余令牌原样返回，由调用方追加到游戏命令末尾（MC 接受
     尾随参数，与主流的「游戏附加参数」行为一致）。
     """
-    import shlex
-    try:
-        toks = shlex.split(text or "")
-    except ValueError:
-        toks = (text or "").split()  # 引号不闭合时降级
+    toks = split_args(text)
     server: str | None = None
     port: str | None = None
     extra: list[str] = []
@@ -264,6 +292,10 @@ def build_options(
         "launcherName": launcher_name,
         "launcherVersion": launcher_version,
         "jvmArguments": [f"-Xmx{ram_mb}M", f"-Xms{xms}M"],
+        # round-226 P1-14：mll 默认 False，1.12~1.18 的 log4j2 配置
+        # （含 Log4Shell 缓解）就不会注入，崩溃堆栈也变薄。mll 只在
+        # 版本 json 带 logging 块时才追加参数，老版本自动跳过。
+        "enableLoggingConfig": True,
     }
     # round-55 JVM 参数预设（对齐主流「JVM 参数」预设下拉）：
     #   default = 不注入额外调优；aikar = 注入社区推荐 Aikar 组（默认即此组）；
@@ -283,13 +315,8 @@ def build_options(
                 "-XX:+DisableExplicitGC",
             ]
     if jvm_args and jvm_args.strip():
-        # round-34 加固：shlex.split 正确解析带引号的参数（-Dfoo="a b" 等），
-        # 之前 .split() 会把引号内空格拆成多个参数。
-        import shlex
-        try:
-            opts["jvmArguments"] += shlex.split(jvm_args)
-        except ValueError:
-            opts["jvmArguments"] += jvm_args.split()  # 引号不闭合时降级
+        # round-34 加固引号语义；round-226 换 split_args 保留 Windows 路径反斜杠。
+        opts["jvmArguments"] += split_args(jvm_args)
     # round-53 实例级渲染器（对齐主流「版本设置→渲染器」）：
     #   software = 软件 OpenGL 兜底（老显卡 / 虚拟机黑屏 / 缺驱动）；
     #   legacy   = 旧驱动兼容（关共享上下文，LWJGL2 版本防切换卡死）。
@@ -557,6 +584,39 @@ def _needs_repair(missing: list[str]) -> bool:
         if _re.search(r"-natives-[A-Za-z0-9_.-]+\.jar$", os.path.basename(p))
     ]
     return len(purely_natives) < len(missing)
+
+
+def _library_expectations(vjson_path: str) -> dict[str, tuple[str, int]]:
+    """从版本 json 收集 ``libraries/<rel> -> (sha1, size)``，供补库校验。
+
+    round-226 P1-9：以前补库只判 ``len(content)>1000``，BMCLAPI 返回
+    200 的 HTML 错误页会被当 jar 写进 classpath 并永久占位。
+    """
+    out: dict[str, tuple[str, int]] = {}
+    try:
+        import json as _json
+        with open(vjson_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except Exception:  # noqa: BLE001 - 拿不到 json 就退回 magic 校验
+        return out
+    for lib in (data.get("libraries") or []):
+        if not isinstance(lib, dict):
+            continue
+        dl = lib.get("downloads") or {}
+        arts = [dl.get("artifact")]
+        cls = dl.get("classifiers") or {}
+        if isinstance(cls, dict):
+            arts.extend(cls.values())
+        for art in arts:
+            if not isinstance(art, dict) or not art.get("path"):
+                continue
+            try:
+                size = int(art.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            out[str(art["path"]).replace("\\", "/")] = (
+                str(art.get("sha1") or ""), size)
+    return out
 
 
 def _prepare_natives(version: str, mc_dir: str, *, on_repair: callable | None = None) -> str | None:
@@ -841,7 +901,9 @@ def launch_instance(
     vroot = versions_root(inst, version)
     # select_java takes java_auto / user_path as KEYWORD-only args — passing the
     # bool positionally raised TypeError and broke every launch.
-    java_auto = settings.get("java_auto", True)
+    # round-226 P1-1：口径收在 effective_java_auto()，与
+    # core.java.java_plan 一致（实例固定 Java 时自动检测必须让位）。
+    java_auto = effective_java_auto(settings, inst)
     # Cleanroom is a 1.12.2 fork whose 0.7.x builds run on Java 25 — the version
     # table alone would select Java 8 and the client would fail to load classes.
     from .core.java import find_version_json, required_java_major_for
@@ -1107,6 +1169,8 @@ def launch_instance(
         if missing and os.path.isdir(_libs_root):
             try:
                 from .core.mirror import MirrorSession
+                import hashlib as _hashlib
+                _exp = _library_expectations(_vjson) if _vjson else {}
                 with MirrorSession() as _sess:
                     for _p in list(missing):
                         if abort_requested():
@@ -1120,10 +1184,25 @@ def launch_instance(
                             # 防 BMCLAPI 对缺失老库返回 22 字节 stub：内容过小视为
                             # 「仓库无此文件」，弃写（否则假 jar 会占住 classpath，
                             # 后续永远跳过补齐、真库也补不进来）。
-                            if _r.status_code == 200 and len(_r.content) > 1000:
+                            _blob = _r.content
+                            _rel_norm = _rel.replace("\\", "/")
+                            _sha1, _size = _exp.get(_rel_norm, ("", 0))
+                            # jar/zip 魔数 + 可选 size/sha1：任何一项不符都
+                            # 弃写，绝不让假 jar 占住 classpath。
+                            _valid = (_r.status_code == 200
+                                      and len(_blob) > 1000
+                                      and _blob[:2] == b"PK")
+                            if _valid and _size and len(_blob) != _size:
+                                _valid = False
+                            if _valid and _sha1:
+                                _valid = (_hashlib.sha1(_blob).hexdigest().lower()
+                                          == _sha1.lower())
+                            if _valid:
                                 os.makedirs(os.path.dirname(_p), exist_ok=True)
-                                with open(_p, "wb") as _f:
-                                    _f.write(_r.content)
+                                _tmp = _p + ".part"
+                                with open(_tmp, "wb") as _f:
+                                    _f.write(_blob)
+                                os.replace(_tmp, _p)
                                 missing.remove(_p)
                         except Exception:  # noqa: BLE001 - 单个库下载失败不阻断
                             pass
@@ -1236,14 +1315,18 @@ def launch_instance(
     _emit_step(callback, "start")
     # round-69 进程优先级：读全局设置（实例级暂无独立覆盖），随 creationflags 生效。
     _pri = (settings.get("process_priority") or "normal")
-    proc, logf = launch_process(cmd, inst.mc_dir, log_path, priority=_pri)
+    # round-226 P1-7：进程 cwd 必须与 opts["gameDirectory"] 一致，
+    # 否则隔离实例下用相对路径读写资源的 mod 会漂到共享 .minecraft。
+    proc, logf = launch_process(cmd, game_dir, log_path, priority=_pri)
     # round-55 启动后命令：游戏进程拉起后由启动器执行（不等待、失败静默）。
     # 退出后命令由 UI 层在轮询到游戏进程退出时执行（main_window._poll_game），
     # 这里只负责「游戏已启动」这一半。
     post_cmd = (getattr(inst, "post_launch_cmd", "") or "").strip() \
         or settings.get("post_launch_cmd", "")
-    run_hook_cmd(post_cmd, inst.mc_dir)
-    return proc, log_path
+    run_hook_cmd(post_cmd, game_dir)
+    # round-226：日志打开失败时 launch_process 走 PIPE 分支返回 None，
+    # 此时不能再把一个根本不存在的 log_path 交给控制台 tail / 崩溃弹窗。
+    return proc, (log_path if logf is not None else None)
 
 
 # round-48 C：进程退出原因分类。返回 (i18n_key, kwargs)，UI 据此给出可操作提示。

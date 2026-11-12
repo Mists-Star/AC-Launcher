@@ -965,7 +965,18 @@ class InstancesManager:
         _ignore = (shutil.ignore_patterns("libraries", "assets")
                    if should_use_shared_pool(src) else None)
         dst_mc = os.path.join(new_root, ".minecraft")
-        shutil.copytree(src.mc_dir, dst_mc, dirs_exist_ok=True,
+        # round-226 P1-2：源的 mc_dir 可能本身就是 versions/<id> 隔离目录
+        # （外来实例，版本 json 扁平躺在里面）。直接拍平到 <new>/.minecraft
+        # 会得到一个既非标准布局、也非隔离布局的四不像：mll 按
+        # <root>/versions/<id>/<id>.json 找 json 必然 VersionNotFound。
+        # 与 import_external(mode="copy") 的 round-98 修法保持一致。
+        vid = (src.version_id or "").strip()
+        isolated_src = bool(vid) and os.path.isfile(
+            os.path.join(src.mc_dir, f"{vid}.json"))
+        copy_target = (os.path.join(dst_mc, "versions", vid)
+                       if isolated_src else dst_mc)
+        os.makedirs(copy_target, exist_ok=True)
+        shutil.copytree(src.mc_dir, copy_target, dirs_exist_ok=True,
                         ignore=_ignore)
         inst = Instance(
             id=new_id,
@@ -991,8 +1002,18 @@ class InstancesManager:
             # 档/模组/自定义目录，两个实例共写一份数据（复制意图落空）。
             # 副本回退全局隔离（一般用户=共享、数据本来就一笔），明确隔离
             # 需求的用户在副本设置里重开——与「复制」的独立性语义一致。
-            isolation="",
+            # 副本仍要有独立数据目录；但隔离布局必须保留，否则存
+            # 档/模组会落回共享根（round-98 同款口径）。
+            isolation="isolated" if isolated_src else "",
             game_dir_override="",
+            # round-226 P2-4：六个实例级设置以前复制后悄悄回退。
+            # `format` 刻意不复制 —— 副本已改成 AC 自有布局，沿用
+            # 源 iso/pcl 格式会让 layout_of 判成扁平布局，反而启动失败。
+            auto_server=src.auto_server,
+            gc_mode=src.gc_mode,
+            mem_optimize=src.mem_optimize,
+            favorite=src.favorite,
+            icon_path=src.icon_path,
             post_launch_cmd=src.post_launch_cmd,
             exit_cmd=src.exit_cmd,
             group=src.group,

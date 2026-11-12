@@ -281,12 +281,18 @@ class ImageLoader(QObject):
 
     # ------------------------------------------------------------ replies
     def _on_ready_read(self) -> None:
-        """round-181：边下边数，超过上限立刻中止，不让大图占满并发槽。"""
+        """round-181：边下边数，超过上限立刻中止，不让大图占满并发槽。
+
+        round-226：QNetworkReply.bytesAvailable() 返回的是**累计未读字节**，
+        不是本次新增量。多次 readyRead 累加会把 400KB 算成 800KB，正常
+        图标被误判超限 abort。这里直接读当前累计值即可（_on_finished
+        才一次性 readAll，不该在这里消费数据）。
+        """
         reply = self.sender()
         if reply is None:
             return
         try:
-            seen = int(reply.property("seen") or 0) + reply.bytesAvailable()
+            seen = int(reply.bytesAvailable() or 0)
             reply.setProperty("seen", seen)
             if seen > self._MAX_ICON_BYTES:
                 reply.abort()
@@ -331,6 +337,14 @@ class ImageLoader(QObject):
                         pass
                 self._raw_put(url, thumb)
                 self._failed.pop(url, None)
+                # round-226：直连兜底成功后把玩家配置的代理还回去，
+                # 以前 _direct_fallback 一旦置 True 就永不复位。
+                if self._direct_fallback:
+                    self._direct_fallback = False
+                    try:
+                        self._apply_proxy()
+                    except Exception:  # noqa: BLE001
+                        pass
                 self._deliver(url, size, dpr, target)
                 for _u, _s, _d, _tgt, _tok in self._waiting.pop(url, []):
                     self._deliver(_u, _s, _d, _tgt)

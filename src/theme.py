@@ -451,6 +451,32 @@ def get_theme_pack_dir() -> str:
     return d
 
 
+def _pack_overrides(pack: dict, key: str) -> dict:
+    """round-226 P1-5：主题包的三张 token 表必须是 dict。
+
+    一个合法 JSON 但 ``colors`` 是字符串 / ``radii`` 是数组 / ``fonts`` 是 null
+    的包，会让 ``dict.update`` 抛 TypeError/ValueError 并**穿透启动链**
+    （main.py 在构造主窗前就调用 apply_theme_pack）。非法字段一律忽略，
+    不会让启动器起不来。
+    """
+    v = pack.get(key, {}) if isinstance(pack, dict) else {}
+    if not isinstance(v, dict):
+        return {}
+    return {k: x for k, x in v.items()
+            if isinstance(k, str) and isinstance(x, (str, int, float))
+            and not isinstance(x, bool)}
+
+
+def _validate_theme_pack(pack: object) -> dict | None:
+    """返回可安全 apply 的浅拷贝；不是「dict + 非空 id」就返回 None。"""
+    if not isinstance(pack, dict) or not pack.get("id"):
+        return None
+    out = dict(pack)
+    for key in ("colors", "radii", "fonts"):
+        out[key] = _pack_overrides(pack, key)
+    return out
+
+
 def list_theme_packs() -> list[dict]:
     """Built-in packs + packs from <data>/themes/*.json (user order wins)."""
     packs = [dict(p) for p in BUILTIN_THEME_PACKS.values()]
@@ -462,7 +488,8 @@ def list_theme_packs() -> list[dict]:
             try:
                 with open(_os_module.path.join(d, fn), "r", encoding="utf-8") as f:
                     p = _json.load(f)
-                if isinstance(p, dict) and p.get("id"):
+                p = _validate_theme_pack(p)
+                if p is not None:
                     packs.append(p)
             except Exception:
                 continue
@@ -483,7 +510,8 @@ def import_theme_pack_file(path: str) -> dict:
     import shutil as _shutil
     with open(path, "r", encoding="utf-8") as f:
         pack = _json.load(f)
-    if not isinstance(pack, dict) or not pack.get("id"):
+    pack = _validate_theme_pack(pack)
+    if pack is None:
         raise ValueError("主题包格式无效：缺少 id")
     safe_id = "".join(c for c in str(pack["id"]) if c.isalnum() or c in "-_")
     dest = _os_module.path.join(get_theme_pack_dir(), f"{safe_id}.json")
@@ -517,9 +545,9 @@ def apply_theme_pack(pack: dict | None) -> None:
             COLORS.update(THEME_DARK)
         elif mode == "light":
             COLORS.update(THEME_LIGHT)
-        COLORS.update(pack.get("colors", {}))
-        RADII.update(pack.get("radii", {}))
-        FONTS.update(pack.get("fonts", {}))
+        COLORS.update(_pack_overrides(pack, "colors"))
+        RADII.update(_pack_overrides(pack, "radii"))
+        FONTS.update(_pack_overrides(pack, "fonts"))
     elif _custom_accent:
         # round-49：无主题包时，重置基础表后重新套用用户自定义 accent，
         # 否则 accent 又变回内置紫。

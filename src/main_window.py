@@ -3600,9 +3600,25 @@ class MainWindow(QMainWindow):
             return
         geo = self.cfg.get("win_geometry")
         if isinstance(geo, (list, tuple)) and len(geo) == 4:
-            x, y, w, h = (int(v) for v in geo)
+            try:
+                x, y, w, h = (int(v) for v in geo)
+            except (TypeError, ValueError):
+                return
             if w >= 900 and h >= 600:
-                self.setGeometry(x, y, w, h)
+                # round-226：上次在副屏（x>=1920）关闭、副屏拔线后照旧
+                # setGeometry 会让整窗不可见，表现为「启动器没起来」。
+                from PySide6.QtGui import QGuiApplication
+                visible = False
+                for scr in QGuiApplication.screens():
+                    g = scr.availableGeometry()
+                    if g.x() <= x < g.right() and g.y() <= y < g.bottom():
+                        visible = True
+                        break
+                if visible:
+                    self.setGeometry(x, y, w, h)
+                else:
+                    from .win_geometry import center_on_screen
+                    center_on_screen(self)
 
     # ── round-83 系统托盘（关窗藏托盘常驻）──────────────────────
     def _init_tray(self) -> None:
@@ -3682,7 +3698,14 @@ class MainWindow(QMainWindow):
         self.close()
 
     def _has_active_tasks(self) -> bool:
-        """round-168：是否还有下载/启动 worker 在跑（含取消收尾）。"""
+        """round-168：是否还有下载/启动 worker 在跑（含取消收尾）。
+
+        round-226：运行中的游戏也算「有事在跑」。UI 的
+        ``tray.quit_game_note`` 明确承诺「退出启动器后游戏仍会继续」，
+        所以这里只负责让退出前弹出那句提示，不杀进程。
+        """
+        if getattr(self, "_game_procs", None):
+            return True
         seen = set()
         for w in list(getattr(self, "_dl_workers", {}).values()) + \
                 list(getattr(self, "_dl_stopping", {}).values()):

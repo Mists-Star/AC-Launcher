@@ -1730,3 +1730,52 @@ round-195 / 197 三条 `class X(QWidget)` 字面量断言改真实继承判据�
    文档里都出现过，直接删名会静默失效（try/except 里更查不出来）。
 
 **门禁**：`tests/test_round224_titlebar.py` 22/22；`regress.py` **91/91**。
+
+## 三十一、round-225：全项目只读审计（2026-11-12，未改业务代码）
+
+> 用户要求「查每一个细节 + 拉其他系统源码对照」。完整报告见
+> `docs/audit_round225_2026-11-12.md`（P0/P1/P2 共 29 条，全部带 `file:line`
+> 与行为复现证据）。本轮**只写报告**，不动实现，等确认优先级后按第 6 节顺序开工。
+
+| 级别 | 条数 | 代表项 |
+|---|---|---|
+| **P0** | 1 | `net_api.py:2891-2908` OptiFine 远端文件名未过 `_safe_filename`，可写穿 mods 目录（已注入污染页面复现） |
+| **P1** | 14 | 实例固定 Java 被自动检测吞掉（`launch.py:844` vs `core/java.py:422`）；复制版本隔离外来实例启动必失败（`instances.py:946`）；CF required 依赖静默跳过仍报成功（`net_api.py:1531`）；`shlex.split` 破坏 Windows 路径参数（`launch.py:82,290`）；坏主题包崩启动（`theme.py:502`）；崩溃分析读 `mc_dir` 而非 `game_dir`；下载取消链断裂；Prism/MultiMC 导入丢 `patches`；退出留孤儿游戏进程 |
+| **P2** | 14 | i18n 4 键只靠 `default=` 兜底、3 处 UI 显示字面 `{xxx}`（Java 确认框是整段模板）；Qt 翻译写死 zh_CN；几何恢复不校验屏幕；配置导入不校验类型；图标字节数虚增 + 直连回退不复位；`.mrpack` 无 sha1 |
+
+**对照源码**：本地已有的 HMCL / PrismLauncher / PCL2-CE 三套源码逐行 diff。
+AC 在「单遍 sha1 + Range 续传 + 来源健康表 + 429 分支」「Java 整盘扫描」
+「崩溃后自动补依赖闭环」三处**强于**参考实现；差距集中在 Java 强制/建议约束集合、
+版本 json 递归继承与环检测、`patches` 导入、具名崩溃规则、加载器安装前 mainClass 冲突检查。
+
+**误报纠正**：子代理报「免 key CF 通道丢弃 hash」是错的（keyless 内部自己取并传
+`expected_sha1`）；「整合包两条主通道都缺 sha1」只对一半（CF manifest 通道已传）。
+另外 `docs/launcher_interop_audit_2026-11.md:32-36,63` 与
+`docs/launcher_comparison_2026-11.md:62-68,79-80` 的 7 条结论已过时，照抄会误判。
+
+**门禁 / 基线**：`regress.py` **91/91**；`smoke_all` 全页构造通过；离屏目视 8 页
++ 3 弹窗无空白（中文方块是 offscreen 缺字体，非 UI bug）；行为探针 12/12 + 2/2 复现。
+
+## 三十二、round-226：按 round-225 审计报告动手修（2026-11-12）
+
+> 详细分级与证据见 `docs/audit_round225_2026-11-12.md`，本轮落地记录见
+> `CHANGELOG.md` 的 round-226。全部改动有行为断言，不靠源码字面量。
+
+| 级别 | 数量 | 落地 |
+|---|---|---|
+| P0 | 1 | OptiFine 远端文件名过 `_safe_filename` + URL `quote` |
+| P1 | 12 | Java 口径、duplicate 布局、CF 依赖 fail-fast、shlex、主题包校验、崩溃分析 `game_dir`、cwd、取消链、补库校验、log4j、`_has_active_tasks` 计入游戏 |
+| P2 | 12 | i18n 缺键/占位符、配置写盘/导入/更新、图标计数、`.mrpack` sha1、缓存键/原子写、几何恢复、`_base_dir` |
+
+**门禁**：`tests/test_round226_fixes.py` **49/49**；`regress.py` **92/92**；
+离屏目视 8 页 + 3 弹窗无空白；打包产物实机启动通过。
+
+☠ **本轮自我纠错**：round-225 把「退出启动器留孤儿游戏进程」判成 P1，其实
+`tray.quit_game_note` 白纸黑字写着「退出启动器后游戏仍会继续」—— 那是**承诺**
+不是 bug。真问题是 `_has_active_tasks()` 不算 `_game_procs`，玩家连那句提示都
+看不到。已按「补提示、不杀进程」修。审计报告第 2 节 P1-12 以此为准。
+
+**明确不做 / 留待专项**：P1-10（mll 版本 json 只合一次继承）、P1-11（Prism/MultiMC
+`patches/*.json` 导入）、P1-13（Java 深扫取消）、P2-3（Qt 翻译写死 zh_CN）、
+P2-14（具名崩溃规则表）。前两项必须有真实 HMCL / Prism 实例样本做端到端，
+别在打包前顺手改。

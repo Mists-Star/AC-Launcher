@@ -36,7 +36,10 @@ def _base_dir() -> str:
     """Config/data base: exe dir when frozen, project dir otherwise."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
-    return os.path.abspath(".")
+    # round-226：源码版以前返回 cwd，从别处启动（快捷方式 / IDE）会另起
+    # 一套 launcher_config.json、data/ 与 ac.lock —— 设置「丢失」、单实例
+    # 锁失效。改成与打包版一致：固定落在项目根。
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def get_config_path(filename: str) -> str:

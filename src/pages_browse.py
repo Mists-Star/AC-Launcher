@@ -1286,6 +1286,7 @@ class StorePage(QWidget):
         self._dworker.speed.connect(self._on_pack_speed)
         self._dworker.finished.connect(self._on_mod_downloaded)
         self._dworker.error.connect(self._on_pack_error)
+        self._dworker.cancelled.connect(self._on_pack_cancelled)
         self._dl_bar.setVisible(True)
         self._dl_bar.setRange(0, 0)          # 依赖树文件数未知 → 忙指示
         self._dl_speed.setVisible(True)
@@ -1455,6 +1456,12 @@ class StorePage(QWidget):
         self._dl_bar.setVisible(False)
         self._dl_speed.setVisible(False)
         self.status.setText(t("store.download_fail", e=e))
+
+    def _on_pack_cancelled(self, _result=None):
+        """round-226：取消是 worker 的第三个终态，不接就永远转圈。"""
+        self._dl_bar.setVisible(False)
+        self._dl_speed.setVisible(False)
+        self.status.setText(t("store.download_cancelled"))
 
     def retranslate_ui(self):
         # 详情面板是页内组件，切语言时先退回列表，避免残留旧语言文案。

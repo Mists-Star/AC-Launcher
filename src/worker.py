@@ -339,8 +339,11 @@ class ProgressWorker(TrackedThread):
         def set_step(key: str) -> None:
             holder.step.emit(key)
 
+        # round-226：把取消判定塞进 callback，网络层据此在 iter_content
+        # 循环里真正中止（此前 abort() 只切信号，线程仍会把文件写完）。
         return {"setStatus": set_status, "setProgress": set_progress,
-                "setMax": set_max, "setStep": set_step}
+                "setMax": set_max, "setStep": set_step,
+                "cancel": self._is_cancelled}
 
     def run(self) -> None:
         kwargs = dict(self._kwargs)

@@ -272,7 +272,10 @@ def main():
     from src.theme import find_theme_pack, apply_theme_pack
     pack = find_theme_pack(cfg.get("theme_pack", "")) if cfg.get("theme_pack") else None
     if pack:
-        apply_theme_pack(pack)
+        try:
+            apply_theme_pack(pack)
+        except Exception as _e:  # noqa: BLE001 - 坏主题包不该让启动器起不来
+            _log.write("4.5 theme pack failed: %r\n" % (_e,)); _log.flush()
     # round-167 低配模式：毛玻璃/透底按有效值压制，不改写玩家配置
     from src import slim
     from src.theme import set_frosted

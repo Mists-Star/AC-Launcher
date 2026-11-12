@@ -8,6 +8,61 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-226（2026-11-12）— 按 round-225 审计报告动手修
+
+承接上一轮全项目只读审计，按报告第 6 节顺序落地。**新增 `tests/test_round226_fixes.py`
+49/49 行为断言**；全量 `regress.py` **92/92**；离屏目视 8 页 + 3 弹窗无空白。
+
+### P0
+- **OptiFine 远端文件名写穿目录**（`src/net_api.py:2891`）：adloadx 页面正则抓到的
+  `f2` 直接拼进落盘路径 / URL，是全仓唯一绕过 `_safe_filename` 的点。现在过
+  `_safe_filename` + `quote`，注入 `../evil.jar` 的探针已复现不了。
+
+### P1（核心链路）
+- **实例固定 Java 被自动检测吞掉**：抽 `launch.effective_java_auto(settings, inst)`，
+  与 `core.java.java_plan` 同口径（实例有 java_path 时自动检测让位）。
+- **复制版本隔离外来实例启动必失败**：`duplicate()` 现在检测扁平 `<id>.json`，
+  命中则保留 `versions/<id>/` 层级并给副本 `isolation="isolated"`（对齐
+  `import_external` 的 round-98 修法）；顺手补 `favorite/gc_mode/mem_optimize/
+  auto_server/icon_path` 等字段，`format` 刻意不复制（副本已是 AC 布局）。
+- **CF required 依赖静默跳过 → 假成功**：`resolve_cf_dependencies` 回报未解析
+  modId，`download_cf_with_deps` 改为**先解析再落盘**，缺前置直接 `NetError`
+  并列出 ID，不再留下「下载成功但进游戏崩」的半成品。
+- **`shlex.split` 破坏 Windows 路径**：新增 `launch.split_args()`，用私有字符
+  保护反斜杠再交给 shlex 处理引号；`-Dfoo="a b"` 语义不变。
+- **坏主题包崩启动**：`theme._validate_theme_pack` 校验 `colors/radii/fonts`
+  必须是 dict，`main.py` 调用点再包一层兜底；三种非法包实测不再抛。
+- **崩溃分析读错目录**：`analyze_instance` 改用 `Instance.game_dir`（与
+  `resolve_game_dir` 同口径），隔离实例不再显示「运行正常」。
+- **进程 cwd 与 gameDirectory 不一致**：`launch_process` / `run_hook_cmd` 的 cwd
+  改传 `game_dir`；日志打开失败时不再返回不存在的 `log_path`。
+- **下载取消链断裂**：`ProgressWorker._mll_callback` 注入 `cancel`，网络层透传到
+  `download_file`；`store_detail` / `pages_browse` 接上 `cancelled` 终态并收进度条。
+- **启动前补库无校验**：`_library_expectations()` 从版本 json 取 sha1/size，
+  补库要求 ZIP 魔数 + 尺寸 + 哈希，且走 `.part` + `os.replace` 原子落盘。
+- **log4j 配置缺失**：`build_options` 设 `enableLoggingConfig=True`（mll 只在
+  版本 json 带 `logging` 时注入，老版本自动跳过）。
+
+### P2
+- i18n 补 4 个只靠 `default=` 兜底的键 + 5 个新键；`t()` 三处字面 `{xxx}`
+  泄漏修掉（Java 确认框是整段模板）。
+- 配置：`save_config` 唯一 tmp + 进程内锁（8 线程并发写实测通过）；导入按
+  `_DEFAULTS` 类型校验；更新安装 / 切语言写盘失败明确提示不再假成功；
+  `_DEFAULTS` 登记 `nav_collapsed`。
+- 图标：`bytesAvailable()` 是累计未读字节，不再累加；直连兜底成功后复位。
+- 其它：`.mrpack` 透传 sha1；CF 缓存键补来源 / MC 版本 / 加载器维度；磁盘缓存
+  写盘纳入锁 + 原子替换；副屏拔线后几何恢复回退居中；`paths._base_dir()`
+  源码版固定项目根，不再依赖 cwd。
+
+### 修正 / 明确不做
+- ☠ **P1-12「退出留下孤儿游戏进程」判断错了**：`tray.quit_game_note` 明确承诺
+  「退出启动器后游戏仍会继续」。改成把 `_game_procs` 计入 `_has_active_tasks()`，
+  退出前弹出那句提示，**不杀游戏**。
+- **P1-10 / P1-11 互操作专项留下一轮**：版本 json 递归继承（`mll` 只合一次）
+  与 Prism/MultiMC `patches/*.json` 导入都需要真实 HMCL / Prism 实例样本做端到端，
+  不在这轮顺手改。
+- P1-13 Java 深扫取消、P2-3 Qt 翻译写死 zh_CN、P2-14 具名崩溃规则表同样留待专项。
+
 ## round-224（2026-11-11）— 原生标题栏跟随主题（修浅色下一条黑栏）
 
 用户截图反馈：浅色主题里「用户条款」窗口**顶部是一条纯黑标题栏**，与白色

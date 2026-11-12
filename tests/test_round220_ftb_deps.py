@@ -88,13 +88,13 @@ check("Fabric API(306612) 仍被跳过", "306612" not in cgot)
 
 print("\n[3] download_cf_with_deps：装依赖时删掉同 mod 旧版本 jar")
 # 桩下载函数：只落地一个 <pid>.jar，便于断言
-def _stub_keyed(pid, fid, dest_dir, callback=None, sha1=""):
+def _stub_keyed(pid, fid, dest_dir, callback=None, sha1="", cancel=None):
     p = os.path.join(dest_dir, "%s.jar" % pid)
     open(p, "w").close()
     return p
 
 
-def _stub_keyless(pid, fid, dest_dir, callback=None, manifest_out=None):
+def _stub_keyless(pid, fid, dest_dir, callback=None, manifest_out=None, cancel=None):
     p = os.path.join(dest_dir, "%s.jar" % pid)
     open(p, "w").close()
     if manifest_out is not None:
