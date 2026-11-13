@@ -125,6 +125,8 @@ SUITES = [
     ("第二轮解耦/打开目录统一（round-223）", "test_round223_dedup.py", "script"),
     ("原生标题栏跟随主题（round-224）", "test_round224_titlebar.py", "script"),
     ("审计发现修复回归（round-226）", "test_round226_fixes.py", "script"),
+    ("round-227 审计第 1 批修复回归（round-228）", "test_round228_fixes.py", "script"),
+    ("round-227 审计第 2 批数据安全回归（round-228）", "test_round228_batch2.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

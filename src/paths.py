@@ -29,7 +29,10 @@ def get_resource_path(relative_path: str) -> str:
         if os.path.isdir(internal):
             return os.path.join(internal, relative_path)
         return os.path.join(base, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
+    # round-228 P1-7：与 get_config_path/get_data_dir 同口径。源码版以前返回
+    # cwd，从快捷方式 / IDE 别处启动会让图标、皮肤、功能包、纹理全找不到，
+    # 而配置却正确落在项目根 —— 半死不活比全坏更难查。
+    return os.path.join(_base_dir(), relative_path)
 
 
 def _base_dir() -> str:

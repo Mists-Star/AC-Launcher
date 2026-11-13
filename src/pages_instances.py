@@ -2280,15 +2280,38 @@ class InstancesPage(QWidget):
         """旧入口（模组冲突预检）→ 转调体检，保持兼容。"""
         self._health_check(inst)
 
+    def _guard_running(self, inst_id: str) -> bool:
+        """round-228 P0-1：删**正在运行**的实例 = 边玩边 rmtree。
+
+        进程表由主窗按实例 id 登记（``MainWindow._game_procs``）。删之前先看一眼，
+        拦下并提示；返回 True 表示调用方应当直接放弃本次删除。
+        """
+        win = self.window()
+        procs = getattr(win, "_game_procs", None) or {}
+        if inst_id not in procs:
+            return False
+        warn(self, t("instances.delete_title"),
+             t("instances.delete_while_running"))
+        return True
+
+    def _report_delete_leftovers(self, inst, failed: list[str]) -> None:
+        """round-228 P2-6：rmtree 删不掉的文件不再静默，明确告诉玩家残骸在哪。"""
+        if failed:
+            warn(self, t("instances.delete_title"),
+                 t("instances.delete_partial", n=len(failed),
+                   path=getattr(inst, "root", "") or inst.mc_dir))
+
     # ia[instances]: 点「删除」 | 详情底部操作行 | 二次确认后移除实例并刷新列表
     def _delete_instance(self, inst: Instance):
         from .win_rounded import confirm
+        if self._guard_running(inst.id):
+            return
         if not confirm(
             self, t("instances.delete_title"),
             t("instances.delete_confirm", name=inst.name),
         ):
             return
-        self.mgr.remove(inst.id)
+        self._report_delete_leftovers(inst, self.mgr.remove(inst.id))
         self._refresh()
 
     # ia[instances]: 点「打开文件夹」 | 详情「管理与诊断」网格 | 用系统文件管理器打开实例目录
@@ -2905,6 +2928,8 @@ class InstancesPage(QWidget):
         inst = self.mgr.get(inst_id)
         if inst is None:
             return
+        if self._guard_running(inst_id):
+            return
         if not confirm(
             self,
             t("instances.delete_title"),
@@ -2914,7 +2939,7 @@ class InstancesPage(QWidget):
                    + t("instances.delete_warn"),
         ):
             return
-        self.mgr.remove(inst_id)
+        self._report_delete_leftovers(inst, self.mgr.remove(inst_id))
         if self._selected_id == inst_id:
             self._selected_id = None
         self._refresh()

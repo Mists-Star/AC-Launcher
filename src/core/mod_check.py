@@ -130,7 +130,10 @@ def _parse_jar(jar_path: str, filename: str) -> _ModMeta | None:
                             # 跳过对自己/游戏/加载器的引用
                             if dep in (mod_id, "minecraft", "forge", "fml", "java"):
                                 continue
-                            if entry.get("type", "").lower() in ("required", "depends", "optional"):
+                            # round-228 P1-12：Forge 的 optional（以及 Fabric 的
+                            # recommends/suggests）是「装了更好、没装也能跑」，
+                            # 不能进必需集合，否则一键修复会去装一堆用不上的模组。
+                            if entry.get("type", "").lower() in ("required", "depends"):
                                 deps.setdefault(dep, entry.get("versionRange", ""))
                 if mod_id:
                     return _ModMeta(id=mod_id, version=mod_ver,

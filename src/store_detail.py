@@ -839,6 +839,11 @@ class StoreDetailPanel(QWidget):
     def _on_versions_ready(self, appending: bool):
         self.versions_lbl.setText(t("store.detail_n_versions", n=len(self._versions)))
 
+        # round-228 P1-16：rec 原先只在下面「有版本且非追加」时赋值，零兼容版本
+        # 走到 _refresh_deps(rec) 就是 UnboundLocalError，详情页直接崩半截。
+        # _refresh_deps 本身接受 None（if not ver: return），这里给个兜底即可。
+        rec = None
+
         # 最新版本条：round-193 改成「最新**兼容**当前实例的版本」
         if self._versions and not appending:
             rec = self._recommended()

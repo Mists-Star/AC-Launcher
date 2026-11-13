@@ -8,6 +8,71 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-228（2026-11-13）— 按 round-227 审计报告 §9 第 1 批动手修
+
+承接 `docs/audit_round227_2026-11-12.md`（全项目只读审计，P0 2 / P1 16 /
+P2 19 / P3 7）。本轮只做「零风险、各 1~5 行」的第 1 批 6 条，**不动业务架构**。
+
+### P0
+- **破坏性确认框按回车 = 确认删除**（`src/win_rounded.py`）：按钮按
+  `reversed(buttons)` 建，Qt 会把第一个 `autoDefault` 按钮当成回车目标，
+  而 `confirm()` 的按钮是 `("No","Yes")` —— 删实例、批量删模组误按一次回车就执行了。
+  现在统一 `setAutoDefault(False)`，由调用点显式声明 `safe_default`：
+  `confirm()` 指向「No」，`ask()` 指向第一个按钮（现有 4 个调用点都是「取消」）。
+  鼠标点「Yes」的原有行为不变。
+
+### P1
+- **模组页「批量启用」实际在批量禁用**（`src/mod_list.py`）：`clicked(bool)` 把
+  `False` 当作 `want` 的第一个位置实参，默认值 `True` 失效。两个按钮改走 lambda
+  显式传意图。
+- **资源路径仍依赖 cwd**（`src/paths.py`）：round-226 修了 `_base_dir()` 却漏了
+  `get_resource_path()`，从快捷方式 / IDE 别处启动时图标、皮肤、功能包、纹理全找不到。
+  改成与 `get_config_path()` 同口径。
+- **固定 Java 路径失效时报错误的原因**（`src/launch.py`）：路径检查原先在
+  `select_java()` 之后，而 `select_java` 对不存在的路径直接返回 `None`，
+  于是先命中「未找到兼容 Java」，`err.java_path_invalid` 是死代码。检查上移。
+- **`optional` 依赖被当成必需前置**（`src/core/mod_check.py`）：Forge 的 `optional`
+  （以及 Fabric 的 `recommends` / `suggests`）不该进必需集合，否则一键修复会去装
+  一堆用不上的模组。只保留 `required` / `depends`。
+- **资源详情页零兼容版本直接崩**（`src/store_detail.py`）：`rec` 只在 `_versions`
+  非空时赋值，空列表走到 `_refresh_deps(rec)` 就是 `UnboundLocalError`。
+  前置 `rec = None`（`_refresh_deps` 本身接受 None）。
+
+### 🔍 验证（第 1 批）
+- 新增 `tests/test_round228_fixes.py` **15/15 行为断言**，已接入 `regress.py`：
+  真弹窗按回车、真点批量启用/禁用按钮、切 cwd 后路径比对、构造 Forge jar 解析
+  依赖类型、空版本列表调用、`err.java_path_invalid` 顺序与死代码检查。
+- 6 个改动文件 `py_compile` 全通过；探针 `_scratch/_verify_round228.py` 9/9、
+  `_scratch/_probe_ui_danger.py` 复验 P0-2 / P1-16 均由 FAIL 转 PASS。
+
+### 第 2 批：数据安全三连
+- **P0-1 删除正在运行的实例不拦截**（`src/pages_instances.py`）：两个删除入口
+  （`_delete_instance` / `_remove`）确认前先查主窗 `_game_procs`，命中就 warn 并放弃。
+  以前是确认框 → 直接 `mgr.remove()` → `rmtree`，边玩边删导致存档残缺。
+  新增中英 i18n `instances.delete_while_running`。
+- **P1-3 备份把整个 assets 共享池复制进快照**（`src/core/backup.py`）：
+  `_walk_files` 现在按 `shared_libs.is_junction()` 过滤目录，**不再靠名字一刀切** ——
+  AC 自建实例的 assets 联接被跳过，外来实例的真实 assets 目录仍照常备份。
+  回滚侧对「共享池实例」额外忽略 `assets`，兼容修复前含真实副本的旧快照，
+  避免 `ensure_dirs()` 把上万文件逐个搬回池。
+- **P2-6 删除残骸静默**（`src/instances.py`）：`remove()` 不再用
+  `rmtree(ignore_errors=True)`，改成 `onexc` 收集失败路径并返回；UI 用新增的
+  `instances.delete_partial` 明确告知残骸位置。元数据移除语义不变。
+- **P2-7 复核为误报，不新建 `core/fs_nodes.py`**：全仓只有
+  `shared_libs.is_junction` 一处 reparse 判定。删掉 `backup._is_link` 冗余包装，
+  `_clear_contents` 直接复用同一实现（报告 §7 已补纠正）。
+
+### 🔍 验证（第 2 批）
+- 新增 `tests/test_round228_batch2.py` **21/21 行为断言**，已接入 `regress.py`：
+  真建 Windows `mklink /J` 联接后跑 `create_backup`，断言快照保留存档/mods、
+  不含池内对象文件，且外来实例真实 assets 仍在；构造 `rmtree` 部分失败验证
+  返回列表；两个删除入口的运行拦截与 i18n 中英对称。
+- 全量 `regress.py` **94/94 通过**（含此前偶发 flaky 的 round-218 长标题用例）。
+- 探针 `_scratch/_probe_delete_running.py` 由 `mgr.remove 被调用次数 = 1 / FAIL`
+  转为 `= 0 / PASS`。
+
+> 第 3~7 批（路径口径 / 下载域 / 启动正确性 / 手感 / 收尾）按审计报告 §9 顺序继续。
+
 ## round-226（2026-11-12）— 按 round-225 审计报告动手修
 
 承接上一轮全项目只读审计，按报告第 6 节顺序落地。**新增 `tests/test_round226_fixes.py`

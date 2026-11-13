@@ -4,13 +4,16 @@
 
 每个快照：
   backups/<id>/<snapshot>/
-    minecraft/        # 该实例 .minecraft 的完整副本，唯一跳过 libraries
+    minecraft/        # 该实例 .minecraft 的用户内容副本（跳过 libraries 与所有目录联接）
     manifest.json     # 实例元数据 + 快照时间
 
-为什么跳过 ``libraries``：round-48 起 AC 自有实例的 ``<mc_dir>/libraries`` 是
-指向全局共享池的**目录联接**。备份时克隆它会把整个去重池复制一遍（既占盘又
-没意义）；回滚时顺着联接还会覆盖共享池。所以存取都跳过，回滚后由
-``Instance.ensure_dirs()`` 重建联接即可。
+为什么不备份 ``libraries`` / ``assets`` 的共享池：round-48 起 AC 自有实例的
+``<mc_dir>/libraries``、``<mc_dir>/assets`` 都是指向全局共享池的**目录联接**。
+备份时克隆它们会把整个去重池复制一遍（assets 1.20 约 400~700 MB、上万文件，
+既占盘又没意义）；回滚时顺着联接还会覆盖共享池。所以存取都跳过，回滚后由
+``Instance.ensure_dirs()`` 重建联接即可。round-228 之前只按名字跳了 libraries，
+漏掉 assets —— 而 ``os.walk`` 对 junction **会**进入（``os.path.islink`` 对
+junction 返回 False），于是每次备份都整份复制 assets/objects。
 
 回滚 = 摘掉 libraries 联接 → **把当前内容整体搬进同盘暂存区** → 用快照内容覆盖
 → 验证成功后才销毁暂存区。任何一步失败都把原内容原样搬回（round-210 P0）。
@@ -23,9 +26,14 @@ import shutil
 import time
 
 from ..paths import get_data_dir
+from .shared_libs import is_junction
 
 # mc_dir 里既不属于用户内容、又可能是共享池联接的目录 → 备份/回滚时跳过。
 # versions/ 保留（游戏本体，回滚后离线也能直接启动）。
+#
+# round-228 P1-3：名字只是兜底，真正的判据是「是不是目录联接」。
+# 外来导入实例的 assets 是真实目录（should_use_shared_pool=False），
+# 按名字一刀切会把它的资源也丢出快照；只跳 reparse point 才能两全。
 _SKIP_DIRS = ("libraries",)
 
 
@@ -43,10 +51,15 @@ def _snapshot_id() -> str:
 
 
 def _walk_files(src: str) -> list[tuple[str, str]]:
-    """列 ``src`` 下所有文件 ``(abs, rel_to_src)``，跳过 _SKIP_DIRS。"""
+    """列 ``src`` 下所有文件 ``(abs, rel_to_src)``，跳过共享池 / 目录联接。"""
     files: list[tuple[str, str]] = []
     for dirpath, dirnames, filenames in os.walk(src):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        # round-228 P1-3：os.walk 会进入 Windows junction（followlinks 只管
+        # symlink，os.path.islink 对 junction 返回 False），必须逐项按
+        # reparse tag 过滤，否则一次备份就把共享池的 assets/objects 全拷进来。
+        dirnames[:] = [d for d in dirnames
+                       if d not in _SKIP_DIRS
+                       and not is_junction(os.path.join(dirpath, d))]
         for fn in filenames:
             ap = os.path.join(dirpath, fn)
             files.append((ap, os.path.relpath(ap, src)))
@@ -124,7 +137,7 @@ def _clear_contents(folder: str) -> None:
     """清掉 folder 的直接子项，绝不顺着符号链接/目录联接越界。"""
     for name in os.listdir(folder):
         p = os.path.join(folder, name)
-        if _is_link(p):
+        if is_junction(p):
             # Windows junction 用 rmdir 只摘链接本身，不动目标目录。
             try:
                 os.rmdir(p)
@@ -189,8 +202,19 @@ def restore_backup(inst, snapshot: str) -> dict:
 
         # 3) 覆盖；失败时清半成品并把暂存区原样搬回。
         try:
+            # round-228 P1-3：AC 自建实例的 assets 必须是联接。修复之前创建的
+            # 旧快照里可能含 assets 的真实副本，直接 copytree 会把它写回成
+            # 普通目录，随后 ensure_dirs() 得把上万文件逐个搬回共享池。
+            # 外来实例的 assets 本来就是真实目录，仍要照常还原。
+            ignore_names = set(_SKIP_DIRS)
+            try:
+                from .shared_libs import should_use_shared_pool
+                if should_use_shared_pool(inst):
+                    ignore_names.add("assets")
+            except Exception:  # noqa: BLE001 - 判定不可用就按旧行为还原
+                pass
             shutil.copytree(src, mc, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns(*_SKIP_DIRS))
+                            ignore=shutil.ignore_patterns(*ignore_names))
             inst.ensure_dirs()
         except Exception:
             _clear_contents(mc)
@@ -214,17 +238,3 @@ def restore_backup(inst, snapshot: str) -> dict:
     # 4) 提交：只有走到这里才真正销毁旧内容。
     shutil.rmtree(stage, ignore_errors=True)
     return load_manifest(snapshot)
-
-
-def _is_link(path: str) -> bool:
-    try:
-        if os.path.islink(path):
-            return True
-    except OSError:
-        return True
-    # Windows 目录联接 (mklink /J)：islink 不一定返回 True，再看 reparse 属性。
-    try:
-        from .shared_libs import is_junction
-        return is_junction(path)
-    except Exception:  # noqa: BLE001 - 能力缺失时不阻断，按普通目录处理
-        return False

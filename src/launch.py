@@ -912,6 +912,14 @@ def launch_instance(
     _vjson = find_version_json(getattr(inst, "mc_dir", ""),
                                version or getattr(inst, "game_version", ""))
     _need = required_java_major_for(inst.game_version, inst.loader, version_json=_vjson)
+    # round-228 P1-10：路径检查必须在 select_java **之前**。固定 Java 路径失效时
+    # select_java 只会返回 None，下面的「未找到兼容 Java」会先命中，于是
+    # err.java_path_invalid 这条正确文案永远走不到，玩家被支去装 Java 也没用。
+    if not java_override and not java_auto and user_java and not os.path.isfile(user_java):
+        from .i18n import t as _t
+        raise RuntimeError(
+            _t("err.java_path_invalid", default="指定的 Java 路径不存在：{path}\n请在 设置 → Java 里重新选择，或开启「自动检测」。", path=user_java)
+        )
     if java_override:
         java = java_override
     else:
@@ -928,11 +936,6 @@ def launch_instance(
                        "已检测到：{detected}\n"
                        "请安装 Java {need}，或在 设置 → Java 开启「允许强制使用不兼容的 Java」。",
                need=need, detected=_java_detected_text())
-        )
-    if not java_override and not java_auto and user_java and not os.path.isfile(user_java):
-        from .i18n import t as _t
-        raise RuntimeError(
-            _t("err.java_path_invalid", default="指定的 Java 路径不存在：{path}\n请在 设置 → Java 里重新选择，或开启「自动检测」。", path=user_java)
         )
     # round-93 「Use Javaw.exe pls」根治。两条线同时处理：
     #   1) Windows 下统一用 javaw.exe 拉起游戏。PCL/HMCL 等导入客户端（尤其

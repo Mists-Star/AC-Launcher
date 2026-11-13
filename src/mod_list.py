@@ -398,12 +398,15 @@ class ModListPanel(QWidget):
                                      % COLORS["text_main"])
         bl.addWidget(self.batch_lbl)
         bl.addStretch(1)
+        # round-228 P1-1：clicked(bool) 会把 False 当第一个位置实参传给槽，
+        # 直接连 _batch_enable 会让「启用」按钮的 want 恒为 False（变成禁用）。
+        # 包一层 lambda 吃掉信号实参，显式传意图。
         self.en_btn = ui_kit.make_button(
-            t("mods.enable"), kind="secondary", on_click=self._batch_enable,
-            min_h=28)
+            t("mods.enable"), kind="secondary",
+            on_click=lambda *_: self._batch_enable(True), min_h=28)
         self.dis_btn = ui_kit.make_button(
-            t("mods.disable"), kind="secondary", on_click=self._batch_disable,
-            min_h=28)
+            t("mods.disable"), kind="secondary",
+            on_click=lambda *_: self._batch_disable(), min_h=28)
         self.upd_btn = ui_kit.make_button(
             t("mods.update_selected"), kind="secondary",
             on_click=self._batch_update, min_h=28)

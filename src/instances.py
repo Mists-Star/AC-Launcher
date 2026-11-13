@@ -1134,21 +1134,35 @@ class InstancesManager:
         self._persist(inst)
         return inst
 
-    def remove(self, instance_id: str) -> None:
+    def remove(self, instance_id: str) -> list[str]:
+        """移除实例。返回**删不掉**的磁盘路径列表（空列表 = 删干净了）。
+
+        round-228 P2-6：以前 ``shutil.rmtree(..., ignore_errors=True)``，被游戏 /
+        杀软占用的文件删不掉也一声不吭，元数据却照删 —— 实例从列表消失、
+        磁盘留半个目录，玩家连清理入口都没有。现在把失败项交给 UI 明确提示。
+        """
+        failed: list[str] = []
         inst = self._instances.pop(instance_id, None)
         if inst is not None:
             # Never delete a user's real game folder for a linked (imported)
             # instance — only drop the AC metadata entry.
             if not inst.external:
-                import shutil
-
                 # round-48/round-175 先摘掉 libraries/assets 联接（链接跟共享池
                 # 耦合，直接 rmtree 可能顺着 reparse point 误删整个共享池）。
                 inst._strip_shared_junctions(inst.mc_dir)
-                shutil.rmtree(inst.root, ignore_errors=True)
+                root = inst.root
+                if os.path.isdir(root):
+                    def _collect(func, path, exc):
+                        failed.append(path)
+
+                    # Python 3.12+ 用 onexc；3.13 里 onerror 只是会告警的兼容别名。
+                    # 回调第三参数 exc 是异常实例（onexc）或 exc_info（onerror），
+                    # 这里都不需要，只收路径。
+                    shutil.rmtree(root, onexc=_collect)
         if self._current == instance_id:
             self._current = next(iter(self._instances), None)
         self._persist(dropped=instance_id)
+        return failed
 
     @property
     def current_id(self) -> Optional[str]:

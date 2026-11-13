@@ -159,6 +159,8 @@ def _msgbox(
     detail: str = "",
     icon: str = "warning",
     buttons: tuple[str, ...] = ("Yes", "No"),
+    *,
+    safe_default: str | None = None,
 ) -> str | None:
     """Show a themed confirmation/info dialog. Returns button text or None.
 
@@ -168,7 +170,9 @@ def _msgbox(
         text:   main message (rich text OK).
         detail: optional secondary text below the main message.
         icon:   one of "warning", "question", "info", "success".
-        buttons: button labels shown right-to-left (last = default).
+        buttons: button labels; the last one gets the accent (visual only).
+        safe_default: label of the button that Enter should activate. ``None``
+            means no keyboard default at all (Enter just dismisses).
 
     Returns:
         The label of the clicked button, or None if dismissed.
@@ -224,6 +228,14 @@ def _msgbox(
         btn.setMinimumWidth(70)
         if label == buttons[-1]:
             btn.setProperty("cls", "accent")
+        # round-228 P0-2：按钮按 reversed(buttons) 建，Qt 会自动把第一个
+        # autoDefault 按钮当成「回车 = 点它」——而 confirm() 的按钮是
+        # ("No","Yes")，第一个建的恰好是「Yes」。于是删实例、批量删模组这类
+        # 破坏性确认框，误按一次回车就直接执行了。统一关掉 autoDefault，
+        # 只把调用点显式指定的 safe_default 设为键盘默认。
+        btn.setAutoDefault(False)
+        if safe_default is not None and label == safe_default:
+            btn.setDefault(True)
         btn.clicked.connect(_make_cb(label))
         btn_row.addWidget(btn)
     root.addLayout(btn_row)
@@ -241,18 +253,24 @@ def _msgbox(
 
 
 def confirm(parent, title: str, text: str, detail: str = "", **kw) -> bool:
-    """Themed Yes/No confirmation dialog. Returns True if user clicked 'Yes'."""
+    """Themed Yes/No confirmation dialog. Returns True if user clicked 'Yes'.
+
+    round-228 P0-2：破坏性操作不能被「随手回车」确认，键盘默认给「No」。
+    """
     return _msgbox(parent, title, text, detail, icon="warning",
-                   buttons=("No", "Yes")) == "Yes"
+                   buttons=("No", "Yes"), safe_default="No") == "Yes"
 
 
 def ask(parent, title: str, text: str, buttons: tuple[str, ...],
         detail: str = "", icon: str = "warning") -> str | None:
     """round-168：带自定义按钮文案的主题确认框（取消任务 / 退出确认用）。
 
-    最后一个按钮是默认（accent）。返回被点击按钮的文案；直接关闭返回 None。
+    最后一个按钮是 accent（仅视觉）。round-228 P0-2：键盘默认给**第一个**按钮
+    ——现有 4 个调用点的第一个都是「取消」，回车因此永远落在安全侧。
+    返回被点击按钮的文案；直接关闭返回 None。
     """
-    return _msgbox(parent, title, text, detail, icon=icon, buttons=buttons)
+    return _msgbox(parent, title, text, detail, icon=icon, buttons=buttons,
+                   safe_default=buttons[0] if buttons else None)
 
 
 # ── Themed native-style dialogs (replace raw QColorDialog / QFileDialog / ──
