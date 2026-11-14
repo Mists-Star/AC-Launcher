@@ -8,6 +8,95 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-230（2026-11-14）— 下载任务页内分区 + 导入进度框收口
+
+### 下载任务区（按主流「分区与跳转一体」的形态）
+- 新增 `src/task_panel.py` 的 `TaskListPanel`：**QWidget 页内分区，不是弹窗**，
+  挂进 `StorePage._stack`（与详情面板同形态）。显示进行中 / 历史、状态、
+  阶段或失败原因、来源链、每行进度；就地「重试」（只发给带 `retry_key` 的
+  下载任务）、「前往」目标页、清空历史。
+- 两个入口：状态栏常驻「任务」按钮（任意页面一步可达）+ 资源中心页头按钮。
+  状态栏原有的点击召回逻辑会跳过任务按钮。
+- 跨页返回闭环：`show_tasks(return_key=)` 记住来源页，返回时导航回原页；
+  资源中心内部进入则回资源列表，不重复导航。
+- `TaskCenter` 补 `retry_key` 字段（含序列化往返）；CF 导入、`_import_pack`、
+  `_MrpackDialog` 安装三条流程补 `start/update/finish/fail` 登记，任务面板
+  不再因为「没人上报」而空着。
+
+### 弹窗收口
+- **删掉两处 `QProgressDialog`**：`StorePage._on_cf_pack_downloaded` 与
+  `InstancesPage._import_pack`。原实现各带一份 200ms 轮询、看门狗/取消按钮、
+  进度条防闪处理；现在统一走 TaskCenter + 非阻塞 toast + 状态栏任务入口。
+  顺带根治「安装停在 `Installation complete` 后进度框关不掉」——没有框了。
+  全仓 `QProgressDialog` 实例化从 3 处降到 1 处（仅 `scan_dialog.py`）。
+- `tick_import_progress` 生产路径已无调用方，保留给 round-222 回归套件，
+  头部注释同步改成客观说明。
+- **刻意保留**：`_MrpackDialog`（要先确认元数据，属决策类）、
+  `LaunchProgressDialog`（步骤灯 + 取消启动是强交互）、登录/向导/条款门禁、
+  以及各确认框。判据沿用 `notes/ac-launcher/2026-09-03_弹窗收敛round76.md`：
+  纯结果反馈→toast，错误/决策/frameless 对话框上下文→保留模态。
+
+### 审计（只查清单，未实施）
+- 全仓弹窗盘点：20 个 QDialog 子类、13 处原生 QMessageBox、10 处裸
+  `QFileDialog.get*`、9 处「重试」按钮、6 个零实例化兼容壳。最干净的可合并
+  点是删进度框后两处近乎逐行相同的 `TaskCenter` 上报骨架（可抽
+  `run_import_task`）；其余按风险排序见回复。
+- 对照 HMCL / Prism / PCL-CE：AC 的「详情 + 任务都页内分区、队列常驻、
+  就地失败/重试」已经比三家更彻底（Prism 下载整体是模态 QDialog，HMCL 任务
+  列表装在覆盖层里）；差距在残留确认框与「跨页进入任务区时设置页的保存确认」。
+
+### 🔍 验证
+- 新增 `test_round230_tasks.py` **35/35**（含「面板不是 QDialog」「两处进度框
+  已收口」「跨页返回原页」「CF/实例页导入都登记任务」）。
+- `test_round229_runtime.py` 更新为 **22/22**；全量 `regress.py` **99/99 通过**；
+  `py_compile` 全过。
+
+## round-230（2026-11-14）— 下载任务页内分区 + 弹窗收口
+
+### 下载任务区（零新增弹窗）
+- 新增 `src/task_panel.py` 的 `TaskListPanel(QWidget)`：和 `StoreDetailPanel` 一样
+  挂进资源中心的 `_stack` 页内分区，**不是 QDialog**。显示进行中 / 最近历史、
+  状态、阶段、进度、失败原因、来源链 tooltip；支持清空历史、失败项重试、
+  跳转目标页。面板不可见时停止 600ms 轮询（TaskCenter 保持 Qt-free）。
+- 两个入口：状态栏常驻「任务」按钮（任意页面一步到达）+ 资源中心页头按钮。
+  跨页进入时 `show_tasks(return_key=...)` 记来源页，返回时导航回原页。
+- `TaskCenter` 加 `retry_key`（实例 id），失败/取消任务才有可靠的「重试」；
+  `TaskRecord` 序列化兼容旧历史。
+- 登记补齐：CF 导入（`_on_cf_pack_downloaded`）与 mrpack 安装（`_MrpackDialog`）
+  现在都写 `start/update/finish/fail`，任务区不再空。
+
+### 弹窗收口
+- `pages_browse.py` 的 CF 导入与 `pages_instances.py` 的 `_import_pack` 两处
+  `QProgressDialog`（含 200ms 轮询、看门狗、取消按钮）**整段删除**，进度与结果
+  统一进任务中心，完成/失败用既有 toast。顺带根治了「进度框卡住关不掉」，
+  也消掉了两处逐行重复的导入骨架。
+- 全仓 `QProgressDialog` 实例化从 3 处降到 1 处（`scan_dialog.py` 复制进度，
+  按 round-76 判据暂留）。`tick_import_progress` 保留给 round-222 回归套件，
+  生产路径已不用，注释已更新。
+- 按 `notes/ac-launcher/2026-09-03_弹窗收敛round76.md` 的三分判据，**决策类
+  模态框一律保留**：删除/覆盖/低内存/低磁盘确认、`_MrpackDialog` 元数据确认、
+  登录/向导/条款门禁、文件与输入选择器。`_MrpackDialog` 内嵌进度条也保留
+  ——去掉会让点「安装」后界面无反馈。
+
+### 主流启动器对照（调研结论，供后续取舍）
+- PCL2 / HMCL：下载是独立一级综合页（左分类树 / 6 Tab），详情是页内整页；
+  HMCL 有真返回栈（`Navigator.java`）。Prism：无一级下载页，资源页三栏同屏
+  但整体包在模态 QDialog 里。三家都不做正文机翻。
+- AC 现状：详情与任务都已页内分区、队列常驻、就地失败/重试，在这条线上
+  比三家更彻底；差距是**无多层返回栈**、以及 `LaunchProgressDialog` 与
+  `TaskListPanel` 两套任务可视化并存。
+- 已对齐 `round-208` 的资源中心子页 12 条行为未动；不做 Prism 式三栏同屏。
+
+### 🔍 验证
+- 新增 `test_round230_tasks.py` **35/35**；`test_round229_runtime.py` 的进度框
+  断言改为「不再创建 QProgressDialog」后 **22/22**。
+- 全量 `regress.py` **99/99 通过**；`compileall src/` 通过。
+
+> 后续候选（未做）：抽公共 `run_import_task` 合并两处同构导入骨架；
+> `LaunchProgressDialog` 用 `PanelShellMixin` 降级为页内分区；
+> `scan_dialog` 复制进度框补登记后删除；详情里 4 个确认框就地化。
+> 审计报告 `_scratch/_audit_dialogs_ast_out.txt`（不入库）。
+
 ## round-229（2026-11-14）— 整合包交互、导入收尾、本地化与注释清理
 
 ### 整合包：从「下载」到「安装」的语义归位

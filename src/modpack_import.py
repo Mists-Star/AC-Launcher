@@ -23,9 +23,9 @@ from .i18n import t
 def tick_import_progress(state: dict, progress) -> None:
     """整合包导入进度的 200ms 轮询回调（round-222 抽取公共实现）。
 
-    ``pages_browse`` / ``pages_instances`` 曾各有一份逐字相同的 32 行闭包，
-    只靠 ``state``（跨线程零信号管道）和 ``QProgressDialog`` 驱动。两处逻辑
-    分叉的风险很实：下面这些坑都是踩过才补上的——
+    生产路径已改走任务中心（状态栏「任务」→ 页内任务分区），不再有
+    QProgressDialog；本函数由 round-222 回归套件验证状态机。下面这些坑
+    都是当时踩过才补上的：
 
     * ``done < 0`` = 不定长阶段（装游戏版本 / 加载器），用回调自定义文案；
     * 满值后**不能**再 ``setValue(max)``：QProgressDialog 会自动关 → reset

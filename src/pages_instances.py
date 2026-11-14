@@ -2708,12 +2708,10 @@ class InstancesPage(QWidget):
         The file picker accepts several formats; we detect the format and pick
         the right importer so the user has a single "Import pack" entry point.
         """
-        from PySide6.QtWidgets import QProgressDialog
         from .win_rounded import pick_files, warn
         from .modpack_import import (
             detect_pack_format, import_curseforge_zip,
             import_zip_as_instance, import_folder_as_instance,
-            tick_import_progress,
         )
         from .net_api import NetError
 
@@ -2752,69 +2750,49 @@ class InstancesPage(QWidget):
             "zip_mc": import_zip_as_instance,
             "folder": import_folder_as_instance,
         }
-        fn = fn_map[fmt]
-        progress = QProgressDialog(self)
-        progress.setWindowTitle(t("modpack.title"))
-        progress.setLabelText(t("modpack.importing"))
-        progress.setCancelButton(None)
-        progress.setMinimumDuration(0)
-        # 防闪加固：关闭 QProgressDialog 满值自动关→reset(清空 label)→再 show
-        # 的自循环（「导入包」空提示闪烁的所有变体都源于此），结束统一手动 close。
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setRange(0, 0)  # indeterminate（先解析 manifest/overrides）
-        progress.setMinimumWidth(420)
-        # round-149：全局 QSS 把 QProgressBar 定死 8px 高，内嵌「38%」文字
-        # 只画得出一半（自动导入进度条「被遮挡」的根因）。按 round-107 的约定
-        # 关掉内嵌文字，百分比改由 label 显示。
-        _bar = progress.findChild(QProgressBar)
-        if _bar is not None:
-            _bar.setTextVisible(False)
-
-        # round-142b：CF 导入给实时 n/N 计数 —— 此前只有无限转圈，
-        # 导入耗时不可见（轮询 state，跨线程零信号管道）。
-        state = {"label": "", "done": 0, "total": 0}
+        # 进度与结果统一进任务中心（状态栏「任务」→ 页内任务分区），不再弹
+        # 独立进度对话框：导入期间可继续浏览，失败原因留在历史里。
+        from .core.task_center import get_task_center
+        _tid = get_task_center().start(
+            "import", os.path.basename(path), target_page="instances",
+            stage=t("modpack.importing")).id
 
         def _pr(label, done, total):
-            state.update(label=str(label), done=done, total=total)
-            return True  # 返回 False 可取消；不提供取消按钮
+            if done and done > 0:
+                get_task_center().update(
+                    _tid, stage=str(label), completed=done, total=total)
+            return True
 
         kw = {"progress": _pr} if fmt == "curseforge" else {}
         worker = Worker(fn, path, self.mgr, **kw)
-        tick = QTimer(self)
-        tick.setInterval(200)
-
-        def _on_tick():
-            tick_import_progress(state, progress)
 
         def _done(inst):
-            tick.stop()
-            progress.hide()
-            # round-150：导入时已尝试安装版本/加载器；失败不丢整合包，但要让
-            # 明确提示首次启动还会再装一次（避免误判「导入失败」）。
+            # 导入时已尝试安装版本/加载器；失败不丢整合包，但要明确提示
+            # 首次启动还会再装一次。
             err = getattr(inst, "loader_install_error", "")
             if err:
                 warn(self, t("modpack.title"), t("modpack.loader_failed_hint", e=err))
             else:
                 toast(self, t("modpack.title"), t("modpack.done"))
+            get_task_center().finish(
+                _tid, detail=(getattr(inst, "name", "") or ""))
             self._refresh()
             if inst and getattr(inst, "id", None):
                 self.mgr.set_current(inst.id)
                 self.current_changed.emit(inst.id)
 
         def _err(e):
-            tick.stop()
-            progress.hide()
+            get_task_center().fail(_tid, detail=str(e))
             if isinstance(e, NetError):
                 warn(self, t("modpack.title"), str(e))
             else:
                 warn(self, t("modpack.title"), t("modpack.error", e=e))
 
-        tick.timeout.connect(_on_tick)
-        tick.start()
         worker.finished.connect(_done)
         worker.error.connect(_err)
+        self._pack_worker = worker
         worker.start()
+        toast(self, t("modpack.title"), t("modpack.import_bg"))
 
     # ── 拖拽导入（round-42，对齐主流整合构建：拖 .mrpack/.zip 进窗口即导入）──
     def dragEnterEvent(self, e):
@@ -3339,6 +3317,10 @@ class _MrpackDialog(QDialog):
         inst.version_id = self.info.get("launch_version") or ""
         self.mgr._persist(inst)
         self._inst = inst
+        # 登记到任务中心：任务分区里能看到这次安装，失败原因也会进历史。
+        from .core.task_center import get_task_center
+        self._task_id = get_task_center().start(
+            "import", name, target_page="instances").id
         from .core import install
         # round-113：跟随用户设置的下载源，不再硬编码 BMCLAPI
         _cfg = load_config()
@@ -3353,6 +3335,9 @@ class _MrpackDialog(QDialog):
     def _done(self, _result):
         self.bar.setVisible(False)
         self.status.setText(t("mrpack.done"))
+        from .core.task_center import get_task_center
+        get_task_center().finish(getattr(self, "_task_id", ""),
+                                 detail=self.info.get("name") or "")
         self.ok_btn.setEnabled(False)
         self.cancel_btn.setText(t("common.close"))
         self.cancel_btn.setEnabled(True)
@@ -3363,6 +3348,8 @@ class _MrpackDialog(QDialog):
     def _err(self, e: str):
         self.bar.setVisible(False)
         self.status.setText(t("mrpack.error", e=e))
+        from .core.task_center import get_task_center
+        get_task_center().fail(getattr(self, "_task_id", ""), detail=str(e))
         # round-40 P2-11：安装失败时移除刚创建的空实例（含空目录），
         # 避免"脏实例"永久留在列表（各主流启动器均为成功后才注册）。
         try:

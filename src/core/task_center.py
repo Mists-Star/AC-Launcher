@@ -64,6 +64,7 @@ class TaskRecord:
     detail: str = ""               # 结束原因 / 备注
     sources: list[str] = field(default_factory=list)  # 来源链（round-155 填入）
     target_page: str = ""          # 完成后可跳转的页面 key
+    retry_key: str = ""            # 失败后可重新发起该任务的实例 id（空 = 不支持重试）
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -93,6 +94,7 @@ class TaskRecord:
                 detail=str(data.get("detail") or ""),
                 sources=[str(s) for s in sources] if isinstance(sources, list) else [],
                 target_page=str(data.get("target_page") or ""),
+                retry_key=str(data.get("retry_key") or ""),
                 created_at=float(data.get("created_at") or 0.0),
                 updated_at=float(data.get("updated_at") or 0.0),
             )
@@ -112,7 +114,8 @@ class TaskCenter:
     # ---- lifecycle -------------------------------------------------- #
     def start(self, kind: str, label: str, *, target_page: str = "",
               stage: str = "", total: int = 0, detail: str = "",
-              sources: list[str] | None = None) -> TaskRecord:
+              sources: list[str] | None = None,
+              retry_key: str = "") -> TaskRecord:
         """登记并启动一条任务；返回记录（调用方用 ``task.id`` 后续上报）。"""
         now = time.time()
         rec = TaskRecord(
@@ -126,6 +129,7 @@ class TaskCenter:
             detail=(detail or "")[:_MAX_DETAIL],
             sources=self._clip_sources(sources),
             target_page=(target_page or "")[:32],
+            retry_key=(retry_key or "")[:64],
             created_at=now,
             updated_at=now,
         )

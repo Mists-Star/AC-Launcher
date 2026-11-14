@@ -2090,6 +2090,14 @@ class MainWindow(QMainWindow):
         ver = QLabel(f"{APP_DISPLAY}  {APP_VERSION}")
         ver.setProperty("cls", "sub")
         self.statusBar().addPermanentWidget(ver)
+        # 任务入口常驻状态栏：从任意页面一步到达资源中心的页内任务分区，
+        # 不再为「看下载进度」新增一个模态对话框。
+        self._tasks_btn = QPushButton(t("tasks.open"))
+        self._tasks_btn.setProperty("cls", "secondary")
+        self._tasks_btn.setCursor(Qt.PointingHandCursor)
+        self._tasks_btn.setToolTip(t("tasks.title"))
+        self._tasks_btn.clicked.connect(lambda *_: self.open_tasks())
+        self.statusBar().addPermanentWidget(self._tasks_btn)
         # round-151：整条状态栏都可点击召回（原来只有 8px 进度条本身能点，
         # 用户点左侧进度文案没有任何反应）。子控件逐个装过滤器，保证点文案/
         # 速度标签也能命中；没有进行中的任务时一律不响应。
@@ -2771,7 +2779,8 @@ class MainWindow(QMainWindow):
                 _tc.update(_tid, state="running", stage="")
             else:
                 _task = _tc.start(
-                    "download", inst.name or inst_id, target_page="instances")
+                    "download", inst.name or inst_id, target_page="instances",
+                    retry_key=inst_id)
                 self._dl_task_ids[inst_id] = _task.id
         except Exception:  # noqa: BLE001 - 任务记录失败不阻断下载
             pass
@@ -3269,11 +3278,30 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         """round-107 / round-151：点击底部状态栏（任意位置）→ 召回任务对话框。"""
         if event.type() == QEvent.Type.MouseButtonPress:
+            # 任务按钮自己处理点击，别让状态栏召回逻辑把它当成「点状态栏」。
+            if obj is getattr(self, "_tasks_btn", None):
+                return False
             bar = self.statusBar()
             if obj is bar or (isinstance(obj, QWidget) and bar.isAncestorOf(obj)):
                 self._reopen_launch_task()
                 return False
         return super().eventFilter(obj, event)
+
+    def open_tasks(self):
+        """从任意页面进入下载任务分区（页内切换，不新增弹窗）。"""
+        try:
+            from_key = self._current_page_key() or ""
+        except Exception:  # noqa: BLE001 - 取不到来源页就按资源中心内跳转处理
+            from_key = ""
+        self._show_page("store")
+        page = getattr(self, "store_page", None)
+        if page is not None:
+            page.show_tasks(return_key=from_key)
+
+    def _on_task_retry(self, inst_id: str):
+        """任务分区里点「重试」：只重发能可靠定位的下载任务。"""
+        if inst_id:
+            self._start_instance_download(inst_id, allow_external=True)
 
     def _active_task_dialog(self):
         """返回 ``(对话框, 页面 key)``；没有进行中的任务时返回 ``(None, "")``。"""
@@ -4242,6 +4270,8 @@ class MainWindow(QMainWindow):
         # round-107：版本库入口已从侧栏移除 → 资源中心页头「版本库」按钮跳转。
         self.store_page.open_versions_requested.connect(
             lambda: self._show_page("versions"))
+        self.store_page.task_retry_requested.connect(self._on_task_retry)
+        self.store_page.task_navigate_requested.connect(self._show_page)
         return self.store_page
 
     # ia[versions]: 选择游戏版本 | 版本库页版本列表 | 展示该版本可用加载器与推荐构建 | `src/pages_browse.py`

@@ -110,15 +110,14 @@ check("CF 导入 + mrpack 对话框两条完成链都刷了新",
 
 
 # ── [4] 进度框有退路：取消按钮 + 看门狗 ─────────────────────────────────
-check("进度框不再禁用取消按钮",
-      "setCancelButtonText(t(\"common.cancel\"))" in pb_src
-      and "setCancelButton(None)" not in pb_src)
-check("取消信号接了收尾", "progress.canceled.connect" in pb_src)
-check("看门狗已接线", "watchdog.timeout.connect" in pb_src
-      and "watchdog.start()" in pb_src)
-check("完成/失败/取消三条终态都停看门狗",
-      pb_src.count("watchdog.stop()") == 3)
-check("看门狗提示文案存在", "modpack.import_bg" in pb_src)
+cf = pb_src.split("def _on_cf_pack_downloaded", 1)[-1].split(
+    "def _on_pack_error", 1)[0]
+check("CF 导入不再创建进度对话框", "QProgressDialog" not in cf)
+check("CF 导入不再需要看门狗（没有可卡住的框）", "watchdog" not in cf)
+check("CF 导入进度进任务中心", "get_task_center().update(" in cf)
+check("CF 导入成功/失败都写终态",
+      ".finish(" in cf and ".fail(" in cf)
+check("后台运行有非阻塞提示", "modpack.import_bg" in cf)
 
 for key in ("store.unverified_mc", "modpack.import_bg"):
     check("i18n 中英对称 " + key,

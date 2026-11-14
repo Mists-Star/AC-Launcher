@@ -400,6 +400,9 @@ _TYPE_SUBDIR = {
 class StorePage(QWidget):
     # round-107 版本库入口已从侧栏移除 → 资源中心页头提供「版本库」按钮跳转。
     open_versions_requested = Signal()
+    # 任务分区里的「重试 / 前往」由主窗转发（页面不直接持有启动链）。
+    task_retry_requested = Signal(str)
+    task_navigate_requested = Signal(str)
     # round-207：搜索按源回调。search_all 的 daemon 线程直接 emit，Qt 自动
     # queued 到主线程 → 快源一到就渲染，不必等另一源 / 等满 8s 预算。
     sourcePartial = Signal(str, object, int)
@@ -459,6 +462,8 @@ class StorePage(QWidget):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(16)
         self._detail_panel = None
+        self._tasks_panel = None
+        self._tasks_return_key = ""
 
         # 页头：目标实例 / 筛选折叠 / 版本库。来源下拉已移到筛选侧栏
         # （§2.2：来源提升为侧栏一级控件）。
@@ -485,9 +490,15 @@ class StorePage(QWidget):
         ver_btn.setCursor(Qt.PointingHandCursor)
         ver_btn.setToolTip(t("versions.title"))
         ver_btn.clicked.connect(lambda: self.open_versions_requested.emit())
+        tasks_btn = QPushButton(t("tasks.open"))
+        tasks_btn.setMinimumHeight(34)
+        tasks_btn.setCursor(Qt.PointingHandCursor)
+        tasks_btn.setToolTip(t("tasks.title"))
+        tasks_btn.clicked.connect(lambda *_: self.show_tasks())
         self._header = ui_kit.page_header(
             t("store.title"),
-            action=[target_w, self.filter_toggle_btn, ver_btn], icon_key="store")
+            action=[target_w, self.filter_toggle_btn, ver_btn, tasks_btn],
+            icon_key="store")
         self.title_lbl = self._header.title_lbl
         lv.addWidget(self._header)
 
@@ -1222,6 +1233,39 @@ class StorePage(QWidget):
         panel.hide()
         panel.deleteLater()
 
+    def show_tasks(self, return_key: str = ""):
+        """切到下载任务页内分区：不弹窗、不跳一级导航。
+
+        ``return_key`` 是「从哪一页进来的」；从状态栏跨页进入时带上，
+        返回时导航回原页，避免两级跳转后落错地方。
+        """
+        if self._detail_panel is not None:
+            self._close_detail()
+        self._tasks_return_key = return_key or ""
+        if self._tasks_panel is None:
+            from .task_panel import TaskListPanel
+            p = TaskListPanel(self)
+            p.back_requested.connect(self._close_tasks)
+            p.retry_requested.connect(self.task_retry_requested.emit)
+            p.navigate_requested.connect(self.task_navigate_requested.emit)
+            self._tasks_panel = p
+            self._stack.addWidget(p)
+        self._stack.setCurrentWidget(self._tasks_panel)
+
+    def _close_tasks(self):
+        p = self._tasks_panel
+        if p is None:
+            return
+        self._tasks_panel = None
+        self._stack.setCurrentWidget(self._list_view)
+        self._stack.removeWidget(p)
+        p.hide()
+        p.deleteLater()
+        key = self._tasks_return_key
+        self._tasks_return_key = ""
+        if key and key != "store":
+            self.task_navigate_requested.emit(key)
+
     # ia[store]: 点「下载 / 安装」 | 资源中心卡片按钮 | 按目标实例下载，缺前置时先询问补齐
     def _download(self, project_id: str, slug: str, cf_file: dict | None = None,
                   card: dict | None = None):
@@ -1414,55 +1458,36 @@ class StorePage(QWidget):
         self._refresh_instance_list()
 
     def _on_cf_pack_downloaded(self, path: str):
-        """CF 整合包主 zip 下载完成 → 免 key 逐文件解析安装为新实例（round-142）。"""
+        """CF 整合包主 zip 下载完成 → 后台逐文件解析安装为新实例。
+
+        进度与结果统一进任务中心（状态栏「任务」→ 页内任务分区），不再弹
+        独立进度对话框：导入期间可继续浏览，失败原因留在历史里，也不会
+        因为底层安装卡住而把界面锁在一个关不掉的框里。
+        """
         self._dl_bar.setVisible(False)
         self._dl_speed.setVisible(False)
-        from PySide6.QtWidgets import QProgressDialog
         from .win_rounded import warn
-        from .modpack_import import (detect_pack_format, import_curseforge_zip,
-                                  tick_import_progress)
+        from .modpack_import import (detect_pack_format, import_curseforge_zip)
         from .net_api import NetError
         if detect_pack_format(path) != "curseforge":
             info(self, t("mrpack.title"), t("mrpack.bad_file"))
             return
-        progress = QProgressDialog(self)
-        progress.setWindowTitle(t("modpack.title"))
-        progress.setLabelText(t("modpack.importing"))
-        # 留一条退路：版本/加载器安装依赖外部网络与 Java 进程，卡住时
-        # 玩家至少要能关掉这个框，而不是被无取消按钮的模态进度困住。
-        progress.setCancelButtonText(t("common.cancel"))
-        progress.setMinimumDuration(0)
-        # 防闪加固：关自动关/自动重置（见 pages_instances 同段注释）。
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setRange(0, 0)  # 先 indeterminate 解析 manifest，随后 n/N
-        progress.setMinimumWidth(420)
-        # round-149：全局 QSS 把 QProgressBar 定死 8px 高，内嵌百分比文字会被
-        # 裁掉一半。与 pages_instances 同款导入流程一起关掉内嵌文字。
-        _bar = progress.findChild(QProgressBar)
-        if _bar is not None:
-            _bar.setTextVisible(False)
 
-        # round-142b：实时 n/N 计数（轮询 state，跨线程零信号管道）
-        state = {"done": 0, "total": 0}
+        from .core.task_center import get_task_center
+        _tid = get_task_center().start(
+            "import", os.path.basename(path), target_page="instances",
+            stage=t("modpack.importing")).id
 
         def _pr(label, done, total):
-            state.update(label=str(label), done=done, total=total)
+            if done and done > 0:
+                get_task_center().update(
+                    _tid, stage=str(label), completed=done, total=total)
             return True
 
         worker = Worker(import_curseforge_zip, path, self.mgr, progress=_pr)
-        from PySide6.QtCore import QTimer
-        tick = QTimer(self)
-        tick.setInterval(200)
-
-        def _on_tick():
-            tick_import_progress(state, progress)
 
         def _done(inst):
-            tick.stop()
-            watchdog.stop()
-            progress.hide()
-            # round-150：导入时已尝试安装版本/加载器；失败时提示首次启动会重试。
+            # 导入时已尝试安装版本/加载器；失败时提示首次启动会重试。
             err = getattr(inst, "loader_install_error", "")
             if err:
                 warn(self, t("modpack.title"), t("modpack.loader_failed_hint", e=err))
@@ -1470,39 +1495,22 @@ class StorePage(QWidget):
                 toast(self, t("modpack.title"), t("modpack.done"))
             if inst and getattr(inst, "id", None):
                 self.mgr.set_current(inst.id)
+            get_task_center().finish(
+                _tid, detail=(getattr(inst, "name", "") or ""))
             self._refresh_instance_list()
 
         def _err(e):
-            tick.stop()
-            watchdog.stop()
-            progress.hide()
+            get_task_center().fail(_tid, detail=str(e))
             if isinstance(e, NetError):
                 warn(self, t("modpack.title"), str(e))
             else:
                 warn(self, t("modpack.title"), t("modpack.error", e=e))
 
-        # 看门狗：底层版本安装可能停在无响应的网络/子进程上，worker 既不会
-        # finished 也不会 error。三分钟后主动收起进度框，让界面恢复可用，
-        # 后台线程继续跑完（不硬杀，避免留下半安装状态）。
-        watchdog = QTimer(self)
-        watchdog.setSingleShot(True)
-        watchdog.setInterval(180000)
-
-        def _stop_waiting():
-            tick.stop()
-            watchdog.stop()
-            progress.hide()
-            toast(self, t("modpack.title"), t("modpack.import_bg"))
-
-        watchdog.timeout.connect(_stop_waiting)
-        progress.canceled.connect(_stop_waiting)
-
-        tick.timeout.connect(_on_tick)
-        tick.start()
-        watchdog.start()
         worker.finished.connect(_done)
         worker.error.connect(_err)
+        self._cf_worker = worker
         worker.start()
+        toast(self, t("modpack.title"), t("modpack.import_bg"))
 
     def _refresh_instance_list(self):
         """跨页面创建的实例不会自动触发实例页重绘，主动刷一次。"""

@@ -131,6 +131,7 @@ SUITES = [
     ("整合包详情页安装语义回归（round-229）", "test_round229_pack_detail.py", "script"),
     ("导入卡住/实例刷新/兼容误判回归（round-229）", "test_round229_runtime.py", "script"),
     ("资源中心本地化回归（round-229）", "test_round229_i18n.py", "script"),
+    ("下载任务页内分区回归（round-230）", "test_round230_tasks.py", "script"),
 ]
 SHOTS = "shots_all.py"
 
