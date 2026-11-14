@@ -121,7 +121,7 @@ class _Page(QWidget):
 
     每次 ``section()`` 开一张卡片，之后的 ``row`` / ``field`` / ``hint`` /
     ``add`` 都落进当前卡片——对齐 PCL2 / HMCL 版本设置窗口的分块观感，而不是
-    一长条没有分隔的控件瀑布（第一版就是那样，实测「一眼看不出在改什么」）。
+    一长条没有分隔的控件瀑布（初版布局实测「一眼看不出在改什么」）。
     """
 
     def __init__(self, parent=None):
@@ -213,7 +213,7 @@ class _Page(QWidget):
 class InstanceEditorPanel(QWidget):
     """实例整页编辑器（**页内面板**）。
 
-    round-195：原来它是 QDialog（弹窗）。用户诉求：「为什么这么多实用功能的
+    round-195：原来它是 QDialog（弹窗）。改为页内面板的考量：
     页面你不直接换页而是用窗口？」—— 实例编辑是最典型的"页面"，弹窗既割裂
     上下文（看不到自己正在改哪个实例），又和旁边的实例列表长得不一样。
 
@@ -331,7 +331,7 @@ class InstanceEditorPanel(QWidget):
         """对齐 PCL 的「概览」页：改名 + 只读信息 + 快捷方式 + 高级管理。
 
         round-187 重排：原来这页叫「基础」，只有两个输入框半屏空白；PCL 的
-        概览页是「打开面板第一眼就该看完所有信息」的一页，我们把 ID/来源、
+        概览页是「打开面板第一眼就该看完所有信息」的一页，集中放 ID/来源、
         目录快捷方式、导出整合包全部收进来。
         """
         p = _Page(self)
@@ -450,7 +450,7 @@ class InstanceEditorPanel(QWidget):
             (t("inst.status_format"), "%s%s" % (t("instances.fmt_" + fmt), extra)),
         )
         # 三行两列（标签 | 值），路径单独段落——全部「标签换行 + 值」堆叠会
-        # 拉出半屏高的小灰字墙（第一版实测）。
+        # 拉出半屏高的小灰字墙（初版布局实测）。
         html = ["<table cellspacing='0' cellpadding='1'>"]
         for k, v in rows:
             html.append(
@@ -541,7 +541,7 @@ class InstanceEditorPanel(QWidget):
         # ── Java ──
         p.section(t("inst.java_section"))
         # 两行必须自带前缀：都写「未找到兼容的 Java」时分不清哪行是「需要」
-        # 哪行是「将使用」（第一版实测）。
+        # 哪行是「将使用」（初版布局实测）。
         self.java_need_lbl = QLabel(t("inst.java_need_unknown"))
         self.java_need_lbl.setWordWrap(True)
         self.java_need_lbl.setStyleSheet(_SUB_STYLE)
@@ -838,7 +838,7 @@ class InstanceEditorPanel(QWidget):
                  % (color, _esc(head))]
         if ok:
             # 用中文标签：直接显示 owner / declared_format 这类内部键名，
-            # 玩家看不懂（实测「标识有效」下面一堆英文字段）。
+            # 可读性差（实测「标识有效」下面一堆英文字段）。
             for k, key in (("owner", "inst.marker_k_owner"),
                            ("kind", "inst.marker_k_kind"),
                            ("launcher", "inst.marker_k_launcher"),
@@ -1231,7 +1231,7 @@ class InstanceEditorPanel(QWidget):
     def _rebuild_loader_choices(self, keep: str = "") -> None:
         """按当前 MC 版本重建加载器下拉 —— 只列**这个版本真有的**加载器。
 
-        用户报「修改的选项中会出现不存在的加载器」：原来直接列 ``LOADERS``
+        现象：修改选项中出现不存在的加载器。原来直接列
         全表，1.12.2 的实例也能选 NeoForge（1.20.1 才有）、Quilt（1.14+）。
 
         实例**当前**的加载器永远保留（哪怕按规则不支持）—— 否则用户一打开面板
@@ -1479,7 +1479,7 @@ class InstanceEditorPanel(QWidget):
         self._refresh_status()
         self.loaderChanged.emit(self._inst.id)
 
-        # 装完 Fabric / Quilt 顺手把 Fabric API 也装上（用户明确要求）。
+        # 装完 Fabric / Quilt 顺手把 Fabric API 也装上。
         # 这一步失败**不能**把「加载器已装好」说成失败 —— 两件事分开报。
         from .core.loader_swap import wants_fabric_api
         if self.fabapi_chk.isChecked() and wants_fabric_api(

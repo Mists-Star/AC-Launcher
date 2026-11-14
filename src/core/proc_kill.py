@@ -2,7 +2,7 @@
 
 旧实现在 UI 主线程里对每个存活进程**串行** ``taskkill(timeout=10)``：
 多开 N 个最坏阻塞 10N 秒，整段 ``except Exception: pass`` 又把失败全吞，
-玩家看到的就是「点了结束游戏没反应」。
+表现为「点了结束游戏没反应」。
 
 现在 Windows 用**一条** taskkill 带上全部 ``/PID``（单次外部命令，
 超时压到 3s），结果结构化返回给 UI；非 Windows 走 ``Popen.kill()``
@@ -82,7 +82,7 @@ def terminate_all(procs, timeout: float = WINDOWS_KILL_TIMEOUT) -> dict:
     # round-217：taskkill 只要有一个 PID 报错（已退出 / 无权限 / PID 被复用）
     # 整体 returncode 就是非 0。原实现据此把**整批**都算失败，UI 于是显示
     # 「3 个都没关掉」，而实际只挂了 1 个。这里改为逐个复核存活状态——
-    # 进程对象是我们自己 Popen 出来的，poll() 判据最准。
+    # 进程对象由本模块 Popen 创建，poll() 判据最准。
     failed = []
     deadline = time.monotonic() + 1.0
     pending = list(alive)

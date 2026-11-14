@@ -54,7 +54,7 @@ _DEFAULTS = {
     "window_mode": "windowed",       # windowed / borderless / fullscreen
     # round-188：启动前内存优化（全局默认关）+ 内存管理（GC）全局档。
     # gc_mode: "" 不额外指定 / zgc / zgc_gen / g1 / g1_tuned / none
-    # round-191：用户要求「默认开启启动前内存优化」
+    # round-191：默认开启启动前内存优化
     "mem_optimize": True,
     # 迁移标记：老配置里是 False（round-188 的默认值），要一次性改成 True；
     # 玩家之后自己关掉就尊重玩家，不再覆盖。
@@ -95,7 +95,7 @@ _DEFAULTS = {
     # round-108 第三方服务：CurseForge 官方 API 需要用户自己的 3rd-party key。
     # 公开发布版不捆绑 key —— 谁用谁填。免 key 通道（MCIM 镜像搜索 +
     # cfwidget/forgecdn 直链，HMCL/PCL2-CE 同款）round-140 起默认开——
-    # 用户拍板「搜索+下载全默认开」，无 key 也能搜能下。
+    # 搜索 + 下载全默认开，无 key 也能搜能下。
     "curseforge_api_key": "",
     "curseforge_keyless": True,
     "launch_sound": True,
@@ -452,7 +452,7 @@ class SettingsPage(QWidget):
         root.addWidget(ui_kit.page_header(
             t("settings.title"), icon_key="settings"))
 
-        # ── round-46 左分区菜单 + 右内容（用户：不要底部滑动）──
+        # ── round-46 左分区菜单 + 右内容（禁用底部滑动）──
         # round-68 设置简化：左分区从三分区（快速设置/Java/高级设置）
         # 合并为两分区（设置 / Java 管理）；右：QStackedWidget
         body = QWidget()
@@ -480,7 +480,7 @@ class SettingsPage(QWidget):
 
         self._sec_stack = QStackedWidget()
         # round-46 设置页挤压根治：内容多必然超一屏（快速设置 6+ grp），
-        # 不滚动 = grp 被压扁（用户反馈"挤压问题没解决"）。恢复每页独立
+        # 不滚动 = grp 被压扁。恢复每页独立
         # QScrollArea（纵向滚动正常；横向滚动条禁用），内容按 Preferred 排满。
         # round-119：分区懒加载。9 个分区全量构建实测 ~450ms，点开设置会卡
         # 一下；这里只放占位页，切到哪页才构建哪页。未构建分区的控件值由
@@ -2153,7 +2153,7 @@ class SettingsPage(QWidget):
         qlay.setContentsMargins(0, 0, 0, 0)
         qlay.setSpacing(4)
         ll.addWidget(self.java_quick_list)
-        # round-46 用户反馈"设置打开慢"：scan_javas() 扫注册表可能 1-2 秒，
+        # round-46：scan_javas() 扫注册表可能 1-2 秒，
         # 改为 Worker 后台线程执行，完成后更新 UI。
         self._java_scan_worker = Worker(scan_javas)
         self._java_scan_worker.finished.connect(self._on_java_scan_done)
@@ -2618,7 +2618,7 @@ class SettingsPage(QWidget):
         path = self.authlib.text().strip() or None
         # 必须存 self 引用！Worker 是 QThread，如果只用局部变量 w，
         # 函数返回后 Python GC 销毁 QThread（线程仍在跑）→ 闪退。
-        # （用户反馈：设置页第三方皮肤站 jar 下载按钮点了就闪退）
+        # （否则设置页第三方皮肤站 jar 下载按钮点击后闪退）
         self._authlib_worker = Worker(authlib_dl.ensure_authlib, path)
 
         def _done(p):
@@ -2668,7 +2668,7 @@ class SettingsPage(QWidget):
         if rb and hasattr(rb, "lang_code"):
             set_language(rb.lang_code)
             self.cfg["language"] = rb.lang_code
-            # round-46 用户反馈"英文切不回中文"：原逻辑只在内存改 cfg，
+            # round-46：原逻辑只在内存改 cfg，
             # 重启后 load_config 读旧值 → 看似切不回去。改为切语言即时落盘。
             try:
                 save_config(self.cfg)
@@ -2908,7 +2908,7 @@ class SettingsPage(QWidget):
             target["accent_color"] = self._selected_color
         # round-107 视觉效果（流光/页面动画/成就弹窗/透底/毛玻璃）已移出设置页 →
         # 这些键归「可选模块」所有：已被某模块写入的键保持模块设定的值，其余一律
-        # 回落到「关」，避免旧配置残留让用户以为效果还开着、却无处可关。
+        # 回落到「关」，避免旧配置残留造成「效果仍开启」的误判且无处可关。
         from .modules import EFFECT_CONFIG_KEYS
         _owners = dict(target.get("_effect_owners") or {})
         for _k, _dflt in EFFECT_CONFIG_KEYS.items():

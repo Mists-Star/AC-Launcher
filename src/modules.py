@@ -289,7 +289,7 @@ def _safe_extract_zip(zf: "zipfile.ZipFile", dest: str) -> None:
 
     round-92 安全审查：**fail-closed 加固**（非紧急修补）。
 
-    结论先说：Python 3.13 标准库 `zipfile.extractall()` **已内置路径净化**——
+    Python 3.13 标准库
     `../../a.txt` 会被折叠为 `<dest>/a.txt`、绝对路径成员被去掉根目录，
     实测无法逃逸。所以这里原本**不是可利用的 Zip Slip 漏洞**。
 

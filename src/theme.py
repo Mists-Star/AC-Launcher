@@ -37,7 +37,7 @@ THEME_LIGHT = {
     # text hierarchy (dark-on-light)
     "text_main":    "#1A1A2E",
     # round-146b：次文本 #6B7280 → #4B5563。壁纸模式下文字直接落在全景画面上，
-    # #6B7280 在亮部对比不足（用户反馈「大部分文字可阅读性低」）。
+    # #6B7280 在亮部对比不足（大部分文字可阅读性低）。
     "text_sub":     "#4B5563",
     "text_disabled":"#9CA3AF",
     "text_accent":  "#7C3AED",
@@ -121,7 +121,7 @@ MOTION_LIFT_PX = 8         # 页面 / 卡片上浮距离
 # THEME_LIGHT/THEME_DARK 里的 #7C3AED 覆盖。None = 未自定义（用内置紫）。
 _custom_accent: str | None = None
 
-# ── 玻璃拟态（round-52 恢复；round-32 曾拍板删除）─────────────────────
+# ── 玻璃拟态（round-52 恢复；round-32 曾移除）─────────────────────
 # 曾经做过：半透明卡片+渐变底（round-23~28）、系统 Acrylic 透桌面
 # （round-30~31，常用方案）。round-32 暂时移除；round-51 先恢复
 # 系统 Acrylic（transparent_window 透底），round-52 恢复应用层半透明
@@ -879,7 +879,7 @@ QListWidget::item:selected {
     color: $text_on_accent;
     font-weight: 600;
     /* round-146：去掉 3px $accent_press 左条——它在浅色主题下是近黑的深紫，
-       用户看到的是「选中项左侧留了一道黑边」。accent 实底本身已足够强调。 */
+       表现为「选中项左侧留了一道黑边」。accent 实底本身已足够强调。 */
 }
 
 /* 左侧导航分组标题（不可选灰字，功能区分化） */

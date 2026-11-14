@@ -410,7 +410,7 @@ class StorePage(QWidget):
         self.get_current = get_current_instance
         # round-142b 修（crash.log 18:43）：CF 整合包装完要在本页 set_current，
         # 但 StorePage 此前没有 mgr —— 回调里 AttributeError，Worker 根本没启动，
-        # 用户看到的就是「导入一直没动静」。
+        # 表现为「导入一直没动静」。
         self.mgr = manager()
         self._mods: list[dict] = []
         self._query = ""
@@ -452,7 +452,7 @@ class StorePage(QWidget):
         root.setContentsMargins(40, 32, 40, 32)
         root.setSpacing(16)
 
-        # 主理人 2026-11-07 拍板：列表 ↔ 详情继续用 _stack 整页切换，
+        # 设计约束：列表 ↔ 详情继续用 _stack 整页切换，
         # 不改成 Prism 式第三栏，也不新开窗口 / QDialog。
         self._list_view = QWidget()
         lv = QVBoxLayout(self._list_view)
@@ -493,7 +493,7 @@ class StorePage(QWidget):
 
         # round-208 §2.1：QSplitter 两栏 = 筛选侧栏 / 结果区。
         # 依据 prism:ResourcePage.ui:29-62（三栏）与 ModPage.cpp:103-128
-        # （replaceWidget 注入 + 可折叠 filterWidget）；拍板后第三格详情
+        # （replaceWidget 注入 + 可折叠 filterWidget）；第三格详情
         # 不在 splitter 内，故 count()==2。
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setChildrenCollapsible(False)
@@ -544,7 +544,7 @@ class StorePage(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
-        # round-218：结果区**永远不出横向滑块**（主理人明确要求）。配合
+        # round-218：结果区**永远不出横向滑块**。配合
         # ElidedLabel，内容宽度恒等于视口宽度；这行是最后一道闸。
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._load_gen = 0  # guards against stale search results
@@ -649,7 +649,7 @@ class StorePage(QWidget):
         实例偷偷收窄。round-208 曾自动把目标实例的 MC 版本与加载器下推服务端，
         联网实测把 CF「FTB」从 409 条砍到 58 条（-86%）、「FTB Quests」从
         140 砍到 27 条，FTB 官方 Forge/NeoForge 版本整批消失，且 can_next
-        变 False 直接翻不到底 —— 这是主理人报的「一部分 mod 搜不到」主因。
+        变 False 直接翻不到底 —— 这是「一部分 mod 搜不到」的主因。
 
         版本 / 加载器仍然参与详情页推荐版本与卡片兼容性徽章，只是不再静默
         改变搜索范围；玩家想按当前实例筛，在侧栏选版本 / 加载器即可。
@@ -876,7 +876,7 @@ class StorePage(QWidget):
         if len(self._partial_keys) > 16:
             for old in sorted(self._partial_keys)[:-16]:
                 self._partial_keys.pop(old, None)
-        # §2.6 拍板：按源渐进渲染保留，只负责「同一页内两源先后到达」的首帧。
+        # §2.6：按源渐进渲染保留，只负责「同一页内两源先后到达」的首帧。
         self._partial_enabled = bool(reset and self._source == "all"
                                      and self._store_page == 0)
         self._partial_done_gen = -1
@@ -1049,7 +1049,7 @@ class StorePage(QWidget):
         info.setSpacing(4)
         # round-218：标题必须「按可用宽度省略」。QLabel 的 sizeHint 是整段
         # 文本宽度，120 字的 mod 名会把卡片最小宽度顶到几千像素，QScrollArea
-        # 的内容跟着变宽 → 右侧内容被挤出窗口 / 底部冒横向滑块（主理人实测）。
+        # 的内容跟着变宽 → 右侧内容被挤出窗口 / 底部冒横向滑块（实测）。
         title = ui_kit.ElidedLabel(m["title"])
         title.setProperty("cls", "title")
         _f = title.font()
@@ -1087,7 +1087,7 @@ class StorePage(QWidget):
         meta.setStyleSheet(f"color: {COLORS['text_disabled']};")
         meta.setToolTip(_meta_text)
         meta_row.addWidget(meta, stretch=1)
-        # round-193：已装的标出来 —— 避免重复下载同一个 mod（用户「下载为啥
+        # round-193：已装的标出来 —— 避免重复下载同一个 mod（装没装、装了什么
         # 不可见」的一部分：装没装、装了什么要一眼看见）
         if self._is_installed(m):
             done = ui_kit.tag(t("store.installed_tag"),
@@ -1174,13 +1174,20 @@ class StorePage(QWidget):
         mc = str(getattr(inst, "game_version", "") or "")
         ld = str(getattr(inst, "loader", "") or "vanilla").lower()
         reason = ""
-        if mc and gv and mc not in gv:
-            reason = t("store.incompat_mc", mc=mc)
-        elif ld and ld != "vanilla" and lds and ld not in lds:
+        note = ""
+        if mc and gv:
+            from .store_compat import mc_compat
+            verdict = mc_compat(mc, gv)
+            if verdict == "mismatch":
+                reason = t("store.incompat_mc", mc=mc)
+            elif verdict == "unverified":
+                # 同一主版本系列但作者没标注：不标红，只挂 tooltip 说明。
+                note = t("store.unverified_mc", mc=mc)
+        if ld and ld != "vanilla" and lds and ld not in lds:
             reason = t("store.incompat_loader", loader=loader_name(ld))
         if reason:
             return False, reason
-        return True, ""
+        return True, note
 
     # ia[store]: 点资源卡片 | 资源中心结果卡片 | 页内栈切到详情（全部版本 / 前置 / 下载），不新开窗口
     def _open_detail(self, m: dict):
@@ -1198,6 +1205,7 @@ class StorePage(QWidget):
             _TYPE_SUBDIR.get(self._category, "mods"),
             instances=self.list_instances())
         panel.back_requested.connect(self._close_detail)
+        panel.install_pack_requested.connect(self._on_detail_install_pack)
         self._detail_panel = panel
         self._stack.addWidget(panel)
         self._stack.setCurrentWidget(panel)
@@ -1217,6 +1225,11 @@ class StorePage(QWidget):
     # ia[store]: 点「下载 / 安装」 | 资源中心卡片按钮 | 按目标实例下载，缺前置时先询问补齐
     def _download(self, project_id: str, slug: str, cf_file: dict | None = None,
                   card: dict | None = None):
+        # 兜底：任何走到这里的整合包都按「安装为新实例」处理，绝不当 mod
+        # 下载进某个实例的 mods/。
+        if self._category == "modpack":
+            self._install_modpack(project_id, slug, card)
+            return
         inst = self._target()
         if inst is None:
             # round-119/120：没选实例时不再直接拦下——详情页可按任意版本下载
@@ -1323,7 +1336,18 @@ class StorePage(QWidget):
         self._dl_meta = {}
 
     # ---- modpack: download .mrpack / CF zip → install as a new instance ----
-    def _install_modpack(self, project_id: str, slug: str, card: dict | None = None):
+    def _on_detail_install_pack(self, payload: dict):
+        """详情页点「安装」→ 复用卡片那条安装链（下到缓存 → 导入成新实例）。
+
+        带上玩家在版本行里选中的版本，避免「选了 1.20.1 却装了最新版」。
+        """
+        card = payload.get("card") or {}
+        self._install_modpack(
+            card.get("project_id", ""), card.get("slug", ""), card,
+            version=payload.get("version"))
+
+    def _install_modpack(self, project_id: str, slug: str,
+                         card: dict | None = None, *, version: dict | None = None):
         if not confirm(
             self, t("store.install_pack_title"),
             t("store.install_pack_confirm", slug=slug),
@@ -1337,14 +1361,18 @@ class StorePage(QWidget):
         # 下载完由 _on_cf_pack_downloaded 走 manifest 逐文件安装链。
         if (card or {}).get("source") == "curseforge":
             from .net_api import download_curseforge_mod
+            fid = None
+            if version:
+                f0 = (version.get("files") or [{}])[0]
+                fid = f0.get("id")
             self._pworker = ProgressWorker(download_curseforge_mod,
-                                           project_id, cache_dir)
+                                           project_id, cache_dir, file_id=fid)
             self._pworker.finished.connect(self._on_cf_pack_downloaded)
         else:
-            # round-111：改用 ProgressWorker（而非裸 Worker）——它会注入 mll 风格
-            # callback，经 net_api.download_modpack_to 桥接成字节级进度 + 实时速度。
+            # 详情页选中的版本透传下去；卡片入口不传 → 沿用最新兼容版。
+            vid = (version or {}).get("id", "") or ""
             self._pworker = ProgressWorker(download_modpack_to, project_id,
-                                           cache_dir)
+                                           cache_dir, version_id=vid)
             self._pworker.finished.connect(self._on_pack_downloaded)
         self._pworker.progress.connect(self._on_pack_progress)
         self._pworker.speed.connect(self._on_pack_speed)
@@ -1382,6 +1410,8 @@ class StorePage(QWidget):
             return
         dlg = _MrpackDialog(path, info_dict, self)
         dlg.exec()
+        # 导入对话框自己新建了实例；不主动刷一次，实例页要等切页才显示。
+        self._refresh_instance_list()
 
     def _on_cf_pack_downloaded(self, path: str):
         """CF 整合包主 zip 下载完成 → 免 key 逐文件解析安装为新实例（round-142）。"""
@@ -1398,7 +1428,9 @@ class StorePage(QWidget):
         progress = QProgressDialog(self)
         progress.setWindowTitle(t("modpack.title"))
         progress.setLabelText(t("modpack.importing"))
-        progress.setCancelButton(None)
+        # 留一条退路：版本/加载器安装依赖外部网络与 Java 进程，卡住时
+        # 玩家至少要能关掉这个框，而不是被无取消按钮的模态进度困住。
+        progress.setCancelButtonText(t("common.cancel"))
         progress.setMinimumDuration(0)
         # 防闪加固：关自动关/自动重置（见 pages_instances 同段注释）。
         progress.setAutoClose(False)
@@ -1428,6 +1460,7 @@ class StorePage(QWidget):
 
         def _done(inst):
             tick.stop()
+            watchdog.stop()
             progress.hide()
             # round-150：导入时已尝试安装版本/加载器；失败时提示首次启动会重试。
             err = getattr(inst, "loader_install_error", "")
@@ -1437,20 +1470,48 @@ class StorePage(QWidget):
                 toast(self, t("modpack.title"), t("modpack.done"))
             if inst and getattr(inst, "id", None):
                 self.mgr.set_current(inst.id)
+            self._refresh_instance_list()
 
         def _err(e):
             tick.stop()
+            watchdog.stop()
             progress.hide()
             if isinstance(e, NetError):
                 warn(self, t("modpack.title"), str(e))
             else:
                 warn(self, t("modpack.title"), t("modpack.error", e=e))
 
+        # 看门狗：底层版本安装可能停在无响应的网络/子进程上，worker 既不会
+        # finished 也不会 error。三分钟后主动收起进度框，让界面恢复可用，
+        # 后台线程继续跑完（不硬杀，避免留下半安装状态）。
+        watchdog = QTimer(self)
+        watchdog.setSingleShot(True)
+        watchdog.setInterval(180000)
+
+        def _stop_waiting():
+            tick.stop()
+            watchdog.stop()
+            progress.hide()
+            toast(self, t("modpack.title"), t("modpack.import_bg"))
+
+        watchdog.timeout.connect(_stop_waiting)
+        progress.canceled.connect(_stop_waiting)
+
         tick.timeout.connect(_on_tick)
         tick.start()
+        watchdog.start()
         worker.finished.connect(_done)
         worker.error.connect(_err)
         worker.start()
+
+    def _refresh_instance_list(self):
+        """跨页面创建的实例不会自动触发实例页重绘，主动刷一次。"""
+        try:
+            page = getattr(self.window(), "instances_page", None)
+            if page is not None and hasattr(page, "_refresh"):
+                page._refresh()
+        except Exception:  # noqa: BLE001 - 页面未就绪不影响导入结果
+            pass
 
     def _on_pack_error(self, e):
         self._dl_bar.setVisible(False)

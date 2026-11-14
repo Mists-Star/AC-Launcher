@@ -25,7 +25,7 @@ from .icons import icon, on_accent, pixmap as icon_pixmap, \
 
 
 # ── 全局滚轮防误触（round-86）───────────────────────────────────────────
-# 用户反馈：滚动页面时鼠标悬停在 QComboBox 上会被滚轮误切选项。这里对
+# 滚动页面时鼠标悬停在 QComboBox 上会被滚轮误切选项。这里对
 # QComboBox.wheelEvent 全局打补丁，一律忽略滚轮——覆盖所有页面/对话框里
 # 的 20+ 个下拉框（main_window / pages_instances / music / onboarding / Java
 # 管理等），一处生效。优点：
@@ -48,7 +48,7 @@ def accent_text() -> str:
     """强调文字色：accent 偏亮时自动换成深色，保证在浅色背景（卡片/弹窗）
     上仍清晰可读；accent 本身够暗则原样返回主题色。
 
-    round-87 用户反馈：主题色设为琥珀黄（#EAB308）后，主页卡片「导入」
+    round-87：主题色设为琥珀黄（#EAB308）后，主页卡片「导入」
     徽章等 accent 文字在浅色主题下看不清。用它替代裸的
     ``color:{COLORS['accent']}``，兼顾强调色与可读性。
     """
@@ -381,7 +381,7 @@ def card(radius: int = R_CARD, fill=None, border=None, parent=None,
 class ElidedLabel(QLabel):
     """单行省略标签：按**当前可用宽度**省略，绝不用文本宽度去顶布局。
 
-    round-218（主理人实机反馈）：资源中心搜到的 mod 名很长时，右侧内容被挤到
+    round-218（实机）：资源中心搜到的 mod 名很长时，右侧内容被挤到
     窗口外面，底部还冒出横向滑块。根因是 `QLabel` 的 `sizeHint/minimumSizeHint`
     等于整段文本的宽度——一个 120 字的标题会把卡片所在的 QScrollArea 内容
     最小宽度撑到几千像素，两栏 splitter 只能把它推出可视区。

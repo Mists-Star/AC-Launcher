@@ -138,34 +138,15 @@ def parse_game_args(text: str) -> tuple[str | None, str | None, list[str]]:
 
 
 def resolve_game_dir(inst, settings: dict) -> str:
-    """版本隔离 / 自定义游戏目录解析（对齐主流「版本隔离」三选项）。
+    """版本隔离 / 自定义游戏目录解析 —— **薄封装**。
 
-    - 默认：游戏数据读写 <mc_dir>（.minecraft，各版本共享存档/模组）；
-    - 版本隔离：读写 <mc_dir>/versions/<version_id>（每版本独立存档/模组）；
-    - 自定义目录：用玩家指定的路径。相对路径按 <mc_dir>/<值> 解析（round-57
-      确定性修复：之前原样 normpath，相对路径会飘移到启动器进程 CWD 下）。
-    实例级 ``isolation`` 为空时回退全局 ``version_isolation``。返回路径保证存在。
+    round-228 P2-11：唯一实现在 ``instances.resolve_game_dir_for``。以前这里
+    和 ``Instance.game_dir`` 各写一份逐行相同的规则，一侧改了另一侧没跟上
+    就会让「UI 写入目录」与「游戏读取目录」脱节（round-227 P1-4）。
+    本函数保留签名，是为了不破坏启动链 / 磁盘检查 / 退出命令三处调用方。
     """
-    iso = (getattr(inst, "isolation", "") or "").strip() \
-        or (settings.get("version_isolation") or "default")
-    if iso == "isolated":
-        sub = inst.version_id or inst.game_version
-        # round-78 其他启动器版本隔离（导入）：mc_dir 本身就是该版本
-        # 的隔离目录，真实 json 在 mc_dir/<sub>.json。再套 versions/<sub> 会让
-        # options.txt/存档等写到不存在的嵌套目录（同 instances.game_dir 规则）。
-        try:
-            if os.path.isfile(os.path.join(inst.mc_dir, f"{sub}.json")):
-                return inst.mc_dir
-        except OSError:
-            pass
-        return os.path.join(inst.mc_dir, "versions", sub)
-    if iso == "custom":
-        custom = (getattr(inst, "game_dir_override", "") or "").strip()
-        if custom:
-            if not os.path.isabs(custom):
-                return os.path.join(inst.mc_dir, os.path.normpath(custom))
-            return os.path.normpath(custom)
-    return inst.mc_dir
+    from .instances import resolve_game_dir_for
+    return resolve_game_dir_for(inst, settings)
 
 
 def apply_wrapper(cmd: list[str], wrapper: str) -> list[str]:
@@ -846,7 +827,7 @@ def launch_instance(
         _emit_step(callback, "install")
         # round-203：同一实例的安装（手动「补全文件」/ 另一个启动）正在跑时，
         # 先等它结束再补。两条 install 并行写同一批 .part 会重复下载、互相
-        # 覆盖，用户看到的就是「总有好几个下载一起占带宽」。
+        # 覆盖，表现为「总有好几个下载一起占带宽」。
         try:
             from .core.dl_gate import claim, inst_key, wait_free
             from .core.mirror import InstallCancelled, active_context
@@ -941,12 +922,12 @@ def launch_instance(
     #   1) Windows 下统一用 javaw.exe 拉起游戏。PCL/HMCL 等导入客户端（尤其
     #      1.8.x）的 native 层会检测启动进程名——用 java.exe（会带出控制台
     #      窗口）启动时，客户端直接弹无标题英文框 "Use Javaw.exe pls" 且无
-    #      引导（该字符串不在我们代码里，玩家「选了 Java 还弹」就是这个）。
+    #      引导（该字符串来自被导入客户端，非启动器代码；「选了 Java 还弹」即此现象）。
     #      主流启动器一律以 javaw.exe 启动，这里把选到的 java.exe 归一为同
-    #      目录 javaw.exe，弹窗源彻底消失。
+    #      目录 javaw.exe，弹窗源随之消失。
     #   2) 手动固定 Java 与版本要求不匹配（如拿 Java 17 跑需 Java 8 的 1.8.9）
     #      → 老客户端模块系统直接崩（InaccessibleObjectException）+ 启动必
-    #      失败且无提示（本次用户实测场景）。此时优先自动切换到兼容的已装
+    #      失败且无提示（实测场景）。此时优先自动切换到兼容的已装
     #      Java 并明示；无可用才中文报错，绝不无声把玩家丢给游戏。
     if java:
         from .core.java import scan_javas as _scan_javas

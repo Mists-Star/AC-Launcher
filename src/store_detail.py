@@ -109,6 +109,15 @@ def _cjk_ratio(text: str) -> float:
     return sum(1 for c in body if "\u4e00" <= c <= "\u9fff") / len(body)
 
 
+def _is_zh_ui() -> bool:
+    """当前界面是否中文（决定要不要自动机翻说明）。"""
+    try:
+        from .i18n import get_language
+        return str(get_language()).lower().startswith("zh")
+    except Exception:  # noqa: BLE001 - 语言读取失败按中文处理
+        return True
+
+
 def _fetch_and_translate(card: dict) -> tuple[str, str | None]:
     """后台线程任务：取项目简介/README（body 优先）并机翻成中文。
 
@@ -149,7 +158,7 @@ class _VersionRow(QFrame):
     """
 
     def __init__(self, parent, ver: dict, is_latest: bool, on_download,
-                 compatible: bool = True, reason: str = ""):
+                 compatible: bool = True, reason: str = "", label: str = ""):
         super().__init__(parent)
         self._ver = ver
         self._compatible = compatible
@@ -237,7 +246,7 @@ class _VersionRow(QFrame):
         d_lbl.setMinimumWidth(70)
         lay.addWidget(d_lbl)
 
-        dl = QPushButton(t("store.download"))
+        dl = QPushButton(label or t("store.download"))
         dl.setProperty("cls", "accent")
         dl.setCursor(Qt.PointingHandCursor)
         dl.setMinimumHeight(30)
@@ -257,6 +266,9 @@ class StoreDetailPanel(QWidget):
     """资源详情页内嵌面板：信息头 + 最新版本条 + 版本卡片流（分页）+ 翻译 + 下载。"""
 
     back_requested = Signal()
+    # 整合包「安装为新实例」请求；payload = {"card": dict, "version": dict}。
+    # 详情页不自己实现安装链，交给资源页复用卡片上那条（缓存 → 导入对话框）。
+    install_pack_requested = Signal(dict)
 
     def __init__(self, parent, card: dict, category: str, inst, subdir: str,
                  instances=None):
@@ -265,6 +277,9 @@ class StoreDetailPanel(QWidget):
         self._ck = "%s:%s" % (card.get("source") or "modrinth",
                               card.get("project_id") or card.get("slug") or "")
         self._category = category
+        # 整合包不能像模组那样下载进某个实例的 mods/：它是「新建实例」的内容。
+        self._is_pack = (category == "modpack"
+                         or (card.get("project_type") or "") == "modpack")
         self._inst = inst
         self._instances = list(instances) if instances is not None else []
         self._subdir = subdir
@@ -384,7 +399,7 @@ class StoreDetailPanel(QWidget):
         bl.addLayout(more_row)
 
         # ── ⑤ 中文说明区 ──
-        # round-143（用户拍板）：打开详情即自动机翻（gtx→MyMemory 兜底、带缓存），
+        # round-143：打开详情即自动机翻（gtx→MyMemory 兜底、带缓存），
         # 不再要求玩家点按钮或跳官网；MC百科按钮保留为社区中文条目入口。
         tl_row = QHBoxLayout()
         self.mcmod_btn = QPushButton(t("store.detail_mcmod"))
@@ -422,10 +437,14 @@ class StoreDetailPanel(QWidget):
         root.addWidget(self.body_scroll, stretch=1)
 
         self._load_first_page()
-        # round-143（用户拍板）：描述默认直接机翻成中文——打开详情就自动翻，
-        # 不再要求玩家先点按钮或跳官网；原文本身是中文时上层零成本直返。
-        if (card.get("description") or "").strip():
+        # 中文界面打开详情时自动机翻；其它语言直接显示原文，避免把英文
+        # 说明翻成中文，也省掉一次无意义的翻译请求。手动按钮始终可用。
+        desc = (card.get("description") or "").strip()
+        if desc and _is_zh_ui():
             self._translate(auto=True)
+        elif desc:
+            self.text.setPlainText(desc)
+            self.tr_status.setText("")
 
     # ---------------- UI 构建 ----------------
     def _build_target_bar(self) -> QHBoxLayout:
@@ -439,6 +458,24 @@ class StoreDetailPanel(QWidget):
         """
         row = QHBoxLayout()
         row.setSpacing(8)
+        if self._is_pack:
+            # 整合包不是「装进某个实例的 mods/」，而是新建一个实例。目标栏
+            # 不提供实例选择，直接把这件事写在界面上，避免玩家以为在下模组。
+            hint = QLabel(t("store.pack_target_hint"))
+            hint.setProperty("cls", "sub")
+            hint.setWordWrap(True)
+            row.addWidget(hint, 1)
+            self.save_as_btn = QPushButton(t("store.pack_save_as"))
+            self.save_as_btn.setProperty("cls", "secondary")
+            self.save_as_btn.setMinimumHeight(32)
+            self.save_as_btn.clicked.connect(self._download_latest)
+            row.addWidget(self.save_as_btn)
+            # _current_inst() 依赖这个 combo；只留「另存为」项，保证任何路径
+            # 都拿不到实例，也就不会把 .mrpack 写进 <game_dir>/mods/。
+            self.target_combo = QComboBox()
+            self.target_combo.addItem(t("store.detail_target_save"), "__save__")
+            self.target_combo.setVisible(False)
+            return row
         lbl = QLabel(t("store.detail_target"))
         lbl.setProperty("cls", "sub")
         row.addWidget(lbl)
@@ -635,12 +672,13 @@ class StoreDetailPanel(QWidget):
         bi.addWidget(self.latest_date)
         bi.addStretch(1)
 
-        self.latest_btn = QPushButton(t("store.download"))
+        self.latest_btn = QPushButton(
+            t("store.install") if self._is_pack else t("store.download"))
         self.latest_btn.setProperty("cls", "accent")
         self.latest_btn.setCursor(Qt.PointingHandCursor)
         self.latest_btn.setMinimumHeight(32)
         self.latest_btn.setEnabled(False)
-        self.latest_btn.clicked.connect(self._download_latest)
+        self.latest_btn.clicked.connect(self._on_latest_action)
         bi.addWidget(self.latest_btn)
         box.setVisible(False)
         self._latest_box = box
@@ -671,7 +709,7 @@ class StoreDetailPanel(QWidget):
         bar.addWidget(self.mc_filter)
 
         # round-193：默认只看「兼容当前实例」的版本（可临时放开看全部）。
-        # 用户原话：「模组最高版本推荐不是随着我版本加载器来选的有何作用？」
+        # 推荐版本必须跟随当前实例的 MC 版本与加载器。
         self.compat_chk = QCheckBox(t("store.detail_compat_only"))
         self.compat_chk.setChecked(True)
         self.compat_chk.setToolTip(t("store.detail_compat_only_hint"))
@@ -732,8 +770,7 @@ class StoreDetailPanel(QWidget):
     def _compat_of(self, ver: dict) -> tuple[bool, str]:
         """这个版本对**当前实例**（MC 版本 + 加载器）兼不兼容。
 
-        用户原话：「模组最高版本推荐不是随着我版本加载器来选的有何作用？」
-        —— 推荐必须跟着实例走：给一个装不上的"最新"毫无意义。
+        推荐必须跟着实例走：给一个装不上的"最新"毫无意义。
         """
         inst = self._current_inst() or self._inst
         if inst is None:
@@ -742,8 +779,12 @@ class StoreDetailPanel(QWidget):
         ld = str(getattr(inst, "loader", "") or "vanilla").lower()
         gvs = [str(g) for g in (ver.get("game_versions") or [])]
         lds = [str(x).lower() for x in (ver.get("loaders") or [])]
-        if mc and gvs and mc not in gvs:
-            return False, t("store.incompat_mc", mc=mc)
+        # 作者没标注当前小版本但属同一主版本系列时不判冲突，避免把实际能
+        # 正常加载的模组从「只看兼容」里过滤掉。
+        if mc and gvs:
+            from .store_compat import mc_compat
+            if mc_compat(mc, gvs) == "mismatch":
+                return False, t("store.incompat_mc", mc=mc)
         if ld and ld != "vanilla" and lds and ld not in lds:
             return False, t("store.incompat_loader", loader=ld)
         return True, ""
@@ -753,7 +794,7 @@ class StoreDetailPanel(QWidget):
 
         round-205：旧实现直接取「第一个兼容」——Modrinth 列表按发布时间倒序，
         第一个兼容常常是 beta/alpha；而下面的大按钮显示的正是这个推荐版本。
-        推荐给普通玩家一个测试版，就是用户说的「版本建议很奇怪」。
+        给普通玩家推荐测试版不合理。
         """
         ok_versions = [v for v in self._versions if self._compat_of(v)[0]]
         if ok_versions:
@@ -967,8 +1008,10 @@ class StoreDetailPanel(QWidget):
             row = self._row_cache.get(key)
             if row is None:
                 row = _VersionRow(self._rows_host, v, latest,
-                                  self._download_version,
-                                  compatible=ok, reason=reason)
+                                  self._on_row_action,
+                                  compatible=ok, reason=reason,
+                                  label=(t("store.install") if self._is_pack
+                                         else t("store.download")))
                 self._row_cache[key] = row
             self._rows.insertWidget(self._rows.count() - 1, row)
             row.show()
@@ -994,6 +1037,26 @@ class StoreDetailPanel(QWidget):
                 pass
 
     # ---------- 下载 ----------
+    def _on_latest_action(self):
+        """主按钮：整合包走安装，其余资源按目标下载。"""
+        if self._is_pack:
+            self._install_pack_version(self._recommended())
+        else:
+            self._download_latest()
+
+    def _on_row_action(self, v: dict):
+        """版本行按钮与整行点击共用一个入口。"""
+        if self._is_pack:
+            self._install_pack_version(v)
+        else:
+            self._download_version(v)
+
+    def _install_pack_version(self, v: dict | None):
+        """把「安装该版本」交给资源页，复用卡片那条安装链。"""
+        if not v:
+            return
+        self.install_pack_requested.emit({"card": self._card, "version": v})
+
     def _download_latest(self):
         # round-205：下载按钮必须下「卡片上显示的那个推荐版本」。旧实现取
         # `self._versions[0]`（列表第一条 = 最新发布），与推荐条显示的
@@ -1136,6 +1199,10 @@ class StoreDetailPanel(QWidget):
         folder the user picks, no instance (and therefore no MC version) needed.
         """
         inst = self._current_inst()
+        # 整合包只走「另存为文件」；安装由 install_pack_requested 单独处理。
+        # 缺了这道兜底，目标栏一旦被改动就可能把 .mrpack 写进实例的 mods/。
+        if self._is_pack:
+            inst = None
         # round-199：记下这次真正写入的实例 —— 下载中途用户可能改「下载到」，
         # 来源记录必须落到文件实际所在的那个实例，不能跟着下拉框漂。
         self._dl_inst = inst
@@ -1193,9 +1260,9 @@ class StoreDetailPanel(QWidget):
         # 每次下载都重置（CF 分支不填 manifest，别让它读到上一次的）
         self._dl_manifest = []
         # round-111：改用 ProgressWorker，速度行进已有 status 标签
-        # （本对话框没有独立进度条，速度是用户明确要的可观测项）。
+        # （本对话框没有独立进度条，速度是必要的可观测项）。
         if self._card.get("source") == "curseforge":
-            # round-220：CF 通道终于自动拉前置（FTB Ultimine → FTB Library 等），
+            # round-220：CF 通道自动拉前置（FTB Ultimine → FTB Library 等），
             # 并把同 mod 旧版本 jar 删掉，避免新旧 FTB Library 共存崩游戏。
             f0 = (v.get("files") or [{}])[0]
             # round-222：不能用 `or` 回退——文件 id 是数字，0 / 空串会掉到
@@ -1377,8 +1444,10 @@ class StoreDetailPanel(QWidget):
         def _err(e):
             self.translate_btn.setEnabled(True)
             if auto:
-                # 自动翻译失败不打扰：保留头部英文简介即可，按钮仍可手动重试。
+                # 自动翻译失败时显示原文，别让说明区空着只剩 placeholder。
                 self.tr_status.setText("")
+                self.text.setPlainText(
+                    (self._card.get("description") or "").strip())
             else:
                 self.tr_status.setText(t("store.detail_translate_fail", e=e))
 

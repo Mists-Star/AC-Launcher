@@ -105,7 +105,7 @@ def filter_neoforge(versions, mc_version: str) -> list[str]:
     """把 NeoForge 版本列表裁到「本 MC 版本可装」的那些。
 
     光按版本号前缀裁是不够的：NeoForge 的 20.x 对应 MC 1.20.x，但 1.19.2
-    也会算出前缀 ``19.2.`` —— 而 NeoForge 压根没有 19.x（它 1.20.1 才有）。
+    也会算出前缀
     所以先卡下限，再按前缀裁。
     """
     if not supports("neoforge", mc_version):

@@ -1,7 +1,7 @@
 """
 WelcomeWindow — AC Launcher 极简启动页。
 
-设计（用户 2026-08-13 反馈）：
+设计约束：
 - 只显示 AC 两个字母 → 之后直接进入 onboarding/主窗口流程
 - 不要背景（透明画布）
 - 不需要"开始"按钮，不需要用户点击
@@ -159,6 +159,6 @@ class WelcomeWindow(QWidget):
 
     # ---------- 鼠标（点击任意位置立即跳过）----------
     def mousePressEvent(self, e):
-        # round-28 用户反馈：欢迎页停留时间足够看到 AC，但允许点击立即跳过。
+        # round-28：欢迎页停留时间足够看到 AC，但允许点击立即跳过。
         if not self._finished_emitted:
             self._fade_out_and_close()

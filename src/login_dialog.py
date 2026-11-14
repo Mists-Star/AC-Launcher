@@ -230,7 +230,7 @@ class LoginDialog(QDialog):
 
         旧版是紫→洋红渐变 + 白字（大面积强调色，主题色一换整块变色），
         round-100 改为中性底 + 全局 token 文字。
-        round-147：再去掉左侧 3px accent 竖条 —— 用户反馈「按钮留黑边/紫边
+        round-147：再去掉左侧 3px accent 竖条 —— 「按钮留黑边/紫边
         等不好看，就是说这些按钮留边都不太好看」。
         """
         hero = RoundedCard(radius=16)

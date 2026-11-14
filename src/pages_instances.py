@@ -538,7 +538,7 @@ class NewInstanceDialog(QDialog):
         else:
             self._frameless = None
 
-        # round-46 用户反馈"新建实例看不到任何东西"：先显示 loading 占位，
+        # round-46：新建实例先显示 loading 占位，
         # fetch 完成后替换。替代方案是显示空白。
         loading = QLabel(t("versions.loading"))
         loading.setProperty("cls", "sub")
@@ -683,7 +683,7 @@ class NewInstanceDialog(QDialog):
 
     def _refresh_version_list(self):
         # round-107：改为「滚到底部自动续加载」。此前超出 _MAX_GROUP_VISIBLE 的
-        # 版本折叠成「显示全部 N 个」按钮，需玩家手动点开（用户反馈反人类）；
+        # 版本折叠成「显示全部 N 个」按钮，需玩家手动点开；
         # 现在首屏渲染前 _MAX_GROUP_VISIBLE 张，剩余由滚动触发展开，并给新出现
         # 的卡片做淡入动画。
         while self._ver_vbox.count():
@@ -977,7 +977,7 @@ class NewInstanceDialog(QDialog):
     def _go_to_loader_page(self):
         if not self._selected_version:
             return
-        # 防抖：round-29 用户反馈快速连续点击会闪退。
+        # 防抖：round-29 快速连续点击会闪退。
         # _busy 在过渡期间禁用所有 next/back，动画完成后重置。
         if self._busy:
             return
@@ -1097,7 +1097,7 @@ class NewInstanceDialog(QDialog):
             # 旧代码 `and card.isVisible()` 会让刚 show 的卡片漏掉选中态
             card.set_selected(lid == loader_id)
         # 用高度占位代替 setVisible：隐藏时保留同样的布局槽位，
-        # 切换加载器不再整页跳动（用户反馈「页面重构 / 位置奇怪」）。
+        # 切换加载器不再整页跳动。
         self.ldver_box.setMaximumHeight(0 if not show_ldver else 16777215)
         if show_ldver:
             self._load_loader_versions()
@@ -1468,8 +1468,8 @@ class InstancesPage(QWidget):
         hl.addWidget(self.new_btn)
         hl.addWidget(self.scan_btn)
         hl.addWidget(self.mrpack_btn)
-        # round-107 收起键重做：原按钮随列表一起折叠 → 位置来回跳动（用户反馈
-        # 「位置会偏移、很反人类」）。改为一颗**常驻页头**的图标按钮：无论列表
+        # round-107 收起键重做：原按钮随列表一起折叠 → 位置来回跳动。
+        # 改为一颗**常驻页头**的图标按钮：无论列表
         # 展开/收起，它始终停在同一个位置，状态靠图标方向 + tooltip 表达。
         self.panel_btn = QPushButton("")
         self.panel_btn.setFixedSize(34, 34)
@@ -1781,7 +1781,7 @@ class InstancesPage(QWidget):
         lay.addLayout(grid)
 
         # ── 管理与诊断（round-200：一级入口）──
-        # 用户反馈「功能藏太深」：体检 / 崩溃分析原来埋在「⋯ 更多」里，
+        # 体检 / 崩溃分析原来埋在「⋯ 更多」里，
         # 备份 / 还原 / 复制只存在于右键菜单（详情页根本看不到）。
         # 改为按用途分组的一级网格：上排全是"查问题 / 修问题"，下排是实例数据操作。
         # ia[instances]: 点「实例体检」 | 详情「管理与诊断」网格 | 页内体检面板（静态扫描 + 一键本地修复）
@@ -1833,7 +1833,7 @@ class InstancesPage(QWidget):
         # ── 更多操作 ──
         # ☠ 别再用文字「⋯」：① 它依赖字体回退（U+22EF 不在雅黑里，缺字时是豆腐块）；
         # ② QPushButton 带菜单时 Qt 还会在文字旁再画一个 ⌄，30px 的小方钮里挤成
-        # 「⋯⌄」两个符号（用户实拍指出）。改用 SVG 图标 + 隐藏 menu-indicator。
+        # 「⋯⌄」两个符号。改用 SVG 图标 + 隐藏 menu-indicator。
         more_btn = QPushButton()
         more_btn.setToolTip(t("instances.more_actions"))
         more_btn.setFixedSize(34, 34)
@@ -2017,7 +2017,7 @@ class InstancesPage(QWidget):
         网络动作放 Worker，避免卡 UI；结果是结构化终态（成功 / 失败阶段 /
         jar 过多跳过），不再误报「依赖齐全」。
         round-209：以前全程只有模态 info/warn —— frameless 主窗口里可能弹到
-        后面，玩家看到的就是「点了没反应、修补没提示」。现在和另外两条一键
+        后面，表现为「点了没反应、修补没提示」。现在和另外两条一键
         修复入口共用 fix_feedback.report()（主窗口浮层 toast），并在点击瞬间
         就给出「正在处理」。
         """
@@ -2772,7 +2772,7 @@ class InstancesPage(QWidget):
             _bar.setTextVisible(False)
 
         # round-142b：CF 导入给实时 n/N 计数 —— 此前只有无限转圈，
-        # 用户体感「导入怎么这么久」（轮询 state，跨线程零信号管道）。
+        # 导入耗时不可见（轮询 state，跨线程零信号管道）。
         state = {"label": "", "done": 0, "total": 0}
 
         def _pr(label, done, total):
@@ -2791,7 +2791,7 @@ class InstancesPage(QWidget):
             tick.stop()
             progress.hide()
             # round-150：导入时已尝试安装版本/加载器；失败不丢整合包，但要让
-            # 用户知道首次启动还会再装一次（而不是以为「导入失败」）。
+            # 明确提示首次启动还会再装一次（避免误判「导入失败」）。
             err = getattr(inst, "loader_install_error", "")
             if err:
                 warn(self, t("modpack.title"), t("modpack.loader_failed_hint", e=err))
@@ -3334,7 +3334,8 @@ class _MrpackDialog(QDialog):
         inst = self.mgr.add(
             name=name,
             game_version=self.info.get("mc_version") or "1.21.4",
-            loader=self.info.get("loader") or "vanilla")
+            loader=self.info.get("loader") or "vanilla",
+            isolation="default")
         inst.version_id = self.info.get("launch_version") or ""
         self.mgr._persist(inst)
         self._inst = inst
@@ -3343,6 +3344,7 @@ class _MrpackDialog(QDialog):
         _cfg = load_config()
         self._worker = Worker(
             install.install_mrpack, self.path, inst.mc_dir,
+            game_dir=inst.game_dir,
             mirror=_cfg.get("download_mirror", "official"))
         self._worker.finished.connect(self._done)
         self._worker.error.connect(self._err)

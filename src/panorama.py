@@ -412,7 +412,7 @@ class PanoramaRenderer:
         self.yaw = 0.0
         self.pitch = -6.0
         # round-146：面与面之间按浮点裁剪后偶有 1px 缝，缓冲填黑时这些缝就是
-        # 用户看到的「黑色噪点/黑线」（且随每帧 yaw 抖动闪烁）。缓冲底色改为
+        # 表现为「黑色噪点/黑线」（且随每帧 yaw 抖动闪烁）。缓冲底色改为
         # 六面平均色——缝隙即使露出来也和画面同色，肉眼不可见。
         self.avg_color = self._mean_color(faces)
 

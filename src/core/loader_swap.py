@@ -216,7 +216,7 @@ def wants_fabric_api(loader: str) -> bool:
 def install_fabric_api(inst, *, callback=None) -> str:
     """把与「当前 MC + 当前加载器」匹配的 Fabric API 装进 mods 目录。
 
-    用户原话：「下加载器不下配套 fabric api」。PCL 装 Fabric 时会一并带上
+    要求：安装加载器时一并安装其配套 API（Fabric → Fabric API）。PCL 装 Fabric 时会一并带上
     Fabric API —— 缺了它，绝大多数 Fabric 模组进游戏直接报缺前置，而玩家
     通常不会意识到「加载器」和「Fabric API」是两样东西。
 

@@ -81,7 +81,7 @@ NAV_ITEMS = NAV_KEYS  # index-compatible alias: NAV_ITEMS[i][1] is still the key
 # 每项：(分组标题键 or None=不分组的独立主项, [(label键, key), ...])
 NAV_GROUPS = [
     (None, [("nav.home", "home")]),                             # 启动（主项）
-    # round-107 侧栏最简：模组/版本库/音乐/成就/控制台 5 项从侧栏移除（用户已确认）。
+    # round-107 侧栏最简：模组/版本库/音乐/成就/控制台 5 项从侧栏移除。
     # 功能全部保留，改由页面内入口承接——模组 → 实例页各分区；版本库 → 首页空态
     # 「下载版本」+ 新建实例向导；音乐/成就/控制台 → 设置页内入口按钮。
     ("nav.group.game", [("nav.instances", "instances")]),
@@ -300,7 +300,7 @@ class _InstanceCard(LightTrailCard):
         play_btn.setToolTip(t("home.play"))
         # round-91 跟随自定义 accent：强调色底 + 自适应文字色。
         # round-146：去掉 2px accent_press 描边——浅色主题下它是近黑深紫，
-        # 按钮四周一圈「黑边/紫边」（用户截图里的圆角黑框）。与 QSS
+        # 按钮四周一圈「黑边/紫边」（浅色主题下的圆角黑框）。与 QSS
         # QPushButton[cls="play"] 统一为无边框。
         from .theme import COLORS as _C
         play_btn.setStyleSheet(
@@ -399,7 +399,7 @@ class _CharStage(QWidget):
         self._anim = QTimer(self)
         self._anim.setInterval(55)          # ≈18 fps for a 30-frame turn
         self._anim.timeout.connect(self._advance_frame)
-        # round-130：拖动旋转（此前只能看自动转，用户问「可转动做好了吗」）。
+        # round-130：支持拖动旋转（此前仅自动旋转）。
         self._drag_x: float | None = None
         self._drag_accum = 0.0
         self._drag_total = 0.0
@@ -600,7 +600,7 @@ class HomePage(QWidget):
         # round-147：壁纸垫底自 round-144b 起挂在**主窗**上（要盖住标题栏、
         # 侧栏和状态栏），几何必须跟主窗走。此前这里用的是首页自己的
         # rect()（内容区大小，比窗口小一圈），于是切页/滚动条出现等任何
-        # 触发首页重排的动作，都把壁纸裁成内容区大小 —— 用户看到的
+        # 触发首页重排的动作，都把壁纸裁成内容区大小 —— 表现为
         # 「点侧栏操作壁纸被拉伸缩小」正是这条路径。
         win = self.window()
         _bd = getattr(win, "backdrop", None)
@@ -783,15 +783,15 @@ class HomePage(QWidget):
         self._title_block(lay)
 
         # round-107 极简首页：删除「统御统计条」（已接管/来源/待修复）——信息与
-        # 实例页重复，且首页越堆越繁杂（用户反馈「首页太复杂」）。
+        # 实例页重复，且首页越堆越繁杂。
 
         # ── hero 单卡（round-121）：左「实例 + 启动」，右「角色立绘」──
         # 旧版把实例卡与角色卡拆成两张：角色卡里 96px 平面小人 + 36px 披风
-        # 缩略图 + 一片空白台座，观感像占位图（用户反馈「来搞笑的」）。主流
+        # 缩略图 + 一片空白台座，观感像占位图。主流
         # 启动器（PCL2 / HMCL / BakaXL）都把大尺寸角色放进启动面板本身，作为
         # 账号区的视觉锚点——合并为一张卡后不再有「卡中卡」和小空台，右侧
         # 200×240 三分之四视角角色直接站在柔光台上，披风穿在身上。
-        # round-147：去掉 accent_border=3 的左侧紫色竖条 —— 用户反馈
+        # round-147：去掉 accent_border=3 的左侧紫色竖条 —— 浅色主题下按钮留黑边/紫边
         # 「图片中按钮留黑边/紫边等不好看，就是说这些按钮留边都不太好看」，
         # round-146 已删掉侧栏选中条的同类竖条，首页 hero 这条是遗漏。
         hero = RoundedCard(radius=18)
@@ -2744,7 +2744,7 @@ class MainWindow(QMainWindow):
         # round-203：全局闸门 —— 同一实例的安装（启动前补全 / 手动补全 / 修复）
         # 同一时刻只允许一个。没有这道锁时，「点启动」与「点补全」会各开一个
         # install 写同一批 .part 文件：既重复占用带宽，又可能互相覆盖导致校验
-        # 失败重下（用户反馈「总有好几个下载一起占」）。
+        # 失败重下（表现为「总有好几个下载一起占」）。
         try:
             from .core.dl_gate import claim, inst_key
             _gate_key = inst_key(getattr(inst, "mc_dir", "") or "")
@@ -4059,7 +4059,7 @@ class MainWindow(QMainWindow):
             idx = STACK_INDEX.get(key)
         if idx is None:
             # No real page yet → show the "敬请期待" placeholder so the entry
-            # is reachable but clearly marked as coming soon (用户方案：功能
+            # is reachable but clearly marked as coming soon (功能
             # 完全对标后面来，未实现的先预留入口)。
             self._show_pcl2_placeholder(key)
             return
@@ -4351,7 +4351,7 @@ class MainWindow(QMainWindow):
             ("delete", "cache", "pcl2.toolbox_clear_cache",
              "pcl2.toolbox_clear_cache_desc"),
         ]:
-            # round-146：用户「不知道百宝箱有什么用」——每个工具配一行说明，
+            # round-146：每个工具配一行说明，让入口自解释（
             # 让入口自解释（按钮左、说明右，窄窗自动换行）。
             _row = QHBoxLayout()
             _row.setSpacing(12)
@@ -4669,7 +4669,7 @@ class MainWindow(QMainWindow):
     def _startup_skin_refresh(self):
         """Boot-time skin fetch for an already-signed-in premium account.
 
-        round-125（用户反馈「识别不到我的皮肤」）：登录时 LoginDialog 会拉一次
+        round-125（启动时皮肤识别不到）：登录时 LoginDialog 会拉一次
         皮肤，但那是上一次会话的事。重启后 ``skins.json`` 里可能根本没有 active
         条目，首页只能退回默认 Steve，皮肤库也显示为空——用户会以为启动器认不出
         他的账号。这里只在「正版账号 + 本地无 active 皮肤」时后台补拉一次，
@@ -5151,7 +5151,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(t("status.instance_running", name=inst.name))
             return
         # round-146：该实例后台下载没结束 → 直接拒绝启动（不再给「取消下载
-        # 并启动」的逃生口）。用户明确要求：下载中不要同时拉起游戏，避免
+        # 并启动」的逃生口）。下载中不同时拉起游戏，避免
         # 同一目录双写；启动入口在首页 / 实例页都会经过这里。
         _dl = getattr(self, "_dl_workers", {}).get(getattr(inst, "id", ""))
         if _dl is not None and _dl.isRunning():
@@ -5890,7 +5890,7 @@ class MainWindow(QMainWindow):
             try:
                 # round-203：游戏运行期间**不关闭**背景壁纸 / 全景图 —— 只停
                 # 逐帧播放，画面保留最后一帧。旧实现走 suspend() 丢大图并隐藏
-                # 整层，玩家一启动游戏启动器就变成纯色背景（用户实测反馈）。
+                # 整层，游戏启动后启动器背景变成纯色（实测）。
                 if hasattr(backdrop, "set_game_running"):
                     backdrop.set_game_running(running)
                 # 兼容历史 suspend 状态：若上一次运行残留了降载标记，退出时恢复。

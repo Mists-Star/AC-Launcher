@@ -834,7 +834,7 @@ def _modrinth_versions(project_id: str, mc_version: str = "", loader: str = "",
     params = {}
     # round-218：这两个是**服务端过滤参数**，形态不合法时 Modrinth 直接回
     # HTTP 400（实测 "versions:26." → 400）→ 详情页一条版本都拿不到，
-    # 玩家看到的就是「版本找不到对应的」。校验不过就不传这个参数。
+    # 界面提示「版本找不到对应的」。校验不过就不传这个参数。
     _mc = normalize_mc_version(mc_version)
     if _mc:
         params["game_versions"] = f'["{_mc}"]'
@@ -975,7 +975,7 @@ def modrinth_game_versions(*, timeout: int = 20) -> list[str]:
     """Modrinth 官方版本标签列表（release 优先 + 最近几个 snapshot，按日期倒序）。
 
     round-218：版本下拉原来是一张**写死的 12 条**静态表（抄自 Prism，最新只到
-    1.21.11）。主理人的实例是 MC **26.3**，压根不在表里 → 「我想要的版本找不到
+    1.21.11）。目标实例为 MC **26.3**，不在表中 → 「我想要的版本找不到
     对应的」。这里改成从 Modrinth 的 ``/tag/game_version`` 拉真实列表
     （实测 922 条，含 26.3），离线时回退静态表。
     """
@@ -1669,7 +1669,7 @@ def download_cf_with_deps(project_id, file_id, dest_dir, mc_version: str = "",
                           primary_sha1: str = "") -> str:
     """下载 CF 模组本体 + 其 required 依赖树（含跨源覆盖）。
 
-    round-220：CF 通道终于和 MR 一样会自动拉前置；依赖重下时删掉同 mod 旧版本
+    round-220：CF 通道与 MR 一样自动拉前置；依赖重下时删掉同 mod 旧版本
     jar，防止「新旧 FTB Library 共存」继续崩游戏。返回本体文件路径。
     round-221：``primary_sha1`` 把详情页版本条目里的 sha1 透传给本体下载，
     修复 round-220 重构后「官方 keyed 通道本体不再校验 sha1」的回归。
@@ -1768,7 +1768,7 @@ def download_cf_card(project_id, slug: str = "", cf_file: dict | None = None,
 
 # ── 模组翻译（round-66）───────────────────────────────────────────────
 # 资源中心详情页"获取翻译"：免费接口，无需 API key。
-# round-125：Google gtx 在国内网络直接超时（用户「资源中心获取翻译失败」），
+# round-125：Google gtx 在国内网络直接超时（翻译失败），
 # 所以改为「Google 优先 + MyMemory 兜底」——MyMemory 无需 key、国内可达。
 # round-127: MyMemory 匿名额度只有约 1 万字符/天，超了统一返回 HTTP 429
 #   "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY"
@@ -1887,7 +1887,9 @@ def translate_text(text: str, target: str = "zh-CN") -> str:
         return ""
     if len(text) > 5000:
         text = text[:5000]
-    key = "tr:" + hashlib.md5((target + text[:200]).encode("utf-8")).hexdigest()
+    # 缓存键必须覆盖整段文本：只取前 200 字时，两段共享同一段开头的
+    # README 会撞键，后一段直接拿到前一段的译文。text 已在上面截到 5000。
+    key = "tr:" + hashlib.md5((target + text).encode("utf-8")).hexdigest()
     cached = _cached(key, _TRANSLATE_TTL)
     if cached is not None:
         return cached
@@ -1909,7 +1911,7 @@ def translate_text(text: str, target: str = "zh-CN") -> str:
 
 
 # 资源中心支持的 Modrinth project_type（对齐主流下载分类：模组/整合包/光影/资源包/数据包）
-# round-100：移除 OptiFine 分类入口（用户拍板）——OptiFine 仍可从"新建实例 →
+# round-100：移除 OptiFine 分类入口 ——OptiFine 仍可从"新建实例 →
 # 加载器"作为独立安装入口使用（见 core/install.py），资源中心不再单列分类。
 STORE_CATEGORIES = [
     ("mod",          "store.category_mod"),
@@ -1968,7 +1970,7 @@ def curseforge_available() -> bool:
 def curseforge_keyless_enabled() -> bool:
     """Whether the keyless channel (MCIM mirror search + cfwidget/forgecdn links) is on.
 
-    Default **on**（round-140 用户拍板「搜索+下载全默认开」）: without an
+    Default **on**（round-140：搜索与下载默认开启）: without an
     official key, keyword search goes through the MCIM community mirror
     (same contract as the CF API, no ``x-api-key`` — HMCL / PCL2-CE use it)
     and downloads resolve slug → cfwidget → ``edge.forgecdn.net``. Turning
@@ -2061,7 +2063,7 @@ def _cf_map_row(m: dict) -> dict:
     # ☠ round-191 修：原规则是「URL 里带 /avatars/ 就当无图标」，本意是滤掉
     # 作者头像 GIF 动图（实测 18.8 MB / 4.2 MB）—— 但 **CF 的项目 logo 本身就在**
     # media.forgecdn.net/avatars/<modId>/<fileId>/xxx.png ！一刀切的结果是
-    # **CF 源一个图标都出不来**，全部退回首字母占位（用户报「好多图标加载不出来」）。
+    # **CF 源一个图标都出不来**，全部退回首字母占位。
     # 正确的区分：作者头像是 authors[].avatarUrl（jtvnw / googleusercontent），
     # 与 logo 无关；logo 里只有动图（.gif）需要丢。
     # 并且优先用 thumbnailUrl（256×256 小图）：卡片只显示 48px，原图动辄
@@ -2164,7 +2166,7 @@ _SEARCH_LABELS = {"mr": "Modrinth", "cf": "CurseForge"}
 def search_all(query: str = "", offset: int = 0, limit: int = 20,
                category: str = "mod", meta: dict | None = None,
                on_source=None) -> list[dict]:
-    """「全部」源（round-140 用户要求）：Modrinth + CurseForge 并行搜索合并返回。
+    """「全部」源（round-140）：Modrinth + CurseForge 并行搜索合并返回。
 
     两源各自走自己的缓存/分页；一边失败不拖死另一边（只有两边都失败且
     结果为空才 raise）。命中 dict 自带 ``source`` 字段，卡片/详情/下载
@@ -2414,7 +2416,7 @@ def _download_cf_keyless(project_id: str, file_id: int | str | None,
     """免 key 下载：镜像拿元数据（1 次）→ forgecdn 直链下载（1 次）。
 
     round-142 初版每个文件最多要问 4 个地方（精确端点/文件列表/cfwidget/下载），
-    用户实测「导入整合包这么久」——现改为：
+    导入整合包耗时偏长，改为：
     * 元数据结果缓存（``cfx:{pid}:{fid}``），重复导入同一包秒回；
     * 精确端点拿到 fileName 即可拼 forgecdn（downloadUrl 为 null 不再往下问）；
     * 文件列表同理：有 id+fileName 直接拼；cfwidget 只在镜像整体故障时才用。
@@ -3029,10 +3031,10 @@ def search_mods_zh(query: str, offset: int = 0, limit: int = 20,
     if cached is None:
         slugs = _lookup_cn_slugs(query)
         projects = _projects_by_slugs(slugs[:60]) if slugs else []
-        # round-191：名库只有一百多条，绝大多数中文词查不到 —— 那就把中文
-        # 查询翻成英文再搜一次 Modrinth（它不认中文）。名库命中优先保留，
-        # 英文结果按 project_id 去重后接在后面。
-        if len(projects) < 3:
+        # Modrinth 不认中文查询。名库命中时直接用本地结果：不再发机翻请求，
+        # 既省翻译额度，也避免机翻结果盖过精确命中。只有名库完全没命中才
+        # 把查询翻成英文兜底一次，英文结果按 project_id 去重接在后面。
+        if not projects:
             try:
                 en = translate_text(query, "en")
             except Exception:  # noqa: BLE001 - 翻译挂了就当没有

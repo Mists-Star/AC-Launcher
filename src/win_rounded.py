@@ -52,7 +52,7 @@ def enable_win11_round_corners(widget) -> bool:
 # Tells DWM to paint the native title bar + 1px window border in dark mode, so a
 # standard QDialog blends with the launcher theme instead of showing un-themed
 # chrome. round-224：以前这个开关是**写死 1** 的，浅色主题下顶部就是一条黑栏
-# （用户报的就是这个）——现在跟随 theme.get_theme_mode() 双向切换。
+# （即上述黑栏问题）——现在跟随 theme.get_theme_mode() 双向切换。
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 _DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
 # Win11 22000+：标题栏底色 / 文字色（让白栏与白窗身不再是两段白）

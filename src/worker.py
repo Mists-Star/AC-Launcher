@@ -154,7 +154,7 @@ def _speed_text(bps: float, total: int) -> str:
 # mll 以 "Download <name>" 报文件名；纯 40 位十六进制的是内容哈希，对用户无意义，
 # 折叠掉只留阶段与计数。
 _SHA1_NAME = re.compile(r"^[0-9a-fA-F]{40}$")
-# mll 的阶段状态串 → 我们的 i18n 键。
+# mll 的阶段状态串 → 本项目的 i18n 键。
 _PHASE_KEYS = {
     "Download Libraries": "dl.phase.libraries",
     "Download Assets": "dl.phase.assets",

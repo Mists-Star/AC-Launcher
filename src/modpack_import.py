@@ -178,10 +178,12 @@ def import_mrpack(path: str, mgr, mirror: str = "official") -> object:
             loader = "forge"
         elif did == "neoforge":
             loader = "neoforge"
-    inst = mgr.add(name=name, game_version=mc_version or "1.21.4", loader=loader)
+    inst = mgr.add(name=name, game_version=mc_version or "1.21.4", loader=loader,
+                   isolation="default")
     inst.version_id = launch_version or ""
     mgr._persist(inst)
-    install.install_mrpack(path, inst.mc_dir, mirror=mirror)
+    install.install_mrpack(path, inst.mc_dir, game_dir=inst.game_dir,
+                           mirror=mirror)
     # round-197：登记模组来源（整合包里的 jar 本来没有可靠的 project_id，
     # 但至少要让玩家在模组列表里看得出"这是整合包带来的"）
     _record_pack_sources(inst, source="modpack", title=name)
@@ -247,7 +249,11 @@ def _install_after_import(inst, progress) -> None:
     cb = None
     if progress is not None:
         def _status(raw: str) -> None:
-            progress(f"{t('modpack.installing_loader')} {raw}", -1, 0)
+            # 只显示本地化阶段文案。底层安装器会把内部状态字符串（例如
+            # "Installation complete"）塞进 setStatus，那是它的某个子步骤，
+            # 不代表导入流程结束；拼到界面上既泄漏英文实现细节，也会让
+            # 玩家误以为已经装完、进而把后面的等待当成卡死。
+            progress(t("modpack.installing_loader"), -1, 0)
         cb = {"setStatus": _status}
     try:
         install_instance(
@@ -288,6 +294,7 @@ def import_curseforge_zip(
         game_version=info["mc_version"] or "1.21.4",
         loader=info["loader"],
         loader_version=info["loader_version"],
+        isolation="default",
     )
     # copy overrides into instance root
     # round-40 P0 安全：overrides 相对路径必须仍在实例目录内（防 `..` 穿越
@@ -412,7 +419,8 @@ def import_zip_as_instance(path: str, mgr) -> object:
 
         game_version = _guess_mc_version_from_dir(mc_dir) or "?"
         loader = _guess_loader_from_dir(mc_dir)
-        inst = mgr.add(name=name, game_version=game_version, loader=loader)
+        inst = mgr.add(name=name, game_version=game_version, loader=loader,
+                   isolation="default")
         # copy contents into AC instance dir
         _copy_tree(mc_dir, inst.mc_dir)
         mgr._persist(inst)
@@ -430,7 +438,8 @@ def import_folder_as_instance(folder: str, mgr) -> object:
         folder = os.path.join(folder, ".minecraft")
     game_version = _guess_mc_version_from_dir(folder) or "?"
     loader = _guess_loader_from_dir(folder)
-    inst = mgr.add(name=name, game_version=game_version, loader=loader)
+    inst = mgr.add(name=name, game_version=game_version, loader=loader,
+                   isolation="default")
     _copy_tree(folder, inst.mc_dir)
     mgr._persist(inst)
     # round-197：导入的实例里那些 jar 标成「导入」来源（区别于手动放入）

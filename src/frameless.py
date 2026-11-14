@@ -54,7 +54,7 @@ class TitleBar(QWidget):
         title: str = "",
         show_controls: bool = True,
         height: int = 44,
-        # round-46 用户要求：对话框只留关闭键（默认 close-only），
+        # round-46：对话框只留关闭键（默认 close-only），
         # 需要完整控制栏的窗口显式传 controls="all"
         controls: str = "close",
     ):
@@ -172,8 +172,8 @@ class TitleBar(QWidget):
                 btn.clicked.connect(getattr(self, slot))
                 lay.addWidget(btn)
                 self._btns[name] = btn
-            # round-46 用户要求：控制按钮组回到右上角（删掉 round-45 误加的
-            # 右侧 stretch——它把按钮组水平居中了，用户明确否定）
+            # round-46：控制按钮组回到右上角（删掉 round-45 误加的
+            # 右侧 stretch——它把按钮组水平居中了，已移除）
 
             # Base style for all titlebar buttons
             self._tb_css_base = (

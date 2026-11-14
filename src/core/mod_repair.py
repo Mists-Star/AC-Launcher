@@ -120,7 +120,7 @@ def repair_missing(inst, missing_ids: list[str] | None = None,
     """联网补装缺失依赖。不抛异常，所有失败以结构化条目返回。
 
     ``failed`` 每项 ``{id, stage, reason}``，stage ∈ search / match /
-    download —— UI 终于能区分「搜不到」「匹配不上」「下载失败」。
+    download —— UI 可据此区分「搜不到」「匹配不上」「下载失败」。
     """
     from ..net_api import NetError, download_mod_to, search_mods
 

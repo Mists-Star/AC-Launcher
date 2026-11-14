@@ -30,7 +30,7 @@ class CrashFinding:
     repairable: bool = False   # launcher can attempt auto-fix
     detail: str = ""           # raw log line / stack excerpt
     meta: dict = field(default_factory=dict)
-    # round-204：从日志里猜出的「最可疑 mod / jar」——用户要的是「哪个模组」，
+    # round-204：从日志里猜出的「最可疑 mod / jar」——结论需落到「哪个模组」，
     # 不是「日志里有 Exception」。
     culprit: str = ""
 
@@ -148,7 +148,7 @@ def crash_report_paths(mc_dir: str) -> list[str]:
 # round-204：结构化线索提取
 # --------------------------------------------------------------------------- #
 # 旧实现只在整段文本里 `rx.search()` 一次，把「命中了一行」当成结论，既不
-# 说明是哪个模组，也不展示那一行原文 —— 玩家看到的就是「崩溃了，可能是
+# 说明是哪个模组，也不展示那一行原文 —— 只能给出「崩溃了，可能是
 # Java 版本」这种废话。下面这组纯函数负责把日志变成「类别 + 可疑对象 +
 # 原始证据行」，UI 只负责排版。
 _JAR_RX = re.compile(r"([A-Za-z0-9_.+\-]+\.jar)", re.IGNORECASE)

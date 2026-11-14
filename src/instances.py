@@ -151,42 +151,12 @@ class Instance:
     def game_dir(self) -> str:
         """当前生效的游戏数据目录（感知版本隔离，round-57 统一入口）。
 
-        与 ``launch.resolve_game_dir`` 规则一一对应：实例级 ``isolation`` 为空
-        回退全局 ``version_isolation``；isolated → ``versions/<版本>``；
-        custom → 自定义目录（相对路径按 ``<mc_dir>/<值>`` 解析，保证确定性，
-        避免相对路径被解释成启动器进程 CWD 下）。
-
+        round-228 P2-11：规则实现收敛到模块级 ``resolve_game_dir_for``，与
+        ``launch.resolve_game_dir`` 共用同一份，杜绝两份实现各自漂移。
         存档/模组/资源包/光影/商店下载等 UI 与游戏实际读写路径统一由本属性
-        派生，杜绝「UI 操作目录 ≠ 游戏读取目录」的脱节（round-56 只修了 mods）。
+        派生，杜绝「UI 操作目录 ≠ 游戏读取目录」的脱节。
         """
-        iso = (self.isolation or "").strip()
-        if not iso:
-            try:
-                from .settings_dialog import load_config
-                iso = (load_config().get("version_isolation") or "default")
-            except Exception:  # noqa: BLE001 - 配置读取失败仅回退默认
-                iso = "default"
-        if iso == "isolated":
-            sub = self.version_id or self.game_version
-            # round-78 其他启动器版本隔离（导入）：mc_dir 本身就是
-            # versions/<id> 隔离目录，真实版本 json 躺在 mc_dir/<sub>.json。
-            # 再套一层 versions/<sub> 会指向不存在的嵌套目录（存档/模组 UI 与
-            # 游戏实际读写路径脱节，启动还会触发假补全）。此时隔离目录即游戏目录。
-            try:
-                if os.path.isfile(os.path.join(self.mc_dir, f"{sub}.json")):
-                    return self.mc_dir
-            except OSError:
-                pass
-            return os.path.join(self.mc_dir, "versions", sub)
-        if iso == "custom":
-            custom = (self.game_dir_override or "").strip()
-            if custom:
-                if not os.path.isabs(custom):
-                    custom = os.path.normpath(os.path.join(self.mc_dir, custom))
-                else:
-                    custom = os.path.normpath(custom)
-                return custom
-        return self.mc_dir
+        return resolve_game_dir_for(self)
 
     @property
     def mods_dir(self) -> str:
@@ -227,6 +197,67 @@ class Instance:
                 _remove_junction(os.path.join(mc_dir, name))
         except Exception:  # noqa: BLE001
             pass
+
+
+# ── round-228 P2-11：游戏目录解析的**唯一实现** ──────────────────────────
+def is_external_layout(inst) -> bool:
+    """外来客户端布局：游戏数据就在 ``mc_dir`` 根上，不该被全局版本隔离改写。
+
+    覆盖三类来源：原地接管（``external``）、按其它启动器布局导入
+    （``kind`` / ``launcher``）。AC 自建实例返回 False，仍跟随全局设置。
+    """
+    if getattr(inst, "external", False):
+        return True
+    if (getattr(inst, "kind", "") or "").strip():
+        return True
+    launcher = (getattr(inst, "launcher", "") or "").strip()
+    return bool(launcher) and launcher != "AC"
+
+
+def resolve_game_dir_for(inst, settings: dict | None = None) -> str:
+    """版本隔离 / 自定义游戏目录解析（全仓唯一实现）。
+
+    round-228 P2-11：以前 ``launch.resolve_game_dir`` 与 ``Instance.game_dir``
+    各写一份逐行相同的规则，任一侧改动都会让「UI 写入目录」与「游戏读取
+    目录」脱节（round-227 P1-4）。现在两边都委托到这里：
+
+      * ``Instance.game_dir`` 不传 settings → 自己读配置；
+      * ``launch.resolve_game_dir(inst, settings)`` 传调用方持有的配置快照。
+
+    round-228 P1-4：外来布局且实例未显式声明隔离时，一律用 ``mc_dir``，
+    **不跟随全局 ``version_isolation``** —— 否则从 PCL2 / HMCL / Prism 导入
+    的 .minecraft 里，存档、模组、options.txt 都会被重定向到不存在的
+    ``<mc>/versions/<id>/``（玩家看到「世界全没了」）。
+    """
+    iso = (getattr(inst, "isolation", "") or "").strip()
+    if not iso:
+        if is_external_layout(inst):
+            return inst.mc_dir
+        if settings is None:
+            try:
+                from .settings_dialog import load_config
+                settings = load_config()
+            except Exception:  # noqa: BLE001 - 配置读取失败仅回退默认
+                settings = {}
+        iso = (settings.get("version_isolation") or "default")
+    if iso == "isolated":
+        sub = inst.version_id or inst.game_version
+        # round-78 其他启动器版本隔离（导入）：mc_dir 本身就是该版本
+        # 的隔离目录，真实 json 在 mc_dir/<sub>.json。再套 versions/<sub> 会让
+        # options.txt/存档等写到不存在的嵌套目录。
+        try:
+            if os.path.isfile(os.path.join(inst.mc_dir, f"{sub}.json")):
+                return inst.mc_dir
+        except OSError:
+            pass
+        return os.path.join(inst.mc_dir, "versions", sub)
+    if iso == "custom":
+        custom = (getattr(inst, "game_dir_override", "") or "").strip()
+        if custom:
+            if not os.path.isabs(custom):
+                return os.path.join(inst.mc_dir, os.path.normpath(custom))
+            return os.path.normpath(custom)
+    return inst.mc_dir
 
 
 def _new_id() -> str:
@@ -411,7 +442,7 @@ def _resolve_layout(inst, version: str = "") -> dict:
         else:
             fmt = _probe_format(inst)
             # 特征全 miss 兜底成 vanilla：这种「猜」不能写成标识，
-            # 否则以后会一直按一张可能错的表补全（用户最想避免的情况）。
+            # 否则以后会一直按一张可能错的表补全（需避免）。
             confidence = "high" if fmt != "vanilla" else "low"
 
     # flat / root 推导（沿用 round-164 口径，未改语义）
@@ -453,7 +484,7 @@ def _resolve_layout(inst, version: str = "") -> dict:
 def detect_format(inst) -> str:
     """判定实例的启动格式（round-82 → round-179）。
 
-    优先级已按用户方案重排：
+    判定优先级：
     1. **先找 AC 专属标识**（``<mc_dir>/.ac-layout.json``），命中且指纹有效
        就直接采用，不再重复探测；
     2. 无标识 → AC 自有布局也要**自动查验**目录特征，不再无条件认 ``ac``；
@@ -895,6 +926,7 @@ class InstancesManager:
         java_path: str = "",
         format: str = "",
         base: str = "",
+        isolation: str = "",
     ) -> Instance:
         """新建实例。
 
@@ -902,8 +934,16 @@ class InstancesManager:
         （``format`` 为 vanilla / iso / custom），实例按 external 记入——
         下载/补全写入该目录，删除实例时绝不动玩家真实文件。``base`` 为空
         仍是 AC 自有布局（format 归一为空 = 自适应 → 结构判定为 ac）。
+
+        round-228 P1-4：``isolation`` 让「别人给的布局」显式声明为 default，
+        不再跟随全局版本隔离；``base`` 非空时自动按 default 处理。
         """
         base = (base or "").strip()
+        # 外来布局（玩家自选的已有游戏目录）：存档/模组本来就在 <base> 根上，
+        # 被全局「版本隔离」重定向到 <base>/versions/<id> 就会「凭空消失」。
+        iso = (isolation or "").strip()
+        if not iso and base:
+            iso = "default"
         inst = Instance(
             id=_new_id(),
             name=name,
@@ -915,6 +955,7 @@ class InstancesManager:
             # 选的格式直接丢掉 —— 「自定义启动格式没作用」的根因。现在
             # 无条件保留；ac / auto 由 detect_format 的自动查验兜底。
             format=(format or "").strip(),
+            isolation=iso,
             external=bool(base),
             _base=base,
         )
@@ -1088,7 +1129,11 @@ class InstancesManager:
                 kind=kind,
                 needs_convert=needs_convert,
                 java_path=java_path or "",
-                isolation="isolated" if isolated_src else "",
+                # round-228 P1-4：整合包 / 外来 .minecraft 自带布局，overrides
+                # 和存档都落在根上。不显式声明 default 就会跟随全局版本隔离，
+                # 被重定向到 <mc>/versions/<id> —— 玩家看到「导入成功但模组呢」。
+                # isolated_src 例外：复制时确实按 versions/<id>/ 重建了层级。
+                isolation="isolated" if isolated_src else "default",
                 external=False,
                 launcher=launcher or "Other",
             )
@@ -1122,6 +1167,9 @@ class InstancesManager:
                 kind=kind,
                 needs_convert=needs_convert,
                 java_path=java_path or "",
+                # round-228 P1-4：原地接管的是别人的 .minecraft，游戏数据就在
+                # mc_dir 根上；全局「版本隔离」不该改写它的读取位置。
+                isolation="default",
                 external=True,
                 _base=mc_dir,
                 launcher=launcher or "Other",

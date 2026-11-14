@@ -91,7 +91,7 @@ def _derive_style_tier(cfg: dict) -> str:
 
 
 def mark_onboarding_done() -> None:
-    """round-45 恢复 flag 文件方案（用户明确说别乱改 onboarding）：
+    """round-45 恢复 flag 文件方案：
     写显式「已完成」flag，不依赖 launch_count。"""
     p = os.path.join(get_data_dir(), "onboarding_done.flag")
     try:
@@ -111,7 +111,7 @@ def reset_onboarding() -> None:
 
 
 def should_show_onboarding() -> bool:
-    # round-45 恢复（用户说别乱改 onboarding）：回到 round-44 flag 文件方案
+    # round-45 恢复：回到 round-44 flag 文件方案
     return not os.path.exists(
         os.path.join(get_data_dir(), "onboarding_done.flag"))
 
@@ -158,7 +158,7 @@ class OnboardingDialog(QDialog):
         self._style_tier: str = "minimal"
 
         # Round window corners on Win11 — same as MainWindow does. Without
-        # this the wizard renders as a sharp rectangle (用户反馈"新手教程没圆角").
+        # this the wizard renders as a sharp rectangle (直角窗口).
         try:
             from .win_rounded import enable_win11_round_corners
             enable_win11_round_corners(self)
@@ -170,7 +170,7 @@ class OnboardingDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # round-46 用户反馈：教程不该有 min/max/close（正常只有跳过/下一步）→ controls="none"
+        # round-46：教程不该有 min/max/close（正常只有跳过/下一步）→ controls="none"
         self.titlebar = TitleBar(self, title=t("onboard.title"), height=38, controls="none")
         root.addWidget(self.titlebar)
 
@@ -231,7 +231,7 @@ class OnboardingDialog(QDialog):
         super().showEvent(e)
         # 首启时主窗口尚未 show（教程走完才 _show_main），本对话框是一个
         # 「owner 不可见的 owned window」——Windows 默认不给这类窗口发任务栏
-        # 按钮（用户反馈：教程窗口在、任务栏却找不到图标，容易以为程序没开）。
+        # 按钮（否则教程窗口在、任务栏却找不到图标，容易误判程序未启动）。
         # 加 WS_EX_APPWINDOW 强制它在任务栏占一个条目（图标继承 app windowIcon）。
         if getattr(self, "_appwindow_forced", False):
             return

@@ -526,7 +526,7 @@ class JavaManagerPanel(PanelCloseMixin, QWidget):
         """下载线程收尾 + 请求关闭（round-197：面板是 QWidget，没有 done()）。
 
         round-173：无论点标题栏关闭还是底部「关闭」按钮，先把下载线程停下来，
-        否则对话框没了、线程还在后台拉几 MB 的包（用户反馈过这种「关了还在下」）。
+        否则对话框关闭后线程仍在后台拉几 MB 的包（表现为「关了还在下」）。
         """
         thr = self._dl_thread
         if thr is not None:

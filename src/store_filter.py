@@ -111,7 +111,7 @@ class StoreFilterPanel(QWidget):
         super().__init__(parent)
         self._guard = False
         # round-218：版本下拉不再只依赖写死的静态表 —— 静态表最新只到 1.21.11，
-        # 主理人的实例是 26.3，压根选不到。这里后台从 Modrinth 拉真实版本表。
+        # 目标实例为 26.3，静态表中不存在。这里后台从 Modrinth 拉真实版本表。
         self._live_versions: list[str] = []
         self._target_version: str = ""
         self._version_worker = None
@@ -159,7 +159,7 @@ class StoreFilterPanel(QWidget):
     def refresh_versions(self) -> None:
         """后台拉 Modrinth 官方版本列表并填进下拉（拉不到就保持静态表）。
 
-        round-218：静态表最新只到 1.21.11，主理人实例是 26.3 → 选不到。
+        round-218：静态表最新只到 1.21.11，目标实例 26.3 → 选不到。
         这里改成用 Modrinth 的 ``/tag/game_version`` 真实列表。
 
         刻意**不**触发 filterChanged：只是把「本来就没有的版本」补上，
@@ -192,7 +192,7 @@ class StoreFilterPanel(QWidget):
         for v in UPSTREAM_VERSIONS:
             if v not in merged:
                 merged.append(v)
-        # 目标实例的版本永远要在（主理人的 26.3 就靠这一条兜住）
+        # 目标实例的版本永远要在（26.3 就靠这一条兜住）
         tgt = self._target_version or ""
         if tgt and tgt not in merged:
             merged.insert(0, tgt)

@@ -479,7 +479,7 @@ class WallpaperWidget(QWidget):
         # round-156：游戏运行中降载（suspend 后 apply 只记录不加载，恢复时重放）。
         self._suspended = False
         # round-203：游戏运行只暂停动画（画面保留最后一帧），不再把壁纸/全景
-        # 整个关掉 —— suspend() 会让主窗背景变成纯色，用户明确不接受。
+        # 整个关掉 —— suspend() 会让主窗背景变成纯色，故不采用。
         self._game_paused = False
 
     # ------------------------------------------------------------- config
@@ -747,7 +747,7 @@ class WallpaperWidget(QWidget):
             return  # a newer request superseded this one
         if not images or len(images) != 6:
             # round-150：贴图缺失（资源未下载 / 旧版本无 panorama）时不再画
-            # 程序化的淡紫色底 —— 用户明确要求「没有版本背景就回退默认白底」。
+            # 程序化的淡紫色底 —— 没有版本背景时应回退默认白底。
             self._no_version_artwork()
             return
         try:
@@ -773,7 +773,7 @@ class WallpaperWidget(QWidget):
         """版本背景没有可用资源 → 隐藏 backdrop，交给窗口回退默认白底（round-150）.
 
         不再画 ``draw_version_wallpaper`` 的淡紫/暗色渐变：那不是玩家选的版本
-        背景，只会在浅色主题下露出一整片紫色底（用户反馈）。
+        背景，只会在浅色主题下露出一整片紫色底。
         """
         if self._mode != "version":
             return
@@ -1114,7 +1114,7 @@ class WallpaperWidget(QWidget):
         """游戏运行中只暂停逐帧播放，**不丢弃**壁纸 / 全景画面（round-203）。
 
         旧行为（round-156）是 ``suspend()``：丢大图、丢六面贴图、隐藏整层，
-        于是玩家一启动游戏，启动器窗口的背景就变成纯色 —— 用户反馈这是 bug。
+        于是游戏启动后启动器窗口的背景变成纯色。
         现在画面保留最后一帧，只停动画（动图/视频/全景按时钟推进的那部分），
         既不烧 CPU 又不改变外观。退出游戏后恢复播放。
         """

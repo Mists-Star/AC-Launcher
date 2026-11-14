@@ -63,7 +63,7 @@ def render_skin(path: str, size: int, model: str | None = None) -> QPixmap:
 
     The character grid is 16×32, so the canvas is 1:2.  This used to return a
     square ``size × size`` pixmap with the grid stretched into it, which drew
-    every library card's character twice as wide as tall (用户反馈「皮肤被压扁」).
+    every library card's character twice as wide as tall (皮肤被压扁).
     Height is always ``size * 2``.
     """
     img = QImage(path)
@@ -290,7 +290,7 @@ def render_skin_3d(path: str, width: int, height: int,
     a tiny flat sprite; this is the pure-Qt equivalent.  ``width`` / ``height``
     are in device-independent pixels.
 
-    round-126（用户仍反馈「低清」）：
+    round-126（低清问题）：
       * 皮肤是 64×64 的像素画，放大到 ~9 px/texel：双线性会把每颗 texel 抹成
         灰雾，读起来就是「低清」；默认改回最近邻（``smooth=False``），texel
         保持硬块，轮廓交给抗锯齿 + 2× 超采样，观感是像素画而不是糊图。

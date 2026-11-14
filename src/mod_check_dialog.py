@@ -53,7 +53,7 @@ def _localize(f) -> tuple[str, str, str]:
 class HealthPanel(PanelCloseMixin, QWidget):
     """实例体检面板（**页内**）。
 
-    round-195：原来是 QDialog 弹窗。用户诉求「实用功能直接换页，别用窗口」——
+    round-195：原来是 QDialog 弹窗，现改为页内换页 ——
     体检是与实例强相关的信息，放进实例页里能一直看到"在给哪个实例体检"。
     窗口壳 :class:`HealthDialog` 保留给历史调用点。
     """

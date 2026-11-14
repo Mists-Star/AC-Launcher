@@ -8,6 +8,56 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-229（2026-11-14）— 整合包交互、导入收尾、本地化与注释清理
+
+### 整合包：从「下载」到「安装」的语义归位
+- **详情页把整合包当模组装进现有实例**：`src/store_detail.py` 新增
+  `install_pack_requested` 信号与 `_is_pack` 判定。整合包详情页不再提供
+  「下载到某个实例」，界面直接写明「会安装为新的游戏实例」，主按钮和版本行
+  按钮改显示「安装」，另留「另存为文件…」。`_download_version` 强制走另存为，
+  不会再出现 `.mrpack` 落进 `<game_dir>/mods/`。
+- **安装带选中版本**：`src/pages_browse.py` 的 `_install_modpack()` 新增
+  `version=`，Modrinth 透传 `version_id`、CF 透传 `file_id`；卡片入口不传时
+  仍沿用最新兼容版。列表页 `_download()` 对整合包一律转到安装链。
+- **导入完实例不刷新**：新增 `_refresh_instance_list()`，CF 导入完成与 mrpack
+  对话框关闭后都主动重绘实例页，不用再切页或重启。
+
+### 导入收尾：卡住、英文状态、兼容误判
+- **进度框关不掉**：CF 导入的 `QProgressDialog` 原来 `setCancelButton(None)`，
+  版本/加载器安装一旦停在无响应的网络或子进程上就没有退路。现在提供取消
+  按钮 + 3 分钟看门狗，收起进度框并提示后台仍在安装，不硬杀线程。
+- **`Installation complete` 泄漏到界面**：`_install_after_import()` 把底层
+  安装器的 `setStatus` 原文拼进了状态文字，那是子步骤而非整个导入完成。
+  改为只显示本地化阶段文案。
+- **同一主版本系列被误判不兼容**：新增 `src/store_compat.py`，作者未标注当前
+  小版本但属同一系列（1.20.1 / 1.20.4）时判「未标注」而非「不兼容」，
+  列表卡片给中性 tooltip、详情页不再从「只看兼容」里过滤掉；跨主版本与
+  加载器冲突仍照常拦截。
+
+### 本地化（对照 HMCL / Prism / PCL2-CE 的下载页做法）
+- `translate_text()` 的缓存键改用全文哈希 —— 原来只取前 200 字，共享同一段
+  README 开头的两个项目会拿错译文。
+- 英文界面不再自动机翻（直接显示原文），中文界面的「打开即翻译」保持不变；
+  自动翻译失败时回填原文，说明区不再空着。
+- `search_mods_zh()` 名库有命中就不再发机翻请求；零命中时才翻成英文兜底。
+- 展示名本来就是「英文原名（中文）」格式，与 HMCL 一致，未改动。
+
+### 注释清理
+- 对 `src/` 全部 116 个模块做了注释 / docstring 专项审计（tokenize + ast，
+  排除字符串字面量）：清理 **126 处**对人的指代与开发过程叙述
+  （「用户拍板」「用户原话」「主理人」「按要求」「用户诉求原话」等），
+  保留全部技术因果、版本号与 `round-NNN` 迭代标记。审计清单留在
+  `_scratch/_audit_comments_report.md`（不入库）。强模式残留 1 处，
+  是「提示用户网络较慢」这类正常产品行为描述。
+
+### 🔍 验证
+- 新增 `test_round229_pack_detail.py` **22/22**、`test_round229_runtime.py`
+  **22/22**、`test_round229_i18n.py` **10/10**，全部接入 `regress.py`。
+- 全量 `regress.py` **98/98 通过**；`compileall src/` 通过。
+
+> 备注：CurseForge 上 Ultimine 只有 23.1.2 属上游数据现状，不是 API key 或
+> 元数据通道问题，不再往缺 key 的方向排查。
+
 ## round-228（2026-11-13）— 按 round-227 审计报告 §9 第 1 批动手修
 
 承接 `docs/audit_round227_2026-11-12.md`（全项目只读审计，P0 2 / P1 16 /
@@ -71,7 +121,34 @@ P2 19 / P3 7）。本轮只做「零风险、各 1~5 行」的第 1 批 6 条，
 - 探针 `_scratch/_probe_delete_running.py` 由 `mgr.remove 被调用次数 = 1 / FAIL`
   转为 `= 0 / PASS`。
 
-> 第 3~7 批（路径口径 / 下载域 / 启动正确性 / 手感 / 收尾）按审计报告 §9 顺序继续。
+### 第 3 批：路径口径专项（本轮最大的结构性问题）
+- **P2-11 两份逐行相同的解析实现收敛**：`src/instances.py` 新增
+  `resolve_game_dir_for(inst, settings)` 作为**全仓唯一实现**；`Instance.game_dir`
+  与 `launch.resolve_game_dir()` 都委托给它（后者保留签名为薄封装，不动三处调用方）。
+- **P1-4 外来实例被全局「版本隔离」改写**：新增 `is_external_layout(inst)`
+  （`external` / `kind` / `launcher != AC`）。这类实例在未显式声明隔离时一律用
+  `mc_dir`，**不跟随全局设置** —— PCL2/HMCL/Prism 导入的 .minecraft 存档、
+  模组、options.txt 不会再被重定向到不存在的 `versions/<id>/`。
+  存量实例（已落盘 `isolation=""`）同样免疫，不需要数据迁移。
+- **写时兜底**：`InstancesManager.add()` 新增 `isolation=` 参数且 `base` 非空时
+  自动按 default；`import_external` 的 link 分支与 copy 标准布局分支显式 default；
+  `modpack_import` 4 处 + 实例页 1 处整合包新建实例全部声明 default。
+- **整合包写入点分流**（复核后修正了审计报告的修法）：mll
+  `mrpack.install_mrpack` 第二参数同时承载版本文件与 loader，**不能整体换成
+  `game_dir`**（会让版本 json 找不到、启动失败）。AC 封装 `install_mrpack()` 新增
+  `game_dir=`，透传为 mll 第三参数 `modpack_directory` —— mods / overrides 写
+  游戏读取点，版本 / loader 仍装 `mc_dir`。应用到已有实例时的备份也改读 `game_dir`。
+
+### 🔍 验证（第 3 批）
+- 新增 `tests/test_round228_batch3.py` **27/27 行为断言**，已接入 `regress.py`：
+  9 种组合下 `Instance.game_dir` 与 `launch.resolve_game_dir` 结果一致；
+  外来布局三种来源免疫全局隔离、显式选择不被覆盖；新建/导入实例写时 default；
+  打桩 mll 验证 `modpack_directory` 分流与「不传 game_dir 保持旧行为」。
+- 全量 `regress.py` **95/95 通过**。首次跑出 94/1（`round-218 长标题`，
+  即报告 P2-1 记录的 `QThreadStorage` flaky），单跑该用例 24/24 通过、
+  复跑全量 95/95，确认与本批改动无关。
+
+> 第 4~7 批（下载域 / 启动正确性 / 手感 / 收尾）按审计报告 §9 顺序继续。
 
 ## round-226（2026-11-12）— 按 round-225 审计报告动手修
 

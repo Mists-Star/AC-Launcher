@@ -149,7 +149,7 @@ def install_instance(inst, *, java_auto: bool = True, java_path: str = "", mirro
 
         实测（国内网络）maven.minecraftforge.net 的 maven-metadata.xml 读超时 +
         Forge 库下载也不稳定；官方源下 ``ml.install`` 会在写版本 json 之前就抛错，
-        用户看到的就是「每次重启后打开都在补全版本」。
+        表现为「每次重启后打开都在补全版本」。
         """
         try:
             return fn()
@@ -375,14 +375,19 @@ def repair_minecraft_dir(mc_dir: str, callback=None) -> list[str]:
     return repaired
 
 
-def install_mrpack(mrpack_path: str, mc_dir: str, *, mirror: str = "official",
-                   proxy: str = "", callback=None) -> str:
+def install_mrpack(mrpack_path: str, mc_dir: str, *, game_dir: str = "",
+                   mirror: str = "official", proxy: str = "",
+                   callback=None) -> str:
     """Install a ``.mrpack`` Modrinth modpack into a ``.minecraft`` directory.
 
     A thin wrapper over ``minecraft_launcher_lib.mrpack`` (the library has
-    native mrpack support since 8.0). It extracts the pack, downloads the base
-    game version + mod loader + every mod into ``mc_dir``, and returns the
-    launch version id to pass to ``command.get_minecraft_command``.
+    native mrpack support since 8.0). It downloads the base game version +
+    mod loader into ``mc_dir``, and returns the launch version id.
+
+    round-228 P1-4：``game_dir`` 透传成 mll 的 ``modpack_directory`` ——
+    **mods / overrides 写游戏真正读取的目录，版本文件与 loader 仍装 mc_dir**。
+    以前两样都写 mc_dir，版本隔离实例应用整合包后就是「装了但游戏里没有」。
+    留空时沿用 mll 默认（两者相同），与旧行为一致。
 
     The same bmclapi/proxy redirect as :func:`install_instance` is applied so
     any game-file downloads the pack triggers go through the chosen mirror.
@@ -393,7 +398,9 @@ def install_mrpack(mrpack_path: str, mc_dir: str, *, mirror: str = "official",
     set_diag(_diag_enabled())
     patch_install_session()
     minecraft_launcher_lib.mrpack.install_mrpack(
-        mrpack_path, mc_dir, callback=callback
+        mrpack_path, mc_dir,
+        modpack_directory=os.path.abspath(game_dir) if game_dir else None,
+        callback=callback
     )
     return minecraft_launcher_lib.mrpack.get_mrpack_launch_version(mrpack_path)
 
@@ -417,17 +424,19 @@ def apply_mrpack_to_instance(mrpack_path: str, inst, *, mirror: str = "official"
 
     from ..paths import get_data_dir
 
-    # 1) 备份被覆盖内容
+    # 1) 备份被覆盖内容（round-228 P1-4：备份的是游戏**读取**的那一份，
+    #    版本隔离下不是 mc_dir 而是 game_dir）
     backup_root = os.path.join(get_data_dir(), "backups")
     backup_dir = os.path.join(backup_root, f"{getattr(inst, 'id', 'inst')}_{int(_time.time())}")
+    gd = getattr(inst, "game_dir", "") or inst.mc_dir
     try:
         for sub in ("mods", "config"):
-            src = os.path.join(inst.mc_dir, sub)
+            src = os.path.join(gd, sub)
             if os.path.isdir(src) and os.listdir(src):
                 shutil.copytree(src, os.path.join(backup_dir, sub),
                                 dirs_exist_ok=True)
         for name in ("options.txt", "servers.dat"):
-            src = os.path.join(inst.mc_dir, name)
+            src = os.path.join(gd, name)
             if os.path.isfile(src):
                 os.makedirs(backup_dir, exist_ok=True)
                 shutil.copy2(src, os.path.join(backup_dir, name))
@@ -436,7 +445,8 @@ def apply_mrpack_to_instance(mrpack_path: str, inst, *, mirror: str = "official"
 
     # 2) 覆盖安装
     launch_version = install_mrpack(
-        mrpack_path, inst.mc_dir, mirror=mirror, proxy=proxy, callback=callback)
+        mrpack_path, inst.mc_dir, game_dir=gd,
+        mirror=mirror, proxy=proxy, callback=callback)
 
     # 3) 从 mrpack 推断 loader（index.json: {"dependencies": {"minecraft":…, "fabric-loader":…}}）
     try:
@@ -742,9 +752,9 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
                "--json", "--quiet"]
         if build:
             cmd += ["--version", build]
-        # round-182：目标 Java 25 优先用「本地已有 / 我们自己的镜像装」，
+        # round-182：目标 Java 25 优先用「本地已有 / 内置镜像安装」，
         # 最后才交给安装器的 --provision-java。实测后者的 Zulu 源在国内会卡在
-        # ~800 KB 的 .part 上（900s 超时 → 玩家看到的就是「启动不了」）。
+        # ~800 KB 的 .part 上（900s 超时 → 启动失败且无明确报错）。
         j25 = java25_path() or _ensure_java25(callback)
         if j25:
             cmd += ["--java", _console_java(j25)]
@@ -769,7 +779,7 @@ def _install_cleanroom(mc_version, mc_dir, *, installer_url="", java="java", cal
                                  timeout=900)
             if r2.returncode != 0:
                 detail = ((r.stderr or "") + (r.stdout or "")).strip()
-                # round-182：把「用的哪个 Java」写进错误里 —— 上一轮
+                # round-182：把「用的哪个 Java」写进错误里 —— 旧错误信息
                 # 「启动不了」只能看到一句 failed，无法判断是不是又拿错了 JVM。
                 from .java import java_major_or_zero
                 raise RuntimeError(

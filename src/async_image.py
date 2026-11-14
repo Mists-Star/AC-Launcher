@@ -94,7 +94,7 @@ class ImageLoader(QObject):
         self._failed: dict[str, tuple] = {}
         # round-191：QNAM **默认吃系统代理**，而 API 走 requests（读 download_proxy，
         # 默认直连）。系统里若残留 Clash/加速器/公司代理，就会出现「搜索正常、
-        # 图标全白」——用户报的正是这个。这里把 QNAM 的代理对齐成同一个设置，
+        # 图标全白」。这里把 QNAM 的代理对齐成同一个设置，
         # 并且在失败后**退回直连重试一次**（不把中文用户卡死在坏代理上）。
         self._direct_fallback = False
         self._apply_proxy()

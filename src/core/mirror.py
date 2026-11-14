@@ -10,7 +10,7 @@ session.
 round-109 下载止血：minecraft-launcher-lib 的每一次下载都走
 ``requests.session()`` / ``requests.get()``，而且从不传 ``timeout``。一个卡住的
 socket 就会让它所属的 ThreadPoolExecutor 线程永久阻塞：``future.result()`` 永不
-返回、不报错、无法取消 —— 用户看到的是进度条钉死在某个哈希上「下载卡死」。
+返回、不报错、无法取消 —— 表现为进度条钉死在某个哈希上「下载卡死」。
 所以这里把 mll 三个自行 ``import requests`` 的下载子模块（``_helper`` / ``install``
 / ``runtime``；mrpack / fabric / forge / quilt 都经由 ``_helper.download_file``，
 已被传递覆盖）的 ``requests`` 属性替换成 :class:`_RequestsShim`，全部引流到
@@ -36,7 +36,7 @@ round-110 三件事：
 * C 诊断日志 —— 每请求的 status / 耗时 / 声明字节数，默认关闭（:func:`set_diag`）。
 
 round-111 大文件分片并行：把 mll 的 ``download_file`` 包一层，让**客户端 jar**
-（``versions/<id>/<id>.jar``，单次安装里最大的单文件）走我们的
+（
 :func:`net_api.parallel_download_file`。刻意**不**对所有文件生效 ——
 一次完整安装有数百到上千次 ``download_file`` 调用，无差别探测大小会是净回归；
 只认这一个确定是大文件的目标，其余零开销原样转发。见
@@ -133,7 +133,7 @@ _UNSET = object()
 #   workers=16 → 6.03MB/s     workers=48 → 8.35MB/s（最快）
 #   workers=64 → 7.27MB/s     workers=96 → 6.76MB/s（开始回落）
 # 48 是拐点，再往上延迟（p50 1779ms → 1934ms → 2453ms）反而拖慢整体。
-# 16 是 mll 里 ThreadPoolExecutor 的默认值（min(32, cpu+4)），我们一直在吃这个亏。
+# 16 是 mll 里 ThreadPoolExecutor 的默认值（min(32, cpu+4)），默认值偏低拖慢整体吞吐。
 _MAX_WORKERS = 48
 # 连接池要能同时容纳全部并发，否则多余的请求每次都要重新握手。
 _POOL_SIZE = 64
@@ -150,7 +150,7 @@ _CHAIN = SourceChain(
 )
 
 # ── round-174：源健康 + 超时策略 ─────────────────────────────────────────────
-# 用户实测「bmclapi 总是等待响应」：镜像挂住时，每个文件都要按官方源的口径等
+# 镜像挂住时，每个文件都要按官方源的口径等
 # 连接 10s + 读 30s，还在同一源上再重试一次（≈80s/文件）；就算最后回退官方，
 # 几百个文件累加就是「一直在等」。三项改动：
 #
@@ -603,8 +603,8 @@ def run_cancellable(command, *, cwd=None, timeout=None, check=False, **kwargs):
     popen_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
     # round-182：安装器（Forge / NeoForge / Cleanroom / OptiFine 的 jar）都是
     # 控制台程序。启动器是窗口应用，Popen 不带 CREATE_NO_WINDOW 就会弹出一个
-    # 全黑的 cmd 窗口（用户实测：「拉起 D 盘 java26 的 cmd 空窗口」）。
-    # 我们要的是 stdout/stderr 管道，不需要那个窗口。
+    # 全黑的 cmd 窗口（例：拉起 D 盘 java26 时出现空白 cmd 窗口）。
+    # 只需 stdout/stderr 管道，不需要该窗口。
     if os.name == "nt":
         popen_kwargs.setdefault(
             "creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0))

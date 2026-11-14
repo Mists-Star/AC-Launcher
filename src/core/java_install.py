@@ -303,7 +303,7 @@ def install_java(major: int, progress=None, image_type: str = "jre",
         _remove_quietly(tmp_zip)
         cancelled = bool(cancel is not None and cancel())
         if cancelled:
-            # 用户明确要求：取消就把未下完的包删掉，不挤占空间。
+            # 取消安装时删除未下完的包，不挤占空间。
             # 网络失败则保留 .part/.src，下次启动可从断点继续。
             _remove_quietly(part)
             _remove_quietly(part_src)
