@@ -9,6 +9,7 @@
 """
 import gzip
 import os
+import struct
 import sys
 import tempfile
 import zlib
@@ -342,7 +343,8 @@ print("== 存档顶视图 ==")
 def chunk_nbt(cx: int, cz: int, top_y: int, surface: str = "minecraft:stone") -> bytes:
     """1.18+ 结构的单个区块：一个 section + WORLD_SURFACE 高度图。"""
     sy = top_y // 16
-    heights = [top_y + 1] * 256
+    # 1.18+ 高度图存 Y+65（表面上方一格 + 地下扩展 64）
+    heights = [top_y + 65] * 256
     hm = pack_non_crossing(heights, 9)
     # List 元素是「匿名」的：只有负载，没有类型字节与名称
     sec = _compound([
@@ -466,14 +468,61 @@ level = root_nbt([
 write_gzip(os.path.join(saves, "MyWorld", "level.dat"), level)
 os.makedirs(os.path.join(saves, "NotAWorld"), exist_ok=True)
 
+# 只有 region/*.mca、没有 level.dat 的世界（从别处搬区块后的常见形态）
+region_only = os.path.join(saves, "RegionOnly")
+os.makedirs(os.path.join(region_only, "region"), exist_ok=True)
+with open(os.path.join(region_only, "region", "r.0.0.mca"), "wb") as fh:
+    fh.write(b"\0" * 32)
+
+# 26.3（DataVersion 5023）把 SpawnX/Y/Z 换成了 spawn.pos
+pos26 = array("i", [5, 90, -7])
+if sys.byteorder == "little":
+    pos26.byteswap()
+new26 = os.path.join(saves, "New26World")
+os.makedirs(new26, exist_ok=True)
+level26 = root_nbt([
+    _named(10, "Data", _compound([
+        _named(10, "spawn", _compound([
+            _named(11, "pos", struct.pack(">i", 3) + pos26.tobytes()),
+        ])),
+    ])),
+])
+write_gzip(os.path.join(new26, "level.dat"), level26)
+
 game = os.path.join(tmp, "game")
-check("list_worlds 只认有 level.dat 的目录",
-      wm.list_worlds(game) == [os.path.join(saves, "MyWorld")],
+check("list_worlds 收录有 level.dat 或有 region/*.mca 的世界",
+      wm.list_worlds(game) == [os.path.join(saves, "MyWorld"),
+                               os.path.join(saves, "New26World"),
+                               os.path.join(saves, "RegionOnly")],
       str(wm.list_worlds(game)))
 info = wm.world_info(os.path.join(saves, "MyWorld"))
 check("出生点解析", info["spawn"] == (12, 70, -30), str(info["spawn"]))
 check("玩家坐标解析", info["player"] == (1.5, 80.0, 2.5), str(info["player"]))
 check("世界名回退目录名", info["name"] == "MyWorld", info["name"])
+info26 = wm.world_info(os.path.join(saves, "New26World"))
+check("26.3 spawn.pos 出生点解析", info26["spawn"] == (5, 90, -7),
+      str(info26["spawn"]))
+
+# 高度图映射：1.18+ 存 Y+65（表面上方一格 + 地下扩展 64），旧版存 Y+1
+_orig_sections, _orig_heightmap, _orig_indices = (
+    wm._sections, wm._heightmap, wm._section_indices)
+try:
+    wm._sections = lambda root: [{"Y": 5}]
+    wm._section_indices = lambda sec, dv, cache, sy: (
+        ["minecraft:air", "minecraft:stone"], [1] * 4096)
+    wm._heightmap = lambda root: [0] * 50 + [159] + [0] * 205
+    tops18, ty18 = wm._top_blocks({}, 2860)
+    check("1.18+ 高度图 Y+65 映射",
+          tops18[50] == "minecraft:stone" and ty18[50] == 94,
+          "%s / %s" % (tops18[50], ty18[50]))
+    wm._heightmap = lambda root: [0] * 50 + [96] + [0] * 205
+    tops_old, ty_old = wm._top_blocks({}, 2586)
+    check("旧版高度图 Y+1 映射不变",
+          tops_old[50] == "minecraft:stone" and ty_old[50] == 95,
+          "%s / %s" % (tops_old[50], ty_old[50]))
+finally:
+    wm._sections, wm._heightmap, wm._section_indices = (
+        _orig_sections, _orig_heightmap, _orig_indices)
 
 # ── 5. 地图对话框（P2 接入层）────────────────────────────────────────────
 print("== 地图对话框 ==")

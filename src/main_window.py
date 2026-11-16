@@ -1207,8 +1207,9 @@ class HomePage(QWidget):
         """聚合「继续哪个 + 哪些挡住你」，hero 下方一行一条。
 
         健康扫描只对当前实例 + 最近玩过的 2 个实例跑（带 TTL 缓存），其余
-        实例只做廉价检查（目录 / Java / 内存 / 上次会话），避免首页刷新时
-        把全库的模组 jar 读一遍。Info 级问题不进入列表。
+        实例只做廉价检查。round-234：缓存 miss 时 ``scan_health`` 实测可达
+        163ms（读 mods / 版本 json / Java），旧实现放在主线程里同步跑，
+        首页刷新与扫描都会顿一下。现在整段聚合移到 Worker，结果回来再渲染。
         """
         if not (hasattr(self, "attention_wrap") and self._alive(self.attention_wrap)):
             return
@@ -1229,13 +1230,39 @@ class HomePage(QWidget):
             if cur_id:
                 health_ids.add(cur_id)
             win = self.window()
-            summary = hs.diagnose_instances(
-                instances, settings, health_ids=health_ids,
-                with_account=True,
-                has_account=bool(getattr(win, "current_account", None)))
+            has_account = bool(getattr(win, "current_account", None))
         except Exception:  # noqa: BLE001 - 聚合失败只是不显示，不影响首页
             return
 
+        from .worker import Worker
+
+        # 连点 / 快速切实例会连发多次刷新；只让最后一代的结果上屏。
+        self._attn_gen = getattr(self, "_attn_gen", 0) + 1
+        gen = self._attn_gen
+
+        def work():
+            return hs.diagnose_instances(
+                instances, settings, health_ids=health_ids,
+                with_account=True, has_account=has_account)
+
+        w = Worker(work)
+        self._attn_worker = w          # 保活到 done/error 触发
+
+        def done(summary):
+            if gen != getattr(self, "_attn_gen", 0):
+                return
+            self._render_home_summary(summary, instances, cur_id)
+
+        w.finished.connect(done)
+        w.error.connect(lambda _e: None)   # 扫描失败只是不显示留意行
+        w.start()
+
+    def _render_home_summary(self, summary, instances, cur_id):
+        """把后台聚合结果画到 hero 下方（只在主线程调用）。"""
+        if not (hasattr(self, "attention_wrap") and self._alive(self.attention_wrap)):
+            return
+        from .core import home_summary as hs
+        self._clear_attention_rows()
         rows = 0
         if summary.continue_with and summary.continue_with != cur_id:
             names = {getattr(i, "id", ""): getattr(i, "name", "") for i in instances}
@@ -2639,6 +2666,31 @@ class MainWindow(QMainWindow):
         if backdrop is not None:
             backdrop.setGeometry(self.rect())
             backdrop.lower()
+        # round-234：首次进入资源中心 / 设置 / 百宝箱要现场构建 80~130ms，
+        # 点下去会顿一下。启动后空闲分批预热，点击时页面已经就绪。
+        if not getattr(self, "_pages_warmed", False):
+            self._pages_warmed = True
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1500, self._warm_pages)
+
+    def _warm_pages(self):
+        """空闲时逐个构建高频页面；只建不切，不影响当前显示。"""
+        from PySide6.QtCore import QTimer
+        # 资源中心构建期会起网络 / worker，退出时销毁顺序不稳（实测 segfault），
+        # 不参与预热；它单独保留懒构建。
+        keys = ("settings", "toolbox", "instances")
+        idxs = [STACK_INDEX[k] for k in keys if k in STACK_INDEX]
+
+        def step(i=0):
+            if i >= len(idxs):
+                return
+            try:
+                self._ensure_page(idxs[i])
+            except Exception:  # noqa: BLE001 - 预热失败不影响页面正常懒构建
+                pass
+            QTimer.singleShot(250, lambda: step(i + 1))
+
+        step()
 
     def _on_current_changed(self, _id: str):
         if getattr(self, "mods_page", None) is not None:
@@ -4177,7 +4229,8 @@ class MainWindow(QMainWindow):
         # Remember the row the user was on BEFORE clicking — used to restore
         # the nav highlight after a dialog (account / lobby) closes, so it
         # feels like a pop-up rather than a navigation.
-        _PAGE_KEYS = ("home", "instances", "mods", "store", "versions", "settings")
+        _PAGE_KEYS = ("home", "instances", "mods", "store", "versions",
+                      "settings", "toolbox")
         if key in _PAGE_KEYS or key.startswith("feature:"):
             self._last_page_row = row
         if key.startswith("feature:"):
@@ -4189,6 +4242,9 @@ class MainWindow(QMainWindow):
         idx = {
             "home": 0, "instances": 1, "mods": 2, "store": 3,
             "versions": 4, "lobby": 5, "settings": 6,
+            # round-233：百宝箱漏在这份手写表里 → 点侧栏被当成 dialog-only
+            # 项，高亮弹回上一页且什么也不打开（"点了没反应"）。
+            "toolbox": 7,
         }.get(key)
         if idx is not None:
             if key == "home":
@@ -4374,6 +4430,12 @@ class MainWindow(QMainWindow):
         _s.setAlignment(Qt.AlignCenter)
         _cl.addWidget(_s)
         for ikey, kind, name_key, desc_key in [
+            # round-232：存档地图 / 投影 / 材料清单原本只在实例右键菜单里，
+            # 藏得太深。三件套对当前实例生效，入口与说明放在一起自解释。
+            ("map", "map", "map.menu", "tool.map_tile_desc"),
+            ("layers", "preview", "preview.title", "tool.preview_tile_desc"),
+            ("export", "materials", "tool.materials",
+             "tool.materials_tile_desc"),
             ("folder", "inst", "pcl2.toolbox_open_inst",
              "pcl2.toolbox_open_inst_desc"),
             ("console", "logs", "pcl2.toolbox_open_data",
@@ -4427,6 +4489,24 @@ class MainWindow(QMainWindow):
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.information(
                     self, t("pcl2.toolbox_clear_cache"), t("pcl2.toolbox_cleared"))
+            elif kind in ("map", "preview", "materials"):
+                # round-232b：复用实例页的实现，避免两套逻辑分叉。
+                page = getattr(self, "instances_page", None)
+                if page is None:
+                    # current_instance() 走 inst_mgr，不依赖实例页；但实例页是
+                    # 懒构建的。直接从百宝箱进来时它还没建，旧实现把这种
+                    # 情况误判成「没有实例」，只弹 toast —— 看起来点了没反应。
+                    page = self._build_instances()
+                if inst is None:
+                    from .win_rounded import toast
+                    toast(self, t("pcl2.toolbox_title"), t("tool.need_instance"))
+                    return
+                action = {
+                    "map": page._open_map,
+                    "preview": page._open_preview,
+                    "materials": page._export_materials,
+                }[kind]
+                action(inst)
         except OSError:
             pass
 
@@ -4565,6 +4645,11 @@ class MainWindow(QMainWindow):
         modal dialog interrupted it—no translucent residue can persist. If the
         effect or config is disabled it falls back to an instant switch.
         """
+        if idx < 0:
+            return
+        # round-233：先构建目标页再做边界校验。懒构建页首次进入前可能
+        # 还没插进栈，先校验会把合法索引误判成越界。
+        self._ensure_page(idx)
         if not 0 <= idx < self.stack.count():
             return
         cur = self.stack.currentIndex()
@@ -4576,7 +4661,7 @@ class MainWindow(QMainWindow):
         if sp is not None and cur == self.stack.indexOf(sp):
             if not self._maybe_save_settings():
                 return
-        self._ensure_page(idx)  # 首次切换才真正构建该页（延迟加载）
+        # round-233：_ensure_page 已提前到边界检查之前（见上方）。
         # round-107：页面切换动画已改为「可选模块」（page_transition 模块），
         # 默认关 → 瞬时切换；装了模块后再走淡入。
         if slim.eff(self.cfg, "page_transition"):

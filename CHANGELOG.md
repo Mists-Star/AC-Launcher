@@ -8,6 +8,86 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-234（2026-11-16）— 首页扫描后台化 + 高频页面空闲预热
+
+### 卡顿定位
+* 实测（真实实例 `the_shooting_star`，只读探针）：`scan_health` 缓存 miss
+  时同步读 mods / 版本 json / Java，**175 ms**；`the_shooting_star` 之外的
+  实例只有 10 ms。首页 `_refresh()` 旧实现在**主线程**调 `diagnose_instances`，
+  这就是「扫描 / 首页刷新莫名卡一下」的来源。
+* 首次切页：资源中心 **127 ms**、设置 **80 ms**、实例 **26 ms**；第二次
+  都是 1–3 ms → 懒构建首次代价。
+* 壁纸与 QSS 不是瓶颈：`apply_qss()` 已有缓存 + 变更守卫 + 同 tick 合并
+  （全量重刷约 300 ms 的路径平日不会走到）；`backdrop.set_game_running()`
+  只停逐帧播放、不丢画面，探针 <1 ms。
+
+### 修复
+* `main_window.py::HomePage._refresh_home_summary` 把整段聚合移进 `Worker`，
+  新增 `_render_home_summary()` 只在主线程落 UI；带 `_attn_gen`，快速切实例
+  时旧结果自动丢弃。主线程调用实测 **1 ms**。
+* `MainWindow.showEvent` 首次显示后 1.5 s 起，用 QTimer 每 250 ms 分批
+  `_ensure_page` 预热设置 / 百宝箱 / 实例页（只建不切）：首开 80→8 ms、
+  15→9 ms、26→4 ms。**资源中心不参与预热**——构建期起网络 / worker，
+  实测退出时销毁顺序不稳会 segfault，保留懒构建。
+* `tests/test_round234_async_scan.py` 6 项（不阻塞 / 后台线程 / 主线程渲染 /
+  过期丢弃 / 预热三页 / 预热不含资源中心）；`regress.py` → **102 / 102**。
+
+## round-233（2026-11-16）— 百宝箱可达性、地图默认落点、设置页左栏背景板
+
+### 修复（用户实测三连反馈）
+* **侧栏点「百宝箱」完全没反应**：`_on_nav` 里有一份手写索引表只到
+  `settings:6`，`toolbox` 落进 "dialog-only" 分支——高亮被弹回上一页、
+  什么也不打开。补 `toolbox:7` 并加进 `_PAGE_KEYS`。同时把 `_switch_stack`
+  的 `_ensure_page` 提到边界校验之前，避免懒构建页被误判越界。
+* **从百宝箱点卡片像没反应**：`current_instance()` 走 `inst_mgr`、不依赖
+  实例页，但实例页是懒构建的；从百宝箱直接进来时它还没建，旧实现把这种
+  情况误判成「没有实例」只弹 toast。现在自动构建后转交（round-232b）。
+* **存档地图「获取不到任何信息」**：`MapDialog._fill_worlds()` 默认停在
+  字母序第一个世界，恰好是没 region 的空存档；有区块的世界排第二，要手动
+  切下拉。现在默认选中第一个真的有 `region/*.mca` 的世界。
+* **设置页内部栏目多出一块近白背景板**：`#settings-sections` 继承通用
+  `QListWidget` 的 `$bg_panel` (#F8F9FA) 底色与右边框，右侧内容区却是透明。
+  单独设为 `background: transparent` + 去掉右边框，选中态仍是 accent 实色。
+
+### 验证
+* 新增 `tests/test_round233_navigation.py` 7 项（百宝箱真实切栈、懒构建兜底、
+  地图默认落点），截图核对设置页左栏已透明。`python regress.py` → **101/101 全绿**。
+
+## round-232（2026-11-16）— 存档地图三件套搬进百宝箱，不再埋在右键菜单
+
+- `main_window.py::_build_toolbox` 新增三张工具卡：**查看存档地图 / 投影预览 /
+  导出材料清单**，对当前实例生效；每张卡带一行自解释说明。入口位于侧栏
+  「其他 → 百宝箱」，不用再右键实例翻倒数第二组菜单。原右键入口保留。
+- `_toolbox_action` 的三个新分支直接转交 `instances_page` 的既有实现
+  （`_open_map` / `_open_preview` / `_export_materials`），不复制第二套逻辑；
+  无当前实例时提示而不是抛异常。
+- 新增 `assets/icons/map.svg` 与 `layers.svg`（沿用现有 lucide 单色描边风格）；
+  `spec` 的 `datas = [("assets", "assets")]` 整目录打包，无需改 spec。
+- i18n 补 4 键 × 2 语言；`tests/test_round232_toolbox.py` 14 项覆盖双语、
+  真实百宝箱按钮、动作分派、无实例兜底；`regress.py` → **100 / 100 全绿**。
+
+## round-231（2026-11-16）— 存档地图适配 MC 26.3 与「只搬了区块」的世界
+
+### 修复（用户实测存档 `the_shooting_star` 触发）
+* `core/world_map.py` **高度图上限写死 255**：1.18+ 世界高度 -64..319、
+  正确解包范围 0..384，整张高度图被当成无效数据丢弃 → 所有 region 画成
+  全透明。上限改 384，并加 `min >= 0` 校验挡住错误解包（456）。
+* **高度图 Y 映射**：1.18+ 存的是「表面方块 Y + 1，再偏移 64」= `Y+65`，
+  旧实现沿用的 `Y+1` 会到错误高度层取方块，同样得到全空气。按 DataVersion
+  2860 分叉；实测 360/234 个区块从 0 不透明像素变成 44010/33314。
+* `list_worlds()` 以前只收带 `level.dat` 的目录；用户从别处搬来的
+  `新的世界 - Gravitia` 有 4 个 `.mca` 但没有 `level.dat`，整个存档在下拉里
+  消失。现在有 `region/*.mca` 也算有效世界。
+* `world_info()` 兼容 26.3（DataVersion 5023）的 `spawn.pos` 新结构；
+  旧的 `SpawnX/Y/Z` 三个键已不存在，出生点此前恒为空。
+
+### 验证
+* `tests/test_schematic_tools.py` 补 4 项：只有 region 的世界入列、
+  26.3 `spawn.pos`、1.18+ `Y+65` 映射、旧版 `Y+1` 不变；
+  同时把合成区块的高度图改成 1.18+ 正确口径（`top_y + 65`）。
+* `python regress.py` → **99 / 99 全绿**；真实存档探针确认两个世界都入列、
+  `spawn=(0,80,0)`、4 个 region 中已测的两个都渲染出地形。
+
 ## round-230（2026-11-14）— 下载任务页内分区 + 导入进度框收口
 
 ### 下载任务区（按主流「分区与跳转一体」的形态）

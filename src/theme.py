@@ -865,6 +865,12 @@ QListWidget {
     outline: 0;
     border-right: 1px solid $border;
 }
+/* 设置页内部栏目（基础 / Java 管理 / 模块…）与主内容区一样透明，
+   不要多出一块近白的背景板；选中态仍走下面的 accent 实色规则。 */
+#settings-sections {
+    background: transparent;
+    border-right: none;
+}
 QListWidget::item {
     color: $text_sub;
     padding: 10px 16px;

@@ -132,6 +132,9 @@ SUITES = [
     ("导入卡住/实例刷新/兼容误判回归（round-229）", "test_round229_runtime.py", "script"),
     ("资源中心本地化回归（round-229）", "test_round229_i18n.py", "script"),
     ("下载任务页内分区回归（round-230）", "test_round230_tasks.py", "script"),
+    ("百宝箱三件套入口回归（round-232）", "test_round232_toolbox.py", "script"),
+    ("百宝箱可达性与地图默认落点（round-233）", "test_round233_navigation.py", "script"),
+    ("首页扫描后台化与页面预热（round-234）", "test_round234_async_scan.py", "script"),
 ]
 SHOTS = "shots_all.py"
 

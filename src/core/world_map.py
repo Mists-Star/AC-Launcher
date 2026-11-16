@@ -38,6 +38,8 @@ DIMENSIONS = {
 
 # 1.16（20w17a）起 long 数组不再跨边界
 _DV_NON_CROSSING = 2529
+# 1.18 起世界高度扩到 -64..319，高度图存 Y+64（此前是 0..255 存 Y+1）
+_DV_EXPANDED_HEIGHT = 2860
 
 
 class MapError(ValueError):
@@ -86,6 +88,16 @@ def list_worlds(game_dir: str) -> list[str]:
         p = os.path.join(root, name)
         if os.path.isfile(os.path.join(p, "level.dat")):
             out.append(p)
+            continue
+        # 从别处复制区块过来的世界可能只有 region/*.mca 而没有 level.dat
+        # （元数据留在源存档里）。地形本身真实可读，不能因为「半个存档」
+        # 就从列表里消失 —— 否则有区块的世界反而看不到。
+        try:
+            if any(n.startswith("r.") and n.endswith(".mca")
+                   for n in os.listdir(os.path.join(p, "region"))):
+                out.append(p)
+        except OSError:
+            pass
     return out
 
 
@@ -104,7 +116,16 @@ def world_info(world_dir: str) -> dict:
         info["spawn"] = (int(data["SpawnX"]), int(data["SpawnY"]),
                          int(data["SpawnZ"]))
     except (KeyError, TypeError, ValueError):
-        pass
+        # 26.3（DataVersion 5023）起改为 ``spawn: {pos: [x,y,z], ...}``，
+        # 老的 SpawnX/Y/Z 三个键不再存在。
+        pos = data.get("spawn")
+        if isinstance(pos, dict):
+            pos = pos.get("pos")
+        try:
+            if len(pos) >= 3:
+                info["spawn"] = (int(pos[0]), int(pos[1]), int(pos[2]))
+        except (TypeError, ValueError):
+            pass
     player = data.get("Player")
     if isinstance(player, dict):
         pos = player.get("Pos")
@@ -201,7 +222,10 @@ def _heightmap(root: dict) -> list[int]:
                 vals = unpack_long_array(raw, 9, 256, crossing=crossing)
             except NbtError:
                 return []
-            if len(vals) == 256 and max(vals) <= 255:
+            # 1.18+ 世界高度 -64..319，高度图存 Y+64 → 上限 384。
+            # 旧实现写死 255，会把新版存档的高度图整张判为无效，
+            # 结果所有 region 都画成全透明（区块其实解析成功了）。
+            if len(vals) == 256 and min(vals) >= 0 and max(vals) <= 384:
                 return vals
     return []
 
@@ -279,9 +303,11 @@ def _top_blocks(root: dict, dv: int) -> tuple[list[str], list[int]]:
 
     heights = _heightmap(root)
     if heights:
+        # 高度图记的是表面上方一格（Y+1）；1.18 起再整体偏移 64 → Y+65
+        h_base = 65 if dv >= _DV_EXPANDED_HEIGHT else 1
         for i, h in enumerate(heights):
-            y = h - 1
-            if y < 0:
+            y = h - h_base
+            if y < -64 or y > 319:
                 continue
             sid = block_at(i % 16, y, i // 16)
             if is_air(sid):

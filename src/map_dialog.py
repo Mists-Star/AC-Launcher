@@ -321,6 +321,15 @@ class MapDialog(QDialog):
         self.world_box.clear()
         for w in worlds:
             self.world_box.addItem(os.path.basename(w), w)
+        # 默认落到第一个真的有 region 的世界。只搬过区块的存档没有
+        # level.dat，在字母序里常排在空存档之后；若停在空存档上，
+        # 用户看到的就是「这个维度还没有生成地图数据」，误以为功能没接上。
+        best = 0
+        for i, w in enumerate(worlds):
+            if any(wm.region_grid(w, d) for d in wm.DIMENSIONS):
+                best = i
+                break
+        self.world_box.setCurrentIndex(best)
         self.world_box.blockSignals(False)
         if not worlds:
             self.canvas.set_empty(t("map.no_saves"))
