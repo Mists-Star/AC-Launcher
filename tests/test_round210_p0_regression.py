@@ -428,3 +428,6 @@ if fails:
         print("  FAILED:", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-210 七条 P0 行为回归）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

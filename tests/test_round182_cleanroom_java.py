@@ -209,3 +209,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL OK")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

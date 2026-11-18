@@ -329,3 +329,6 @@ if fails:
 # regress.py 用这个标记兜住「离屏 Qt 在解释器 teardown 阶段崩溃」的已知噪音
 # （0xC0000409：测试已跑完但进程退出码非 0）。
 print("ALL CHECKS PASSED（round-208 资源中心整页对齐 + IA 护栏）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

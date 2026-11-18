@@ -265,3 +265,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-185 模组元数据 + 模组列表）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

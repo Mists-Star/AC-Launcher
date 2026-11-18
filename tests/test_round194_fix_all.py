@@ -105,3 +105,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-194 一键修复反馈）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -310,3 +310,6 @@ if fails:
     print("ALL CHECKS FAILED（round-222 解耦 / 查重 / 修复回归）")
     sys.exit(1)
 print("ALL CHECKS PASSED（round-222 解耦 / 查重 / 修复回归）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

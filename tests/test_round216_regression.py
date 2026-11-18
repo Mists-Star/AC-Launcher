@@ -336,3 +336,6 @@ if fails:
         print("  FAILED:", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-216 磁盘边界 / 生命周期 / 缓存预算）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

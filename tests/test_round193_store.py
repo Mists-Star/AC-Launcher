@@ -118,3 +118,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-193 资源中心：版本随实例 / 前置 / 下载可见）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -170,4 +170,6 @@ check("round-201 未新增文案，中英键集合仍对称",
       "zh=%d en=%d" % (len(zh), len(en_us)))
 
 print("RESULT:", "PASS" if not FAILS else "FAIL %d: %r" % (len(FAILS), FAILS))
-sys.exit(1 if FAILS else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

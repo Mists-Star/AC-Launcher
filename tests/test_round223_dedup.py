@@ -396,3 +396,6 @@ if fails:
     print("ALL CHECKS FAILED（round-223 第二轮解耦 / 查重）")
     sys.exit(1)
 print("ALL CHECKS PASSED（round-223 第二轮解耦 / 查重）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

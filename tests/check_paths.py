@@ -24,4 +24,6 @@ if out:
     print(out)
 if err:
     print(err)
-sys.exit(p.returncode)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

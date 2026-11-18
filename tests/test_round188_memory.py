@@ -124,3 +124,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-188 GC 模式 + 启动前内存优化）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

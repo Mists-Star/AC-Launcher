@@ -173,4 +173,6 @@ check("全仓 Signal/emit arity 无超参（检查 %d 处）" % scanned,
       not mismatch, "; ".join(mismatch[:3]))
 
 print("== %s ==" % ("PASS" if not fails else "FAIL %d" % len(fails)))
-sys.exit(1 if fails else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

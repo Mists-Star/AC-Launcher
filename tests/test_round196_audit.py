@@ -145,3 +145,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-196 全面审计补漏）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

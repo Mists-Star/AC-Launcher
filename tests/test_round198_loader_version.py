@@ -131,3 +131,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-198 加载器版本继承/空列表）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

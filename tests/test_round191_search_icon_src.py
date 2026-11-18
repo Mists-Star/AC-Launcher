@@ -148,3 +148,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-191 中文搜索 / 图标 / 来源 / 内存优化）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

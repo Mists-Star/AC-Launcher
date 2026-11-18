@@ -202,4 +202,6 @@ check("设置项文案不再宣称『自动关闭』",
       "自动关闭" not in read("src/i18n.py").split('"settings.close_after_launch":')[1][:60])
 
 print("== %s ==" % ("PASS" if not fails else "FAIL %d" % len(fails)))
-sys.exit(1 if fails else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

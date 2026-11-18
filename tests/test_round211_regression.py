@@ -323,3 +323,6 @@ if fails:
         print("  FAILED:", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-211 第 3/5/6 批行为回归）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

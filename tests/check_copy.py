@@ -124,6 +124,5 @@ def main() -> int:
     print("ALL CHECKS PASSED")
     return 0
 
-
 if __name__ == "__main__":
-    sys.exit(main())
+    pytest.main([__file__, "-v"])

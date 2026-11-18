@@ -415,3 +415,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-183 编辑面板 / 加载器装卸 / pcl 格式）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -496,3 +496,6 @@ if fails:
         print("  FAILED:", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-217 §19.3 P2 长尾）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

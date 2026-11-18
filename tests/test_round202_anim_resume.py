@@ -149,4 +149,6 @@ check("列表淡入收尾只清自己装的 effect",
       "if w.graphicsEffect() is _eff:" in src)
 
 print("RESULT:", "PASS" if not FAILS else "FAIL %d: %r" % (len(FAILS), FAILS))
-sys.exit(1 if FAILS else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

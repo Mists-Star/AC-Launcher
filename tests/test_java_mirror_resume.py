@@ -261,4 +261,6 @@ import shutil  # noqa: E402
 shutil.rmtree(TMP, ignore_errors=True)
 
 print("== %s ==" % ("PASS" if not fails else "FAIL %d" % len(fails)))
-sys.exit(1 if fails else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

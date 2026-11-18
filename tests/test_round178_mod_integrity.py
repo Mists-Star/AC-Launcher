@@ -271,4 +271,6 @@ finally:
     restore()
 
 print("RESULT:", "PASS" if not FAILS else "FAIL %d: %r" % (len(FAILS), FAILS))
-sys.exit(1 if FAILS else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

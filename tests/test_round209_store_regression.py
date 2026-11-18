@@ -305,3 +305,6 @@ if fails:
         print("  FAILED:", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-209 FTB 搜索回归 + 切来源缓存键）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

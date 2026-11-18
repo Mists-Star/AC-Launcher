@@ -97,3 +97,6 @@ if fails:
     print("FAILED:", ", ".join(fails))
     sys.exit(1)
 print("ALL CHECKS PASSED（round-234 首页扫描后台化）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

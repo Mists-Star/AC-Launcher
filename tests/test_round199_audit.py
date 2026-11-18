@@ -167,4 +167,6 @@ check("没有版本数据 → 不画徽章（None）",
       StorePage._compat_of_card(fake, {}) is None)
 
 print("\n%s" % ("ALL PASS" if not fails else "FAILED: %s" % ", ".join(fails)))
-sys.exit(1 if fails else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -231,3 +231,6 @@ if fails:
     print("FAILED: %d" % len(fails))
     sys.exit(1)
 print("ALL CHECKS PASSED（round-207 资源中心秒获取）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

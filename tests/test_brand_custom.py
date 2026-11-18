@@ -148,3 +148,6 @@ if FAILS:
     sys.exit(1)
 # 标记与 regress.py 的成功标记表对齐（离屏 teardown 噪音会让退出码非 0）
 print("ALL CHECKS PASSED")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

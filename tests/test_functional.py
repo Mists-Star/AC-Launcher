@@ -190,3 +190,6 @@ if __name__ == "__main__":
     code = main()
     shutil.rmtree(TMP, ignore_errors=True)
     sys.exit(code)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

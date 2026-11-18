@@ -160,3 +160,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-195 功能统一 + 页面化）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

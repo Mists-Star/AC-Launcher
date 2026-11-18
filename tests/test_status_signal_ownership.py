@@ -210,4 +210,6 @@ check("失败时清空速度数字并终止 indeterminate 进度条",
       "self.set_speed(\"\")" in failed and "self.bar.setMaximum(1)" in failed)
 
 print("== %s ==" % ("PASS" if not fails else "FAIL %d" % len(fails)))
-sys.exit(1 if fails else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

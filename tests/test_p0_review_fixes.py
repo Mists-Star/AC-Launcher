@@ -126,4 +126,6 @@ check("老配置缺 launcher 字段 → 仍按自建处理",
       shared_libs.should_use_shared_pool(inst(launcher="")))
 
 print("P0 REVIEW FIXES %s (%d failures)" % ("OK" if not fails else "FAILED", len(fails)))
-sys.exit(1 if fails else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

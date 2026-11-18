@@ -270,3 +270,6 @@ if fails:
     print("ALL CHECKS FAILED（round-221 CF 文件列表分页回归）")
     sys.exit(1)
 print("ALL CHECKS PASSED（round-221 CF 文件列表分页回归）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

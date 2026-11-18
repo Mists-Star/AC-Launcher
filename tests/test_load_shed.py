@@ -10,6 +10,8 @@ import os
 import sys
 import tempfile
 
+import pytest
+
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -17,77 +19,74 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from PySide6.QtGui import QPixmap, QColor  # noqa: E402
 
-app = QApplication.instance() or QApplication([])
 
-from src import effects  # noqa: E402
-from src.wallpaper import WallpaperWidget  # noqa: E402
-
-fails = []
+@pytest.fixture(scope="session")
+def qapp():
+    return QApplication.instance() or QApplication([])
 
 
-def check(label, cond, extra=""):
-    print("  %s %-52s %s" % ("OK  " if cond else "FAIL", label, extra))
-    if not cond:
-        fails.append(label)
+@pytest.fixture
+def tmp_img(qapp):
+    TMP = tempfile.mkdtemp(prefix="_shed_")
+    IMG = os.path.join(TMP, "wall.png")
+    pm = QPixmap(64, 36)
+    pm.fill(QColor("#2F6F4F"))
+    pm.save(IMG, "PNG")
+    yield IMG
+    import shutil
+    shutil.rmtree(TMP, ignore_errors=True)
 
 
-# ── 1. 装饰动画随游戏运行暂停 ──
-effects.set_game_running(True)
-check("游戏运行 → GAME_RUNNING=True", effects.GAME_RUNNING)
-check("无卡时主表不启动",
-      effects._MASTER is None or not effects._MASTER.isActive())
+def test_game_running_pause(qapp):
+    """1. 装饰动画随游戏运行暂停"""
+    from src import effects  # noqa: E402
 
-card = effects.LightTrailCard()
-card.show()
-check("游戏运行中主表不跑",
-      effects._MASTER is None or not effects._MASTER.isActive())
-check("降载期间卡片仍登记（供退出后自动恢复）",
-      card in effects._ACTIVE_CARDS)
-effects.set_game_running(False)
-check("游戏退出 → GAME_RUNNING=False", not effects.GAME_RUNNING)
-check("退出后无需再切页，主表自动恢复",
-      effects._MASTER is not None and effects._MASTER.isActive())
-card.hide()
-effects._stop_master()
-card.deleteLater()
+    effects.set_game_running(True)
+    assert effects.GAME_RUNNING
+    assert effects._MASTER is None or not effects._MASTER.isActive()
 
-# ── 2. 壁纸降载 / 恢复 ──
-TMP = tempfile.mkdtemp(prefix="_shed_")
-IMG = os.path.join(TMP, "wall.png")
-pm = QPixmap(64, 36)
-pm.fill(QColor("#2F6F4F"))
-pm.save(IMG, "PNG")
+    card = effects.LightTrailCard()
+    card.show()
+    assert effects._MASTER is None or not effects._MASTER.isActive()
+    assert card in effects._ACTIVE_CARDS
 
-w = WallpaperWidget()
-cfg = {"wallpaper_mode": "image", "wallpaper_image": IMG,
-       "wallpaper_opacity": 1.0, "wallpaper_color": "#1E1E1E"}
-w.apply(cfg)
-check("初始加载大图", w._pixmap is not None and not w._pixmap.isNull())
+    effects.set_game_running(False)
+    assert not effects.GAME_RUNNING
+    assert effects._MASTER is not None and effects._MASTER.isActive()
 
-w.suspend()
-check("suspend 丢弃大图/缩放缓存",
-      w._pixmap is None and w._scaled is None and w._pano_buffer is None)
-check("suspend 隐藏并置位", w._suspended and not w.isVisible())
-check("暂停期间 panorama 也停表",
-      w._pano_timer is None or not w._pano_timer.isActive())
+    card.hide()
+    effects._stop_master()
+    card.deleteLater()
 
-w.apply(cfg)
-check("游戏运行中 apply 不重新加载",
-      w._pixmap is None and w._suspended)
 
-w.resume()
-check("resume 清除降载标记", not w._suspended)
-w.apply(cfg)
-check("恢复后重新上屏大图",
-      w._pixmap is not None and not w._pixmap.isNull() and w.isVisible())
+def test_wallpaper_suspend_resume(qapp, tmp_img):
+    """2. 壁纸降载 / 恢复"""
+    from src.wallpaper import WallpaperWidget  # noqa: E402
 
-# 非图片模式：版本全景被 suspend 丢弃后，恢复走 apply 重新请求
-w.apply({"wallpaper_mode": "none"})
-check("切回无壁纸 → 隐藏", not w.isVisible() and w._pixmap is None)
-w.deleteLater()
+    w = WallpaperWidget()
+    cfg = {"wallpaper_mode": "image", "wallpaper_image": tmp_img,
+           "wallpaper_opacity": 1.0, "wallpaper_color": "#1E1E1E"}
+    w.apply(cfg)
+    assert w._pixmap is not None and not w._pixmap.isNull()
 
-print()
-if fails:
-    print("FAILED: %d" % len(fails))
-    sys.exit(1)
-print("ALL PASS")
+    w.suspend()
+    assert w._pixmap is None and w._scaled is None and w._pano_buffer is None
+    assert w._suspended and not w.isVisible()
+    assert w._pano_timer is None or not w._pano_timer.isActive()
+
+    w.apply(cfg)
+    assert w._pixmap is None and w._suspended
+
+    w.resume()
+    assert not w._suspended
+    w.apply(cfg)
+    assert w._pixmap is not None and not w._pixmap.isNull() and w.isVisible()
+
+    # 非图片模式：版本全景被 suspend 丢弃后，恢复走 apply 重新请求
+    w.apply({"wallpaper_mode": "none"})
+    assert not w.isVisible() and w._pixmap is None
+    w.deleteLater()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

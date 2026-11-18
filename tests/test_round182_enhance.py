@@ -289,4 +289,6 @@ except Exception as e:  # noqa: BLE001
 
 print("\n" + ("ALL PASS (%d checks)" % (len(fails) + 0) if not fails
              else "FAILED: %d" % len(fails)))
-sys.exit(1 if fails else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

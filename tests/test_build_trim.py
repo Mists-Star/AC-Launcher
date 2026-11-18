@@ -10,20 +10,12 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import build  # noqa: E402
-
-FAILS: list[str] = []
-
-
-def check(label: str, ok: bool, detail: str = "") -> None:
-    print("  %s %s%s" % ("OK  " if ok else "FAIL", label,
-                         (" | " + detail) if detail else ""))
-    if not ok:
-        FAILS.append(label)
 
 
 def make_dist(root: str, n_extra: int = 6) -> str:
@@ -47,22 +39,26 @@ def remaining(dist: str) -> list[str]:
     return sorted(x for x in os.listdir(tr) if x.endswith(".qm"))
 
 
-# ── 1. 正常瘦身：只删非 zh_CN / en ──────────────────────────────────
-with tempfile.TemporaryDirectory() as td:
-    dist = make_dist(td, 6)
-    removed, failed, saved = build._trim_dist(dist)
-    left = remaining(dist)
-    check("正常瘦身删掉 6 个多余 .qm", removed == 6, "removed=%d" % removed)
-    check("正常瘦身无失败", failed == 0, "failed=%d" % failed)
-    check("瘦身统计了节省字节", saved > 0, "saved=%d" % saved)
-    check("zh_CN / en 三个 .qm 保留",
-          left == ["qt_base_en.qm", "qt_en.qm", "qt_zh_CN.qm"],
-          "left=%r" % left)
+def test_trim_normal():
+    """1. 正常瘦身：只删非 zh_CN / en"""
+    with tempfile.TemporaryDirectory() as td:
+        dist = make_dist(td, 6)
+        removed, failed, saved = build._trim_dist(dist)
+        left = remaining(dist)
+        assert removed == 6, f"removed={removed}"
+        assert failed == 0, f"failed={failed}"
+        assert saved > 0, f"saved={saved}"
+        assert left == ["qt_base_en.qm", "qt_en.qm", "qt_zh_CN.qm"], f"left={left}"
 
-# ── 2. 删除抛非 OSError 异常（模拟批量删除保护）────────────────────
-orig_remove = build.os.remove
-for exc in (SystemExit(1), RuntimeError("bulk delete blocked"),
-            OSError("permission denied")):
+
+@pytest.mark.parametrize("exc", [
+    SystemExit(1),
+    RuntimeError("bulk delete blocked"),
+    OSError("permission denied"),
+])
+def test_trim_non_oserror_swallowed(exc):
+    """2. 删除抛非 OSError 异常（模拟批量删除保护）"""
+    orig_remove = build.os.remove
     calls = {"n": 0}
 
     def flaky(path, _exc=exc, _calls=calls):
@@ -77,57 +73,54 @@ for exc in (SystemExit(1), RuntimeError("bulk delete blocked"),
         try:
             removed, failed, _ = build._trim_dist(dist)
         except BaseException as e:  # noqa: BLE001
-            check("%s 不穿透 build.py" % type(exc).__name__, False,
-                  "raised %r" % e)
+            pytest.fail(f"{type(exc).__name__} 不应穿透 build.py: raised {e!r}")
         else:
-            check("%s 被吞掉且不影响其余删除" % type(exc).__name__,
-                  removed == 5 and failed == 1,
-                  "removed=%d failed=%d" % (removed, failed))
-            check("%s 后中文翻译仍在" % type(exc).__name__,
-                  "qt_zh_CN.qm" in remaining(dist))
+            assert removed == 5 and failed == 1, f"removed={removed} failed={failed}"
+            assert "qt_zh_CN.qm" in remaining(dist)
         finally:
             build.os.remove = orig_remove
 
-# ── 3. _build 退出码：trim 失败但产物完整 → 0 ───────────────────────
-orig_call = build.subprocess.call
-orig_trim = build._trim_dist
-orig_size = build._print_size
-try:
-    build.subprocess.call = lambda *a, **k: 0
-    build._print_size = lambda *a, **k: (0, 0)
-    build._trim_dist = lambda root: (0, 5, 0)  # 模拟全部瘦身失败
 
-    with tempfile.TemporaryDirectory() as td:
-        dist = make_dist(td, 2)
-        rc = build._build(td)
-        check("PyInstaller 成功 + trim 全失败仍返回 0", rc == 0,
-              "rc=%d" % rc)
+def test_build_exit_code_trim_fail_artifact_ok():
+    """3. _build 退出码：trim 失败但产物完整 → 0"""
+    orig_call = build.subprocess.call
+    orig_trim = build._trim_dist
+    orig_size = build._print_size
+    try:
+        build.subprocess.call = lambda *a, **k: 0
+        build._print_size = lambda *a, **k: (0, 0)
+        build._trim_dist = lambda root: (0, 5, 0)  # 模拟全部瘦身失败
 
-    with tempfile.TemporaryDirectory() as td:
-        dist = make_dist(td, 2)
-        os.remove(os.path.join(dist, "AC_Launcher.exe"))
-        rc = build._build(td)
-        check("产物缺 exe 时返回 1", rc == 1, "rc=%d" % rc)
+        with tempfile.TemporaryDirectory() as td:
+            dist = make_dist(td, 2)
+            rc = build._build(td)
+            assert rc == 0, f"rc={rc}"
 
-    with tempfile.TemporaryDirectory() as td:
-        dist = make_dist(td, 2)
-        import shutil
-        shutil.rmtree(os.path.join(dist, "_internal", "PySide6"))
-        rc = build._build(td)
-        check("产物缺 _internal/PySide6 时返回 1", rc == 1, "rc=%d" % rc)
-finally:
-    build.subprocess.call = orig_call
-    build._trim_dist = orig_trim
-    build._print_size = orig_size
+        with tempfile.TemporaryDirectory() as td:
+            dist = make_dist(td, 2)
+            os.remove(os.path.join(dist, "AC_Launcher.exe"))
+            rc = build._build(td)
+            assert rc == 1, f"rc={rc}"
 
-# ── 4. 静态防再犯 ──────────────────────────────────────────────────
-src = open(os.path.join(ROOT, "build.py"), encoding="utf-8").read()
-check("_rm 使用 except BaseException 兜底",
-      "except BaseException" in src and "except OSError:\n            pass" not in src)
-check("KeyboardInterrupt 仍可穿透（不吞用户中断）",
-      src.count("except KeyboardInterrupt:\n            raise") >= 2)
-check("_build 末尾由产物完整性决定 rc",
-      "if not os.path.isfile(os.path.join(dist, \"AC_Launcher.exe\"))" in src)
+        with tempfile.TemporaryDirectory() as td:
+            dist = make_dist(td, 2)
+            import shutil
+            shutil.rmtree(os.path.join(dist, "_internal", "PySide6"))
+            rc = build._build(td)
+            assert rc == 1, f"rc={rc}"
+    finally:
+        build.subprocess.call = orig_call
+        build._trim_dist = orig_trim
+        build._print_size = orig_size
 
-print("RESULT:", "PASS" if not FAILS else "FAIL %d: %r" % (len(FAILS), FAILS))
-sys.exit(1 if FAILS else 0)
+
+def test_static_checks():
+    """4. 静态防再犯"""
+    src = open(os.path.join(ROOT, "build.py"), encoding="utf-8").read()
+    assert "except BaseException" in src and "except OSError:\n            pass" not in src
+    assert src.count("except KeyboardInterrupt:\n            raise") >= 2
+    assert 'if not os.path.isfile(os.path.join(dist, "AC_Launcher.exe"))' in src
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

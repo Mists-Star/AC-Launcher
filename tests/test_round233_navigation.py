@@ -90,3 +90,6 @@ if fails:
     print("FAILED:", ", ".join(fails))
     sys.exit(1)
 print("ALL CHECKS PASSED（round-233 导航与地图默认落点）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

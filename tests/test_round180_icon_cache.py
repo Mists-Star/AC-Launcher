@@ -128,4 +128,6 @@ check("旧的两份尺寸缓存命名已移除",
       'f"{key}_{size}@{tag}.png"' not in src)
 
 print("RESULT:", "PASS" if not FAILS else "FAIL %d: %r" % (len(FAILS), FAILS))
-sys.exit(1 if FAILS else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

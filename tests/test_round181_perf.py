@@ -200,4 +200,6 @@ print("\nRESULT: %d checks, %d failures" % (
 if FAILS:
     for f in FAILS:
         print("  -", f)
-sys.exit(1 if FAILS else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -203,3 +203,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("ALL CHECKS PASSED（round-197 崩溃分析页内 / Java 合一 / 来源记录）")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

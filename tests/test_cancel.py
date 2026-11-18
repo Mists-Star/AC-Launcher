@@ -264,3 +264,6 @@ if fails:
         print(" - %s" % f)
     sys.exit(1)
 print("全部通过")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

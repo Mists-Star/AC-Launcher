@@ -201,3 +201,6 @@ if fails:
     print("失败 %d 项: %s" % (len(fails), fails))
     sys.exit(1)
 print("ALL CHECKS PASSED")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

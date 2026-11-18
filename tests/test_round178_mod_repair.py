@@ -170,4 +170,6 @@ check("4 个新文案中英都有且键数一致",
       and new_keys <= set(zh), "zh=%d en=%d" % (len(zh), len(en)))
 
 print("RESULT:", "PASS" if not FAILS else "FAIL %d: %r" % (len(FAILS), FAILS))
-sys.exit(1 if FAILS else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

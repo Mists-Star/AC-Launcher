@@ -36,4 +36,6 @@ for path, want, label in CASES:
                                            label, want, got))
 print()
 print("全部通过" if bad == 0 else "%d 个失败" % bad)
-sys.exit(1 if bad else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -136,4 +136,6 @@ check("拼不出命令时如实写原因，不假装成功",
       report.splitlines()[-1][:40] if report else "")
 
 print("== %s ==" % ("PASS" if not fails else "FAIL %d" % len(fails)))
-sys.exit(1 if fails else 0)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
