@@ -135,6 +135,7 @@ SUITES = [
     ("百宝箱三件套入口回归（round-232）", "test_round232_toolbox.py", "script"),
     ("百宝箱可达性与地图默认落点（round-233）", "test_round233_navigation.py", "script"),
     ("首页扫描后台化与页面预热（round-234）", "test_round234_async_scan.py", "script"),
+    ("百宝箱实例下拉（round-235）", "test_round235_toolbox_instance.py", "script"),
 ]
 SHOTS = "shots_all.py"
 
