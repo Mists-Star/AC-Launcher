@@ -30,6 +30,7 @@ from .effects import (
     fade_page_transition, motion_ms,
 )
 from .icons import icon, on_accent, screen_dpr
+from .feedback import apply_feedback_to_button, FeedbackConfig, sync_feedback_colors_from_theme
 from .i18n import t
 from src.instances import manager, Instance
 from src.pages_instances import InstancesPage, ModsPage
@@ -79,16 +80,17 @@ NAV_ITEMS = NAV_KEYS  # index-compatible alias: NAV_ITEMS[i][1] is still the key
 
 # AC 布局左侧导航分组（对标主流的功能分化）。
 # 每项：(分组标题键 or None=不分组的独立主项, [(label键, key), ...])
+# round-236：恢复「模组」与「版本库」到侧栏「游戏」分组，聚合同类功能。
 NAV_GROUPS = [
-    (None, [("nav.home", "home")]),                             # 启动（主项）
-    # round-107 侧栏最简：模组/版本库/音乐/成就/控制台 5 项从侧栏移除。
-    # 功能全部保留，改由页面内入口承接——模组 → 实例页各分区；版本库 → 首页空态
-    # 「下载版本」+ 新建实例向导；音乐/成就/控制台 → 设置页内入口按钮。
-    ("nav.group.game", [("nav.instances", "instances")]),
+    (None, [("nav.home", "home")]),                                  # 启动（主项）
+    ("nav.group.game", [
+        ("nav.instances", "instances"),
+        ("nav.mods", "mods"),
+        ("nav.versions", "versions"),
+    ]),
     ("nav.group.resource", [("nav.store", "store")]),
     ("nav.group.multiplayer", [("lobby.nav_lobby", "lobby")]),
-    # round-124：百宝箱此前只有顶部导航布局能进，AC 侧栏没有入口 → 补在「其他」
-    ("nav.group.other", [("pcl2.nav_toolbox", "toolbox")]),
+    ("nav.group.tools", [("pcl2.nav_toolbox", "toolbox")]),
     ("nav.group.system", [("nav.account", "account"), ("nav.settings", "settings")]),
 ]
 
@@ -775,6 +777,8 @@ class HomePage(QWidget):
         b.setIcon(on_accent("play"))
         b.setIconSize(QSize(24, 24))
         b.clicked.connect(self._on_play)
+        # round-236: 增强反馈感——按下缩放 + 焦点环
+        apply_feedback_to_button(b, press_scale=True, focus_ring=True)
         return b
 
     # ── four style layouts ──
@@ -843,6 +847,7 @@ class HomePage(QWidget):
         self.empty_cta.setCursor(Qt.PointingHandCursor)
         self.empty_cta.setVisible(False)
         self.empty_cta.clicked.connect(self._open_versions)
+        apply_feedback_to_button(self.empty_cta, press_scale=True, focus_ring=True)
         left.addWidget(self.empty_cta, alignment=Qt.AlignLeft)
         left.addStretch(1)
 
@@ -863,6 +868,7 @@ class HomePage(QWidget):
         kill.setProperty("cls", "danger")
         kill.clicked.connect(self._on_kill_game)
         self.kill_btn = kill
+        apply_feedback_to_button(kill, press_scale=True, focus_ring=True)
         play_row.addWidget(kill, alignment=Qt.AlignVCenter)
         play_row.addStretch(1)
         left.addStretch(1)
@@ -910,6 +916,7 @@ class HomePage(QWidget):
         self.char_btn.setIcon(icon("skin"))
         self.char_btn.setIconSize(QSize(16, 16))
         self.char_btn.clicked.connect(self._on_char_btn)
+        apply_feedback_to_button(self.char_btn, press_scale=True, focus_ring=True)
         right.addWidget(self.char_btn, alignment=Qt.AlignRight)
         hl.addLayout(right)
 
@@ -1387,12 +1394,14 @@ class HomePage(QWidget):
             dl_btn.setCursor(Qt.PointingHandCursor)
             dl_btn.setMinimumHeight(32)
             dl_btn.clicked.connect(self._open_versions)
+            apply_feedback_to_button(dl_btn, press_scale=True, focus_ring=True)
             empty_lay.addWidget(dl_btn)
 
             scan_btn = QPushButton(t("home.scan_import"))
             scan_btn.setCursor(Qt.PointingHandCursor)
             scan_btn.setMinimumHeight(32)
             scan_btn.clicked.connect(self._open_scan)
+            apply_feedback_to_button(scan_btn, press_scale=True, focus_ring=True)
             empty_lay.addWidget(scan_btn)
 
             lay.addWidget(empty_w, 0, 0)
@@ -2124,6 +2133,7 @@ class MainWindow(QMainWindow):
         self._tasks_btn.setCursor(Qt.PointingHandCursor)
         self._tasks_btn.setToolTip(t("tasks.title"))
         self._tasks_btn.clicked.connect(lambda *_: self.open_tasks())
+        apply_feedback_to_button(self._tasks_btn, press_scale=True, focus_ring=True)
         self.statusBar().addPermanentWidget(self._tasks_btn)
         # round-151：整条状态栏都可点击召回（原来只有 8px 进度条本身能点，
         # 用户点左侧进度文案没有任何反应）。子控件逐个装过滤器，保证点文案/
@@ -3457,6 +3467,7 @@ class MainWindow(QMainWindow):
         self.nav_toggle_btn.setProperty("cls", "icon-btn")
         self.nav_toggle_btn.setToolTip(t("nav.collapse_sidebar"))
         self.nav_toggle_btn.clicked.connect(self._toggle_nav_collapsed)
+        apply_feedback_to_button(self.nav_toggle_btn, press_scale=True, focus_ring=True)
         self.nav_toggle_btn.setVisible(False)  # 真实可见性在 nav 布局确定后设置
         lay.addWidget(self.nav_toggle_btn)
         lay.addStretch(1)
@@ -3466,6 +3477,7 @@ class MainWindow(QMainWindow):
         self.account_btn.setMinimumHeight(34)
         self.account_btn.setIcon(icon("account"))
         self.account_btn.setIconSize(QSize(16, 16))
+        apply_feedback_to_button(self.account_btn, press_scale=True, focus_ring=True)
         if self.current_account:
             self.account_btn.setText(self.current_account.get("name", t("topbar.login")))
         # Click behavior depends on login state (handled in _on_account_btn):
@@ -3489,6 +3501,7 @@ class MainWindow(QMainWindow):
         self.diag_btn.setCursor(Qt.PointingHandCursor)
         self.diag_btn.setProperty("cls", "icon-btn")
         self.diag_btn.clicked.connect(self._open_diagnostics)
+        apply_feedback_to_button(self.diag_btn, press_scale=True, focus_ring=True)
         lay.addWidget(self.diag_btn)
 
         # ── Window controls (frameless) — vector glyphs, not Unicode ──
@@ -3598,6 +3611,7 @@ class MainWindow(QMainWindow):
         # 里设置，而启动时 set_theme_mode 早于标题栏构建 → 从不触发，按钮永远
         # 是空框。构建时立即渲染一次初始图标 + 文字。
         self._refresh_theme_toggle(b)
+        apply_feedback_to_button(b, press_scale=True, focus_ring=True)
         return b
 
     def _style_theme_toggle(self, b: QPushButton) -> None:
@@ -4049,6 +4063,7 @@ class MainWindow(QMainWindow):
             b.setMinimumHeight(36)
             b.setIconSize(QSize(18, 18))
             b.clicked.connect(lambda _c=False, k=key: self._pcl2_on_top(k))
+            apply_feedback_to_button(b, press_scale=True, focus_ring=True)
             self._pcl2_top_btns[key] = b
             self._pcl2_top_labels[key] = label_key
             tl.addWidget(b)
@@ -4323,7 +4338,7 @@ class MainWindow(QMainWindow):
             list_instances=lambda: self.inst_mgr.list(),
             get_current_instance=self.current_instance,
         )
-        # round-107：版本库入口已从侧栏移除 → 资源中心页头「版本库」按钮跳转。
+        # round-236：版本库现已回到侧栏「游戏」分组；资源中心页头按钮保留作为便捷入口。
         self.store_page.open_versions_requested.connect(
             lambda: self._show_page("versions"))
         self.store_page.task_retry_requested.connect(self._on_task_retry)
@@ -4375,6 +4390,7 @@ class MainWindow(QMainWindow):
         self._lobby_join.setMinimumHeight(40)
         self._lobby_join.setMinimumWidth(116)
         self._lobby_join.clicked.connect(self._join_lobby_code)
+        apply_feedback_to_button(self._lobby_join, press_scale=True, focus_ring=True)
         code_row.addWidget(self._lobby_join)
         _cl.addLayout(code_row)
         btn_row = QHBoxLayout()
@@ -4382,6 +4398,7 @@ class MainWindow(QMainWindow):
         self._lobby_create.setProperty("cls", "accent")
         self._lobby_create.setMinimumHeight(40)
         self._lobby_create.clicked.connect(self._open_lobby)
+        apply_feedback_to_button(self._lobby_create, press_scale=True, focus_ring=True)
         btn_row.addWidget(self._lobby_create)
         btn_row.addStretch(1)
         _cl.addLayout(btn_row)
@@ -4429,6 +4446,20 @@ class MainWindow(QMainWindow):
         _s.setWordWrap(True)
         _s.setAlignment(Qt.AlignCenter)
         _cl.addWidget(_s)
+        # round-235：三件套原来只认「当前实例」，没设当前实例就只会提示
+        # 「未选择」，而百宝箱里根本没有选实例的地方。这里放一个下拉，
+        # 没有当前实例时默认选第一个，点地图/投影/材料就用它。
+        _inst_row = QHBoxLayout()
+        _inst_row.setSpacing(12)
+        _inst_lbl = QLabel(t("toolbox.instance"))
+        _inst_lbl.setProperty("cls", "sub")
+        _inst_row.addWidget(_inst_lbl)
+        self._toolbox_inst_combo = QComboBox()
+        self._toolbox_inst_combo.setMinimumWidth(240)
+        self._toolbox_inst_combo.setMinimumHeight(36)
+        _inst_row.addWidget(self._toolbox_inst_combo, 1)
+        _cl.addLayout(_inst_row)
+        self._refresh_toolbox_instances()
         for ikey, kind, name_key, desc_key in [
             # round-232：存档地图 / 投影 / 材料清单原本只在实例右键菜单里，
             # 藏得太深。三件套对当前实例生效，入口与说明放在一起自解释。
@@ -4452,6 +4483,7 @@ class MainWindow(QMainWindow):
             _b.setMinimumWidth(230)
             _b.setCursor(Qt.CursorShape.PointingHandCursor)
             _b.clicked.connect(lambda _=False, k=kind: self._toolbox_action(k))
+            apply_feedback_to_button(_b, press_scale=True, focus_ring=True)
             _row.addWidget(_b)
             _d = QLabel(t(desc_key))
             _d.setProperty("cls", "sub")
@@ -4462,6 +4494,33 @@ class MainWindow(QMainWindow):
         _tb.addStretch(1)
         return self.toolbox_widget
 
+    def _refresh_toolbox_instances(self):
+        """填充百宝箱实例下拉：优先当前实例，否则默认第一个。"""
+        combo = getattr(self, "_toolbox_inst_combo", None)
+        if combo is None:
+            return
+        try:
+            insts = self.inst_mgr.list()
+        except Exception:  # noqa: BLE001 - 实例读失败就留空并禁用
+            insts = []
+        cur_id = ""
+        try:
+            cur = self.current_instance()
+            cur_id = getattr(cur, "id", "") if cur is not None else ""
+        except Exception:  # noqa: BLE001
+            pass
+        combo.blockSignals(True)
+        combo.clear()
+        for i, item in enumerate(insts):
+            combo.addItem(getattr(item, "name", "") or t("home.no_inst_name"),
+                          getattr(item, "id", ""))
+            if cur_id and getattr(item, "id", "") == cur_id:
+                combo.setCurrentIndex(i)
+        if not cur_id and insts:
+            combo.setCurrentIndex(0)
+        combo.setEnabled(bool(insts))
+        combo.blockSignals(False)
+
     def _toolbox_action(self, kind: str):
         """round-79b：工具箱快捷动作（打开目录 / 清理缓存）。"""
         import os as _os
@@ -4470,9 +4529,17 @@ class MainWindow(QMainWindow):
         d = get_data_dir()
         inst = None
         try:
-            fn = self.get_current_instance
-            if callable(fn):
-                inst = fn()
+            # round-235：三件套与「打开游戏目录」都按百宝箱下拉选的实例走，
+            # 不再只有一个隐式的「当前实例」。
+            combo = getattr(self, "_toolbox_inst_combo", None)
+            if (combo is not None and combo.isEnabled() and combo.count()
+                    and kind in ("map", "preview", "materials", "inst")):
+                iid = combo.currentData()
+                inst = self.inst_mgr.get(iid) if iid else None
+            if inst is None:
+                fn = self.get_current_instance
+                if callable(fn):
+                    inst = fn()
         except Exception:  # noqa: BLE001 - 取不到当前实例就退回数据目录
             inst = None
         try:
@@ -4692,8 +4759,7 @@ class MainWindow(QMainWindow):
         if self.nav_layout == "pcl2":
             self._pcl2_goto(key)
             return
-        # round-107：部分页面（mods/versions/music/achievements/console）已从侧栏
-        # 移除，没有对应导航行——此时直接切栈，不再去点不存在的行（否则会误落到首页）。
+        # round-236：mods/versions 已恢复到侧栏「游戏」分组；music/achievements/console 仍为功能扩展包。
         rows = {k: r for r, k in self._nav_row_map.items()}
         if key in rows:
             row = rows[key]

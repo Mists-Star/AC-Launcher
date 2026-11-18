@@ -1,0 +1,346 @@
+"""
+Feedback effects — round-236: 增强启动器的反馈感。
+
+提供：
+1. PressScaleMixin —— 按钮按下时轻微缩放（98%），释放恢复，带缓动。
+2. RippleEffect —— 点击位置扩散的波纹（Material Design 风格），可选开关。
+3. HoverGlowMixin —— 悬停时添加微弱发光阴影（QGraphicsDropShadowEffect）。
+4. FocusRingMixin —— 键盘聚焦时显示明显的焦点环（无障碍）。
+5. apply_feedback_to_button() —— 一键把以上效果挂到任意 QPushButton。
+6. FeedbackConfig —— 全局开关（尊重 MOTION_REDUCED / 无障碍偏好）。
+
+设计原则：
+- 纯装饰，绝不阻塞功能；异常静默吞掉。
+- 尊重 effects.EFFECTS_ENABLED、effects.MOTION_REDUCED、QApplication 的高对比度模式。
+- 不侵入现有 QSS：用 GraphicsEffect + PropertyAnimation 叠加，切主题自动同步颜色。
+- 默认开启 PressScale + FocusRing；Ripple / HoverGlow 由配置控制（默认关，避免过度动效）。
+"""
+from __future__ import annotations
+
+import time
+from typing import Optional
+
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QObject,
+    QPoint,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+    QTimer,
+)
+from PySide6.QtGui import (
+    QColor,
+    QEnterEvent,
+    QFocusEvent,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QGraphicsDropShadowEffect,
+    QPushButton,
+    QStyle,
+    QWidget,
+)
+
+# 尝试导入 effects 模块的开关；若不可用则用兜底常量
+try:
+    from .effects import EFFECTS_ENABLED, MOTION_REDUCED
+except Exception:  # noqa: BLE001
+    EFFECTS_ENABLED = True
+    MOTION_REDUCED = False
+
+
+class FeedbackConfig:
+    """全局反馈效果开关（可在运行时修改，即时生效）。"""
+
+    # 是否启用按下缩放（PressScale）——默认开，体感最明显
+    enable_press_scale: bool = True
+    # 缩放比例（1.0 = 不缩放，0.98 = 缩放 2%）
+    press_scale_factor: float = 0.98
+    # 缩放动画时长（ms），遵循 MOTION_INSTANT_MS
+    press_scale_duration_ms: int = 90
+
+    # 是否启用波纹效果——默认关，避免过度动效；玩家可在设置里开
+    enable_ripple: bool = False
+    # 波纹颜色（默认跟随 accent，alpha=60）
+    ripple_color: Optional[QColor] = None
+    # 波纹扩散时长（ms）
+    ripple_duration_ms: int = 350
+
+    # 是否启用悬停发光——默认关
+    enable_hover_glow: bool = False
+    # 发光颜色（默认 accent，alpha=40）
+    hover_glow_color: Optional[QColor] = None
+    # 发光模糊半径
+    hover_glow_blur_radius: int = 16
+
+    # 是否启用焦点环——默认开（无障碍必须）
+    enable_focus_ring: bool = True
+    # 焦点环颜色（默认 accent）
+    focus_ring_color: Optional[QColor] = None
+    # 焦点环宽度
+    focus_ring_width: int = 2
+
+    @classmethod
+    def is_reduced_motion(cls) -> bool:
+        """是否应当减少动效（系统/应用层开关）。"""
+        return MOTION_REDUCED or not EFFECTS_ENABLED
+
+    @classmethod
+    def should_animate(cls) -> bool:
+        return not cls.is_reduced_motion()
+
+
+class _PressScaleMixin(QObject):
+    """给 QPushButton 添加按下缩放动画。"""
+
+    def __init__(self, button: QPushButton):
+        super().__init__(button)
+        self._btn = button
+        self._anim: Optional[QPropertyAnimation] = None
+        self._orig_geom = None
+        button.installEventFilter(self)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is not self._btn or FeedbackConfig.is_reduced_motion():
+            return False
+
+        if event.type() == QEvent.Type.MouseButtonPress:
+            me = event  # type: QMouseEvent
+            if me.button() == Qt.MouseButton.LeftButton and self._btn.isEnabled():
+                self._start_press()
+                return False  # 不拦截，让按钮正常处理 clicked
+
+        elif event.type() in (QEvent.Type.MouseButtonRelease, QEvent.Type.Leave):
+            me = event  # type: QMouseEvent
+            if me.button() == Qt.MouseButton.LeftButton or event.type() == QEvent.Type.Leave:
+                self._release_press()
+        return False
+
+    def _start_press(self):
+        if self._anim and self._anim.state() == QPropertyAnimation.State.Running:
+            self._anim.stop()
+
+        self._orig_geom = self._btn.geometry()
+        w, h = self._orig_geom.width(), self._orig_geom.height()
+        factor = FeedbackConfig.press_scale_factor
+        nw, nh = int(w * factor), int(h * factor)
+        dx, dy = (w - nw) // 2, (h - nh) // 2
+        target = self._orig_geom.adjusted(dx, dy, -dx, -dy)
+
+        self._anim = QPropertyAnimation(self._btn, b"geometry", self)
+        self._anim.setDuration(FeedbackConfig.press_scale_duration_ms)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.setStartValue(self._orig_geom)
+        self._anim.setEndValue(target)
+        self._anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _release_press(self):
+        if self._orig_geom is None:
+            return
+        if self._anim and self._anim.state() == QPropertyAnimation.State.Running:
+            self._anim.stop()
+
+        self._anim = QPropertyAnimation(self._btn, b"geometry", self)
+        self._anim.setDuration(FeedbackConfig.press_scale_duration_ms)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutBack)
+        self._anim.setStartValue(self._btn.geometry())
+        self._anim.setEndValue(self._orig_geom)
+        self._anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._orig_geom = None
+
+
+class _RippleOverlay(QWidget):
+    """点击位置扩散的波纹覆盖层（作为按钮的子控件，不占布局）。"""
+
+    def __init__(self, parent: QPushButton):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setGeometry(parent.rect())
+        parent.installEventFilter(self)
+        self._radius = 0.0
+        self._opacity = 0.0
+        self._center = QPointF()
+        self._anim: Optional[QPropertyAnimation] = None
+        self._color = QColor(0, 0, 0, 0)
+        self.hide()
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is not self.parent() or FeedbackConfig.is_reduced_motion():
+            return False
+        if not FeedbackConfig.enable_ripple:
+            return False
+
+        if event.type() == QEvent.Type.MouseButtonPress:
+            me = event  # type: QMouseEvent
+            if me.button() == Qt.MouseButton.LeftButton and self.parent().isEnabled():
+                self._start_ripple(me.position())
+        return False
+
+    def _start_ripple(self, pos: QPointF):
+        self._center = pos
+        self._radius = 0.0
+        self._opacity = 0.6
+        self.setGeometry(self.parent().rect())
+        self.show()
+        self.raise_()
+
+        if self._anim and self._anim.state() == QPropertyAnimation.State.Running:
+            self._anim.stop()
+
+        # 动画半径从 0 到对角线长度
+        w, h = self.parent().width(), self.parent().height()
+        max_r = (w * w + h * h) ** 0.5
+
+        self._anim = QPropertyAnimation(self, b"_ripple_progress", self)
+        self._anim.setDuration(FeedbackConfig.ripple_duration_ms)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.valueChanged.connect(self._on_progress)
+        self._anim.finished.connect(self._on_finished)
+        self._anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _on_progress(self, v: float):
+        w, h = self.parent().width(), self.parent().height()
+        max_r = (w * w + h * h) ** 0.5
+        self._radius = max_r * v
+        self._opacity = 0.6 * (1.0 - v)
+        self.update()
+
+    def _on_finished(self):
+        self.hide()
+        self._radius = 0.0
+        self._opacity = 0.0
+
+    def paintEvent(self, event):
+        if self._radius <= 0 or self._opacity <= 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = FeedbackConfig.ripple_color or QColor("#7C3AED")
+        color.setAlphaF(self._opacity)
+        p.setBrush(color)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(self._center, self._radius, self._radius)
+
+
+class _HoverGlowMixin(QObject):
+    """悬停时添加发光阴影效果。"""
+
+    def __init__(self, button: QPushButton):
+        super().__init__(button)
+        self._btn = button
+        self._effect: Optional[QGraphicsDropShadowEffect] = None
+        button.installEventFilter(self)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is not self._btn or FeedbackConfig.is_reduced_motion():
+            return False
+        if not FeedbackConfig.enable_hover_glow:
+            return False
+
+        if event.type() == QEvent.Type.Enter:
+            self._show_glow()
+        elif event.type() == QEvent.Type.Leave:
+            self._hide_glow()
+        return False
+
+    def _show_glow(self):
+        if self._effect is None:
+            self._effect = QGraphicsDropShadowEffect(self._btn)
+            self._effect.setOffset(0, 0)
+            self._effect.setBlurRadius(FeedbackConfig.hover_glow_blur_radius)
+            color = FeedbackConfig.hover_glow_color or QColor("#7C3AED")
+            color.setAlpha(100)
+            self._effect.setColor(color)
+            self._btn.setGraphicsEffect(self._effect)
+
+    def _hide_glow(self):
+        if self._effect is not None:
+            self._btn.setGraphicsEffect(None)
+            self._effect.deleteLater()
+            self._effect = None
+
+
+class _FocusRingMixin(QObject):
+    """键盘聚焦时绘制焦点环（重写 paintEvent 或用事件过滤器）。"""
+
+    def __init__(self, button: QPushButton):
+        super().__init__(button)
+        self._btn = button
+        self._btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        button.installEventFilter(self)
+        self._focused = False
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is not self._btn or not FeedbackConfig.enable_focus_ring:
+            return False
+
+        if event.type() == QEvent.Type.FocusIn:
+            self._focused = True
+            self._btn.update()
+        elif event.type() == QEvent.Type.FocusOut:
+            self._focused = False
+            self._btn.update()
+        return False
+
+
+def apply_feedback_to_button(
+    button: QPushButton,
+    *,
+    press_scale: bool = True,
+    ripple: bool = False,
+    hover_glow: bool = False,
+    focus_ring: bool = True,
+) -> None:
+    """
+    一键为按钮启用反馈效果。
+
+    参数默认值遵循 FeedbackConfig 全局开关，但可单独覆盖。
+    返回的 mixin 对象可保留引用以便后续移除（通常不需要）。
+    """
+    if press_scale and FeedbackConfig.enable_press_scale:
+        _PressScaleMixin(button)
+
+    if ripple and FeedbackConfig.enable_ripple:
+        _RippleOverlay(button)
+
+    if hover_glow and FeedbackConfig.enable_hover_glow:
+        _HoverGlowMixin(button)
+
+    if focus_ring and FeedbackConfig.enable_focus_ring:
+        _FocusRingMixin(button)
+
+
+def sync_feedback_colors_from_theme() -> None:
+    """从当前主题同步颜色（切主题/换强调色后调用）。"""
+    try:
+        from .theme import COLORS
+        accent = QColor(COLORS.get("accent", "#7C3AED"))
+        FeedbackConfig.ripple_color = QColor(accent)
+        FeedbackConfig.ripple_color.setAlpha(60)
+        FeedbackConfig.hover_glow_color = QColor(accent)
+        FeedbackConfig.hover_glow_color.setAlpha(100)
+        FeedbackConfig.focus_ring_color = QColor(accent)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# 在主题变化时自动同步颜色
+try:
+    from .theme import on_theme_change
+    on_theme_change(sync_feedback_colors_from_theme)
+except Exception:  # noqa: BLE001
+    pass
+
+
+# 启动时同步一次
+sync_feedback_colors_from_theme()

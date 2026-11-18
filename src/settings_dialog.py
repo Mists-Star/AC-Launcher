@@ -145,6 +145,11 @@ _DEFAULTS = {
     # 而是让所有过渡瞬时完成（页面切换/列表淡入/流光/toast 滑入），
     # 因此不受 EFFECT_CONFIG_KEYS 的模块归属回写影响。
     "reduce_motion": False,
+    # round-236b 交互反馈
+    "feedback_press_scale": True,    # 按钮按下时轻微缩放（默认开）
+    "feedback_ripple": False,        # 点击波纹（Material 风格，默认关）
+    "feedback_hover_glow": False,    # 悬停发光阴影（默认关）
+    "feedback_focus_ring": True,     # 键盘聚焦环（无障碍必须，默认开）
     # round-167 低配模式：压制壁纸/动效/音效/启动画面等重效果（不改写玩家偏好）
     "slim_mode": False,
     # ---- 启动后窗口行为（round-50 引入，2026-11-06 改语义）----
@@ -814,6 +819,36 @@ class SettingsPage(QWidget):
             t("settings.verify_layout_integrity_hint"))
         _fx_boxes = [self.close_launch_chk, self.tray_chk, self.topmost_chk,
                      self.reduce_motion_chk, self.verify_layout_chk]
+
+        # round-236b 交互反馈：按下缩放 / 点击波纹 / 悬停发光 / 焦点环
+        fb_grid = QGridLayout()
+        fb_grid.setHorizontalSpacing(24)
+        fb_grid.setVerticalSpacing(6)
+        self.feedback_press_scale_chk = QCheckBox(t("settings.feedback_press_scale"))
+        self.feedback_press_scale_chk.setChecked(
+            self.cfg.get("feedback_press_scale", True))
+        self.feedback_press_scale_chk.setToolTip(t("settings.feedback_press_scale_hint"))
+        self.feedback_ripple_chk = QCheckBox(t("settings.feedback_ripple"))
+        self.feedback_ripple_chk.setChecked(
+            self.cfg.get("feedback_ripple", False))
+        self.feedback_ripple_chk.setToolTip(t("settings.feedback_ripple_hint"))
+        self.feedback_hover_glow_chk = QCheckBox(t("settings.feedback_hover_glow"))
+        self.feedback_hover_glow_chk.setChecked(
+            self.cfg.get("feedback_hover_glow", False))
+        self.feedback_hover_glow_chk.setToolTip(t("settings.feedback_hover_glow_hint"))
+        self.feedback_focus_ring_chk = QCheckBox(t("settings.feedback_focus_ring"))
+        self.feedback_focus_ring_chk.setChecked(
+            self.cfg.get("feedback_focus_ring", True))
+        self.feedback_focus_ring_chk.setToolTip(t("settings.feedback_focus_ring_hint"))
+        _fb_boxes = [self.feedback_press_scale_chk, self.feedback_ripple_chk,
+                     self.feedback_hover_glow_chk, self.feedback_focus_ring_chk]
+        for _i, _cb in enumerate(_fb_boxes):
+            fb_grid.addWidget(_cb, _i // 2, _i % 2)
+        fb_grid.setColumnStretch(2, 1)
+        fb_grp = QGroupBox(t("settings.feedback"))
+        fb_grp_lay = QVBoxLayout(fb_grp)
+        fb_grp_lay.addLayout(fb_grid)
+        apl.addWidget(fb_grp)
         for _i, _cb in enumerate(_fx_boxes):
             fx_grid.addWidget(_cb, _i // 2, _i % 2)
         fx_grid.setColumnStretch(2, 1)
@@ -2936,6 +2971,19 @@ class SettingsPage(QWidget):
         target["verify_layout_integrity"] = self._safe(
             lambda: self.verify_layout_chk.isChecked(),
             bool(target.get("verify_layout_integrity", True)))
+        # round-236b 交互反馈
+        target["feedback_press_scale"] = self._safe(
+            lambda: self.feedback_press_scale_chk.isChecked(),
+            bool(target.get("feedback_press_scale", True)))
+        target["feedback_ripple"] = self._safe(
+            lambda: self.feedback_ripple_chk.isChecked(),
+            bool(target.get("feedback_ripple", False)))
+        target["feedback_hover_glow"] = self._safe(
+            lambda: self.feedback_hover_glow_chk.isChecked(),
+            bool(target.get("feedback_hover_glow", False)))
+        target["feedback_focus_ring"] = self._safe(
+            lambda: self.feedback_focus_ring_chk.isChecked(),
+            bool(target.get("feedback_focus_ring", True)))
         # round-167 低配模式（基础分区懒加载 → 未构建时保留原值）
         target["slim_mode"] = self._safe(
             lambda: self.slim_chk.isChecked(),
@@ -3073,9 +3121,15 @@ class SettingsPage(QWidget):
         try:
             from .effects import (set_window_opacity, set_effects_enabled,
                                   set_reduce_motion)
+            from .feedback import FeedbackConfig
             set_effects_enabled(self.cfg.get("effect_light_trail", False))
             # round-152 减少动效即时生效（无需重启）
             set_reduce_motion(self.cfg.get("reduce_motion", False))
+            # round-236b 交互反馈即时生效
+            FeedbackConfig.enable_press_scale = self.cfg.get("feedback_press_scale", True)
+            FeedbackConfig.enable_ripple = self.cfg.get("feedback_ripple", False)
+            FeedbackConfig.enable_hover_glow = self.cfg.get("feedback_hover_glow", False)
+            FeedbackConfig.enable_focus_ring = self.cfg.get("feedback_focus_ring", True)
             set_window_opacity(self._window, self.cfg.get("window_opacity", 1.0))
         except Exception:  # noqa: BLE001
             pass
