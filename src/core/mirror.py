@@ -1014,8 +1014,16 @@ _PATCH_MODULES = ("_helper", "install", "runtime")
 
 # round-172：这些加载器安装函数用 ``subprocess.run`` 跑安装器 jar，jar 自己还会
 # 下载几百 MB —— 取消启动时必须能连带杀掉子进程，否则「取消」看起来毫无反应。
-_SPROC_PATCH_MODULES = ("mod_loader._fabric", "mod_loader._forge",
-                        "mod_loader._neoforge", "mod_loader._quilt")
+_SPROC_PATCH_MODULES = (
+    "mod_loader._fabric", "mod_loader._forge",
+    "mod_loader._neoforge", "mod_loader._quilt",
+    # round-248：mll 顶层旧模块也用 subprocess 跑安装器/查 Java 版本。
+    # 用户实测「导入整合包/启动/补全都会闪一个终端」——这些路径不一定
+    # 走 mod_loader._*（例如 install_mrpack 的 Java 探测走 java_utils），
+    # 漏 patch 的模块会弹出黑色 cmd 窗口。全部装 shim，run_cancellable
+    # 在 Windows 下自动补 CREATE_NO_WINDOW（见其实现）。
+    "fabric", "forge", "quilt", "java_utils", "runtime",
+)
 
 
 def _candidates(url, ctx=None):

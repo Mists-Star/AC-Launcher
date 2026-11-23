@@ -299,6 +299,13 @@ def save_config(cfg: dict) -> None:
             except OSError:
                 pass
             raise
+    # round-248：所有保存路径统一在这里把 feedback_* 同步到运行时。
+    # 此前这些开关只有设置页 checkbox、没有任何消费端读取 → 改了不生效。
+    try:
+        from .feedback import FeedbackConfig
+        FeedbackConfig.apply_config(cfg)
+    except Exception:  # noqa: BLE001 - 反馈开关失败不阻断配置落盘
+        pass
 
 
 def _cfg_float(cfg: dict, key: str, default: float) -> float:

@@ -48,12 +48,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# 尝试导入 effects 模块的开关；若不可用则用兜底常量
+# ☠ round-248：`from .effects import EFFECTS_ENABLED, MOTION_REDUCED` 是
+# **导入时的值快照**——main_window 后面调 set_effects_enabled()/set_reduce_motion()
+# 改的是 effects 模块的变量，这里的副本永远不更新 → 按钮反馈/波纹按错误的
+# 开关状态工作（用户实测"所有动画都失效"）。改为实时读模块属性。
 try:
-    from .effects import EFFECTS_ENABLED, MOTION_REDUCED
+    from . import effects as _effects
 except Exception:  # noqa: BLE001
-    EFFECTS_ENABLED = True
-    MOTION_REDUCED = False
+    _effects = None
 
 
 class FeedbackConfig:
@@ -89,8 +91,28 @@ class FeedbackConfig:
 
     @classmethod
     def is_reduced_motion(cls) -> bool:
-        """是否应当减少动效（系统/应用层开关）。"""
-        return MOTION_REDUCED or not EFFECTS_ENABLED
+        """是否应当减少动效。
+
+        ☠ round-248：旧实现是 `from .effects import EFFECTS_ENABLED,
+        MOTION_REDUCED` 的**导入快照**——运行时 set_reduce_motion()/流光开关
+        改的是 effects 模块变量，这里永远不更新。且把 EFFECTS_ENABLED（流光
+        装饰）也算进"减少动效"是错的：用户关流光但开了按钮反馈是合法配置。
+        现在实时读 effects.MOTION_REDUCED，与 round-238 的 fade_in_widget 解耦
+        口径一致——只有无障碍「减少动效」才是全局动画总闸。
+        """
+        if _effects is None:
+            return False
+        return bool(getattr(_effects, "MOTION_REDUCED", False))
+
+    @classmethod
+    def apply_config(cls, cfg: dict) -> None:
+        """把玩家设置里的 feedback_* 开关同步到运行时（当前无人接线，修复）。"""
+        if not isinstance(cfg, dict):
+            return
+        cls.enable_press_scale = bool(cfg.get("feedback_press_scale", True))
+        cls.enable_ripple = bool(cfg.get("feedback_ripple", False))
+        cls.enable_hover_glow = bool(cfg.get("feedback_hover_glow", False))
+        cls.enable_focus_ring = bool(cfg.get("feedback_focus_ring", True))
 
     @classmethod
     def should_animate(cls) -> bool:
@@ -108,7 +130,8 @@ class _PressScaleMixin(QObject):
         button.installEventFilter(self)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if obj is not self._btn or FeedbackConfig.is_reduced_motion():
+        if obj is not self._btn or FeedbackConfig.is_reduced_motion() or \
+                not FeedbackConfig.enable_press_scale:
             return False
 
         etype = event.type()

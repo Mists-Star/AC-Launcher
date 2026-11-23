@@ -521,6 +521,29 @@ def scan_health(inst, settings: dict | None = None) -> dict:
     groups = [{"key": k, "findings": fs} for k, fs in sections if fs]
     findings = [f for _k, fs in sections for f in fs]
 
+    # round-248：过滤玩家主动忽略的误报。所有体检入口（弹窗/页内/首页摘要）
+    # 都走这里，忽略一处生效处处生效。计数按过滤后的算，避免"报 3 项却只
+    # 显示 2 张卡"。
+    inst_id = str(getattr(inst, "id", "") or "")
+    ignored = 0
+    if inst_id:
+        try:
+            from . import health_ignore
+            before = len(findings)
+            findings = [f for f in findings
+                        if not health_ignore.is_ignored(inst_id, f)]
+            ignored = before - len(findings)
+            if ignored:
+                groups = [
+                    {"key": g["key"],
+                     "findings": [f for f in g["findings"]
+                                  if not health_ignore.is_ignored(inst_id, f)]}
+                    for g in groups
+                ]
+                groups = [g for g in groups if g["findings"]]
+        except Exception:  # noqa: BLE001 - 忽略表坏了也要正常显示体检
+            pass
+
     n_crit = sum(1 for f in findings if f.severity == SEV_CRITICAL)
     n_warn = sum(1 for f in findings if f.severity == SEV_WARNING)
     n_info = len(findings) - n_crit - n_warn
@@ -533,6 +556,7 @@ def scan_health(inst, settings: dict | None = None) -> dict:
         "info": n_info,
         "scanned": (conflict or {}).get("scanned", 0),
         "fixable": fixable,
+        "ignored": ignored,
     }
 
 

@@ -27,6 +27,40 @@
   只 emit 不 connect 的信号属于 `InstanceCard`/`ModCard` 遗留死代码
   （文件头已标注 old layout，仅在老测试里实例化），不动以免破坏测试。
 
+## round-248（2026-11-23）— 体检误报可忽略 / 动画反馈开关接线 / 子进程终端
+
+### 体检误报可忽略（用户要求：明明可用却报有问题）
+* 新增 `src/core/health_ignore.py`：按 `(实例id, kind+meta 签名)` 持久化到
+  `data/health_ignored.json`，升级/翻译改动不失效，实例间不串扰。
+* `instance_health.scan_health` 末尾统一过滤（所有入口一次生效），返回
+  `ignored` 计数；`HealthPanel` 每张卡加「忽略此项」，底部加「恢复忽略」，
+  全被忽略时给提示而非空白。i18n 中英 11 个键补齐。
+* 验证 `_probe_health_ignore.py` ALL PASS：签名稳定/不撞/跨实例隔离、
+  落盘重载仍忽略、scan_health 过滤与计数、恢复后重现、UI 按钮与文案。
+
+### 动画反馈全失效（用户报切页/卡片/按钮/换肤/背景过渡都没了）
+* ☠ 根因①：`feedback.py` 用 `from .effects import EFFECTS_ENABLED,
+  MOTION_REDUCED` —— **导入时的值快照**，运行时 `set_reduce_motion()` 改的是
+  effects 模块变量，这里永远不更新。改成实时 `getattr(_effects, ...)`。
+* ☠ 根因②：`is_reduced_motion()` 把 `EFFECTS_ENABLED`（流光装饰）也算成
+  "减少动效"——用户关流光但开按钮反馈是合法配置，不该连带关。与 round-238
+  的 `fade_in_widget` 解耦口径统一：只有无障碍 `MOTION_REDUCED` 是总闸。
+* ☠ 根因③：`feedback_press_scale / ripple / hover_glow / focus_ring` 四个设置
+  **只有 checkbox 和 i18n、从没同步到运行时** → 勾了按下缩放也没效果。
+  加 `FeedbackConfig.apply_config(cfg)`，在 `MainWindow.__init__` 和
+  `save_config()` 两处接线（覆盖所有保存路径）。
+* 探针实测：切页淡入/列表淡入/打断恢复都正常（效果函数没坏，坏在开关）；
+  `_probe_feedback_config.py` / `_probe_feedback_page_diag.py` 全过。
+* 背景切换过渡：壁纸里 `_LoopFade` 是**视频循环接缝**用的，不是背景切换
+  淡入——现有代码没有"切壁纸淡入"，此项待用户确认是否要新增。
+
+### 子进程闪终端
+* mll 的 `_SubprocessShim` 只装在 4 个 `mod_loader._*` 模块，顶层
+  `fabric/forge/quilt` 与 `java_utils`（Java 版本探测）、`runtime`（chmod）
+  漏装 → 这些路径弹黑色 cmd 窗口（用户实测导入/启动/补全都闪）。
+  patch 列表补全，Windows 下 `run_cancellable` 强制 `CREATE_NO_WINDOW`。
+  验证 `_probe_subprocess_hidden.py` ALL PASS。
+
 ## round-247（2026-11-22 夜）— 部署不再留 .old 备份
 
 * 用户要求：程序文件有 git + 构建可重建，没必要每轮留一份 117MB 的

@@ -107,10 +107,15 @@ class HealthPanel(PanelCloseMixin, QWidget):
             t("health.rescan"), on_click=self._rescan, min_h=36)
         self.fixall_btn = ui_kit.make_button(
             t("health.fix_all"), kind="accent", on_click=self._fix_all, min_h=36)
+        # round-248：恢复被忽略的误报（默认隐藏，有忽略项时显示）
+        self.restore_ignored_btn = ui_kit.make_button(
+            t("health.ignore_restore"), on_click=self._restore_ignored, min_h=36)
+        self.restore_ignored_btn.setVisible(False)
         self.close_btn = ui_kit.make_button(
             t("common.close"), on_click=self._on_close, min_h=36)
         row.addWidget(self.rescan_btn)
         row.addStretch(1)
+        row.addWidget(self.restore_ignored_btn)
         row.addWidget(self.fixall_btn)
         row.addWidget(self.close_btn)
         bl.addLayout(row)
@@ -142,17 +147,30 @@ class HealthPanel(PanelCloseMixin, QWidget):
         findings = result.get("findings") or []
         groups = result.get("groups") or []
         n_fix = int(result.get("fixable", 0) or 0)
+        n_ignored = int(result.get("ignored", 0) or 0)
+
+        from .core import health_ignore
+        has_ignored = health_ignore.ignored_count(
+            str(getattr(self.inst, "id", "") or "")) > 0
+        self.restore_ignored_btn.setVisible(has_ignored)
 
         try:
-            self.header.desc_lbl.setText(
-                t("health.summary", n=len(findings), f=n_fix) if findings
-                else t("health.ok_desc"))
+            _desc = (t("health.summary", n=len(findings), f=n_fix) if findings
+                     else t("health.ok_desc"))
+            if n_ignored:
+                _desc += "  ·  " + t("health.ignored_suffix", n=n_ignored)
+            self.header.desc_lbl.setText(_desc)
         except Exception:  # noqa: BLE001 - desc 刷新失败不影响报告
             pass
 
         if not findings:
             self.fixall_btn.setEnabled(False)
             self.fixall_btn.setToolTip(t("health.fix_all_none_hint"))
+            if n_ignored:
+                hint = QLabel(t("health.all_ignored_hint", n=n_ignored))
+                hint.setProperty("cls", "sub")
+                hint.setWordWrap(True)
+                self._list.addWidget(hint)
             self._list.addStretch(1)
             return
 
@@ -192,9 +210,39 @@ class HealthPanel(PanelCloseMixin, QWidget):
                 label,
                 (lambda _checked=False, ff=f, fxx=fx: self._apply(ff, fxx)),
             ))
+        # round-248：每条发现都能「忽略」——扫描判据是启发式的，玩家实例
+        # 明明能玩却被误报时要能压掉，避免每次体检都被同一条假阳性淹没。
+        actions.append((
+            t("health.ignore"),
+            (lambda _checked=False, ff=f: self._ignore(ff)),
+        ))
         return _FindingCard(
             color, t(f"health.sev.{f.severity}"), title, reason, suggestion,
             list(f.filenames or []), actions)
+
+    def _ignore(self, f) -> None:
+        """忽略这条发现（持久化到 data/health_ignored.json），随后重扫。"""
+        from .core import health_ignore
+        inst_id = str(getattr(self.inst, "id", "") or "")
+        if not inst_id:
+            self._note(t("health.ignore_no_instance"), "warning")
+            return
+        try:
+            health_ignore.add(inst_id, f, _localize(f)[0])
+        except Exception as e:  # noqa: BLE001
+            self._note(t("health.ignore_failed", e=str(e)), "warning")
+            return
+        self._note(t("health.ignored_done"))
+        self._rescan()
+
+    def _restore_ignored(self) -> None:
+        """恢复本实例所有被忽略项（底部按钮）。"""
+        from .core import health_ignore
+        inst_id = str(getattr(self.inst, "id", "") or "")
+        n = health_ignore.clear_instance(inst_id)
+        self._note(t("health.ignore_restored", n=n) if n
+                   else t("health.ignore_none"))
+        self._rescan()
 
     # ── 动作 ──────────────────────────────────────────────────────────────
     def _apply(self, f, fix: dict | None = None) -> None:

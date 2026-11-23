@@ -2044,6 +2044,10 @@ class MainWindow(QMainWindow):
         set_effects_enabled(bool(slim.eff(self.cfg, "effect_light_trail")))
         # round-152 减少动效：必须在任何页面/卡片构建之前生效。
         set_reduce_motion(bool(slim.eff(self.cfg, "reduce_motion")))
+        # round-248：feedback_* 四个开关此前只有设置页 UI、从没同步到运行时
+        # → 玩家勾了「按下缩放」也没效果。在这里一次性接线。
+        from .feedback import FeedbackConfig
+        FeedbackConfig.apply_config(self.cfg)
         set_window_opacity(self, slim.eff(self.cfg, "window_opacity") or 1.0)
         # round-167 低配模式：图片内存缓存上限要在页面构建前生效
         try:
