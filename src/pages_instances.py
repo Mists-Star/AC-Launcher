@@ -2416,9 +2416,15 @@ class InstancesPage(QWidget):
         from .win_rounded import confirm, toast
         if self._guard_running(inst.id):
             return
+        # round-250：与列表页删除入口统一——都带上路径与"会删真实文件"警告。
+        # 旧实现详情底部按钮的确认框只有一句"确认删除？"，玩家看不到
+        # 会删掉哪些内容（功能分化/对外显示问题）。
         if not confirm(
             self, t("instances.delete_title"),
             t("instances.delete_confirm", name=inst.name),
+            detail=t("instances.delete_path", path=inst.mc_dir)
+                   + "\n\n"
+                   + t("instances.delete_warn"),
         ):
             return
         failed = self.mgr.remove(inst.id)

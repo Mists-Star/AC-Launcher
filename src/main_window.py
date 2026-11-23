@@ -2440,7 +2440,9 @@ class MainWindow(QMainWindow):
         # 右侧文字栈
         right = QVBoxLayout()
         right.setSpacing(2)
-        unlocked_lbl = QLabel("§l§6§o" if False else "已解锁！")  # 中文"已解锁！"
+        # round-250：这里曾硬编码中文「已解锁！」，切英文后仍是中文；
+        # 且 `"§l§6§o" if False else ...` 是死代码。走 i18n。
+        unlocked_lbl = QLabel(t("ach.unlocked"))
         unlocked_lbl.setStyleSheet(
             "color: #FFD700; font-size: 11px; font-weight: 700; letter-spacing: 1px;"
         )

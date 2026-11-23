@@ -1133,6 +1133,9 @@ class InstanceEditorPanel(QWidget):
             pass
         self._set_busy(True, t("inst.repair_working"))
         # 跟随用户设置（之前硬编码 official，国内慢到像"没在下载"）
+        # round-250：这里曾漏导入 load_config → 点补全抛 NameError，
+        # 被 Qt 事件循环吞掉，玩家只看到"正在校验…"然后没反应。
+        from .settings_dialog import load_config
         cfg = load_config()
         self._repair_worker = ProgressWorker(
             install_instance, self._inst,

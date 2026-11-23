@@ -27,6 +27,41 @@
   只 emit 不 connect 的信号属于 `InstanceCard`/`ModCard` 遗留死代码
   （文件头已标注 old layout，仅在老测试里实例化），不动以免破坏测试。
 
+## round-250（2026-11-23）— 隐形问题扩大审查：文案/显示/功能分化/细节
+
+用户要求「扩大范围，细分查显示问题、文案问题、逻辑与功能分化、对外显示、
+功能细节」。四路并行审计，核实后修掉 4 个：
+
+### P0 补全按钮 NameError（功能细节，实证用户反馈的"补全没用"）
+* 上一轮我在 `instance_editor._repair_files` 加了 `cfg = load_config()`，
+  但该文件顶部没导入 → 点补全抛 `NameError`，被 Qt 事件循环吞掉，
+  玩家只看到"正在校验…"然后没反应。pyflakes 全量扫 undefined name 抓出。
+  补局部导入，`_probe_repair_no_nameerror.py` ALL PASS。
+
+### 文案问题：硬编码中文（对外显示）
+* `main_window.py` 成就 toast 里 `QLabel("§l§6§o" if False else "已解锁！")`
+  ——切英文后仍是中文，且含死代码三元表达式。改走 `t("ach.unlocked")`。
+* i18n 全量审计：中英键 2136/2136 完全对齐、占位符 0 不一致、
+  `default=` 兜底文案 0 处偏差、UI 硬编码中文仅此 1 处。
+
+### 功能分化：删除实例两个入口确认框不一致
+* 详情底部「删除」只有一句"确认删除？"，列表入口带路径 + "会删真实文件"
+  警告。统一为都带 `delete_path` + `delete_warn`。
+  `_probe_delete_consistency.py` ALL PASS。
+
+### 显示问题审计（无真 bug，记录结论）
+* offscreen 截图无 CJK 字体（中文全方框），改程序化几何审计：
+  文本截断/零尺寸/父子越界。报告里的"截断"多为 QLabel wordWrap 的
+  sizeHint 假阳性；两个"越界"是 QComboBox 的 popup（几何正常）。
+  没有发现真实显示缺陷。
+
+### 探针与验证
+* 新增 `_probe_display_audit` / `_probe_shots_all` / `_probe_delete_consistency`
+  / `_probe_repair_no_nameerror`。全量 104 测试文件零失败、compile OK、
+  smoke 17/17、相关探针 ALL PASS、pyflakes 无 undefined name。
+* ☠ 教训：`pyflakes src/` 每轮都该跑——我的 `load_config` 漏导入就是
+  靠它抓出来的；功能改动后必须再扫一次 undefined name。
+
 ## round-249（2026-11-23）— 全库同类 bug 审查：右键菜单丢失 / 导入识别错误 / 中文搜索排序
 
 用户要求「自己审查所有出现过的 bug，查功能无法使用 + 识别错误」。按历史 bug
