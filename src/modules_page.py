@@ -80,7 +80,7 @@ class ModulesPage(QWidget):
         lay.setContentsMargins(24, 20, 24, 24)
         lay.setSpacing(16)
 
-        # ── round-167 功能扩展包：可物理删除的页面 ──
+        # ── 功能扩展包：可物理删除的页面（内置随包发布 + 远程索引安装）──
         self._feat_grp = QGroupBox(t("features.group"))
         fg = QVBoxLayout(self._feat_grp)
         fg.setSpacing(8)
@@ -97,8 +97,12 @@ class ModulesPage(QWidget):
         fb_url = QPushButton(t("features.install_url"))
         fb_url.setMinimumHeight(32)
         fb_url.clicked.connect(self._install_feature_url)
+        fb_remote = QPushButton(t("features.install_remote"))
+        fb_remote.setMinimumHeight(32)
+        fb_remote.clicked.connect(self._install_feature_remote)
         frow.addWidget(fb_file)
         frow.addWidget(fb_url)
+        frow.addWidget(fb_remote)
         frow.addStretch(1)
         fg.addLayout(frow)
         lay.addWidget(self._feat_grp)
@@ -161,7 +165,7 @@ class ModulesPage(QWidget):
 
     # ── 0. 功能扩展包（round-167）─────────────────────────────────────────
     def _fill_features(self):
-        """已装扩展 + 可恢复的内置包。删除/安装后主窗口会重建导航。"""
+        """已装扩展 + 可恢复的内置包 + 远程可安装列表。删除/安装后主窗口会重建导航。"""
         self._clear(self._feat_lay)
         try:
             packs = F.scan_installed()
@@ -176,6 +180,7 @@ class ModulesPage(QWidget):
         for p in packs:
             self._feat_lay.addWidget(
                 self._feature_row(p, p.id in builtin_ids))
+        # 内置包被玩家删掉后不自动重装，但在这里列为「可安装」
         try:
             avail = F.list_builtins()
         except Exception:  # noqa: BLE001
@@ -183,7 +188,10 @@ class ModulesPage(QWidget):
         for item in avail:
             self._feat_lay.addWidget(self._feature_avail_row(item))
 
-    def _feature_row(self, pack, is_builtin: bool) -> QFrame:
+        # 远程可安装列表（异步加载，避免卡 UI）
+        self._load_remote_features()
+
+    def _feature_row(self, pack, is_builtin: bool = False) -> QFrame:
         row = QFrame()
         row.setProperty("cls", "card")
         h = QHBoxLayout(row)
@@ -210,6 +218,7 @@ class ModulesPage(QWidget):
         return row
 
     def _feature_avail_row(self, item: dict) -> QFrame:
+        """被删除的内置包：一行「可安装」卡片（round-167 设计：删了不自动回来）。"""
         row = QFrame()
         row.setProperty("cls", "card")
         h = QHBoxLayout(row)
@@ -251,6 +260,7 @@ class ModulesPage(QWidget):
         self._notify_features_changed()
 
     def _restore_feature(self, item: dict):
+        """把被删除的内置包从 assets/features 装回（round-167 手动恢复路径）。"""
         try:
             pack = F.restore_builtin(item.get("id", ""))
         except Exception as e:  # noqa: BLE001
@@ -292,6 +302,122 @@ class ModulesPage(QWidget):
             return
         try:
             pack = F.install_from_url(str(url).strip())
+        except Exception as e:  # noqa: BLE001
+            warn(self, t("features.failed"), str(e))
+            return
+        self._after_feature_install(pack)
+
+    def _install_feature_remote(self):
+        """从远程索引加载可用扩展列表并让用户选择安装。"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QListWidgetItem, QDialogButtonBox, QLabel
+        try:
+            idx = F.fetch_feature_index()
+        except Exception as e:  # noqa: BLE001
+            warn(self, t("features.remote_failed"), str(e))
+            return
+        if not idx:
+            info(self, t("features.remote_empty"), t("features.remote_none"))
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(t("features.remote_title"))
+        dlg.resize(520, 420)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+        hint = QLabel(t("features.remote_hint"))
+        hint.setProperty("cls", "sub")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        lst = QListWidget()
+        lst.setSelectionMode(QListWidget.SingleSelection)
+        for item in idx:
+            it = QListWidgetItem(f"{_lname(item.name, item.name_en)}  v{item.version}")
+            it.setToolTip(_lname(item.description, item.description_en))
+            it.setData(Qt.UserRole, item)
+            lst.addItem(it)
+        lay.addWidget(lst, stretch=1)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        sel = lst.currentItem()
+        if not sel:
+            return
+        item: F.RemoteFeatureInfo = sel.data(Qt.UserRole)
+        if not confirm(self, t("features.pack_warn_title"), t("features.pack_warn")):
+            return
+        try:
+            pack = F.install_from_remote(item.id)
+        except Exception as e:  # noqa: BLE001
+            warn(self, t("features.failed"), str(e))
+            return
+        self._after_feature_install(pack)
+
+    def _load_remote_features(self):
+        """异步加载远程可安装扩展（仅显示前 5 个，点击「更多」打开完整列表）。"""
+        from PySide6.QtCore import QThread, Signal
+        class _Loader(QThread):
+            done = Signal(list)
+            def run(self):
+                try:
+                    self.done.emit(F.fetch_feature_index())
+                except Exception:
+                    self.done.emit([])
+        self._remote_loader = _Loader()
+        self._remote_loader.done.connect(self._on_remote_loaded)
+        self._remote_loader.start()
+
+    def _on_remote_loaded(self, idx: list):
+        # 只在功能扩展区显示前几个 +「查看更多」按钮
+        if not idx:
+            return
+        # 过滤掉已安装的
+        installed_ids = {p.id for p in F.scan_installed()}
+        avail = [x for x in idx if x.id not in installed_ids]
+        if not avail:
+            return
+        # 显示前 3 个
+        for item in avail[:3]:
+            self._feat_lay.addWidget(self._remote_feature_row(item))
+        if len(avail) > 3:
+            more_btn = QPushButton(t("features.remote_more", count=len(avail) - 3))
+            more_btn.setProperty("cls", "secondary")
+            more_btn.setMinimumHeight(30)
+            more_btn.clicked.connect(self._install_feature_remote)
+            self._feat_lay.addWidget(more_btn)
+
+    def _remote_feature_row(self, item) -> QFrame:
+        row = QFrame()
+        row.setProperty("cls", "card")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(12, 8, 12, 8)
+        h.setSpacing(10)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        name = QLabel(f"{_lname(item.name, item.name_en)}  v{item.version}")
+        name.setStyleSheet("font-size: 13px; font-weight: 700;")
+        col.addWidget(name)
+        desc = QLabel(_lname(item.description, item.description_en) or " ")
+        desc.setProperty("cls", "sub")
+        desc.setWordWrap(True)
+        col.addWidget(desc)
+        h.addLayout(col, stretch=1)
+        badge = QLabel(t("features.remote"))
+        badge.setProperty("cls", "badge")
+        h.addWidget(badge)
+        ins_b = QPushButton(t("features.install"))
+        ins_b.setMinimumHeight(30)
+        ins_b.clicked.connect(lambda _=False, i=item: self._install_remote_item(i))
+        h.addWidget(ins_b)
+        return row
+
+    def _install_remote_item(self, item):
+        if not confirm(self, t("features.pack_warn_title"), t("features.pack_warn")):
+            return
+        try:
+            pack = F.install_from_remote(item.id)
         except Exception as e:  # noqa: BLE001
             warn(self, t("features.failed"), str(e))
             return

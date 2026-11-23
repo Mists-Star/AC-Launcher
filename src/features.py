@@ -1,17 +1,22 @@
 """round-167 功能扩展包 — 可物理删除的页面插件。
 
 与 `modules.py` 的「内容模块」（主题/JVM/音效/崩溃策略）不同，本模块管理
-**功能页面本身**：音乐、成就、控制台等页面被移到 `<data>/features/<id>/`
+**功能页面本身**：音乐、成就、控制台、主题等页面被移到 `<data>/features/<id>/`
 下，删掉目录即彻底移除，启动器核心不受影响。
 
 目录结构::
 
     <data>/features/<id>/manifest.json
     <data>/features/<id>/entry.py        # 必须暴露 create_page(ctx)
-    assets/features/<id>/...             # 随安装包发布的内置原始包
+    assets/features/<id>/...             # 随安装包发布的内置原始包（git 跟踪）
 
-`registry.json` 只记录「曾经装过的内置包」：玩家主动删掉的包不会被下一次
+`registry.json` 只记录「曾经装过的包」：玩家主动删掉的包不会被下一次
 启动自动装回；只有设置页点「安装」或 `restore_builtin()` 才恢复。
+
+远程索引（可选）：
+    启动器可从配置的 URL 拉取 `features-index.json`，获取官方/社区扩展列表，
+    含下载地址、校验哈希、版本等元数据。内置包与远程扩展**并存**：内置包随
+    安装包发布（`assets/features` 进 git，删了能一键装回），远程扩展按需下载。
 
 动态导入用 `src._feature_<id>` 作为模块名，`__package__` 为 `src`，因此包内
 页面代码可以直接沿用 `.theme` / `.i18n` / `.ui_kit` 等相对导入。
@@ -29,7 +34,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .paths import get_data_dir, get_resource_path
 
@@ -58,6 +63,9 @@ CORE_PAGE_IDS = frozenset({
     "toolbox", "account", "launch", "download", "online", "more",
 })
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+# 默认远程索引地址（可被配置覆盖）
+DEFAULT_FEATURE_INDEX_URL = "https://github.com/Mists-Star/AC-Launcher-Features/releases/latest/download/features-index.json"
 
 
 class FeatureError(Exception):
@@ -296,35 +304,6 @@ def scan_installed(root: str | None = None) -> list[FeaturePack]:
 
 
 # ── 内置包：首次安装 / 删除后不自动重装 ──────────────────────────────────
-def _copy_tree(src: str, dest: str) -> None:
-    for item in os.listdir(src):
-        s = os.path.join(src, item)
-        d = os.path.join(dest, item)
-        if os.path.isdir(s):
-            shutil.copytree(s, d)
-        else:
-            shutil.copy2(s, d)
-
-
-def _check_tree_limits(base: str) -> None:
-    """安装前检查目录体积/文件数，防止误装超大扩展包。"""
-    count = 0
-    total = 0
-    for dirpath, _dirnames, filenames in os.walk(base):
-        for name in filenames:
-            path = os.path.join(dirpath, name)
-            try:
-                size = os.path.getsize(path)
-            except OSError:
-                continue
-            count += 1
-            total += size
-            if count > _MAX_PACK_FILES:
-                raise FeatureError(f"扩展文件过多（上限 {_MAX_PACK_FILES} 个）")
-            if total > _MAX_PACK_BYTES:
-                raise FeatureError("扩展包过大（上限 128 MB）")
-
-
 def _bundled_packs(broot: str) -> list[tuple[str, str, dict]]:
     """返回 [(id, folder, manifest)]，坏包跳过。"""
     out = []
@@ -426,6 +405,35 @@ def restore_builtin(feature_id: str, dest_root: str | None = None,
 
 
 # ── 安装 / 卸载 ───────────────────────────────────────────────────────────
+def _copy_tree(src: str, dest: str) -> None:
+    for item in os.listdir(src):
+        s = os.path.join(src, item)
+        d = os.path.join(dest, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d)
+        else:
+            shutil.copy2(s, d)
+
+
+def _check_tree_limits(base: str) -> None:
+    """安装前检查目录体积/文件数，防止误装超大扩展包。"""
+    count = 0
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(base):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            count += 1
+            total += size
+            if count > _MAX_PACK_FILES:
+                raise FeatureError(f"扩展文件过多（上限 {_MAX_PACK_FILES} 个）")
+            if total > _MAX_PACK_BYTES:
+                raise FeatureError("扩展包过大（上限 128 MB）")
+
+
 def install_from_folder(src: str, root: str | None = None,
                         check_dir_name: bool = True) -> FeaturePack:
     """把含 manifest.json 的目录复制为扩展（同 id 已存在则报冲突）。"""
@@ -580,8 +588,14 @@ def _check_url(url: str) -> str:
     return url
 
 
-def install_from_url(url: str, root: str | None = None) -> FeaturePack:
-    """从 https 链接安装（GitHub Release / raw zip 或 .py）。"""
+def install_from_url(url: str, root: str | None = None,
+                     sha256: str = "") -> FeaturePack:
+    """从 https 链接安装（GitHub Release / raw zip 或 .py）。
+
+    ``sha256`` 非空时在**写盘/解压之前**校验下载字节：远程索引声明了哈希
+    就必须真的校验，否则等于没有完整性保护（round-244 修：原先这里只写了
+    ``pass``，docstring 却承诺"会校验"）。
+    """
     url = _check_url(str(url or "").strip())
     tmp = tempfile.mkdtemp(prefix="ac_feat_dl_")
     try:
@@ -596,6 +610,12 @@ def install_from_url(url: str, root: str | None = None) -> FeaturePack:
             raise FeatureError(f"下载失败：{e}")
         if len(data) > _MAX_DOWNLOAD:
             raise FeatureError("扩展包超过 32 MB，已拒绝")
+        if sha256:
+            import hashlib
+            actual = hashlib.sha256(data).hexdigest().lower()
+            if actual != sha256.strip().lower():
+                raise FeatureError(
+                    "扩展包校验失败（sha256 不匹配）：下载内容可能被篡改")
         name = os.path.basename(url.split("?", 1)[0]) or "download.zip"
         path = os.path.join(tmp, name)
         with open(path, "wb") as f:
@@ -615,6 +635,108 @@ def uninstall(feature_id: str, root: str | None = None) -> None:
     folder = os.path.join(_root(root), mid)
     if os.path.isdir(folder):
         shutil.rmtree(folder, ignore_errors=True)
+
+
+# ── 远程索引 ──────────────────────────────────────────────────────────────
+@dataclass
+class RemoteFeatureInfo:
+    """远程索引里的单条扩展元数据（不含本地路径）。"""
+    id: str
+    name: str
+    name_en: str
+    version: str
+    description: str
+    description_en: str
+    download_url: str
+    sha256: str = ""
+    icon: str = "tools"
+    nav_group: str = "extensions"
+    order: int = 50
+
+
+def fetch_feature_index(url: str | None = None, timeout: int = 15) -> list[RemoteFeatureInfo]:
+    """
+    从远程拉取功能扩展索引。
+
+    索引格式（JSON）:
+    {
+      "version": 1,
+      "updated": "2026-11-19T12:00:00Z",
+      "features": [
+        {
+          "id": "music",
+          "name": "音乐播放器",
+          "name_en": "Music Player",
+          "version": "1.1.0",
+          "description": "多文件播放列表...",
+          "description_en": "Playlist...",
+          "download_url": "https://github.com/.../music-1.1.0.zip",
+          "sha256": "abc123...",
+          "icon": "music",
+          "nav_group": "extensions",
+          "order": 10
+        },
+        ...
+      ]
+    }
+
+    返回解析后的 RemoteFeatureInfo 列表；网络/解析失败抛 FeatureError。
+    """
+    index_url = url or DEFAULT_FEATURE_INDEX_URL
+    try:
+        with urllib.request.urlopen(index_url, timeout=timeout) as resp:
+            data = resp.read()
+    except Exception as e:
+        raise FeatureError(f"获取扩展索引失败：{e}")
+    try:
+        idx = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise FeatureError(f"扩展索引解析失败：{e}")
+
+    if not isinstance(idx, dict) or "features" not in idx:
+        raise FeatureError("扩展索引格式无效（缺少 features 字段）")
+
+    out: list[RemoteFeatureInfo] = []
+    for item in idx.get("features", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(RemoteFeatureInfo(
+                id=str(item.get("id", "")),
+                name=str(item.get("name", "")),
+                name_en=str(item.get("name_en", "") or item.get("name", "")),
+                version=str(item.get("version", "")),
+                description=str(item.get("description", "")),
+                description_en=str(item.get("description_en", "") or item.get("description", "")),
+                download_url=str(item.get("download_url", "")),
+                sha256=str(item.get("sha256", "")),
+                icon=str(item.get("icon", "tools")),
+                nav_group=str(item.get("nav_group", "extensions")),
+                order=int(item.get("order", 50)),
+            ))
+        except Exception:
+            continue  # 跳过坏条目
+    return out
+
+
+def install_from_remote(feature_id: str, index_url: str | None = None,
+                        root: str | None = None) -> FeaturePack:
+    """
+    从远程索引查找 feature_id，下载对应 zip 并安装。
+    会校验 sha256（若索引提供）。
+    """
+    idx = fetch_feature_index(index_url)
+    info = next((x for x in idx if x.id == feature_id), None)
+    if info is None:
+        raise FeatureError(f"远程索引未找到扩展：{feature_id}")
+    if not info.download_url:
+        raise FeatureError(f"扩展 {feature_id} 缺少下载地址")
+    # sha256 交给 install_from_url 在写盘/解压前校验原始 zip 字节；
+    # 安装后再算 entry.py 的 hash 是没意义的（已被当作代码执行过）。
+    pack = install_from_url(info.download_url, root=root, sha256=info.sha256)
+    # 标记来源
+    pack.source = "remote"
+    return pack
 
 
 # ── 动态加载 ──────────────────────────────────────────────────────────────

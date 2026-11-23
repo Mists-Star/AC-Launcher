@@ -165,9 +165,12 @@ check("P1-3 外来实例真实 assets 仍被备份",
 root = tempfile.mkdtemp(prefix="ac228b_remove_")
 write(os.path.join(root, "a.txt"))
 rm_inst = fake_inst(root, root=root)
+# round-243：remove() 现在先把**元数据**移进回收站（可恢复），再删游戏目录。
+# 这个测试关心的是"删目录失败要回报"这一半，所以把回收站那步打空。
 fake_mgr = types.SimpleNamespace(
     _instances={"deadbeef": rm_inst}, _current="deadbeef",
-    _persist=lambda **kw: None)
+    _persist=lambda **kw: None,
+    _move_to_trash=lambda *a, **kw: None)
 
 _orig_rmtree = shutil.rmtree
 
@@ -192,7 +195,8 @@ root2 = tempfile.mkdtemp(prefix="ac228b_remove2_")
 write(os.path.join(root2, "a.txt"))
 fake_mgr2 = types.SimpleNamespace(
     _instances={"x": fake_inst(root2, root=root2, iid="x")},
-    _current="x", _persist=lambda **kw: None)
+    _current="x", _persist=lambda **kw: None,
+    _move_to_trash=lambda *a, **kw: None)
 failed2 = I.InstancesManager.remove(fake_mgr2, "x")
 check("P2-6 删干净时返回空列表", failed2 == [], str(failed2))
 check("P2-6 正常删除真的清了目录", not os.path.exists(root2))

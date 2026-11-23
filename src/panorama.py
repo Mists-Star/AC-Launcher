@@ -41,6 +41,7 @@ import os
 import re
 import shutil
 import zipfile
+from collections import OrderedDict
 
 from PySide6.QtCore import QPointF, QRectF, QThread, Signal
 from PySide6.QtGui import (
@@ -601,6 +602,12 @@ class PanoramaLoader(QThread):
         _ACTIVE_LOADERS.append(self)
 
     def run(self) -> None:  # pragma: no cover - thread body
+        # round-243：命中缓存直接返回，不再重新扫描 + 解码（切回看过的
+        # 版本时这一步把 ~130ms 降到 ~0）。
+        cached = cached_faces(self._key)
+        if cached is not None:
+            self.ready.emit(self._key, list(cached), "cache")
+            return
         images: list[QImage] = []
         source = ""
         try:
@@ -615,4 +622,57 @@ class PanoramaLoader(QThread):
         except Exception:  # noqa: BLE001 - a missing panorama is not fatal
             images = []
             source = ""
+        if images:
+            store_faces(self._key, images)
         self.ready.emit(self._key, images, source)
+
+
+# ────────────────────────────────────────────── decoded-face LRU (round-243)
+# 为什么缓存「解码后的 QImage」而不是文件路径：定位索引只要 1ms（实测），
+# 真正贵的是解码 6 张 1024² PNG（实测 ~120ms）。切回刚看过的版本时重走一遍
+# 完全是浪费，玩家感知到的就是"每次切版本都卡一下"。
+# 代价是内存：每个版本 6×1024²×4B ≈ 24MB。所以只留最近 2 个版本
+# （来回切两个实例的场景已覆盖），并设总字节上限兜住超大贴图的极端情况。
+_FACE_CACHE: "OrderedDict[tuple, list[QImage]]" = OrderedDict()
+_FACE_CACHE_ENTRIES = 2
+_FACE_CACHE_BYTES = 56 * 1024 * 1024
+
+
+def _face_bytes(images: list[QImage]) -> int:
+    total = 0
+    for img in images:
+        try:
+            total += img.sizeInBytes()
+        except Exception:  # noqa: BLE001 - 老版本 Qt 没有 sizeInBytes
+            total += img.width() * img.height() * 4
+    return total
+
+
+def cached_faces(key: tuple) -> list[QImage] | None:
+    """取某实例已解码的全景六面（命中即移到队尾）。"""
+    hit = _FACE_CACHE.get(key)
+    if hit is None:
+        return None
+    _FACE_CACHE.move_to_end(key)
+    return hit
+
+
+def store_faces(key: tuple, images: list[QImage]) -> None:
+    """缓存某实例的全景六面，超出条目/字节上限时淘汰最久未用的。"""
+    if not images or len(images) != 6:
+        return
+    if _face_bytes(images) > _FACE_CACHE_BYTES // 2:
+        return  # 单个版本就吃掉一半预算 → 不值得缓存
+    _FACE_CACHE[key] = list(images)
+    _FACE_CACHE.move_to_end(key)
+    while len(_FACE_CACHE) > _FACE_CACHE_ENTRIES:
+        _FACE_CACHE.popitem(last=False)
+    while sum(_face_bytes(v) for v in _FACE_CACHE.values()) > _FACE_CACHE_BYTES:
+        if len(_FACE_CACHE) <= 1:
+            break
+        _FACE_CACHE.popitem(last=False)
+
+
+def clear_face_cache() -> None:
+    """释放缓存的全景贴图（游戏启动降载时调用）。"""
+    _FACE_CACHE.clear()

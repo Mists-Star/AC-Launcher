@@ -111,16 +111,25 @@ class _PressScaleMixin(QObject):
         if obj is not self._btn or FeedbackConfig.is_reduced_motion():
             return False
 
-        if event.type() == QEvent.Type.MouseButtonPress:
-            me = event  # type: QMouseEvent
-            if me.button() == Qt.MouseButton.LeftButton and self._btn.isEnabled():
+        etype = event.type()
+        if etype == QEvent.Type.MouseButtonPress:
+            # 只有 MouseButtonPress/Release 才是 QMouseEvent；直接把 QEvent
+            # 当 QMouseEvent 用会在 Leave 分支抛 AttributeError（crash.log 里
+            # 每个鼠标离开都记一条，异常风暴拖慢交互）。
+            me = event
+            if isinstance(me, QMouseEvent) and \
+                    me.button() == Qt.MouseButton.LeftButton and self._btn.isEnabled():
                 self._start_press()
                 return False  # 不拦截，让按钮正常处理 clicked
 
-        elif event.type() in (QEvent.Type.MouseButtonRelease, QEvent.Type.Leave):
-            me = event  # type: QMouseEvent
-            if me.button() == Qt.MouseButton.LeftButton or event.type() == QEvent.Type.Leave:
+        elif etype == QEvent.Type.MouseButtonRelease:
+            me = event
+            if isinstance(me, QMouseEvent) and me.button() == Qt.MouseButton.LeftButton:
                 self._release_press()
+
+        elif etype == QEvent.Type.Leave:
+            # Leave 是普通 QEvent，没有 button()，独立处理
+            self._release_press()
         return False
 
     def _start_press(self):
@@ -134,12 +143,17 @@ class _PressScaleMixin(QObject):
         dx, dy = (w - nw) // 2, (h - nh) // 2
         target = self._orig_geom.adjusted(dx, dy, -dx, -dy)
 
-        self._anim = QPropertyAnimation(self._btn, b"geometry", self)
+        # 不用 DeleteWhenStopped：动画停止后 C++ 对象自毁，而 self._anim 仍
+        # 持有 Python 引用 → 下一次 _release_press 读 state() 抛
+        # "Internal C++ object already deleted"（crash.log 里已复现）。
+        # 复用同一个动画对象，下次 _start_press 会 stop + 重设值。
+        if self._anim is None:
+            self._anim = QPropertyAnimation(self._btn, b"geometry", self)
         self._anim.setDuration(FeedbackConfig.press_scale_duration_ms)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.setStartValue(self._orig_geom)
         self._anim.setEndValue(target)
-        self._anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._anim.start()
 
     def _release_press(self):
         if self._orig_geom is None:
@@ -147,12 +161,13 @@ class _PressScaleMixin(QObject):
         if self._anim and self._anim.state() == QPropertyAnimation.State.Running:
             self._anim.stop()
 
-        self._anim = QPropertyAnimation(self._btn, b"geometry", self)
+        if self._anim is None:
+            self._anim = QPropertyAnimation(self._btn, b"geometry", self)
         self._anim.setDuration(FeedbackConfig.press_scale_duration_ms)
         self._anim.setEasingCurve(QEasingCurve.Type.OutBack)
         self._anim.setStartValue(self._btn.geometry())
         self._anim.setEndValue(self._orig_geom)
-        self._anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._anim.start()
         self._orig_geom = None
 
 
@@ -199,14 +214,16 @@ class _RippleOverlay(QWidget):
         w, h = self.parent().width(), self.parent().height()
         max_r = (w * w + h * h) ** 0.5
 
-        self._anim = QPropertyAnimation(self, b"_ripple_progress", self)
+        # 同上：复用动画对象，避免 DeleteWhenStopped 留下悬空 Python 引用。
+        if self._anim is None:
+            self._anim = QPropertyAnimation(self, b"_ripple_progress", self)
+            self._anim.valueChanged.connect(self._on_progress)
+            self._anim.finished.connect(self._on_finished)
         self._anim.setDuration(FeedbackConfig.ripple_duration_ms)
         self._anim.setEasingCurve(QEasingCurve.Type.OutQuad)
         self._anim.setStartValue(0.0)
         self._anim.setEndValue(1.0)
-        self._anim.valueChanged.connect(self._on_progress)
-        self._anim.finished.connect(self._on_finished)
-        self._anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._anim.start()
 
     def _on_progress(self, v: float):
         w, h = self.parent().width(), self.parent().height()

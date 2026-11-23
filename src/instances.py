@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Callable, Optional
@@ -617,14 +618,18 @@ def sorted_instances(items):
 
 
 class InstancesManager:
-    # round-78 存储升级：单文件 data/instances.json → 拆分
-    #   data/instances/<id>.json     每实例全量（真理源，独占文件，原子写）
-    #   data/instances.index.json    摘要索引（渲染字段，启动秒开；lazy 全量）
+    # 存储结构：
+    #   data/instances/<id>.json          每实例全量（真理源，独占文件，原子写）
+    #   data/instances.index.json         摘要索引（渲染字段，启动秒开；lazy 全量）
+    #   data/instances_trash/<id>.json    回收站实例元数据（原子写）
+    #   data/instances_trash/index.json   回收站索引（删除时间、原路径等）
     # 旧版单文件首次启动一次性迁移后改名 .legacy.bak。
     def __init__(self):
         self._dir = os.path.join(get_data_dir(), "instances")
         self._index_path = os.path.join(get_data_dir(), "instances.index.json")
         self._legacy_path = os.path.join(get_data_dir(), "instances.json")
+        self._trash_dir = os.path.join(get_data_dir(), "instances_trash")
+        self._trash_index_path = os.path.join(self._trash_dir, "index.json")
         self._instances: dict[str, Instance] = {}
         self._current: Optional[str] = None
         # 已从 <id>.json 补齐全量字段的实例（其余仅摘要字段在内存）
@@ -751,6 +756,121 @@ class InstancesManager:
                 and raw.get("game_version")):
             return None
         return self._from_dict(raw, iid=iid)
+
+    # -------- 回收站 ----------
+    def _ensure_trash_dir(self) -> None:
+        os.makedirs(self._trash_dir, exist_ok=True)
+
+    def _read_trash_index(self) -> dict:
+        try:
+            with open(self._trash_index_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("items"), dict):
+                return data
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass
+        return {"schema": 1, "items": {}}
+
+    def _write_trash_index(self, data: dict) -> None:
+        self._ensure_trash_dir()
+        tmp = self._trash_index_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._trash_index_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+
+    def list_trash(self) -> list[dict]:
+        """返回回收站中的实例摘要列表。"""
+        idx = self._read_trash_index()
+        return list(idx.get("items", {}).values())
+
+    def restore_from_trash(self, instance_id: str) -> bool:
+        """将实例从回收站恢复到实例列表。"""
+        idx = self._read_trash_index()
+        item = idx.get("items", {}).pop(instance_id, None)
+        if item is None:
+            return False
+        raw = item.get("data")
+        if not raw:
+            self._write_trash_index(idx)
+            return False
+        # 写回实例文件
+        self._write_inst_file(raw)
+        # 重新加载实例
+        inst = self._from_dict(raw, iid=instance_id)
+        if inst.id:
+            self._instances[inst.id] = inst
+        self._write_trash_index(idx)
+        self._persist()
+        return True
+
+    def delete_from_trash(self, instance_id: str) -> bool:
+        """从回收站永久删除实例（仅元数据）。"""
+        idx = self._read_trash_index()
+        if instance_id not in idx.get("items", {}):
+            return False
+        idx["items"].pop(instance_id, None)
+        self._write_trash_index(idx)
+        # 删除回收站中的实例文件
+        trash_file = os.path.join(self._trash_dir, f"{instance_id}.json")
+        try:
+            if os.path.exists(trash_file):
+                os.remove(trash_file)
+        except OSError:
+            pass
+        return True
+
+    def clear_trash(self) -> int:
+        """清空回收站，返回已删除条目数。"""
+        idx = self._read_trash_index()
+        count = len(idx.get("items", {}))
+        idx["items"] = {}
+        self._write_trash_index(idx)
+        # 删除所有回收站实例文件
+        if os.path.isdir(self._trash_dir):
+            for fn in os.listdir(self._trash_dir):
+                if fn.endswith(".json"):
+                    try:
+                        os.remove(os.path.join(self._trash_dir, fn))
+                    except OSError:
+                        pass
+        return count
+
+    def _move_to_trash(self, instance_id: str, inst: Instance) -> None:
+        """将实例移至回收站（元数据 + 可选磁盘目录标记）。"""
+        self._ensure_trash_dir()
+        # 保存实例全量数据到回收站
+        raw = self._to_dict(inst)
+        raw["_trashed_at"] = time.time()
+        raw["_original_root"] = getattr(inst, "root", "")
+        trash_file = os.path.join(self._trash_dir, f"{instance_id}.json")
+        try:
+            with open(trash_file + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(raw, f, ensure_ascii=False, indent=2)
+            os.replace(trash_file + ".tmp", trash_file)
+        except Exception:
+            try:
+                if os.path.exists(trash_file + ".tmp"):
+                    os.remove(trash_file + ".tmp")
+            except OSError:
+                pass
+        # 更新回收站索引
+        idx = self._read_trash_index()
+        idx["items"][instance_id] = {
+            "id": instance_id,
+            "name": inst.name,
+            "game_version": inst.game_version,
+            "loader": inst.loader,
+            "deleted_at": raw["_trashed_at"],
+            "data": raw,
+        }
+        self._write_trash_index(idx)
 
     def _ensure_full(self, iid: str) -> Optional[Instance]:
         """按需读 <id>.json 补齐全量字段并缓存（round-78 lazy 读取）。
@@ -1183,29 +1303,23 @@ class InstancesManager:
         return inst
 
     def remove(self, instance_id: str) -> list[str]:
-        """移除实例。返回**删不掉**的磁盘路径列表（空列表 = 删干净了）。
+        """将实例移至回收站。返回**删不掉**的磁盘路径列表（空列表 = 删干净了）。
 
-        round-228 P2-6：以前 ``shutil.rmtree(..., ignore_errors=True)``，被游戏 /
-        杀软占用的文件删不掉也一声不吭，元数据却照删 —— 实例从列表消失、
-        磁盘留半个目录，玩家连清理入口都没有。现在把失败项交给 UI 明确提示。
+        实例元数据移至回收站（可恢复），游戏目录文件尝试删除。
+        导入的外部实例仅移除元数据，不删除游戏目录。
         """
         failed: list[str] = []
         inst = self._instances.pop(instance_id, None)
         if inst is not None:
-            # Never delete a user's real game folder for a linked (imported)
-            # instance — only drop the AC metadata entry.
+            # 先移至回收站（保留元数据以便恢复）
+            self._move_to_trash(instance_id, inst)
+            # 非外部实例：尝试删除游戏目录
             if not inst.external:
-                # round-48/round-175 先摘掉 libraries/assets 联接（链接跟共享池
-                # 耦合，直接 rmtree 可能顺着 reparse point 误删整个共享池）。
                 inst._strip_shared_junctions(inst.mc_dir)
                 root = inst.root
                 if os.path.isdir(root):
                     def _collect(func, path, exc):
                         failed.append(path)
-
-                    # Python 3.12+ 用 onexc；3.13 里 onerror 只是会告警的兼容别名。
-                    # 回调第三参数 exc 是异常实例（onexc）或 exc_info（onerror），
-                    # 这里都不需要，只收路径。
                     shutil.rmtree(root, onexc=_collect)
         if self._current == instance_id:
             self._current = next(iter(self._instances), None)

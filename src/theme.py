@@ -112,10 +112,13 @@ _theme_mode = "light"
 # 160/180/280。无障碍「减少动效」由 effects.set_reduce_motion 负责把
 # 过渡压成瞬时（本组 token 不随之改写，便于还原）。
 MOTION_INSTANT_MS = 90     # 按下 / 悬停等即时反馈
-MOTION_QUICK_MS = 160      # 页面、列表淡入（最高频）
+# round-238：页面切换 160→190ms（用户反馈「太突兀、只有一点点抖动」）。
+# 主流启动器导航过渡多在 100-180ms，取偏上限让渐入看得见但不拖沓。
+MOTION_QUICK_MS = 190      # 页面、列表淡入（最高频）
 MOTION_SETTLE_MS = 280     # 面板落位 / toast 进出
 MOTION_SCENE_MS = 700      # 启动页 / 场景级过渡
-MOTION_LIFT_PX = 8         # 页面 / 卡片上浮距离
+# 8→14px：8px 配 OutCubic 观感像「抖一下」；14px + OutQuad 是顺滑滑入。
+MOTION_LIFT_PX = 14        # 页面 / 卡片上浮距离
 # round-49 修复「改选项把强调色拉回紫色」：记录用户自定义的 accent。set_theme_mode /
 # apply_theme_pack 重置基础色表后必须重新套用自定义 accent，否则 accent 恒被
 # THEME_LIGHT/THEME_DARK 里的 #7C3AED 覆盖。None = 未自定义（用内置紫）。
@@ -1400,9 +1403,15 @@ _QSS_APPLIED: str | None = None
 _QSS_TIMER: "QTimer | None" = None
 
 
-def apply_qss() -> None:
-    """Re-apply the global theme stylesheet (cached + change-guarded + debounced)."""
-    global _QSS_TIMER
+def apply_qss(now: bool = False) -> None:
+    """Re-apply the global theme stylesheet (cached + change-guarded + debounced).
+
+    ``now=True`` 跳过 0ms 合并窗口、当场 ``setStyleSheet``。只有"必须确认
+    样式已经落地"的场景才用它——round-243 的换肤遮罩就是：撤遮罩前新样式
+    必须已经贴上，否则淡出之后还会再闪一次，等于白做。
+    普通调用一律保持异步合并（多个调用点在同一 tick 里只重贴一次）。
+    """
+    global _QSS_TIMER, _QSS_APPLIED
     app = QApplication.instance()
     if app is None:
         return
@@ -1410,9 +1419,18 @@ def apply_qss() -> None:
     # Nothing changed since last applied → no work needed.
     if qss == _QSS_APPLIED and (_QSS_TIMER is None or not _QSS_TIMER.isActive()):
         return
-    # A coalesced apply is already pending; it will pick up the latest qss.
+    # 已有一个合并中的 apply 在排队
     if _QSS_TIMER is not None and _QSS_TIMER.isActive():
+        if not now:
+            # 它会取到最新的 qss，这里直接让路
+            return
+        _QSS_TIMER.stop()
+        _QSS_TIMER = None
+    if now:
+        _QSS_APPLIED = qss
+        app.setStyleSheet(qss)
         return
+
     _QSS_TIMER = QTimer(app)
     _QSS_TIMER.setSingleShot(True)
 

@@ -29,11 +29,19 @@ CHUNK_BLOCKS = 16
 # 防止 「2MB 压缩 → 2GB 膨胀」把内存打爆）
 _CHUNK_MAX_BYTES = 24 * 1024 * 1024
 
-# 维度 → world_dir 下的子目录（主世界直接在 world_dir/region）
-DIMENSIONS = {
-    "overworld": "",
-    "nether": "DIM-1",
-    "end": "DIM1",
+# 维度 → 目录定位。MC 1.16 (20w17a) 起改用「每世界独立维度目录」：
+#   <world>/dimensions/minecraft/overworld/region
+#   <world>/dimensions/minecraft/the_nether/region
+#   <world>/dimensions/minecraft/the_end/region
+# 老布局则是 <world>/region、<world>/DIM-1/region、<world>/DIM1/region。
+# round-237：实测 26.3 存档只有新版目录，老代码写死老布局 → 主世界一个
+# region 都找不到。改为「每维度一组候选路径，新版优先、老版兜底」。
+DIMENSIONS = ("overworld", "nether", "end")   # 保持对外迭代顺序不变
+_DIM_CANDIDATES = {
+    # (新版相对路径, 老版相对路径)
+    "overworld": ("dimensions/minecraft/overworld", ""),
+    "nether": ("dimensions/minecraft/the_nether", "DIM-1"),
+    "end": ("dimensions/minecraft/the_end", "DIM1"),
 }
 
 # 1.16（20w17a）起 long 数组不再跨边界
@@ -47,9 +55,22 @@ class MapError(ValueError):
 
 
 def region_dir(world_dir: str, dim: str) -> str:
-    sub = DIMENSIONS.get(dim, "")
-    return os.path.join(world_dir, sub, "region") if sub else os.path.join(
-        world_dir, "region")
+    """返回该维度实际存在的 region 目录（新版维度目录优先，老布局兜底）。
+
+    候选按顺序探测，取第一个**含 .mca 文件**的；都不含时返回新版路径，
+    让上层 region_grid 得到空列表并给出「该维度暂无地图数据」提示。
+    """
+    cands = _DIM_CANDIDATES.get(dim, _DIM_CANDIDATES["overworld"])
+    paths = [os.path.join(world_dir, c, "region") if c
+             else os.path.join(world_dir, "region") for c in cands]
+    for p in paths:
+        try:
+            if any(n.startswith("r.") and n.endswith(".mca")
+                   for n in os.listdir(p)):
+                return p
+        except OSError:
+            continue
+    return paths[0]
 
 
 def region_path(world_dir: str, dim: str, rx: int, rz: int) -> str:
@@ -92,12 +113,10 @@ def list_worlds(game_dir: str) -> list[str]:
         # 从别处复制区块过来的世界可能只有 region/*.mca 而没有 level.dat
         # （元数据留在源存档里）。地形本身真实可读，不能因为「半个存档」
         # 就从列表里消失 —— 否则有区块的世界反而看不到。
-        try:
-            if any(n.startswith("r.") and n.endswith(".mca")
-                   for n in os.listdir(os.path.join(p, "region"))):
-                out.append(p)
-        except OSError:
-            pass
+        # round-237：新版 MC 区块在 dimensions/.../region，老代码只查
+        # world/region 会漏，改为逐维度走 region_dir 探测。
+        if any(region_grid(p, d) for d in DIMENSIONS):
+            out.append(p)
     return out
 
 

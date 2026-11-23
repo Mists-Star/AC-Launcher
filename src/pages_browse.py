@@ -173,6 +173,7 @@ class VersionsPage(QWidget):
         self.title_lbl = self._header.title_lbl
         root.addWidget(self._header)
 
+
         # 过滤 pill 单独一行（对照 Versions.svg）。放独立行而非塞进 header，
         # 避免窄窗口下 5 个 pill + 搜索 + 刷新挤在一行溢出（round-52 约束）。
         fil_row = QHBoxLayout()
@@ -190,6 +191,12 @@ class VersionsPage(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
+        # round-245 性能：Mojang manifest 有 900+ 个版本。一次性建 925 张
+        # LightTrailCard（8398 个 widget）实测首屏 3.4s、二次切页 133ms。
+        # 改成增量渲染：首屏只建一页，滚动到底部再追加。
+        self._visible_limit = 60
+        self.scroll.verticalScrollBar().valueChanged.connect(
+            self._on_scroll_more)
         self._load_gen = 0  # guards against stale worker results
         self._content = QWidget()
         self._vbox = QVBoxLayout(self._content)
@@ -266,23 +273,77 @@ class VersionsPage(QWidget):
                 w.deleteLater()
         self._cards: list[tuple] = []    # (widget, group, id_lower)
         self._headers: list[tuple] = []  # (widget, group)
-        installed = {i.game_version for i in self.mgr.list()}
+        self._all_members: list[tuple[str, dict]] = []  # (group, version)
         for g in _GROUP_ORDER:
-            members = [v for v in self._versions if _group_of(v) == g]
-            if not members:
-                continue
-            hdr = ui_kit.group_label(t(f"versions.group.{g}"))
-            self._vbox.addWidget(self._fade(hdr))
-            self._headers.append((hdr, g))
-            for v in members:
-                card = self._fade(self._make_card(v, v["id"] in installed))
-                self._vbox.addWidget(card)
-                self._cards.append((card, g, v["id"].lower()))
+            for v in self._versions:
+                if _group_of(v) == g:
+                    self._all_members.append((g, v))
+        self._more_btn = None
+        self._render_slice()
+
+    def _render_slice(self):
+        """只把前 ``_visible_limit`` 条渲染成卡片（增量，见 round-245）。"""
+        installed = {i.game_version for i in self.mgr.list()}
+        limit = self._visible_limit
+        # 先移除旧的「加载更多」按钮，再按新 limit 补齐
+        if getattr(self, "_more_btn", None) is not None:
+            try:
+                self._more_btn.setParent(None)
+                self._more_btn.deleteLater()
+            except RuntimeError:
+                pass
+            self._more_btn = None
+        have = len(self._cards)
+        need = min(limit, len(self._all_members))
+        headers = set(g for g, _ in self._headers)
+        for idx in range(have, need):
+            g, v = self._all_members[idx]
+            if g not in headers:
+                hdr = ui_kit.group_label(t(f"versions.group.{g}"))
+                # 分组标题插在对应位置之前（增量时插到 vbox 尾部即可，
+                # 因为 _all_members 已按分组排序）
+                self._vbox.addWidget(self._fade(hdr))
+                self._headers.append((hdr, g))
+                headers.add(g)
+            card = self._fade(self._make_card(v, v["id"] in installed))
+            self._vbox.addWidget(card)
+            self._cards.append((card, g, v["id"].lower()))
+        if need < len(self._all_members):
+            more = QPushButton(
+                t("versions.load_more", n=len(self._all_members) - need))
+            more.setMinimumHeight(34)
+            more.clicked.connect(self._load_more)
+            self._vbox.addWidget(more)
+            self._more_btn = more
         self._vbox.addStretch(1)
+
+    def _load_more(self):
+        self._visible_limit += 60
+        # _render_slice 依赖 have→need 增量，先清掉旧 stretch/按钮
+        while self._vbox.count():
+            item = self._vbox.takeAt(self._vbox.count() - 1)
+            w = item.widget()
+            if w is not None and w is getattr(self, "_more_btn", None):
+                w.setParent(None)
+                w.deleteLater()
+        self._more_btn = None
+        # 卡片和分组标题保留，只补新增部分
+        self._render_slice()
+
+    def _on_scroll_more(self, value: int):
+        bar = self.scroll.verticalScrollBar()
+        if bar.maximum() > 0 and value >= bar.maximum() - 40:
+            self._load_more()
 
     def _apply_filter(self):
         """分类 pill / 搜索框过滤 = 纯显隐切换（不再重建，见 _rebuild）。"""
         q = self.search.text().strip().lower()
+        # 搜索要覆盖全部版本，不只是已渲染的那 60 张：有关键词时把
+        # limit 提到全集上限（命中通常很少，卡片建起来很快）。
+        wanted = len(self._all_members) if q else 60
+        if wanted > self._visible_limit:
+            self._visible_limit = wanted
+            self._render_slice()
         only_group = self._filter_key
         counts: dict[str, int] = {}
         for w, g, vid in getattr(self, "_cards", []):
@@ -319,7 +380,7 @@ class VersionsPage(QWidget):
 
         info = QVBoxLayout()
         info.setSpacing(3)
-        name = QLabel(v["id"])
+        name = ui_kit.ElidedLabel(v["id"])
         name.setProperty("cls", "title")
         info.addWidget(name)
         date = QLabel(t("versions.released", date=self._fmt_date(v["releaseTime"])))
@@ -501,6 +562,7 @@ class StorePage(QWidget):
             icon_key="store")
         self.title_lbl = self._header.title_lbl
         lv.addWidget(self._header)
+
 
         # round-208 §2.1：QSplitter 两栏 = 筛选侧栏 / 结果区。
         # 依据 prism:ResourcePage.ui:29-62（三栏）与 ModPage.cpp:103-128
@@ -1447,7 +1509,8 @@ class StorePage(QWidget):
         try:
             raw = minecraft_launcher_lib.mrpack.get_mrpack_information(path)
             launch_version = minecraft_launcher_lib.mrpack.get_mrpack_launch_version(path)
-            info_dict = _parse_mrpack_info(raw)
+            # round-246：传 path 才能从 modrinth.index.json 解析 loader/mods
+            info_dict = _parse_mrpack_info(raw, path)
             info_dict["launch_version"] = launch_version
         except Exception:
             info(self, t("mrpack.title"), t("mrpack.bad_file"))

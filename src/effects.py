@@ -235,11 +235,12 @@ class LightTrailCard(RoundedCard):
     # -- lifecycle -----------------------------------------------------
     def showEvent(self, e):
         super().showEvent(e)
-        # round-202：可见即登记（不看 reduced/game 状态）。主表是否启动交给
-        # _resume_if_possible 统一判断——登记状态保留后，游戏退出 / 关掉
-        # 「减少动效」都能立刻恢复；旧实现只在「允许动画」时才登记，
-        # 于是降载期间切页露出的卡片永远是冷的，退出后也不复活。
-        if EFFECTS_ENABLED and (self._trail or self._reflect):
+        # round-202：可见即登记（不看 reduced/game/EFFECTS_ENABLED 状态）。
+        # 主表是否启动交给 _resume_if_possible 统一判断——登记状态保留后，
+        # 游戏退出 / 关掉「减少动效」/ 重新开启流光都能立刻恢复；
+        # 旧实现只在「允许动画」时才登记，于是降载期间切页露出的卡片
+        # 永远是冷的，退出后也不复活。
+        if self._trail or self._reflect:
             _ACTIVE_CARDS.add(self)
             _resume_if_possible()
 
@@ -416,25 +417,39 @@ def fade_page_transition(stack, index: int) -> None:
                 old_page.move(old_end)
             except Exception:  # noqa: BLE001
                 pass
+        # round-238：从「当前透明度」接力，而不是先删旧 effect 再从 0 开始。
+        # 旧实现中途切页时画面会闪回全透明再淡入 —— 观感就是「抖一下」。
         prev_eff = stack.graphicsEffect()
-        stack.setGraphicsEffect(None)
-        if prev_eff is not None:
-            try:
-                prev_eff.deleteLater()
-            except Exception:  # noqa: BLE001
-                pass
-        eff = QGraphicsOpacityEffect(stack)
-        eff.setOpacity(0.0)
-        stack.setGraphicsEffect(eff)
+        if isinstance(prev_eff, QGraphicsOpacityEffect):
+            start_op = prev_eff.opacity()   # 接力当前值
+            eff = prev_eff                  # 复用，不删不重建
+        else:
+            if prev_eff is not None:
+                try:
+                    stack.setGraphicsEffect(None)
+                    prev_eff.deleteLater()
+                except Exception:  # noqa: BLE001
+                    pass
+            eff = QGraphicsOpacityEffect(stack)
+            start_op = 0.0
+            eff.setOpacity(start_op)
+            stack.setGraphicsEffect(eff)
         stack.setCurrentIndex(index)
         anim = QPropertyAnimation(eff, b"opacity", stack)
         anim.setDuration(motion_ms(MOTION_QUICK_MS))
-        anim.setStartValue(0.0)
+        anim.setStartValue(start_op)
         anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setEasingCurve(QEasingCurve.OutQuad)
 
-        def _done(_eff=eff):
-            # 只清「自己装的」effect；被后续切换替换掉时绝不越权清理。
+        # round-238：代数标记。effect 现在会被后续切换复用，旧动画的兜底
+        # QTimer 若迟到，绝不能删掉新一代正在用的 effect（这正是「操作几次
+        # 后动画失效/突变」的根因）。只有代数匹配才允许清理。
+        gen = getattr(stack, "_fade_gen", 0) + 1
+        stack._fade_gen = gen
+
+        def _done(_eff=eff, _gen=gen):
+            if _gen != getattr(stack, "_fade_gen", 0):
+                return  # 迟到回调：新动画已接管，不许越权清理共享 effect
             try:
                 if stack.graphicsEffect() is _eff:
                     stack.setGraphicsEffect(None)
@@ -445,10 +460,9 @@ def fade_page_transition(stack, index: int) -> None:
         anim.finished.connect(_done)
         anim.start()
         # 兜底：即使 finished 因异常/事件循环卡住没送达，也保证 effect 被摘掉，
-        # 不留半透明页面。迟到的回调只会清自己的 effect（见 _done 的判据）。
+        # 不留半透明页面。代数不匹配时 _done 自动放行（见上）。
         QTimer.singleShot(anim.duration() + 80, _done)
-        # 持有引用防 GC；下次切换会重新 setGraphicsEffect，旧的 finished 仍
-        # 会触发 _done 清掉自身，不会互相干扰。
+        # 持有引用防 GC。
         stack._fade_anim = anim
 
         # 新页上浮（round-100）：先同步布局取真实落点，再从 +8px 滑回。
@@ -459,12 +473,22 @@ def fade_page_transition(stack, index: int) -> None:
             except Exception:  # noqa: BLE001
                 pass
             end_pos = page.pos()
-            page.move(end_pos.x(), end_pos.y() + MOTION_LIFT_PX)
+            # round-238：从当前位置接力。旧实现无条件 page.move(end+8) 瞬间
+            # 跳到下方再滑回；若上一次上浮被打断、页面还停在偏移位，这一跳
+            # 会先从"半路"闪到"下方"——就是用户说的「抖动」。
+            now = page.pos()
+            if abs(now.y() - end_pos.y()) < 2:
+                # 页面在正确位置 → 施加滑入起点
+                start_pos = type(now)(now.x(), now.y() + MOTION_LIFT_PX)
+            else:
+                # 页面已被上次动画偏移 → 从当前位置接力滑回，不再额外跳
+                start_pos = now
+            page.move(start_pos)
             rise = QPropertyAnimation(page, b"pos", stack)
             rise.setDuration(motion_ms(MOTION_QUICK_MS))
-            rise.setStartValue(page.pos())
+            rise.setStartValue(start_pos)
             rise.setEndValue(end_pos)
-            rise.setEasingCurve(QEasingCurve.OutCubic)
+            rise.setEasingCurve(QEasingCurve.OutQuad)
 
             def _rise_done(_p=page, _pos=end_pos):
                 try:
@@ -490,8 +514,14 @@ def fade_in_widget(w, duration: int = MOTION_QUICK_MS) -> None:
 
     一次性 QGraphicsOpacityEffect——动画结束必清 effect（同
     fade_page_transition 的防重影策略）；重复触发先清旧 effect。
-    失败、效果总开关关闭或减少动效 → 静默跳过（纯装饰，不参与功能）。"""
-    if w is None or not EFFECTS_ENABLED or MOTION_REDUCED:
+
+    round-238：与页面切换动画解耦（对齐 round-103 的做法）——淡入属于
+    「过渡动画」，不该被流光装饰总开关 ``EFFECTS_ENABLED`` 连带关掉。
+    旧实现里 effect_light_trail=False（默认）时列表淡入 100% 被跳过，
+    玩家看到的就是「切页有动画、列表刷出来却毫无过渡」。现在只受
+    ``MOTION_REDUCED``（无障碍减少动效）约束。
+    """
+    if w is None or MOTION_REDUCED:
         return
     from PySide6.QtCore import QPropertyAnimation, QEasingCurve
     from PySide6.QtWidgets import QGraphicsOpacityEffect
@@ -519,7 +549,7 @@ def fade_in_widget(w, duration: int = MOTION_QUICK_MS) -> None:
         anim.setDuration(duration)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setEasingCurve(QEasingCurve.OutQuad)
 
         def _done(_eff=eff):
             # 只清自己装的 effect（理由同 fade_page_transition）

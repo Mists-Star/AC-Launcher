@@ -8,6 +8,267 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+### 同类问题普查（round-244 附）
+* pyflakes 全量扫 `src/` + AST 扫事件接线/枚举不匹配 + 只 emit 不 connect 的信号。
+* 又抓出并修掉 **onboarding 两个同型 NameError**（P0）：
+  `onboarding.py:1035` 用 `QSize` 但没导入 → 扫描导入列表整表崩；
+  `onboarding.py:1059` 用 `warn` 但没导入 → 导入失败回调二次崩溃。
+  验证 `_probe_onboarding_import.py` ALL PASS（列表构造/失败提示/成功态）。
+* 又抓出**远程扩展 sha256 校验是假的**（P0）：`install_from_remote` docstring
+  写"会校验"，实际 `if info.sha256: ... pass`（还留了个 `zip_path` 假变量）；
+  现在 `install_from_url(..., sha256=)` 在**写盘/解压之前**校验原始字节，
+  不匹配直接抛 `FeatureError` 且不落盘。验证 `_probe_feature_sha.py`
+  ALL PASS（正确哈希装成功 / 错误哈希拒绝且不落盘 / 不传仍兼容 /
+  透传接线检查）。
+* 清掉恢复内置包时造成的 `_copy_tree`/`_check_tree_limits` 重复定义与
+  无用 `Optional` 导入。
+* 确认为**假阳性/不动**：`_probe_format` 的 `"vanilla"` 是比较字符串
+  （兜底 return 经 `_KIND_TO_FORMAT` 返回，静态提取漏了）；其余 5 个
+  只 emit 不 connect 的信号属于 `InstanceCard`/`ModCard` 遗留死代码
+  （文件头已标注 old layout，仅在老测试里实例化），不动以免破坏测试。
+
+## round-247（2026-11-22 夜）— 部署不再留 .old 备份
+
+* 用户要求：程序文件有 git + 构建可重建，没必要每轮留一份 117MB 的
+  `_internal.old-<时间戳>`（`data/` 增长慢但备份一夜堆几份很占磁盘）。
+* `build.py::_deploy_to_test_dir` 改为**逐文件覆盖**
+  （`shutil.copytree(..., dirs_exist_ok=True)` + `copy2(exe)`），不再改名留底、
+  不再回滚旧程序；失败就让下次构建重来。`data/`、`launcher_config.json`、
+  `ac.lock` 一律不碰。
+* ☠ 不能 `shutil.rmtree(_internal)`：外层沙箱对 4104 个文件触发
+  `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 拦截；逐文件覆盖既绕过批量删除、
+  又避免"删完再复制失败导致程序没法跑"的窗口。
+* 已清理部署目录里唯一一份旧备份 `_internal.old-20261122-222233`（116MB）。
+* 复验：`build.py` exit=0、无 `.old-*` 产生、用户数据 mtime 未变。
+
+## round-246（2026-11-22 夜）— 整合包 UI 接线漏传 + 进度条不动
+
+用户实测仍「看不到模组数量、识别不到加载器、进度不涨」——round-245 修了解析
+函数本身，但**UI 调用点没跟着改**，属于"改了实现没改接线"的典型。
+
+* **P0 检测不到**：`_show_mrpack_dialog`（`pages_instances.py:2971`）和
+  `StorePage._on_pack_downloaded`（`pages_browse.py:1512`）都还是
+  `_parse_mrpack_info(raw)`，没传 path → 新增的「从 modrinth.index.json 读
+  loader/mods」分支永远不执行。两处改为 `_parse_mrpack_info(raw, path)`。
+* **P0 进度不涨**：`_MrpackDialog._start` 用的是 `Worker`（只有 finished/error，
+  **没有 progress/status 信号**）→ 进度条从显示到结束一动不动。换成
+  `ProgressWorker`，接 `status`/`progress`/`step` 三个槽；进度条按 mll
+  setMax/setProgress 更新，无定长时跑 busy 指示。
+* ☠ 教训：round-245 的探针直接调 `_parse_mrpack_info(raw, path)` →
+  **假通过**。新探针 `_probe_mrpack_ui.py` 从真实 UI 入口
+  `_show_mrpack_dialog` / `_on_pack_downloaded` 打 spy，验证对话框真正拿到的
+  info 含 loader/loader_version/mods，并实测进度槽更新 QProgressBar。
+  **验证必须打在最终效果上，不能只测被改函数本身。**
+* 验证：6 个探针 ALL PASS；compile OK、smoke 17/17、
+  `test_pack_progress` / `test_round229_pack_detail` ALL CHECKS PASSED。
+
+## round-245（2026-11-22 晚）— 整合包检测/补全/版本页卡顿/反馈异常风暴
+
+### 整合包元信息全检测不到（P0）
+* 根因：`mll.get_mrpack_information()` 返回**扁平结构**
+  `{name, summary, versionId, formatVersion, minecraftVersion, optionalFiles}`——
+  既没有 `dependencies` 也没有 `files`。`_parse_mrpack_info` 却按
+  `dependencies` 是 list-of-dict 遍历 → mc_version 恒空、loader 恒 vanilla、
+  mods 恒 0（用户实测「版本/加载器/所有东西都检测不到」）。
+* loader/loader_version 只在 `modrinth.index.json` 的 `dependencies`（**dict**）
+  里，需另从 zip 读。修后 Forge/Fabric/原版三种都解析正确。
+* `_MrpackDialog._done` 把 `install_mrpack` 返回的 launch version id 当
+  `_result` 丢弃 → 新建实例 version_id 空/错、loader_version 不落盘，
+  启动永远 "Version xxx was not found"。现已回写并 persist，
+  `_start` 也传 loader_version。
+* 验证 `_probe_mrpack_meta.py` ALL PASS。
+
+### 补全无效 + 矛盾元数据导致启动必失败（P0）
+* 用户实例 `Dreamy World`：`game_version=1.21.4 / loader=vanilla` 但
+  `version_id=1.20.1-forge-47.4.0`。补全按 vanilla 装 1.21.4、启动按
+  version_id 找 1.20.1-forge → 必然失败，且补全前没有任何字段校验。
+* 新增 `src/core/instance_meta.py`：`loader_mismatch()` / `heal_version_id()`，
+  「version_id 带加载器标记但实例是原版 / 加载器种类不一致 / MC 版本不一致」
+  三种矛盾都清掉陈旧 id。接入 `launch.py`（启动前）、`main_window`（下载式补全）、
+  `instance_editor`（编辑页补全）三处。验证 `_probe_meta_heal.py` ALL PASS，
+  含 forge/fabric/neoforge/vanilla 相容实例不被误伤。
+* 编辑页补全原来只连 `finished/error`，下载全程无任何可见反馈（用户
+  「点补全只有一个提示、不拉下载」）；现接 status/progress 到状态行，
+  并跟随用户下载源设置（原来硬编码 official）。
+* ☠ `heal_version_id` 的 MC 版本检测不能取 version_id 里第一个 x.y.z——
+  `fabric-loader-0.16.9-1.21.4` / `neoforge-21.1.0` 会把 loader 版本当 MC 版本
+  误判；改成「game_version 作为子串出现即相容，否则只认 1.x 格式」。
+
+### 所有页面响应卡顿回归（P0）
+* 全页实测：`versions` 首次 **3438ms**、二次 **133ms**，8398 个 widget——
+  Mojang manifest 有 925 个版本，一次性建成 925 张 LightTrailCard。
+* 改成增量渲染：首屏 60 张 + 「加载更多」按钮 + 滚动到底自动追加；
+  搜索时扩到全集保证命中靠后版本，分类 pill 仍是纯显隐。
+* 修后：versions 首次 **116ms**、二次 **11ms**、widget **669**；
+  全页首次 store 87/lobby 8/settings 36/instances 28/其它 <20ms，
+  二次全部 <11ms。验证 `_probe_all_pages_perf.py` ALL PASS +
+  `_probe_versions_incremental.py` ALL PASS（首屏/加载更多/搜索靠后版本/
+  清空/pill 分类功能不回退）。
+* ☠ 探针判据用 `isVisible()` 在不 show 的 offscreen 窗口里恒 False（父链
+  不可见）→ 要用 `isHidden()` 读显式隐藏状态。
+
+### 交互反馈异常风暴（P0）
+* `crash.log` 实测每帧刷 `AttributeError: QEvent has no attribute button`
+  （`feedback.py:122` 把 Leave 的普通 QEvent 当 QMouseEvent）+ `RuntimeError:
+  QPropertyAnimation already deleted`（`DeleteWhenStopped` 后 Python 引用悬空）。
+* 修：`eventFilter` 对 Press/Release 用 `isinstance(QMouseEvent)` 守卫、Leave
+  独立分支不读 button()；Press/Ripple 动画改为复用单一对象不再自毁。
+  验证 `_probe_feedback_events.py` ALL PASS（40 轮 Press/Release/Leave 零异常、
+  200 次 Leave 0.5ms）。
+
+## round-244（2026-11-22）— 整合包导入/拖入 P0 修复
+
+### 导入整合包按钮一点没反应（P0）
+* 根因：`InstancesPage._import_pack()` 定义了 `fn_map` 却**从来没有
+  `fn = fn_map[fmt]`**，直接 `Worker(fn, ...)` → 任何格式都抛
+  `NameError: name 'fn' is not defined`（HEAD 里就有，非本轮引入）。
+* 修法：按钮与拖拽两条路径合并到 `_run_pack_import(path, fmt)`，统一
+  importer 选择、任务中心进度、错误提示、实例切换；按钮只负责选文件和
+  关面板，`.mrpack` 仍走原预览对话框。
+
+### 拖入整合包即安装：功能从来没有生效过（P0）
+* 根因①：`dragEnterEvent/dropEvent` 从 round-42 就写了，但**全项目没有一处
+  调用 `setAcceptDrops(True)`** → Qt 默认拒收拖拽事件，永远不触发。
+* 根因②：拖拽分派写的是 `elif fmt == "zip"`，而 `detect_pack_format()`
+  实际返回 `"zip_mc"` → 就算事件能进来，普通 `.zip` 也是哪个分支都不走。
+* 修法：`InstancesPage.__init__` 和 `MainWindow.__init__` 都开
+  `setAcceptDrops(True)`；主窗新增整窗拖入转发（在别的页面拖进来会自动
+  跳到实例页再导入）；分派统一走 `_run_pack_import`，`zip_mc` 不再漏。
+* 验证：`_probe_modpack_import.py` 全过（按钮导入不再 NameError 且用对
+  importer / `zip_mc` 进 worker / 实例页拖入接住 / 整窗拖入自动跳页 /
+  `.mrpack` 仍走预览对话框）；`smoke_all.py` 17/17；`test_pack_progress`
+  与 `test_round229_pack_detail` ALL CHECKS PASSED。
+* ☠ 探针教训：`QUrl.fromLocalFile()` 出来的路径是正斜杠，和 `os.path.join`
+  生成的反斜杠比较必须 `normcase(normpath())` 归一化；`QMimeData` 在
+  `QtCore` 不在 `QtGui`（另外 PySide6 直接合成 `QDropEvent` 时 mimeData
+  会退化成 QObject，测自己的 handler 用假事件对象更稳）。
+
+## round-243（2026-11-21）— 实例页空白、扫描页重做、换肤过渡、成就页重做、内置扩展包恢复
+
+> 一天里连做的一批：先修「实例页看不见版本 / 扫描扫不出东西 / 自定义图标不生效」，
+> 再修「换肤卡、切页没动画」，顺手把成就页从"裸进度条"重做成进度卡；
+> 最后按用户拍板恢复「随包内置功能扩展」（控制台/成就/音乐不再只靠远程索引）。
+> 每条都带实测数据；验证脚本在仓库根 `_probe_*.py`（pano / switch_cycle /
+> flow_check / detail_geom / inst_icons / scan_panel / retheme_veil /
+> page_fade / ach_page / builtin_features / modules_ui）。
+
+### 内置功能扩展包恢复：控制台不删、feature 进仓库（P0）
+* 背景：上一轮（未提交的工作区改动）把「随包内置扩展」整层拆了——
+  `features.py` 删掉 `bundled_root / ensure_builtins / bundled_ids /
+  list_builtins / restore_builtin`，`main_window` 不再播种，
+  `modules_page` 只剩远程索引安装。而远程仓库 `AC-Launcher-Features`
+  还没有内容 → 新装机器**没有控制台/成就/音乐三个页面**，玩家删掉后也装不回来。
+* 用户决策：控制台别删；feature 进仓库。
+* 恢复为**混合模式**（不是二选一）：
+  - 内置包随安装包发布，`assets/features/{achievements,console,music}` 六个文件
+    **一直在 git 跟踪中**（`git ls-files` 证实，无需新增跟踪）；
+    `data/features/` 是运行时副本、仍按 `data/` 规则忽略（玩家可删可改）。
+  - `src/features.py`：从 HEAD 取回 bundled 层六个函数，远程索引层
+    （`fetch_feature_index / install_from_remote`）原样保留；docstring 改为
+    「内置包与远程扩展并存」。
+  - `src/main_window.py`：恢复启动播种 `features.ensure_builtins()`
+    （try/except 包裹，扩展系统坏了不挡启动）。
+  - `src/modules_page.py`：恢复「内置」徽章 + 被删内置包的「可安装」行 +
+    `_restore_feature()` 一键装回；远程可安装列表保留在其后。
+* 语义不变（沿用 round-167 既定设计）：玩家**主动删除的包不会被下次启动
+  偷偷装回**，只会在模块页出现「安装」按钮，点了才恢复。
+* 验证：`_probe_builtin_features.py`（git 跟踪 / 首装播种 / 删除不自动回 /
+  一键装回 / 远程层保留，16 项全过）；`_probe_modules_ui.py`（真实控件级：
+  3 已装行+3 内置徽章 → 删控制台剩 2 行+1 安装行 → 点安装装回并触发导航刷新，
+  16 项全过）；`tests/test_features.py` ALL PASS；`_probe_167.py` PROBE OK；
+  全量编译 + `tests/smoke_all.py` 17/17 通过。
+* ☠ 探针教训（v2 修正）：`AC_DEV_TEMP=1` 下临时目录初始为空，探针必须先
+  `ensure_builtins()` 模拟首启，否则满页都是「可安装」行，判据全歪；
+  另外 offscreen 下点「安装」会卡在模态 `info()` 上，探针须打桩
+  `modules_page.info/warn`（真实产品里用户自己关弹窗，非 bug）。
+
+### 实例页整页空白（P0）
+* 根因：`InstancesPage.__init__` 把分栏视图**建了两遍**，`_refresh()` 切到 index 1
+  （空壳），数据全写进 index 3。删掉第二份，并把页索引约定写死成注释
+  （0 空状态 / 1 分栏 / 2 回收站 / 3+ 动态功能页）。
+* 详情卡右侧被裁：`_mono()` 的 QLabel 开了 wordWrap，`minimumSizeHint()` 仍按
+  **最长不可断片段**（Windows 路径）算宽 → 900 px 窗口溢出 211 px。加水平
+  `QSizePolicy.Ignored` 后溢出归零。
+* 徽章行 / 管理按钮 4 列 / 分区入口 2 列改用 `FlowLayout` / `FlowGrid`
+  （新文件 `src/ui_flow.py`）：732 / 1012 / 1400 三种宽度溢出均为 0，列数自适应。
+* 实例名消失：`ElidedLabel` 自带 `QSizePolicy.Ignored`，遇到 `addStretch(1)`
+  会拿到 0 宽 → 改 `addWidget(name, 1)`。
+
+### 自定义实例图标全链路
+* `_InstRow._apply_icon()` + 详情卡 44 px 图标位；右键菜单加「更换图标 /
+  恢复默认 / 加入|取消收藏」；新增 `instance_updated` 信号让首页同步刷新。
+* 实测：列表行红、详情卡红、未设图标的实例仍走默认图标（互不串味）。
+
+### 扫描页重做
+* 三道信息层：状态点 + 状态文字 + 三枚计数徽章（发现 / 待导入 / 已导入）／
+  工具栏／可折叠分组卡片。
+* 扫描线程逐条 `found` 回调 + 120 ms 批量插行（0.3 s 内已有结果），实时路径
+  中间省略显示；新增「停止」并**保留已发现结果**（按钮变「重新扫描」）。
+* 「已导入」从内存 set 换成 `managed_index()` 持久判定（`<目录>|<版本>` /
+  `<目录>|*`），重开面板不再重复导入；行键带版本，同目录多版本不会被合并。
+* 导入成功后不再整盘重扫，改为 `imported` 信号 → 宿主增量刷新列表。
+
+### 首页切版本卡顿与全景"卡住"
+* `wallpaper.apply()` 加输入签名幂等短路：配置没变时 5 次调用 → **0.05 ms**
+  （原来 5 次 start + 5 次 teardown，末态还停在 pano=False）。
+* `_start_panorama()` **不再先停旧的再起新的**：切版本 30 ms 后
+  `pano_active/visible` 由 `False/False` 变为 `True/True`，屏上不再出现白屏空窗。
+* 解码贴图加 LRU（2 版本 / 56 MB）：切回看过的版本 **140 ms → 11.9~19.5 ms**；
+  冷切新版本仍是 142~187 ms（那是解码成本，不可压）。
+* combo 切实例同步耗时 **3.5 ms**（teardown 0 次、`apply_qss` 0 次）。
+
+### 外观更改"卡顿"的真实成因（不是 Qt 慢）
+* 实测（1180×780 / 143 个控件）：`build_qss()` 0 ms、`apply_qss()` 缓存命中 0 ms，
+  **`setStyleSheet()` 首次 60~70 ms**——整窗每个控件重新 polish + 重绘。
+  玩家看到的不是"算得慢"，是**整窗瞬间换色**的视觉跳变。
+* 新增 `MainWindow.retheme(mode, accent, pack)` 三段式：① 抓一张当前画面盖住
+  窗口（11.8 ms）→ ② 把 re-polish 推到下一 tick（藏在遮罩后面，屏幕上仍是
+  静止的旧画面）→ ③ 遮罩 170 ms 淡出。实测 `retheme()` 返回 **11.8 ms**、
+  样式 46 ms 落地、淡出期间帧间隔平均 **13.9 ms** / 最大 18.0 ms
+  （空闲基线 15.8 / 18.1，即与不操作时持平）。
+* `theme.apply_qss(now=True)`：只有"必须确认样式已落地"的场合才同步贴
+  （遮罩撤之前必须贴好，否则淡出完还会再闪一次）；默认仍异步合并。
+* 设置页 5 处换肤入口（预置色点 / 自定义色 / 明暗单选 / 主题包下拉 / 导入主题包）
+  统一收口到 `SettingsPage._retheme()`；顺带修「点不保存时主题包不还原」。
+* 低配 / 减少动效下不建遮罩、当场做完（不为动效绕过无障碍开关）。
+
+### 页面切换淡入"根本没加进来"
+* 根因：`_switch_stack` 的淡入挂在可选模块 `page_transition`，而
+  `modules.EFFECT_CONFIG_KEYS` 里它默认 `False`、模块不装也是 `False` →
+  绝大多数人从没见过。改为核心行为，只由**低配模式**与**减少动效**压制。
+* 验收（`_probe_page_fade.py`）：默认配置下读到 15 个中间透明度
+  （0.18→0.35→0.47…），渐完 effect 正常摘除；减少动效 / 低配下 0 个中间帧；
+  连点切页动画不丢、effect 仍能回收。
+
+### 成就页重做
+* 原来一条 14 px 裸进度条 + 一行小字，看不出"差在哪"；且 `toast → _rebuild()`
+  每次解锁都拆光全部卡片重建，整页闪一下、滚动位置也丢。
+* 改为**进度卡**：主数字 `n / 总数` + 百分比 + 8 px 自绘细条 + **分区进度
+  chip 条带**（未开始 / 进行中 / 已完成三态，沿用 success 绿与 accent 紫）；
+  解锁时只就地改那一张卡与头部（`_AchCard.set_unlocked`）。
+* 换语言时整页重铺（页头与 chip 文案也随语言变），不再只刷数字。
+* 验收（`_probe_ach_page.py`）：进度 / 百分比 / 条比例与数据一致，7 个分区
+  chip 的 n/total 全对，解锁后**卡片对象 id 完全不变**（证明没重建），
+  `启程 1/1` → `Journey 1/1`。截图 `_probe_out/ach_page_r243.png`。
+
+### 回归可用性
+* 装上 `pytest`：此前 91 个测试尾部的 `pytest.main` 全是
+  `NameError: name 'pytest' is not defined`，其中 4 个文件因顶层 `import pytest`
+  根本跑不起来。`test_load_shed`、`test_round184_export` 等从"假红"转真绿。
+* `win_rounded.toast()` 沿 parent 链找宿主时不再对非控件锚点抛 `AttributeError`
+  （无头回归里传 `SimpleNamespace` 假页会把整条删除链炸掉）。
+* `test_round216_regression.py` / `test_round228_batch2.py` 按扫描面板重写后的
+  接缝更新（行为断言一字未改），并补上 `_move_to_trash` 空实现。
+
+### 发现的未决问题（未擅自改）
+* `assets/features/`（内置功能包：成就 / 音乐 / 控制台）在上一轮被从工作区删除，
+  同时 `features.py` 删掉了 `ensure_builtins / restore_builtin / bundled_ids /
+  list_builtins`，`main_window` 也不再播种——与 `features.py` 文档里新写的
+  「主程序**不再内置任何扩展包**」一致，但后果是：新装机器没有这三个页面，
+  且玩家在「功能扩展包」里删掉后**无法恢复**（`data/features/` 被 gitignore，
+  不进版本库）。本轮已把 `assets/features/` 从 git 恢复（未改任何代码逻辑），
+  是"随包内置 + 可恢复"还是"完全走远程索引"需要拍板。
+
 ## round-235（2026-11-16）— 百宝箱可选目标实例
 
 - 三件套原来只认「当前实例」：没设当前实例就只弹「请先选择或创建一个实例」，

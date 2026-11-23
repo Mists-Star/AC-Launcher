@@ -1124,13 +1124,37 @@ class InstanceEditorPanel(QWidget):
             return
         from .core.install import install_instance
         from .worker import ProgressWorker
+        # round-245：补全前自愈矛盾元数据，否则按错的 loader/版本补全后
+        # 启动仍然失败（用户实测）。
+        try:
+            from .core.instance_meta import heal_version_id
+            heal_version_id(self._inst, persist=manager().save)
+        except Exception:  # noqa: BLE001
+            pass
         self._set_busy(True, t("inst.repair_working"))
+        # 跟随用户设置（之前硬编码 official，国内慢到像"没在下载"）
+        cfg = load_config()
         self._repair_worker = ProgressWorker(
             install_instance, self._inst,
-            java_auto=True, java_path="", mirror="official", proxy="")
+            java_auto=bool(cfg.get("java_auto", True)),
+            java_path=(getattr(self._inst, "java_path", "")
+                       or cfg.get("java_path", "")),
+            mirror=cfg.get("download_mirror", "official"),
+            proxy=cfg.get("download_proxy", ""))
+        # ☠ 之前只连 finished/error → 下载全程无任何可见反馈，用户以为
+        # "点补全只有提示、没拉起下载进程"。现在把状态/进度接到状态栏。
+        self._repair_worker.status.connect(self._on_repair_status)
+        self._repair_worker.progress.connect(self._on_repair_progress)
         self._repair_worker.finished.connect(self._on_repair_done)
         self._repair_worker.error.connect(self._on_repair_failed)
         self._repair_worker.start()
+
+    def _on_repair_status(self, text: str) -> None:
+        self.ld_state.setText(str(text))
+
+    def _on_repair_progress(self, value: int, maximum: int) -> None:
+        if maximum and maximum > 0:
+            self.ld_state.setText(f"{max(0, value)} / {maximum}")
 
     def _on_repair_done(self, _result) -> None:
         self._set_busy(False, "")
@@ -1350,6 +1374,9 @@ class InstanceEditorPanel(QWidget):
             self.ldver_hint.setText(t("inst.loader_vanilla_hint"))
             self._refresh_loader_state()
             self._sync_fabapi_visibility()
+            # 即使是 vanilla，初始加载完成也要更新 _old_ver（防止误判）
+            if initial:
+                self._old_ver = (self._inst.game_version or "", "vanilla", "")
             return
         self.ldver_combo.setEnabled(self._ver_editable)
         self.ldver_hint.setText(t("inst.loader_ver_loading"))
@@ -1359,12 +1386,14 @@ class InstanceEditorPanel(QWidget):
         from .pages_instances import _fetch_loader_versions
         mc = self.ver_edit.currentText().strip() or self._inst.game_version or ""
         self._ldver_worker = Worker(_fetch_loader_versions, mc, loader)
-        self._ldver_worker.finished.connect(self._on_loader_versions)
+        # 传递 initial 标志，以便回调里更新 _old_ver
+        self._ldver_worker.finished.connect(
+            lambda vers: self._on_loader_versions(vers, initial=initial))
         self._ldver_worker.error.connect(
             lambda _e: self.ldver_hint.setText(t("inst.loader_ver_failed")))
         self._ldver_worker.start()
 
-    def _on_loader_versions(self, versions: list) -> None:
+    def _on_loader_versions(self, versions: list, initial: bool = False) -> None:
         keep = self._current_ldver()
         # ☠ round-198：空态下拉里那一项是**提示文案**（"（该 MC 版本没有可用
         # 版本）"），不是版本号 → 别把它当成"旧版本"去提示。
@@ -1424,6 +1453,14 @@ class InstanceEditorPanel(QWidget):
                   new=self.ldver_combo.currentText()))
         self.install_btn.setEnabled(self._ver_editable)
         self._refresh_loader_state()
+        # 初始加载完成后，把 _old_ver 更新为当前 UI 状态，
+        # 防止用户未改动却被误判为版本变更（触发重装）。
+        if initial:
+            self._old_ver = (
+                self.ver_edit.currentText().strip() or self._inst.game_version or "",
+                self._current_loader(),
+                self._current_ldver() if getattr(self, "_ldver_available", True) else (self._inst.loader_version or "")
+            )
 
     def _refresh_loader_state(self) -> None:
         """状态行：已装的加载器版本 id / 没装。"""

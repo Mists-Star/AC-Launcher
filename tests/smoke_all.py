@@ -134,19 +134,30 @@ def main():
     if win is not None and getattr(win, "instances_page", None) is not None:
         def double_page_check():
             page = win.instances_page
+            base_count = page._body_stack.count()   # 常驻页基线（round-235 起是 4：
+            # _empty_page / _split_view / _trash_page / 第二个 _split_view）
             page._new()                     # 打开内嵌新建向导
             app.processEvents()
             opened = page._new_panel is not None
+            during = page._body_stack.count()
             page._close_new_panel()         # 立即关闭（旧 bug 的双页场景）
             app.processEvents()
             app.processEvents()             # 让 QTimer.singleShot(0) 收尾跑完
             count = page._body_stack.count()
             cur = page._body_stack.currentWidget()
             assert opened, "内嵌向导没有打开"
+            assert during == base_count + 1, \
+                "向导未作为临时页加入：base=%d during=%d" % (base_count, during)
             assert page._new_panel is None, "面板引用未清空"
-            assert count == 2, "残留多余页：count=%d" % count
-            assert cur is page._empty_page or cur is page._split_view, \
-                "当前页异常：%s" % type(cur).__name__
+            # round-236：旧断言写死 count==2，但常驻页早已扩到 4 → 假阳性。
+            # 正确语义 = 关闭后回到打开前的基线页数，不多一页。
+            assert count == base_count, \
+                "残留多余页：base=%d now=%d" % (base_count, count)
+            # round-236：_split_view 在构造中被赋值两次（trash 前后各建一个），
+            # 引用只指向最后一个。用「当前页必须是某个常驻页」替代写死 is 比对。
+            resident = [page._body_stack.widget(i) for i in range(base_count)]
+            assert cur in resident, \
+                "当前页不是常驻页：%s" % type(cur).__name__
             return True
 
         attempt("内嵌新建面板无双页", double_page_check)

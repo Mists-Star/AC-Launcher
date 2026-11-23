@@ -475,9 +475,9 @@ class SettingsPage(QWidget):
         # 7 个扁平分类（组内不再折叠）+ Java / 模块。左菜单分类导航，对齐
         # Prism / HMCL 的做法。
         for key, ico in (
-            ("basic", "settings"), ("appearance", "sun"), ("launch", "play"),
-            ("network", "server"), ("sound", "music"), ("account", "account"),
-            ("advanced", "tools"), ("java", "java"), ("modules", "store"),
+            ("basic", "settings"), ("appearance", "sun"), ("modules", "store"),
+            ("launch", "play"), ("network", "server"), ("sound", "music"),
+            ("account", "account"), ("advanced", "tools"), ("java", "java"),
         ):
             it = QListWidgetItem(icon(ico), t(f"settings.sec_{key}"))
             self._sec_list.addItem(it)
@@ -491,9 +491,9 @@ class SettingsPage(QWidget):
         # 一下；这里只放占位页，切到哪页才构建哪页。未构建分区的控件值由
         # _safe() 回落到 cfg（见 _sync_ui_to_cfg），保存/脏检查不受影响。
         self._sec_builders = (
-            self._page_basic, self._page_appearance, self._page_launch,
-            self._page_network, self._page_sound, self._page_account,
-            self._page_advanced, self._build_java_group, self._build_modules,
+            self._page_basic, self._page_appearance, self._build_modules,
+            self._page_launch, self._page_network, self._page_sound,
+            self._page_account, self._page_advanced, self._build_java_group,
         )
         self._sec_pages = [None] * len(self._sec_builders)
         for _ in self._sec_builders:
@@ -1550,6 +1550,18 @@ class SettingsPage(QWidget):
         dgl.addWidget(open_diag)
         lay.addWidget(diag_grp)
 
+        # ── Crash Analysis (P0 #3) ──
+        crash_grp = QGroupBox(t("settings.sec_crash"))
+        cgl = QVBoxLayout(crash_grp)
+        cgl.setSpacing(8)
+        cgl.addWidget(QLabel(t("crash.open_analyzer_desc")))
+        open_crash = QPushButton(t("crash.open_analyzer"))
+        open_crash.setProperty("cls", "accent")
+        open_crash.setMinimumHeight(34)
+        open_crash.clicked.connect(self._open_crash_analyzer)
+        cgl.addWidget(open_crash)
+        lay.addWidget(crash_grp)
+
         # ── round-107 页面入口：成就 / 控制台 已从左侧导航移除，改由此处进入 ──
         links_grp = QGroupBox(t("settings.page_links"))
         lkl = QVBoxLayout(links_grp)
@@ -1786,9 +1798,32 @@ class SettingsPage(QWidget):
                 f"QPushButton:hover {{ border: 2px solid #9CA3AF; }}"
             )
 
+    # ── 换肤收口（round-243）────────────────────────────────────────
+    # 以前每个入口都是「set_xxx() + apply_qss()」各写一遍，于是：
+    #   ① 没有过渡，整窗瞬间换色（用户报的"外观更改卡顿"就是这一下的视觉跳变，
+    #      实测 QSS 编译 0~2ms、重绘 4~8ms，Qt 一点都不慢，是"跳"不是"卡"）；
+    #   ② 5 处各写一遍，漏一处就出「设置页换了、别的页没换」的不一致。
+    # 现在统一走主窗 retheme()：先盖一张当前画面，换完再淡出。
+    def _retheme(self, **kw):
+        win = self._window
+        if win is not None and hasattr(win, "retheme"):
+            win.retheme(**kw)
+            return
+        # 回退：没挂在主窗上（独立预览 / 探针 / 单元测试）就直接换，行为不变。
+        from .theme import (apply_qss, apply_theme_pack, find_theme_pack,
+                            set_accent_color, set_theme_mode)
+        if "pack" in kw:
+            p = kw["pack"]
+            apply_theme_pack(p if isinstance(p, dict)
+                             else (find_theme_pack(p) if p else None))
+        if kw.get("mode"):
+            set_theme_mode(kw["mode"])
+        if kw.get("accent"):
+            set_accent_color(kw["accent"])
+        apply_qss(now=True)
+
     def _pick_color(self, hex_color: str):
         """Preset color dot clicked — apply immediately."""
-        from .theme import set_accent_color, apply_qss
         from .achievements import achievements as _ach
         _ach.unlock("first_theme")
         self._selected_color = hex_color
@@ -1796,13 +1831,9 @@ class SettingsPage(QWidget):
             dot._is_selected = (dot.color_hex == hex_color)
             self._apply_dot_style(dot)
         # Apply accent color globally so user sees the change instantly
-        set_accent_color(hex_color)
-        app = QApplication.instance()
-        if app:
-            apply_qss()
+        self._retheme(accent=hex_color)
 
     def _pick_color_custom(self):
-        from .theme import set_accent_color, apply_qss
         c = dark_color(self, self._custom_color or "#3B82F6")
         if c:
             self._selected_color = c
@@ -1810,10 +1841,7 @@ class SettingsPage(QWidget):
             for dot in self.color_btns:
                 dot._is_selected = False
                 self._apply_dot_style(dot)
-            set_accent_color(c)
-            app = QApplication.instance()
-            if app:
-                apply_qss()
+            self._retheme(accent=c)
 
     def _browse_wallpaper(self):
         """Open file picker filtered by the currently selected wallpaper mode."""
@@ -2391,10 +2419,7 @@ class SettingsPage(QWidget):
         """Live-preview theme change when user clicks light/dark radio."""
         if rb is None or not hasattr(rb, "theme_mode_val"):
             return
-        mode = rb.theme_mode_val
-        from .theme import set_theme_mode, apply_qss
-        set_theme_mode(mode)
-        apply_qss()
+        self._retheme(mode=rb.theme_mode_val)
 
     def _on_topmost_toggle(self, on: bool):
         """Live 窗口置顶开关（round-79b）：即时让主窗置顶/取消置顶。"""
@@ -2441,14 +2466,12 @@ class SettingsPage(QWidget):
     def _on_pack_changed(self, _idx: int):
         """Live-apply the selected theme pack (none = built-in theme)."""
         pack_id = self.pack_combo.currentData() or ""
-        from .theme import find_theme_pack, apply_theme_pack, apply_qss
-        apply_theme_pack(find_theme_pack(pack_id) if pack_id else None)
-        apply_qss()
+        self._retheme(pack=pack_id)
         from .achievements import achievements as _ach
         _ach.unlock("first_theme")
 
     def _import_theme_pack(self):
-        from .theme import import_theme_pack_file, apply_theme_pack, apply_qss
+        from .theme import import_theme_pack_file
         from .win_rounded import pick_files, warn
         path = pick_files(self, t("settings.theme_pack_import_title"), "", "主题包 (*.json)")
         if not path:
@@ -2458,8 +2481,8 @@ class SettingsPage(QWidget):
         except Exception as e:
             warn(self, t("settings.theme_pack_import_fail"), str(e))
             return
-        apply_theme_pack(pack)
-        apply_qss()
+        # 传 dict：刚导入的包可能还没进 list_theme_packs() 的缓存，按 id 反查会落空
+        self._retheme(pack=pack)
         self._reload_pack_combo()
         # select the imported pack
         for i, p in enumerate(self._packs, start=1):
@@ -2693,6 +2716,13 @@ class SettingsPage(QWidget):
     def _open_diagnostics(self):
         from .diagnostics_dialog import DiagnosticsDialog
         DiagnosticsDialog(self).exec()
+
+    def _open_crash_analyzer(self):
+        """Open CrashAnalyzerDialog for the current instance (P0 #3)."""
+        from .crash_dialog import CrashAnalyzerDialog
+        from .instances import manager as inst_mgr
+        inst = inst_mgr().current()
+        CrashAnalyzerDialog(inst=inst, parent=self).exec()
 
     # ── save ───────────────────────────────────────────────────────────────
     # ── language live switch ──
@@ -3056,14 +3086,16 @@ class SettingsPage(QWidget):
     def discard_changes(self):
         """Revert live-applied theme/accent/wallpaper to the last saved config
         (the user chose not to keep their edits)."""
-        from .theme import set_accent_color, set_theme_mode, apply_qss
-        disk = load_config()
-        set_theme_mode(disk.get("theme_mode", "light"))
-        set_accent_color(disk.get("accent_color", "#7C3AED"))
-        # round-87 放弃修改时字体也还原
         from .theme import set_font_family
+        disk = load_config()
+        # round-87 放弃修改时字体也还原。字体必须先设——build_qss 要用新字体族
+        # 重建，晚一步就是"字体没跟着回去"。
         set_font_family(disk.get("font_family", ""))
-        apply_qss()
+        # round-243：主题包也一起还原。以前只还原了明暗+强调色，用户换过包
+        # 再点「不保存」包还赖在屏上，下次打开设置又显示成"没选包"。
+        self._retheme(mode=disk.get("theme_mode", "light"),
+                      accent=disk.get("accent_color", "#7C3AED"),
+                      pack=disk.get("theme_pack", "") or "")
         self.cfg = disk
         try:
             win = self._window

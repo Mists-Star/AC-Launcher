@@ -93,8 +93,11 @@ a = os.path.join(mroot, "mc_a")
 b = os.path.join(mroot, "mc_b")
 os.makedirs(a, exist_ok=True)
 os.makedirs(b, exist_ok=True)
-panel._all_instances = [_inst(a, "a1"), _inst(a, "a2"), _inst(b, "b1")]
-panel._imported = set()
+# round-243 扫描面板重写后字段改名（行为断言一字未改，只是接缝换了）：
+#   _all_instances → _all       「已导入」判定从内存 set 改成持久索引 _managed
+#   summary        → footer_lbl （状态条已改成"状态点+计数徽章"，汇总文案落到脚注）
+panel._all = [_inst(a, "a1"), _inst(a, "a2"), _inst(b, "b1")]
+panel._managed = set()
 calls = []
 
 
@@ -110,11 +113,13 @@ with mock.patch.object(panel, "_do_import", fake_import), \
 
 check("同目录多版本只导入一次", calls.count(a) == 1, "calls=%s" % calls)
 check("不同目录各自导入", calls.count(b) == 1)
-check("成功目录被记为已导入", a in panel._imported)
-check("失败目录没有被记为已导入", b not in panel._imported)
+key_a = sd._inst_key(sd._norm_path(a), "a1")
+key_b = sd._inst_key(sd._norm_path(b), "b1")
+check("成功目录被记为已导入", key_a in panel._managed, key_a)
+check("失败目录没有被记为已导入", key_b not in panel._managed, key_b)
 check("汇总文案报告 1 成功 1 失败",
-      "1" in panel.summary.text() and len(panel.summary.text()) > 0,
-      panel.summary.text()[:40])
+      "1" in panel.footer_lbl.text() and len(panel.footer_lbl.text()) > 0,
+      panel.footer_lbl.text()[:40])
 
 # ══════════════════════════════════════════════════════════════════════
 # 3. BGM 模式
@@ -240,7 +245,8 @@ from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
 seen = {"stopped": 0, "done": 0}
 
 
-def fake_discover(progress=None, should_stop=None):
+def fake_discover(progress=None, should_stop=None, on_found=None):
+    # round-243：扫描体新增 on_found 回调（行级实时上屏），签名要对齐
     for _ in range(3000):
         if should_stop is not None and should_stop():
             seen["stopped"] += 1
@@ -251,7 +257,10 @@ def fake_discover(progress=None, should_stop=None):
 
 with mock.patch.object(sd, "discover_instances", fake_discover):
     panel2 = sd.ScanPanel(auto_scan=False)
-    panel2._on_done = lambda r: seen.__setitem__("done", seen["done"] + 1)
+    # round-243：面板不再有 _on_done 钩子，扫描结束走 job.finished 信号。
+    # 这里在 _run_scan() **之前**打桩——连接发生在 _run_scan 内部，才会接到它。
+    panel2._on_scan_finished = (
+        lambda r: seen.__setitem__("done", seen["done"] + 1))
     panel2._run_scan()
     loop = QEventLoop()
     QTimer.singleShot(100, loop.quit)
@@ -260,6 +269,10 @@ with mock.patch.object(sd, "discover_instances", fake_discover):
     t0 = time.time()
     panel2.shutdown()
     cost = time.time() - t0
+    # 给足一拍：shutdown 靠"先断信号再停机"，要确认信号确实不会补送
+    loop2 = QEventLoop()
+    QTimer.singleShot(250, loop2.quit)
+    loop2.exec()
     check("扫描线程确实在跑（前置条件）", was_running)
     check("shutdown 后线程停止", not panel2._worker.isRunning(), "%.2fs" % cost)
     check("shutdown 不干等", cost < 2.0, "%.2fs" % cost)

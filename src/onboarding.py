@@ -20,15 +20,17 @@ import threading
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QRadioButton, QButtonGroup, QWidget, QComboBox, QProgressBar,
-    QCheckBox, QGridLayout,
+    QCheckBox, QGridLayout, QListWidget, QListWidgetItem,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QFont, QColor
 
 from .theme import COLORS, RoundedCard, set_accent_color
-from .icons import pixmap as icon_pixmap
+from .icons import pixmap as icon_pixmap, icon
 from .i18n import t, set_language
+from .instances import launcher_label
 from .frameless import FramelessHelper, TitleBar
+from .win_rounded import warn
 from .settings_dialog import load_config, save_config, ACCENT_PRESETS
 from .paths import get_data_dir
 from .worker import TrackedThread
@@ -124,6 +126,10 @@ class OnboardingDialog(QDialog):
             ("title", "onboard.title"),
             ("body", "onboard.welcome"),
             ("body", "onboard.mode_hint"),
+        ]),
+        ("import", [
+            ("title", "onboard.step_import"),
+            ("body", "onboard.import_text"),
         ]),
         ("lang", [
             ("title", "onboard.step_lang"),
@@ -297,6 +303,9 @@ class OnboardingDialog(QDialog):
         # build step-specific controls
         if step_key == "welcome":
             pass  # just text
+
+        elif step_key == "import":
+            self._build_import_step()
 
         elif step_key == "lang":
             # round-79: checked 必须跟随 cfg 里已保存的语言（之前写死
@@ -932,6 +941,124 @@ class OnboardingDialog(QDialog):
         cfg["java_auto"] = self.cfg.get("java_auto", True)
         save_config(cfg)
 
+    # ── Import step ─────────────────────────────────────────────────────────
+    def _build_import_step(self):
+        """Scan other launchers for instances and import them."""
+        self.import_btn = QPushButton(t("onboard.import_btn"))
+        self.import_btn.setProperty("cls", "accent")
+        self.import_btn.setMinimumHeight(40)
+        self.import_btn.setCursor(Qt.PointingHandCursor)
+        self.import_btn.clicked.connect(self._on_import_scan)
+        self.step_layout.addWidget(self.import_btn)
+
+        self.import_status = QLabel()
+        self.import_status.setWordWrap(True)
+        self.import_status.setProperty("cls", "sub")
+        self.import_status.setVisible(False)
+        self.step_layout.addWidget(self.import_status)
+
+        self.import_progress = QProgressBar()
+        self.import_progress.setMaximum(0)
+        self.import_progress.setTextVisible(False)
+        self.import_progress.setVisible(False)
+        self.step_layout.addWidget(self.import_progress)
+
+        # Results list (populated after scan)
+        self.import_list = QListWidget()
+        self.import_list.setSpacing(6)
+        self.import_list.setVisible(False)
+        self.step_layout.addWidget(self.import_list, stretch=1)
+
+    def _on_import_scan(self):
+        self.import_btn.setEnabled(False)
+        self.import_btn.setText(t("onboard.import_scanning"))
+        self.import_progress.setVisible(True)
+        self.import_status.setVisible(True)
+        self.import_status.setText(t("onboard.import_scanning"))
+        self.import_list.setVisible(False)
+        self.import_list.clear()
+
+        # Run scan in background thread
+        self._import_thread = _ImportScanThread()
+        self._import_thread.done.connect(self._on_import_done)
+        self._import_thread.start()
+
+    def _on_import_done(self, result: dict):
+        try:
+            self.import_progress.setVisible(False)
+            self.import_btn.setEnabled(True)
+            self.import_btn.setText(t("onboard.import_btn"))
+            instances = result.get("instances", [])
+            n = len(instances)
+            if n > 0:
+                self.import_status.setText(t("onboard.import_done", n=n))
+                self._populate_import_list(instances)
+                self.import_list.setVisible(True)
+            else:
+                self.import_status.setText(t("onboard.import_none"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _populate_import_list(self, instances: list[dict]):
+        from .instances import launcher_label
+        self.import_list.clear()
+        for inst in instances:
+            item = QListWidgetItem()
+            row = QWidget()
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(10, 8, 10, 8)
+            lay.setSpacing(10)
+
+            info_lbl = QLabel()
+            info_lbl.setTextFormat(Qt.RichText)
+            detail = f"{t('scan.launcher')} {launcher_label(inst['launcher'], show_original=True)}  ·  " \
+                     f"{t('scan.version')} {inst['game_version']}  ·  " \
+                     f"{t('scan.loader')} {inst['loader']}"
+            extra = []
+            if inst.get('mods'):
+                extra.append(t("scan.mods") + f" {inst['mods']}")
+            if inst.get('resource_packs'):
+                extra.append(t("scan.respacks") + f" {inst['resource_packs']}")
+            if inst.get('shaders'):
+                extra.append(t("scan.shaders") + f" {inst['shaders']}")
+            if inst.get('saves'):
+                extra.append(t("scan.saves") + f" {inst['saves']}")
+            sub_color = COLORS.get("text_sub", "#6B7280")
+            if extra:
+                detail += f"<br><span style='color:{sub_color};font-size:11px'>" + \
+                    "  ·  ".join(extra) + "</span>"
+            info_lbl.setText(f"<b>{inst['name']}</b><br><span style='color:{sub_color}'>{detail}</span>")
+            lay.addWidget(info_lbl, stretch=1)
+
+            import_btn = QPushButton(t("scan.import"))
+            import_btn.setMinimumHeight(32)
+            import_btn.setIcon(icon("import"))
+            import_btn.setIconSize(QSize(16, 16))
+            import_btn.clicked.connect(lambda _c, i=inst, b=import_btn: self._do_import_instance(i, b))
+            lay.addWidget(import_btn)
+
+            item.setSizeHint(row.sizeHint())
+            self.import_list.addItem(item)
+            self.import_list.setItemWidget(item, row)
+
+    def _do_import_instance(self, inst: dict, btn: QPushButton):
+        btn.setEnabled(False)
+        btn.setText(t("onboard.import_scanning"))
+        # Run import in background thread
+        self._import_one_thread = _ImportOneThread(inst)
+        self._import_one_thread.done.connect(lambda ok, b=btn, i=inst: self._on_one_import_done(ok, b, i))
+        self._import_one_thread.start()
+
+    def _on_one_import_done(self, ok: bool, btn: QPushButton, inst: dict):
+        if ok:
+            btn.setText(t("scan.imported"))
+            btn.setEnabled(False)
+            btn.setStyleSheet(f"QPushButton {{ background:{COLORS['bg_panel']}; color:{COLORS['text_sub']}; border:1px solid {COLORS['border']}; border-radius: 8px; }}")
+        else:
+            btn.setEnabled(True)
+            btn.setText(t("scan.import"))
+            warn(self, t("scan.import_title"), t("onboard.import_fail", e="导入失败"))
+
 
 def _radio_group(options, default_val) -> tuple:
     """Build a horizontal radio button group. Returns (QButtonGroup, QWidget)."""
@@ -1045,3 +1172,66 @@ class _JavaInstallThread(TrackedThread):
                 self.cancelled.emit()
             else:
                 self.done.emit(path)
+
+
+class _ImportScanThread(TrackedThread):
+    """Scan other launchers for instances in a background thread."""
+
+    done = Signal(dict)  # {"count": n, "instances": [...]}
+
+    def run(self) -> None:
+        try:
+            from .scan import discover_instances
+            instances = discover_instances()
+            # Convert ScannedInstance objects to serializable dicts
+            result = []
+            for inst in instances:
+                result.append({
+                    "launcher": inst.launcher,
+                    "name": inst.name,
+                    "game_version": inst.game_version,
+                    "loader": inst.loader,
+                    "mc_dir": inst.mc_dir,
+                    "mods": inst.mods,
+                    "resource_packs": inst.resource_packs,
+                    "shaders": inst.shaders,
+                    "saves": inst.saves,
+                    "version_id": inst.version_id,
+                    "kind": inst.kind,
+                    "needs_convert": inst.needs_convert,
+                    "isolated": inst.isolated,
+                    "loader_version": inst.loader_version,
+                    "note": inst.note,
+                })
+            self.done.emit({"count": len(result), "instances": result})
+        except Exception as e:  # noqa: BLE001
+            self.done.emit({"count": 0, "instances": [], "error": str(e)})
+
+
+class _ImportOneThread(TrackedThread):
+    """Import a single instance in background."""
+
+    done = Signal(bool)
+
+    def __init__(self, inst: dict):
+        super().__init__()
+        self.inst = inst
+
+    def run(self) -> None:
+        try:
+            from .instances import manager as instances_manager
+            instances_manager().import_external(
+                mc_dir=self.inst["mc_dir"],
+                name=self.inst["name"],
+                game_version=self.inst["game_version"],
+                loader=self.inst["loader"],
+                loader_version=self.inst["loader_version"],
+                version_id=self.inst["version_id"],
+                kind=self.inst["kind"],
+                needs_convert=self.inst["needs_convert"],
+                mode="link",  # in-place link is faster during onboarding
+                launcher=self.inst["launcher"],
+            )
+            self.done.emit(True)
+        except Exception:  # noqa: BLE001
+            self.done.emit(False)

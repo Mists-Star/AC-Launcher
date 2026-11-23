@@ -1,15 +1,11 @@
 @echo off
 rem ═══════════════════════════════════════════════════════════════════════
-rem  AC Launcher — 一键构建脚本（PyInstaller onedir）
+rem  AC Launcher — 一键构建并部署到测试目录（PyInstaller onedir）
 rem
-rem  产物：dist_beta\AC_Launcher\AC_Launcher.exe（含 _internal 目录）
-rem  分发：整个 dist_beta\AC_Launcher 文件夹打包（zip）即可。
-rem        用户数据（data\）与 launcher_config.json 在 exe 旁首次运行自动创建。
+rem  流程：构建(临时目录) → 裁剪(Qt翻译只留zh_CN/en) → 部署到 D:\Appdata\AC_Launcher
+rem  用户数据（data\）与 launcher_config.json 在 exe 旁首次运行自动创建。
 rem
-rem  为什么用 PyInstaller：Nuitka 4.1.3 + PySide6 6.11 + Python 3.13 打包后
-rem  报 shiboken6 ImportError（最小探针已复现，dist 内缺 shiboken6/__init__.py
-rem  且 abi3 dll 位置错误）。PyInstaller 的 PySide6 hook 成熟，开箱可用；
-rem  运行期性能两者持平，Startup 差距 <1s，对启动器无感。
+rem  使用 PyInstaller onedir：PySide6 hook 成熟、开箱可用；
 rem
 rem  依赖：venv（已装 pyinstaller）
 rem ═══════════════════════════════════════════════════════════════════════
@@ -39,6 +35,6 @@ IF %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [DONE] dist_beta\AC_Launcher\AC_Launcher.exe
-echo 分发：整个 dist_beta\AC_Launcher 文件夹打包（zip）即可。
+echo [DONE] 已部署到 D:\Appdata\AC_Launcher\AC_Launcher.exe
+echo 直接运行该 exe 即可测试（便携模式，数据自带）。
 pause

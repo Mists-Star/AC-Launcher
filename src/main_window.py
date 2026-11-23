@@ -48,6 +48,7 @@ from . import brand_custom
 from . import instance_art
 from . import features
 from . import slim
+from . import ui_kit
 from .win_rounded import enable_win11_round_corners
 
 
@@ -93,6 +94,10 @@ NAV_GROUPS = [
     ("nav.group.tools", [("pcl2.nav_toolbox", "toolbox")]),
     ("nav.group.system", [("nav.account", "account"), ("nav.settings", "settings")]),
 ]
+
+# 「参数没传」的哨兵。None 在换肤语境里是**有意义的实参**
+# （pack=None 表示"卸掉主题包回到默认"），所以不能拿 None 当默认值。
+_UNSET = object()
 
 # Stack index of every page — single source of truth for BOTH nav layouts
 # (AC left sidebar and the optional top-bar). Add a new page here and it
@@ -210,7 +215,7 @@ class _InstanceCard(LightTrailCard):
     style). Clicking the card body selects it as the current instance; the
     embedded play button launches it directly."""
 
-    def __init__(self, inst, is_current, on_select, on_play, parent=None):
+    def __init__(self, inst, is_current, on_select, on_play, on_health=None, parent=None):
         # round-50 首页实例网格流光：低强度慢速，视觉整洁
         super().__init__(
             radius=14, parent=parent,
@@ -221,6 +226,7 @@ class _InstanceCard(LightTrailCard):
         self._inst = inst
         self._on_select_cb = on_select
         self._on_play_cb = on_play
+        self._on_health_cb = on_health
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(144)
         # 允许高度随内容撑开（早年固定高度会裁掉底部播放钮/时间行）
@@ -238,7 +244,7 @@ class _InstanceCard(LightTrailCard):
         ic.setPixmap(_pm if _pm is not None
                      else icon("instances").pixmap(22, 22))
         top.addWidget(ic)
-        name = QLabel(inst.name or "—")
+        name = ui_kit.ElidedLabel(inst.name or "—")
         name.setProperty("cls", "big")
         name.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         top.addWidget(name, stretch=1)
@@ -293,6 +299,24 @@ class _InstanceCard(LightTrailCard):
         last_lbl = QLabel(last_txt)
         last_lbl.setProperty("cls", "sub")
         bot.addWidget(last_lbl, stretch=1)
+
+        # 实例体检按钮（🩺）——点击打开 HealthDialog
+        health_btn = QPushButton()
+        health_btn.setIcon(icon("repair"))
+        health_btn.setIconSize(QSize(18, 18))
+        health_btn.setFixedSize(36, 36)
+        health_btn.setCursor(Qt.PointingHandCursor)
+        health_btn.setToolTip(t("health.title"))
+        health_btn.setProperty("cls", "surface")
+        from .theme import COLORS as _C2
+        health_btn.setStyleSheet(
+            f"QPushButton {{ background: {_C2['bg_card']}; color: {_C2['text_main']}; "
+            f"border: 1px solid {_C2['border']}; border-radius: 9px; padding: 0; }}"
+            f"QPushButton:hover {{ background: {_C2['bg_hover']}; border-color: {_C2['accent']}; }}"
+        )
+        health_btn.clicked.connect(lambda *a: self._emit_health())
+        bot.addWidget(health_btn)
+
         play_btn = QPushButton()
         play_btn.setIcon(on_accent("play"))
         play_btn.setIconSize(QSize(20, 20))
@@ -316,6 +340,10 @@ class _InstanceCard(LightTrailCard):
 
     def _emit_play(self):
         self._on_play_cb(self._inst.id)
+
+    def _emit_health(self):
+        if hasattr(self, "_on_health_cb") and self._on_health_cb:
+            self._on_health_cb(self._inst.id)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -946,6 +974,13 @@ class HomePage(QWidget):
         self.log_stream.setWordWrap(True)
         self.log_stream.setTextInteractionFlags(Qt.TextSelectableByMouse)
         hint_row.addWidget(self.log_stream, stretch=1)
+        # P0 #3: 崩溃分析常驻入口
+        self.crash_analysis_btn = QPushButton(t("home.crash_analysis"))
+        self.crash_analysis_btn.setProperty("cls", "surface")
+        self.crash_analysis_btn.setCursor(Qt.PointingHandCursor)
+        self.crash_analysis_btn.setMinimumHeight(28)
+        self.crash_analysis_btn.clicked.connect(self._open_crash_analyzer)
+        hint_row.addWidget(self.crash_analysis_btn)
         self.log_clear_btn = QPushButton(t("home.repair_log_clear"))
         self.log_clear_btn.setProperty("cls", "sub")
         self.log_clear_btn.setCursor(Qt.PointingHandCursor)
@@ -1346,7 +1381,36 @@ class HomePage(QWidget):
 
     # ── 实例卡片网格 ──
     def _make_instance_card(self, inst, is_current):
-        return _InstanceCard(inst, is_current, self._select_instance, self._play_instance)
+        return _InstanceCard(
+            inst, is_current,
+            self._select_instance,
+            self._play_instance,
+            on_health=self._open_health_for_instance
+        )
+
+    def _open_health_for_instance(self, inst_id):
+        """打开实例体检对话框。"""
+        if self.inst_mgr is None:
+            return
+        try:
+            inst = self.inst_mgr.get(inst_id)
+        except Exception:
+            return
+        if inst is None:
+            return
+        self._open_instances()
+        # 延迟打开体检，等实例页构建完成
+        QTimer.singleShot(0, lambda i=inst: self._do_open_health(i))
+
+    def _do_open_health(self, inst):
+        """实际打开 HealthDialog（需在实例页 ready 后）。"""
+        try:
+            from .mod_check_dialog import open_health_dialog
+            win = self.window()
+            if win is not None and hasattr(win, "instances_page") and win.instances_page is not None:
+                open_health_dialog(win, inst, win.instances_page.mgr)
+        except Exception:
+            pass
 
     def _refresh_inst_grid(self, instances, cur_id):
         if not (hasattr(self, "inst_grid_lay") and self._alive(self.inst_grid_lay)):
@@ -1397,9 +1461,15 @@ class HomePage(QWidget):
             apply_feedback_to_button(dl_btn, press_scale=True, focus_ring=True)
             empty_lay.addWidget(dl_btn)
 
+            # 导入按钮提升为同等醒目等级：accent + 图标 + 更宽，首屏即可见
             scan_btn = QPushButton(t("home.scan_import"))
+            scan_btn.setProperty("cls", "accent")
             scan_btn.setCursor(Qt.PointingHandCursor)
             scan_btn.setMinimumHeight(32)
+            scan_btn.setMinimumWidth(160)
+            # 左侧加个下载/导入图标，视觉上区分两个 accent 按钮
+            scan_btn.setIcon(icon("download"))
+            scan_btn.setIconSize(QSize(18, 18))
             scan_btn.clicked.connect(self._open_scan)
             apply_feedback_to_button(scan_btn, press_scale=True, focus_ring=True)
             empty_lay.addWidget(scan_btn)
@@ -1485,6 +1555,16 @@ class HomePage(QWidget):
         from .repair_log import clear
         clear()
         self._refresh_repair_log()
+
+    def _open_crash_analyzer(self):
+        """Open CrashAnalyzerDialog for the current instance (P0 #3)."""
+        win = self.window()
+        if win is None or win is self:
+            return
+        from .crash_dialog import CrashAnalyzerDialog
+        from .instances import manager as inst_mgr
+        inst = inst_mgr().current()
+        CrashAnalyzerDialog(inst=inst, parent=win).exec()
 
     def _open_scan(self):
         """Embed the scanner directly into the home page (no modal dialog).
@@ -1886,6 +1966,9 @@ class MainWindow(QMainWindow):
         # 的卡片默认填充据此把窗内卡片/容器变透明（对话框等独立顶层窗没有
         # 该属性，保持实色）。纯 Python 读取，无需 repolish。
         self.setProperty("wallpaper_backdrop", "1")
+        # round-244：整窗接收整合包拖入（实例页自己也开了 acceptDrops；
+        # 在别的页面拖进来时由本窗接管，自动跳到实例页再导入）。
+        self.setAcceptDrops(True)
         # ── 临时启动定位打点（round-83 排查"构造卡死"，定位后移除）──
         self.setWindowTitle(APP_DISPLAY)
         _boot_trace("1 title")
@@ -2063,7 +2146,8 @@ class MainWindow(QMainWindow):
             7: self._build_toolbox,
         }
         # round-167：功能扩展包（音乐/成就/控制台等）可被玩家整包删除。
-        # 首次启动复制内置包；玩家删掉后不再自动装回（见 features.ensure_builtins）。
+        # 首次启动复制内置包；玩家删掉后不再自动装回
+        # （见 features.ensure_builtins，可在模块页手动装回）。
         try:
             features.ensure_builtins()
         except Exception:  # noqa: BLE001 - 扩展系统坏了也不能挡启动
@@ -2624,12 +2708,21 @@ class MainWindow(QMainWindow):
         if backdrop is None:
             return
         try:
+            from . import theme as _theme
             from .theme import apply_qss, set_wallpaper_surface
             # round-167 低配模式：壁纸按有效值压制（关闭低配后自动恢复）
             _wcfg = slim.effective(self.cfg)
             mode = str(_wcfg.get("wallpaper_mode", "none") or "none")
-            set_wallpaper_surface(mode != "none")
-            apply_qss()
+            want_surface = mode != "none"
+            # round-238 切版本卡顿优化：apply_qss() 会重生成整棵样式表，
+            # 而切版本只换全景图、壁纸模式没变。set_wallpaper_surface 本身
+            # 幂等（状态相同直接 return），这里同步判断——只有 surface 真的
+            # 变化时才重刷 QSS，避免每次切版本都全窗重绘。
+            # 注意：必须走模块属性读实时值，from-import 会拿到旧快照。
+            surface_changed = bool(_theme._wallpaper_surface) != want_surface
+            set_wallpaper_surface(want_surface)
+            if surface_changed:
+                apply_qss()
             backdrop.apply(_wcfg, version_id, *self._panorama_source())
             backdrop.setGeometry(self.rect())   # round-144b: 挂主窗，盖到状态栏
             backdrop.lower()
@@ -2640,11 +2733,19 @@ class MainWindow(QMainWindow):
             pass
 
     def _set_wallpaper_surface(self, on: bool) -> None:
-        """Switch the translucent page surface and repolish (round-150)."""
+        """Switch the translucent page surface and repolish (round-150).
+
+        round-243：``apply_qss()`` 会重生成整棵样式表（实测 ~6ms + 全窗重绘），
+        而全景上屏/不可用这两条回调**每次切版本都会触发一次**。状态没变时
+        跳过重刷——与 ``_apply_wallpaper`` 里的 round-238 优化同一口径。
+        """
         try:
+            from . import theme as _theme
             from .theme import apply_qss, set_wallpaper_surface
+            changed = bool(_theme._wallpaper_surface) != bool(on)
             set_wallpaper_surface(on)
-            apply_qss()
+            if changed:
+                apply_qss()
             home = getattr(self, "home", None)
             if home is not None:
                 home._refresh_overlay_style()
@@ -2804,6 +2905,13 @@ class MainWindow(QMainWindow):
             return
         if getattr(inst, "external", False) and not allow_external:
             return
+        # round-245：补全前先自愈矛盾元数据。否则 game_version/loader 与
+        # version_id 对不上时，补全按错的字段装（用户实测「补全了也启动失败」）。
+        try:
+            from .core.instance_meta import heal_version_id
+            heal_version_id(inst, persist=self.inst_mgr.save)
+        except Exception:  # noqa: BLE001 - 自愈失败不阻断下载
+            pass
         prev = self._dl_workers.get(inst_id) or self._dl_stopping.get(inst_id)
         if prev is not None and prev.isRunning():
             # round-168：上一次下载正在取消收尾，等线程退出再允许重下（防双写）。
@@ -4321,7 +4429,17 @@ class MainWindow(QMainWindow):
         self.instances_page.section_requested.connect(self._on_instance_section)
         self.instances_page.scan_done.connect(self._refresh_after_import)
         self.instances_page.instance_created.connect(self._on_instance_created)
+        # round-243：实例图标/收藏是「就地改」，不新建实例也不切当前实例，
+        # 首页的实例卡需要跟着换图标 → 单独一条轻量刷新通道。
+        self.instances_page.instance_updated.connect(self._on_instance_updated)
         return self.instances_page
+
+    def _on_instance_updated(self, inst_id: str) -> None:
+        """实例字段就地改动（图标 / 收藏）后同步首页（约 15ms，不做全量重建）。"""
+        try:
+            self.home._refresh()
+        except Exception:  # noqa: BLE001 - 首页还没构建/已销毁都不该阻断实例页
+            pass
 
     # ia[mods]: 切换当前实例 | 模组页实例选择 | 重新读取该实例 mods 目录并刷新列表 | `src/pages_instances.py`
     # ia[mods]: 点模组行启停按钮 | 模组页列表行 | 重命名 .disabled 后缀并即时刷新状态 | `src/mod_list.py`
@@ -4490,7 +4608,10 @@ class MainWindow(QMainWindow):
             _d.setWordWrap(True)
             _row.addWidget(_d, 1)
             _cl.addLayout(_row)
-        _tb.addWidget(_card)
+        # round-236：卡片设了 maximumWidth=520 却没水平居中，1200+ 宽窗口下
+        # 孤零零贴左边、右侧一大片空。用 AlignHCenter 让它水平居中（上下已有
+        # addStretch 负责垂直居中）。
+        _tb.addWidget(_card, alignment=Qt.AlignHCenter)
         _tb.addStretch(1)
         return self.toolbox_widget
 
@@ -4729,12 +4850,124 @@ class MainWindow(QMainWindow):
             if not self._maybe_save_settings():
                 return
         # round-233：_ensure_page 已提前到边界检查之前（见上方）。
-        # round-107：页面切换动画已改为「可选模块」（page_transition 模块），
-        # 默认关 → 瞬时切换；装了模块后再走淡入。
-        if slim.eff(self.cfg, "page_transition"):
-            fade_page_transition(self.stack, idx)
-        else:
+        # round-243：页面切换**淡入**改为核心行为。
+        # 原实现挂在「可选模块 page_transition」上，而模块默认不装 → 绝大多数
+        # 玩家从没见过这个动画（看着像"根本没加"）。现在只由两件事压制：
+        # 低配模式、无障碍的「减少动效」。
+        if slim.is_slim(self.cfg) or self.cfg.get("reduce_motion"):
             self.stack.setCurrentIndex(idx)
+        else:
+            fade_page_transition(self.stack, idx)
+
+    # ── 外观切换的过渡（round-243）──────────────────────────────────
+    def retheme(self, mode: str | None = None, accent: str | None = None,
+                pack=_UNSET) -> None:
+        """换主题 / 强调色 / 主题包，并做一次交叉淡出过渡。
+
+        为什么需要它：``apply_qss()`` 本身只有 1~2ms，但 ``setStyleSheet()``
+        会让**整窗每个控件重新 polish + 重绘**——实测首次 60~70ms（143 个控件），
+        肉眼看到的就是"点一下，界面先僵一下，然后突然换色"。
+
+        所以这里分三步，把"耗时"和"可见变化"错开：
+          ① 立刻抓一张当前画面盖住窗口（约 11ms）→ 用户先得到"点到了"的反馈，
+             而且屏幕上还是那张旧画面，一个字都没跳；
+          ② 把重活推到下一 tick——60~70ms 的 repolish 藏在遮罩**后面**，
+             用户看不见（屏幕上还是旧画面，静止的）；
+          ③ 遮罩 170ms 淡出 → 这时新主题已经在底下铺好了，看到的是渐变。
+
+        实测（``_probe_retheme_veil.py``）：retheme() 返回 10~13ms、
+        样式在下一 tick 落地、淡出期间帧间隔与空闲基线持平（14~16ms）。
+
+        ``pack`` 可传主题包 id（字符串）、包 dict（导入后直接就地上屏）
+        或 ``None``（卸包回到内置主题）。不传 = 不动主题包。
+        """
+        veil = None if (slim.is_slim(self.cfg)
+                        or self.cfg.get("reduce_motion")) else self._veil_snapshot()
+
+        def _apply() -> None:
+            try:
+                self._retheme_apply(mode=mode, accent=accent, pack=pack)
+            finally:
+                if veil is not None:
+                    self._veil_fade_out(veil)
+
+        if veil is None:
+            # 低配 / 减少动效：没有遮罩可藏，当场做完（以前也是这样）
+            _apply()
+        else:
+            QTimer.singleShot(0, _apply)
+
+    def _retheme_apply(self, mode: str | None = None, accent: str | None = None,
+                       pack=_UNSET) -> None:
+        """真正换肤的那一半（不含遮罩）。重活都在这里，调用方负责挡镜头。"""
+        from .theme import (apply_qss, apply_theme_pack, find_theme_pack,
+                            set_accent_color, set_theme_mode)
+        if pack is not _UNSET:
+            if isinstance(pack, dict):
+                apply_theme_pack(pack)
+            else:
+                apply_theme_pack(find_theme_pack(pack) if pack else None)
+        if mode:
+            set_theme_mode(mode)
+        if accent:
+            set_accent_color(accent)
+        # now=True：apply_qss() 平时是「下一个 tick 再贴」的合并写法。这里必须
+        # 确认样式已经贴上去，遮罩才能开始撤——否则淡出完还会再闪一次，白做。
+        apply_qss(now=True)
+        home = getattr(self, "home", None)
+        if home is not None:
+            try:
+                home._refresh_overlay_style()
+            except Exception:  # noqa: BLE001 - 样式刷新失败不该阻断换肤
+                pass
+
+    def _veil_snapshot(self):
+        """把当前窗口画成一张图盖在最上层（约 8ms），供交叉淡出用。"""
+        try:
+            pm = self.grab()
+        except Exception:  # noqa: BLE001
+            return None
+        veil = QLabel(self)
+        veil.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        veil.setScaledContents(True)   # 高分屏 dpr 取整差 1px 也不会露底
+        veil.setPixmap(pm)
+        veil.setGeometry(self.rect())
+        veil.show()
+        veil.raise_()
+        # 先把「旧画面已就位」这件事推到屏幕上，再让调用方去换肤。
+        veil.repaint()
+        return veil
+
+    def _veil_fade_out(self, veil, ms: int = 170) -> None:
+        """遮罩淡出后自毁（一次性 effect，不留常驻图层）。"""
+        from PySide6.QtCore import QEasingCurve, QPropertyAnimation
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        dur = int(motion_ms(ms))
+        if dur <= 0:
+            # 减少动效：渐变本身就是被禁的东西，遮罩直接撤掉（不要用
+            # max(60, …) 兜底，那等于绕过无障碍开关自己造了个动效）。
+            veil.hide()
+            veil.deleteLater()
+            return
+        eff = QGraphicsOpacityEffect(veil)
+        veil.setGraphicsEffect(eff)
+        anim = QPropertyAnimation(eff, b"opacity", veil)
+        anim.setDuration(dur)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _done():
+            try:
+                veil.setGraphicsEffect(None)
+                veil.hide()
+                veil.deleteLater()
+            except RuntimeError:
+                pass
+
+        anim.finished.connect(_done)
+        veil._fade_anim = anim      # 保引用：局部变量被回收会让动画瞬间结束
+        anim.start()
 
     def _maybe_save_settings(self) -> bool:
         """Ask about unsaved settings. Returns True if we may proceed navigating
@@ -4750,6 +4983,35 @@ class MainWindow(QMainWindow):
             sp.discard_changes()
             return True
         return False
+
+    # ── round-244：整窗拖入整合包 ───────────────────────────────────────
+    @staticmethod
+    def _dropped_pack_paths(e) -> list[str]:
+        out = []
+        for u in e.mimeData().urls():
+            p = u.toLocalFile()
+            if p and p.lower().endswith((".mrpack", ".zip")):
+                out.append(p)
+        return out
+
+    def dragEnterEvent(self, e):
+        if self._dropped_pack_paths(e):
+            e.acceptProposedAction()
+            return
+        super().dragEnterEvent(e)
+
+    def dropEvent(self, e):
+        packs = self._dropped_pack_paths(e)
+        if packs:
+            e.acceptProposedAction()
+            self._show_page("instances")
+            page = getattr(self, "instances_page", None)
+            if page is None:
+                return
+            for p in packs:
+                page._import_pack_path(p)
+            return
+        super().dropEvent(e)
 
     def _show_page(self, key: str):
         """Programmatically switch the content stack to the given nav key."""
@@ -5318,6 +5580,141 @@ class MainWindow(QMainWindow):
                 pass
         return False
 
+    # -------------------------------------------------------------------------- #
+    # round-174: Pre-launch health check interception
+    # -------------------------------------------------------------------------- #
+    def _confirm_health_before_launch(self, inst, settings) -> tuple[bool, bool]:
+        """启动前实例体检确认。
+
+        Returns ``(proceed, applied_fixes)``:
+          * No fixable issues (critical/warning with safe fix) → (True, False)
+          * Fixable issues found → shows dialog with "Fix and launch" / "Launch anyway" / "Cancel"
+            - "Fix and launch": applies all safe fixes, saves instance, returns (True, True)
+            - "Launch anyway": proceeds without fixes, returns (True, False)
+            - "Cancel": returns (False, False)
+          * Any error during check → (True, False) to never block launch on check failure
+
+        Only checks for CRITICAL and WARNING findings with safe fixes (FIX_SAFE).
+        INFO findings are not blocking. Install-type fixes (mode=="install") are not
+        auto-applied here — they require network and user consent via the full HealthDialog.
+        """
+        try:
+            from .core import instance_health
+        except Exception:  # noqa: BLE001 - health module unavailable
+            return True, False
+
+        try:
+            result = instance_health.scan_health(inst, settings)
+        except Exception:  # noqa: BLE001 - scan failed, don't block
+            return True, False
+
+        findings = result.get("findings") or []
+        if not findings:
+            return True, False
+
+        # Collect only safe-fixable CRITICAL/WARNING findings
+        fixable_critical = []
+        fixable_warning = []
+        for f in findings:
+            fx = getattr(f, "fix", None)
+            if not isinstance(fx, dict):
+                continue
+            if fx.get("safety", instance_health.FIX_SAFE) != instance_health.FIX_SAFE:
+                continue
+            if fx.get("mode") == "install":
+                continue  # network installs need full HealthDialog
+            if f.severity == instance_health.SEV_CRITICAL:
+                fixable_critical.append(f)
+            elif f.severity == instance_health.SEV_WARNING:
+                fixable_warning.append(f)
+
+        n_critical = len(fixable_critical)
+        n_warning = len(fixable_warning)
+        n_fixable = n_critical + n_warning
+
+        if n_fixable == 0:
+            return True, False  # nothing to auto-fix, proceed
+
+        # Show confirmation dialog
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(t("launch.health_confirm_title"))
+        box.setText(t(
+            "launch.health_confirm_msg",
+            name=getattr(inst, "name", "") or "?",
+            critical=n_critical,
+            warning=n_warning,
+            info=result.get("info", 0),
+            fixable=n_fixable,
+        ))
+        fix_btn = box.addButton(
+            t("launch.health_confirm_fix"),
+            QMessageBox.ButtonRole.AcceptRole)
+        anyway_btn = box.addButton(
+            t("launch.health_confirm_anyway"),
+            QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton(
+            t("common.cancel"),
+            QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(fix_btn)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is cancel_btn:
+            return False, False
+        if clicked is anyway_btn:
+            return True, False
+
+        # Fix and launch: apply all safe fixes — collect labels for feedback
+        applied = 0
+        applied_labels: list[str] = []
+        failed_labels: list[str] = []
+        for f in fixable_critical + fixable_warning:
+            fx = getattr(f, "fix", None)
+            if not isinstance(fx, dict):
+                continue
+            if fx.get("safety", instance_health.FIX_SAFE) != instance_health.FIX_SAFE:
+                continue
+            # Localize the fix label (same logic as HealthPanel._build_card)
+            try:
+                label = t(fx.get("label") or "health.fix",
+                          **(fx.get("label_kwargs") or {}))
+                if "{" in label:  # placeholder not resolved → fallback
+                    label = t("health.fix")
+            except Exception:  # noqa: BLE001
+                label = t("health.fix")
+            try:
+                if instance_health.apply_fix(inst, fx):
+                    applied += 1
+                    applied_labels.append(label)
+                else:
+                    failed_labels.append(label + "（无变化）")
+            except Exception as exc:  # noqa: BLE001
+                failed_labels.append(f"{label}（{exc}）")
+        if applied > 0 and self.inst_mgr is not None:
+            try:
+                self.inst_mgr.save(inst)
+            except Exception:  # noqa: BLE001
+                pass
+        # Show detailed toast + statusBar
+        try:
+            from .win_rounded import toast
+            if applied_labels or failed_labels:
+                lines = [t("launch.health_fixed_toast", n=applied)]
+                if applied_labels:
+                    lines.append("✅ " + "、".join(applied_labels))
+                if failed_labels:
+                    lines.append("⚠️ " + "、".join(failed_labels))
+                detail = "\n".join(lines)
+                toast(self, detail, duration=4000)
+                self.statusBar().showMessage(detail, 8000)
+            else:
+                toast(self, t("launch.health_fixed_toast", n=0), duration=2500)
+        except Exception:  # noqa: BLE001
+            pass
+        return True, applied > 0
+
     def _handle_play(self, inst: Instance, *, server: str | None = None,
                      port: str | None = None):
         self._last_inst = inst  # round-46：记住实例，Java 选完可重试
@@ -5402,6 +5799,10 @@ class MainWindow(QMainWindow):
             _box.exec()
             if _box.clickedButton() is not _continue:
                 return
+        # round-174 启动前体检拦截：发现可修复的严重/注意项时先确认。
+        _health_ok, _health_fixed = self._confirm_health_before_launch(inst, settings)
+        if not _health_ok:
+            return
         # round-153 启动前 Java 确认：会更换玩家指定的 Java 时先问一次，
         # 同意则本次直接用替代路径（只影响这一次，不改设置）。
         # round-163：三选一 —— 改用兼容 Java / 强制用不兼容 Java / 取消。
@@ -5529,21 +5930,38 @@ class MainWindow(QMainWindow):
             pass
         self.statusBar().showMessage(t("status.launched", name=inst.name))
         self.home.play_btn.setEnabled(True)
-        # round-52：进度对话框全部点亮后稍作停留再关（玩家能看到「启动游戏✔」）
+        # round-242：按用户最终选择分流——
+        #   默认：进度框点亮「启动游戏✔」→ 停留 900ms → 自动关闭（回到原行为）；
+        #   开发者模式：进度框切成「游戏运行中·实时日志」窗，不自动关，
+        #              启动器最小化到托盘后可从托盘唤出看 mod 加载进度。
         _dlg = getattr(self, "_launch_dlg", None)
+        _dev = bool(self.cfg.get("dev_mode", False))
         if _dlg is not None:
-            try:
-                _dlg.mark_launched()
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(900, _dlg.close)
-            except Exception:  # noqa: BLE001
-                # round-217：close() 本身也可能因为 C++ 对象已销毁再抛一次，
-                # 原实现把 close 放在 except 里裸调 → 二次异常直接冒泡到 Qt。
+            if _dev:
                 try:
-                    _dlg.close()
-                except RuntimeError:
-                    pass
-            self._launch_dlg = None
+                    _dlg.mark_launched(_log_path or "")
+                    try:
+                        _dlg.open_console_requested.connect(
+                            lambda: self._show_page("console"))
+                    except Exception:
+                        pass
+                except Exception:  # noqa: BLE001
+                    try:
+                        _dlg.close()
+                    except RuntimeError:
+                        pass
+                # 保留引用供托盘唤出 / 游戏退出收尾
+            else:
+                try:
+                    _dlg.mark_launched()      # 只点亮步骤，不切日志
+                    QTimer.singleShot(900, _dlg.close)
+                except Exception:  # noqa: BLE001
+                    try:
+                        _dlg.close()
+                    except RuntimeError:
+                        pass
+                self._launch_dlg = None
+
         # round-34：游戏进程生命周期——保存 proc 引用并轮询退出状态
         self._track_game_process(_proc, inst.name, _log_path, inst)
 
@@ -5833,6 +6251,18 @@ class MainWindow(QMainWindow):
                     _cp.set_game_finished(code)
                 except Exception:
                     pass
+            # round-241：游戏退出 → 日志窗停止 tail、退出「可召回」模式，
+            # 玩家关掉时正常销毁；不再无限留引用。
+            _ldlg = getattr(self, "_launch_dlg", None)
+            if _ldlg is not None:
+                try:
+                    _ldlg.stop_log_tail()
+                    _ldlg._live_log_mode = False
+                    _ldlg.status_lbl.setText(
+                        t("status.game_exited", name=name, code=code))
+                except Exception:
+                    pass
+                self._launch_dlg = None
             # round-48 C：退出原因分类——用退出码 + 崩溃日志特征给出可操作提示
             base = t("status.game_exited", name=name, code=code)
             try:
@@ -5968,6 +6398,9 @@ class MainWindow(QMainWindow):
             copy_btn = box.addButton(
                 t("exit.crash_copy", default="复制诊断信息"),
                 QMessageBox.ButtonRole.ActionRole)
+            analyze_btn = box.addButton(
+                t("exit.crash_view_analysis", default="查看分析"),
+                QMessageBox.ButtonRole.ActionRole)
             box.addButton(QMessageBox.StandardButton.Ok)
             # ── round-92 崩溃策略接线（modules.apply_crash_module → active_crash_policy）──
             # action=restart → 追加「重启游戏」按钮并设为默认；auto_analyze=true →
@@ -6007,15 +6440,20 @@ class MainWindow(QMainWindow):
                 QDesktopServices.openUrl(QUrl.fromLocalFile(_open))
             elif clicked is copy_btn:
                 QApplication.clipboard().setText(detail)
+            elif clicked is analyze_btn:
+                # P0 #3: 手动点击「查看分析」→ 模态打开崩溃分析器
+                if _relaunch is not None:
+                    self._open_crash_analyzer(_relaunch)
             # 崩溃策略 auto_analyze：关闭崩溃弹窗后非模态打开日志分析器
             if _auto_analyze and _relaunch is not None:
                 self._open_crash_analyzer(_relaunch)
-            # 崩溃策略 open_logs=true：玩家未点「打开日志目录/复制/重启」而直接
+            # 崩溃策略 open_logs=true：玩家未点「打开日志目录/复制/重启/查看分析」而直接
             # 关闭弹窗时，自动打开日志目录（对应 crash_pol policy.json 的 open_logs 声明）
             if (_policy.get("open_logs")
                     and clicked is not open_btn
                     and clicked is not copy_btn
-                    and clicked is not restart_btn):
+                    and clicked is not restart_btn
+                    and clicked is not analyze_btn):
                 _auto_dir = crash_dir if os.path.isdir(crash_dir) else (
                     log_dir if os.path.isdir(log_dir) else "")
                 if _auto_dir:

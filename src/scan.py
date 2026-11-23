@@ -392,10 +392,13 @@ def _official_profile_names(mc_dir: str) -> dict[str, str]:
 class _Collector:
     """Accumulates discovered instances, de-duplicated by (game dir, version)."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_found=None) -> None:
         self.results: list[ScannedInstance] = []
         self._seen: set[tuple[str, str]] = set()
         self._roots_done: set[str] = set()
+        # round-243：每发现一条就回调（UI 用它做"扫描中实时出卡片"）。
+        # 以前只有扫描全部结束才一次性返回结果，几十秒里列表一直是空的。
+        self._on_found = on_found
 
     # -- generic --------------------------------------------------------
     def emit(self, inst: ScannedInstance) -> None:
@@ -409,6 +412,11 @@ class _Collector:
         inst.shaders = _count_subdirs(os.path.join(inst.mc_dir, "shaderpacks"))
         inst.saves = _count_subdirs(os.path.join(inst.mc_dir, "saves"))
         self.results.append(inst)
+        if self._on_found is not None:
+            try:
+                self._on_found(inst)
+            except Exception:  # noqa: BLE001 - 回调失败绝不影响扫描本身
+                pass
 
     def claimed(self, root: str) -> bool:
         """True when *root* was already processed by a more specific handler."""
@@ -550,9 +558,14 @@ class _Collector:
         return True
 
 
-def discover_instances(progress=None, should_stop=None) -> list[ScannedInstance]:
-    """扫描可导入的实例。``should_stop()`` 返回 True 时尽快返回已发现结果。"""
-    col = _Collector()
+def discover_instances(progress=None, should_stop=None,
+                       on_found=None) -> list[ScannedInstance]:
+    """扫描可导入的实例。``should_stop()`` 返回 True 时尽快返回已发现结果。
+
+    ``progress(msg)`` 会收到阶段名或正在遍历的目录；``on_found(inst)`` 在每
+    发现一条实例时立即回调（UI 靠它边扫边出结果）。
+    """
+    col = _Collector(on_found=on_found)
     appdata = os.environ.get("APPDATA", "")
     local = os.environ.get("LOCALAPPDATA", "")
     profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))

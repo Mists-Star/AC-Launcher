@@ -642,7 +642,28 @@ def _emit_step(callback, key: str) -> None:
     mll 的 CallbackDict 只认 setStatus/setProgress/setMax；这里额外读
     可选的 ``setStep`` 键（ProgressWorker 已注入），让对话框能逐行点亮
     「检查环境 → 安装版本 → 补齐库 → 预检 → 启动」。失败静默，不拦启动。
+
+    round-240 可观测性：同时把「阶段 + 距上一阶段的耗时」追加到
+    ``<data>/launch_timing.log``。玩家反馈「点启动后等待时间长」但启动器
+    没有任何耗时日志，无法定位瓶颈。此日志纯诊断、失败静默、不影响启动。
     """
+    import time as _time
+    try:
+        now = _time.monotonic()
+        prev_t = getattr(_emit_step, "_last_t", None)
+        prev_k = getattr(_emit_step, "_last_k", "")
+        # 上一次启动的 "start" 到这次的 "check" 可能隔几分钟，不算进本次。
+        if key == "check":
+            prev_t, prev_k = None, ""
+        delta_ms = int((now - prev_t) * 1000) if prev_t is not None else 0
+        _emit_step._last_t, _emit_step._last_k = now, key
+        from .paths import get_data_dir
+        p = os.path.join(get_data_dir(), "launch_timing.log")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("%s  step=%-10s  +%d ms  (prev=%s)\n" %
+                    (_time.strftime("%H:%M:%S"), key, delta_ms, prev_k or "-"))
+    except Exception:  # noqa: BLE001 - 诊断日志绝不能影响启动
+        pass
     if callback and hasattr(callback, "get"):
         try:
             f = callback.get("setStep")
@@ -800,6 +821,11 @@ def launch_instance(
     # 正确判据：加载器实例必须匹配 <loader> 相关的 version json
     # （fabric-loader-0.15.11-1.20.1 / 1.20.1-forge-47.2.0 等）。
     import os as _os
+    # round-245 P0：矛盾元数据自愈（version_id 与 loader/game_version 对不上
+    # 时，启动永远 "Version not found"，补全也装错版本）。先清掉陈旧 id，
+    # 让下面的判定/install 走当前正确的 loader + game_version。
+    from .core.instance_meta import heal_version_id
+    heal_version_id(inst)
     _loader = (getattr(inst, "loader", "") or "").strip().lower()
     _skip = False
     installed = inst.version_id or inst.game_version

@@ -481,6 +481,13 @@ class WallpaperWidget(QWidget):
         # round-203：游戏运行只暂停动画（画面保留最后一帧），不再把壁纸/全景
         # 整个关掉 —— suspend() 会让主窗背景变成纯色，故不采用。
         self._game_paused = False
+        # round-243：上一次 apply 的输入签名（见 apply() 的幂等短路）。
+        # ☠ suspend() 会把贴图/全景全部丢弃，必须同时清掉签名，否则游戏退出
+        # 后 resume()+apply() 会命中短路，壁纸再也回不来。
+        self._applied_sig = None
+        # round-243：上一次真正构建过的动态层签名（mode, path, volume）。
+        # 视频/GIF 只在它变化时才拆建，否则切实例会把视频从头重播。
+        self._dyn_sig = None
 
     # ------------------------------------------------------------- config
     def apply(self, cfg: dict, version_id: str | None = None,
@@ -497,12 +504,34 @@ class WallpaperWidget(QWidget):
             # round-156：游戏运行中不接受新壁纸加载（配置已由调用方保存，
             # resume 后由窗口重新 apply）。
             return
+        # ☠ round-243：apply() 原来**无条件**拆掉动态层、清空全景再重建。
+        # 首页的 combo 切实例、页面切换、状态刷新都会调到这里，于是"配置
+        # 一个字都没变"的刷新也把正在显示的全景掀掉、重新起线程解码 6 张
+        # 1024² 贴图（实测一次 ~130ms，且末态可能短暂无全景）。
+        # 现在先算一份"输入签名"，完全相同时直接返回，什么也不动。
+        path = cfg.get("wallpaper_image", "")
+        sig = (mode, path,
+               round(float(cfg.get("wallpaper_opacity", 1.0)), 3),
+               str(cfg.get("wallpaper_color", "#1E1E1E")),
+               float(cfg.get("wallpaper_video_vol", 0.0)),
+               version_id, mc_dir, game_dir, version)
+        if sig == self._applied_sig:
+            return
+        self._applied_sig = sig
         self._opacity = float(cfg.get("wallpaper_opacity", 1.0))
         self._color = QColor(cfg.get("wallpaper_color", "#1E1E1E"))
-        path = cfg.get("wallpaper_image", "")
         self._version_id = version_id
 
-        self._teardown_dynamic()
+        # ☠ round-243：动态层（GIF / 视频）只在**素材真的换了**时才拆建。
+        # 原来这里无条件 `_teardown_dynamic()`：用视频壁纸的玩家每切一次实例
+        # 都会把解码器 + 音频端点拆掉重建、视频从 0 重新开始播。
+        dyn = (mode, path if mode in ("gif", "video") else "",
+               float(cfg.get("wallpaper_video_vol", 0.0))
+               if mode == "video" else 0.0)
+        dyn_changed = dyn != self._dyn_sig
+        if dyn_changed:
+            self._teardown_dynamic()
+            self._dyn_sig = dyn
         self._mode = mode
         self._pixmap = None
         self._scaled = None
@@ -522,10 +551,12 @@ class WallpaperWidget(QWidget):
                 self._media_luma = _mean_luma([pm.toImage()])
         elif mode == "gif" and path and os.path.exists(path):
             self._stop_panorama()
-            self._start_gif(path)
+            if dyn_changed:
+                self._start_gif(path)
         elif mode == "video" and path and os.path.exists(path):
             self._stop_panorama()
-            self._start_video(path, float(cfg.get("wallpaper_video_vol", 0.0)))
+            if dyn_changed:
+                self._start_video(path, float(cfg.get("wallpaper_video_vol", 0.0)))
         elif mode == "version":
             # Player custom wallpaper takes priority over the version theme.
             if path and os.path.exists(path):
@@ -710,6 +741,11 @@ class WallpaperWidget(QWidget):
         Scanning the asset store and decoding six 1024x1024 textures takes
         long enough to stall the UI thread, so the work happens in a
         ``PanoramaLoader`` thread and the result arrives via a signal.
+
+        round-243：切换实例时**不再先把旧全景清掉**。原来是
+        ``_stop_panorama()`` → 等新图，中间有 ~100ms 背景整块消失（实测
+        `apply()` 后 30ms：`pano_active=False, visible=False`），玩家看到的
+        就是"切版本闪白一下"。现在旧图继续转，新图就绪才替换。
         """
         if not mc_dir:
             self._stop_panorama()
@@ -717,7 +753,7 @@ class WallpaperWidget(QWidget):
         key = (mc_dir, game_dir, version)
         if key == self._pano_key:
             return  # already loading or loaded for this instance
-        self._stop_panorama()
+        # 旧全景（若有）保持不动：只换 key，等新图到达再整体替换
         self._pano_key = key
         try:
             from .panorama import PanoramaLoader
@@ -781,6 +817,9 @@ class WallpaperWidget(QWidget):
         self._pixmap = None
         self._scaled = None
         self._media_luma = None
+        # round-243：这次的"没有版本素材"不能被 apply() 的幂等短路记成结论——
+        # 玩家随后装了资源包/补下载素材，下一次 apply（参数没变）也要重新探测。
+        self._applied_sig = None
         if self._veil is not None:
             self._veil.hide()
         self.setVisible(False)
@@ -1143,10 +1182,21 @@ class WallpaperWidget(QWidget):
             pass
         self._teardown_dynamic()
         self._stop_panorama()
+        # round-243：游戏要吃掉一大块内存，已解码的全景缓存（每版本 ~24MB）
+        # 顺手释放；游戏退出后按需重新解码即可。
+        try:
+            from .panorama import clear_face_cache
+            clear_face_cache()
+        except Exception:  # noqa: BLE001 - 没有全景支持时无需清理
+            pass
         self._pixmap = None
         self._scaled = None
         self._pano_buffer = None
         self._media_luma = None
+        # round-243：贴图已全部丢弃 → 必须让下一次 apply() 重新加载（否则会
+        # 命中幂等短路，背景永远回不来）。动态层同理。
+        self._applied_sig = None
+        self._dyn_sig = None
         self.setVisible(False)
 
     def resume(self) -> None:

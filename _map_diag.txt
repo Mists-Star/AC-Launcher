@@ -1,0 +1,5 @@
+world_box count=1
+world_box items=['新的世界']
+current world=新的世界
+dim_box items=['主世界', '下界', '末地']
+canvas tiles=None

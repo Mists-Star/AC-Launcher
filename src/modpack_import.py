@@ -133,27 +133,53 @@ def _parse_curseforge_manifest(manifest: dict) -> dict:
     }
 
 
-def _parse_mrpack_info(raw: dict) -> dict:
+def _parse_mrpack_info(raw: dict, path: str = "") -> dict:
+    """把 mll 的 MrpackInformation 转成 UI/建实例用的元信息。
+
+    ☠ round-245 P0：mll 的 ``get_mrpack_information`` 返回的是**扁平结构**
+    ``{name, summary, versionId, formatVersion, minecraftVersion, optionalFiles}``
+    ——既没有 ``dependencies`` 也没有 ``files``。旧实现按 ``dependencies`` 是
+    list-of-dict 遍历，结果 mc_version 恒空、loader 恒 vanilla、mods 恒 0，
+    玩家看到「整合包什么都检测不到」，建出来的实例 loader 也永远错。
+
+    loader 与 loader_version 只存在于 ``modrinth.index.json`` 的
+    ``dependencies``（dict），需要另外从 zip 里读；MC 版本优先用 mll 给的
+    ``minecraftVersion``，没有再回退读 index。
+    """
     name = raw.get("name") or t("new_instance.unnamed")
-    deps = raw.get("dependencies") or []
-    mc_version = ""
+    mc_version = str(raw.get("minecraftVersion") or "").strip()
     loader = "vanilla"
-    for d in deps:
-        did = (d.get("id") or "").lower()
-        if did.startswith("minecraft"):
-            mc_version = did.split(":")[-1] if ":" in did else did
-        elif did in ("fabric-loader", "quilt-loader"):
-            loader = "fabric" if did == "fabric-loader" else "quilt"
-        elif did == "forge":
-            loader = "forge"
-        elif did == "neoforge":
-            loader = "neoforge"
-    mods = raw.get("files") or []
+    loader_version = ""
+    deps: dict = {}
+    file_count = 0
+    if path:
+        try:
+            import zipfile
+            with zipfile.ZipFile(path, "r") as z:
+                try:
+                    index = json.loads(z.read("modrinth.index.json").decode("utf-8"))
+                except Exception:  # noqa: BLE001 - 坏 index 走 mll 已解析的信息
+                    index = {}
+                if isinstance(index, dict):
+                    d = index.get("dependencies") or {}
+                    deps = d if isinstance(d, dict) else {}
+                    file_count = len(index.get("files") or [])
+                    if not mc_version:
+                        mc_version = str(deps.get("minecraft") or "").strip()
+        except Exception:  # noqa: BLE001
+            pass
+    for key in ("fabric-loader", "quilt-loader", "forge", "neoforge",
+                "liteloader"):
+        if deps.get(key):
+            loader = "neoforge" if key == "neoforge" else key.split("-")[0]
+            loader_version = str(deps[key])
+            break
     return {
         "name": name,
         "mc_version": mc_version,
         "loader": loader,
-        "mods": len(mods),
+        "loader_version": loader_version,
+        "mods": file_count,
     }
 
 

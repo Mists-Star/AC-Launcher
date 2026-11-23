@@ -150,11 +150,23 @@ _MOD_CN = {
 _RE_CN_SPLIT = "（"
 
 
+# round-239：构建期生成的补充表（机翻自用户搜索缓存里出现过的 mod）。
+# 内置表 _MOD_CN 优先（人工校对、质量高）；补充表兜底（覆盖长尾）。
+try:
+    from .mod_cn_extra import _MOD_CN_EXTRA  # noqa: F401 - 可能尚未生成
+except Exception:  # noqa: BLE001 - 表不存在时静默降级为只用内置表
+    _MOD_CN_EXTRA = {}
+
+
 def cn_name(slug: str, fallback: str = "") -> str:
-    """slug → 展示名（英文原名在前，中文翻译在后）；未收录返回 fallback。"""
+    """slug → 展示名（英文原名在前，中文翻译在后）；未收录返回 fallback。
+
+    查找顺序：内置人工表 → 机翻补充表 → fallback（英文原名，无括号）。
+    """
     if not slug:
         return fallback
-    return _MOD_CN.get(slug, fallback or slug)
+    hit = _MOD_CN.get(slug) or _MOD_CN_EXTRA.get(slug)
+    return hit if hit else (fallback or slug)
 
 
 def cn_short(slug: str) -> str:
@@ -162,7 +174,7 @@ def cn_short(slug: str) -> str:
 
     只取「·」前的部分（「·」后是补充说明，搜索时反而添噪）。未收录返回 ""。
     """
-    disp = _MOD_CN.get(slug or "", "")
+    disp = _MOD_CN.get(slug or "") or _MOD_CN_EXTRA.get(slug or "", "")
     if not disp or _RE_CN_SPLIT not in disp:
         return ""
     body = disp.split(_RE_CN_SPLIT, 1)[1].rstrip("）)")
@@ -172,7 +184,7 @@ def cn_short(slug: str) -> str:
 def cn_slug_map() -> dict:
     """中文主体 → [slug] 的反查表（供中文搜索使用）。"""
     out = {}
-    for slug in _MOD_CN:
+    for slug in set(_MOD_CN) | set(_MOD_CN_EXTRA):
         short = cn_short(slug)
         if short:
             out.setdefault(short, []).append(slug)

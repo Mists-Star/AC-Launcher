@@ -19,7 +19,7 @@ except ImportError:  # non-Windows builds won't have ctypes.windll, but the
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSizePolicy, QFileDialog, QLineEdit,
+    QSizePolicy, QFileDialog, QLineEdit, QWidget,
 )
 from PySide6.QtCore import Qt
 
@@ -417,7 +417,13 @@ def _find_toast_host(parent):
         show = getattr(obj, "show_toast", None)
         if callable(show):
             return show
-        obj = obj.parent()
+        # round-243：锚点不一定是 QWidget（无头回归里常传 SimpleNamespace
+        # 假页）。以前无条件 obj.parent() → AttributeError 把整条业务链炸掉，
+        # 而这里本来就只是"找个地方显示提示"，找不到就该安静放弃。
+        nxt = getattr(obj, "parent", None)
+        if not callable(nxt):
+            return None
+        obj = nxt()
         seen += 1
     return None
 
@@ -431,5 +437,9 @@ def toast(parent, title: str, text: str = "", duration: int = 3200) -> None:
     show = _find_toast_host(parent)
     if show is not None:
         show(title, text, duration=duration)
-    else:
-        info(parent, title, text)
+        return
+    if not isinstance(parent, QWidget):
+        # 兜底分支要弹真弹窗，锚点必须是个控件。非控件锚点（无头测试 / 纯
+        # 数据对象）下静默跳过：提示没弹出来，不该比业务逻辑本身更重要。
+        return
+    info(parent, title, text)

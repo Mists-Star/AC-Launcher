@@ -26,6 +26,7 @@ from PySide6.QtGui import QIcon, QTransform
 from .theme import COLORS, RoundedCard, with_alpha, loader_vivid
 from .os_open import open_local_path
 from .effects import LightTrailCard, fade_in_widget  # round-50 卡片混合：实例详情卡流光；round-100 列表淡入
+from .ui_flow import FlowLayout, FlowGrid  # round-243：按宽度自动换行，避免窄窗口把卡片撑爆
 from . import ui_kit
 from .icons import icon, on_accent
 from .frameless import FramelessHelper, TitleBar
@@ -293,7 +294,7 @@ class InstanceCard(LightTrailCard):
         info.setSpacing(6)
         name_row = QHBoxLayout()
         name_row.setSpacing(6)
-        name = QLabel(inst.name)
+        name = ui_kit.ElidedLabel(inst.name)
         name.setProperty("cls", "title")
         name_row.addWidget(name)
         if getattr(inst, "favorite", False):
@@ -378,25 +379,25 @@ class _InstRow(LightTrailCard):
         lay.setContentsMargins(14, 8, 14, 8)
         lay.setSpacing(10)
 
-        icon_box = QLabel()
-        icon_box.setFixedSize(32, 32)
-        icon_box.setAlignment(Qt.AlignCenter)
-        icon_box.setProperty("cls", "tile")
-        icon_box.setPixmap(icon("instances").pixmap(18, 18))
-        lay.addWidget(icon_box)
+        self._icon_box = QLabel()
+        self._icon_box.setFixedSize(32, 32)
+        self._icon_box.setAlignment(Qt.AlignCenter)
+        self._icon_box.setProperty("cls", "tile")
+        lay.addWidget(self._icon_box)
+        self._apply_icon()
 
         col = QVBoxLayout()
         col.setSpacing(2)
-        nm = QLabel(inst.name)
-        nm.setProperty("cls", "title")
+        self.nm = ui_kit.ElidedLabel(inst.name)
+        self.nm.setProperty("cls", "title")
         # round-100：字色交给 title 类（内联色不随主题切换刷新）
-        nm.setStyleSheet("font-size: 13px;")
-        nm.setWordWrap(False)
-        col.addWidget(nm)
-        sub = QLabel(f"{inst.game_version or '?'}  ·  {loader_name(inst.loader)}")
-        sub.setProperty("cls", "sub")
-        sub.setStyleSheet("font-size: 11px;")
-        col.addWidget(sub)
+        self.nm.setStyleSheet("font-size: 13px;")
+        # ElidedLabel handles elision internally; WordWrap not needed
+        col.addWidget(self.nm)
+        self.sub = QLabel(f"{inst.game_version or '?'}  ·  {loader_name(inst.loader)}")
+        self.sub.setProperty("cls", "sub")
+        self.sub.setStyleSheet("font-size: 11px;")
+        col.addWidget(self.sub)
         lay.addLayout(col, stretch=1)
 
         self._cur_tag = QLabel()
@@ -411,6 +412,20 @@ class _InstRow(LightTrailCard):
         self._task_lbl = QLabel("")
         self._task_lbl.setVisible(False)
         lay.addWidget(self._task_lbl)
+
+    def _apply_icon(self):
+        """round-243：列表行显示玩家自选的实例图标。
+
+        这里原本写死 `icon("instances")`——不管玩家在编辑器里换没换图标，左侧
+        列表永远是那颗默认矢量图，看起来就像"自定义图标没做"。空路径/读不出
+        图时回落到默认图标（`icon_pixmap` 返回 None 即代表回落）。
+        """
+        pm = instance_art.icon_pixmap(
+            getattr(self.inst, "icon_path", ""), 28, radius=8)
+        if pm is None:
+            self._icon_box.setPixmap(icon("instances").pixmap(18, 18))
+        else:
+            self._icon_box.setPixmap(pm)
 
     def set_task_state(self, state):
         """round-107 T8 行内任务徽标：``(kind, pct)``，None/空则隐藏。"""
@@ -440,8 +455,13 @@ class _InstRow(LightTrailCard):
         self.update()
 
     def refresh_state(self, is_current: bool):
-        """round-38 性能：更新 ✓ 标签而不重建行（快切卡顿优化）。"""
+        """round-38 性能：更新 ✓ 标签而不重建行（快切卡顿优化）。
+        同步更新实例名称、版本、加载器（编辑保存后同步）。
+        """
         self._cur_tag.setVisible(is_current)
+        self.nm.setText(self.inst.name)
+        self.sub.setText(f"{self.inst.game_version or '?'}  ·  {loader_name(self.inst.loader)}")
+        self._apply_icon()   # round-243：编辑器换过图标后增量刷新也要跟上
 
     def mousePressEvent(self, e):
         self.clicked.emit(self.inst.id)
@@ -1426,11 +1446,16 @@ class InstancesPage(QWidget):
     current_changed = Signal(str)
     section_requested = Signal(str, str)  # section key, instance id
     scan_done = Signal()  # emitted when the embedded scanner closes
+    # round-243：实例字段被就地改动（图标 / 收藏），需要首页等其它页面同步刷新
+    instance_updated = Signal(str)
     # round-107 T8：页面内新建实例后上报 id，由 MainWindow 统一发起后台下载。
     instance_created = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # round-244 P0：dragEnterEvent/dropEvent 从 round-42 就有，但从来没人
+        # 调 setAcceptDrops(True) —— Qt 默认拒收，拖整合包进窗口永远没反应。
+        self.setAcceptDrops(True)
         self.mgr = manager()
         self._rows: dict[str, _InstRow] = {}
         # round-107 T8 实例行任务状态（仅内存，重启即清）：
@@ -1459,6 +1484,8 @@ class InstancesPage(QWidget):
             t("instances.scan_import"), "search", self._open_scan, w=132)
         self.mrpack_btn = self._mk_header_btn(
             t("instances.import_pack"), "download", self._import_mrpack, w=120)
+        self.trash_btn = self._mk_header_btn(
+            t("instances.trash_title"), "delete", self._open_trash, w=80, accent=False)
         head_actions = QWidget()
         self._head_actions = head_actions   # round-195：功能页时隐藏（新建/扫描/导入包会跳走）
         head_actions.setStyleSheet("background: transparent;")
@@ -1468,6 +1495,7 @@ class InstancesPage(QWidget):
         hl.addWidget(self.new_btn)
         hl.addWidget(self.scan_btn)
         hl.addWidget(self.mrpack_btn)
+        hl.addWidget(self.trash_btn)
         # round-107 收起键重做：原按钮随列表一起折叠 → 位置来回跳动。
         # 改为一颗**常驻页头**的图标按钮：无论列表
         # 展开/收起，它始终停在同一个位置，状态靠图标方向 + tooltip 表达。
@@ -1490,13 +1518,15 @@ class InstancesPage(QWidget):
         root.addWidget(self._header)
 
         # ── body: stacked view switcher (prevents the "double page" bug) ──
-        # We use a QStackedWidget for the body so only one view is ever visible:
-        #   0 = empty state   (no instances yet)
-        #   1 = split view    (list + details)
-        #   2 = new instance wizard
-        #   3 = scan panel
-        # This replaces the old manual show/hide juggling that left stale
-        # widgets stacked on top of each other.
+        # We use a QStackedWidget for the body so only one view is ever visible.
+        # 固定页索引约定（round-243 修正，勿再插入）：
+        #   0 = 空状态   (还没有实例)
+        #   1 = 分栏视图 (左列表 + 右详情)   ← _refresh 唯一会切回的页
+        #   2 = 回收站
+        #   3+ = 动态挂载的功能页（新建向导 / 扫描 / 编辑 / 体检 / 导出…）
+        # ☠ round-243：这里曾经把 split view **创建了两遍**，第二份带着真正的
+        #   数据被 addWidget 成 index 3，而 _refresh 只切 index 1（空壳）→
+        #   整个实例页看起来一片空白。只允许存在一份，任何"再建一次"都是坑。
         self._body_stack = QStackedWidget()
 
         # page 0: empty state
@@ -1558,10 +1588,13 @@ class InstancesPage(QWidget):
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setSizes([280, 720])
 
-        # round-107：原「左侧展开条 + 折叠按钮」双按钮方案整体移除——收起按钮
-        # 已常驻页头（panel_btn），这里只放分割器，位置永不偏移。
         body.addWidget(self._splitter, stretch=1)
         self._body_stack.addWidget(self._split_view)
+
+        # page 2: trash
+        self._trash_page = self._trash_state()
+        self._body_stack.addWidget(self._trash_page)
+
         self._sync_panel_btn()  # 初始同步页头收起按钮图标方向
 
         root.addWidget(self._body_stack, stretch=1)
@@ -1693,10 +1726,28 @@ class InstancesPage(QWidget):
         # name + current tag
         name_row = QHBoxLayout()
         name_row.setSpacing(10)
-        nm = QLabel(inst.name)
+        # round-243：详情卡左侧加实例图标（44px 圆角）。没设图标时退回默认
+        # tile + 矢量图标，与列表行保持同一套回落规则。
+        icon_lbl = QLabel()
+        icon_lbl.setFixedSize(44, 44)
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        _ipm = instance_art.icon_pixmap(
+            getattr(inst, "icon_path", ""), 44, radius=11)
+        if _ipm is None:
+            icon_lbl.setProperty("cls", "tile")
+            icon_lbl.setPixmap(icon("instances").pixmap(24, 24))
+        else:
+            icon_lbl.setPixmap(_ipm)
+        icon_lbl.setToolTip(t("inst.pick_icon"))
+        name_row.addWidget(icon_lbl)
+        nm = ui_kit.ElidedLabel(inst.name)
         nm.setProperty("cls", "big")
         nm.setStyleSheet("font-size: 20px;")
-        name_row.addWidget(nm)
+        # ☠ round-243：ElidedLabel 的水平策略是 Ignored（它靠"绝不用文本宽度
+        # 顶布局"来防溢出），而这一行末尾又有 addStretch(1)——两者相遇时布局
+        # 把多余空间全给了 spacer，标签拿到 **0 宽**：详情卡里实例名字整个
+        # 消失（实测 w=0 / sizeHint=260）。必须给它 stretch 才能分到宽度。
+        name_row.addWidget(nm, 1)
         if inst.id == self.mgr.current_id:
             from .ui_kit import state_pix
             tag = QWidget()
@@ -1729,8 +1780,11 @@ class InstancesPage(QWidget):
         lay.addLayout(name_row)
 
         # badges: version pill · loader badge · format badge (round-82) · java
-        meta = QHBoxLayout()
-        meta.setSpacing(8)
+        # round-243：QHBoxLayout → FlowLayout。原来一行徽章的最小宽度是**所有
+        # 徽章之和**（实测 524px：版本 99 + 加载器 97 + 布局 196 + 加载器版本
+        # 108），窗口收窄到 900（应用最小宽）时详情区只有 369px → 整张卡溢出
+        # 211px 被硬裁。换成流式后宽度不够自动换行，卡片下限退化成最宽那颗。
+        meta = FlowLayout(h_spacing=8, v_spacing=8)
         ver_pill = QLabel(inst.game_version or "?")
         ver_pill.setProperty("cls", "pill")
         meta.addWidget(ver_pill)
@@ -1744,7 +1798,6 @@ class InstancesPage(QWidget):
             jl = QLabel("☕ " + os.path.basename(inst.java_path))
             jl.setProperty("cls", "badge")
             meta.addWidget(jl)
-        meta.addStretch(1)
         lay.addLayout(meta)
 
         # ── 路径（round-124）──
@@ -1806,15 +1859,17 @@ class InstancesPage(QWidget):
             ("instances.open_folder", "folder",
              lambda: self._open_folder(inst)),
         ]
-        mgmt_grid = QGridLayout()
-        mgmt_grid.setSpacing(8)
-        for i, (label_key, ico, slot) in enumerate(mgmt):
+        # round-243：4 列 QGridLayout（最小 502px）→ FlowGrid。列数按宽度算：
+        # 宽窗口 4 列、900px 最小窗口自动 2 列，不再有"写死列数 = 写死下限"。
+        mgmt_grid = FlowGrid(h_spacing=8, v_spacing=8, min_item_width=104,
+                             max_cols=4)
+        for label_key, ico, slot in mgmt:
             b = QPushButton(t(label_key))
             b.setMinimumHeight(40)
             b.setIcon(icon(ico))
             b.setIconSize(QSize(15, 15))
             b.clicked.connect(lambda _c=False, f=slot: f())
-            mgmt_grid.addWidget(b, i // 4, i % 4)
+            mgmt_grid.addWidget(b)
         lay.addLayout(mgmt_grid)
 
         # ── 底部行：设为当前 / 更多（低频） / 删除 ──
@@ -1873,22 +1928,22 @@ class InstancesPage(QWidget):
         # ── section entries ──
         sec_title = ui_kit.group_label(t("instances.sections"))
         lay.addWidget(sec_title)
-        sec_grid = QGridLayout()
-        sec_grid.setSpacing(10)
+        sec_grid = FlowGrid(h_spacing=10, v_spacing=10, min_item_width=120,
+                            max_cols=4)
         sections = [
             ("mods",      "instances.sec_mods",      "mods"),
             ("respack",   "instances.sec_respacks",  "resourcepack"),
             ("shaders",   "instances.sec_shaders",   "shader"),
             ("saves",     "instances.sec_saves",     "folder"),
         ]
-        for i, (key, label_key, ico) in enumerate(sections):
+        for key, label_key, ico in sections:
             b = QPushButton(t(label_key))
             b.setMinimumHeight(44)
             b.setIcon(icon(ico))
             b.setIconSize(QSize(16, 16))
             b.clicked.connect(
                 lambda _c=False, k=key: self.section_requested.emit(k, inst.id))
-            sec_grid.addWidget(b, i // 2, i % 2)
+            sec_grid.addWidget(b)
         lay.addLayout(sec_grid)
 
         self.detail_lay.addWidget(card)
@@ -1906,6 +1961,14 @@ class InstancesPage(QWidget):
             f"border-radius: 6px; padding: 4px 10px;"
         )
         lbl.setWordWrap(True)
+        # ☠ round-243：QLabel 开了 wordWrap 之后 minimumSizeHint() 仍然按**最长
+        # 不可断片段**算宽度。Windows 路径（`C:\Users\...\.minecraft`）整串没有
+        # 空格 → 最小宽度 ≈ 整串像素宽（实测 920px）→ 顺着 QVBoxLayout 撑大整张
+        # 详情卡（976px），而 QScrollArea 视口只有 ~549px 且横向滚动条关闭 →
+        # 卡片右侧被硬裁掉：4 列按钮只剩 2.5 列、分区入口全被切。
+        # 横向策略设 Ignored：布局不再参考它的 sizeHint，直接给满可用宽度；
+        # wordWrap + heightForWidth 仍会按实际宽度折行显示完整路径。
+        lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         lbl.setToolTip(text)
         return lbl
@@ -1955,6 +2018,15 @@ class InstancesPage(QWidget):
         # round-183：PCL 式整页编辑（加载器真装真卸 / 模组内嵌增删）
         m.addAction(t("instances.edit_instance"),
                     lambda: self._edit_instance_settings(inst))
+        # round-243：图标 / 收藏原来只能在编辑器里改，列表和右键都摸不到
+        m.addAction(t("inst.pick_icon"),
+                    lambda: self._pick_instance_icon(inst))
+        if getattr(inst, "icon_path", ""):
+            m.addAction(t("inst.reset_icon"),
+                        lambda: self._reset_instance_icon(inst))
+        m.addAction(t("inst.favorite_remove" if getattr(inst, "favorite", False)
+                      else "inst.favorite_add"),
+                    lambda: self._toggle_instance_favorite(inst))
         m.addAction(t("instances.duplicate"),
                     lambda: self._duplicate(inst))
         m.addSeparator()
@@ -1989,6 +2061,44 @@ class InstancesPage(QWidget):
         m.addAction(t("common.delete"),
                     lambda: self._delete_instance(inst))
         m.exec(pos)
+
+    # ── 图标 / 收藏（round-243：从编辑器搬到列表也能操作） ────────────
+    def _after_inst_field_change(self, inst: Instance) -> None:
+        """图标/收藏落盘后：刷新列表行、详情卡，并通知外层同步首页。"""
+        self.mgr.save(inst)
+        row = self._rows.get(inst.id)
+        if row is not None:
+            row.refresh_state(inst.id == self.mgr.current_id)
+        if inst.id == self._selected_id:
+            self._render_detail()
+        self.instance_updated.emit(inst.id)
+
+    def _pick_instance_icon(self, inst: Instance) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        from .win_rounded import warn
+        path, _f = QFileDialog.getOpenFileName(
+            self, t("inst.pick_icon"), "", t("inst.icon_filter"))
+        if not path:
+            return
+        try:
+            inst.icon_path = instance_art.set_instance_icon(inst, path)
+        except ValueError as exc:
+            warn(self, t("inst.pick_icon"),
+                 t("inst.icon_too_big") if "large" in str(exc)
+                 else t("inst.icon_bad"))
+            return
+        self._after_inst_field_change(inst)
+
+    def _reset_instance_icon(self, inst: Instance) -> None:
+        instance_art.clear_instance_icon(inst)
+        inst.icon_path = ""
+        self._after_inst_field_change(inst)
+
+    def _toggle_instance_favorite(self, inst: Instance) -> None:
+        inst.favorite = not bool(getattr(inst, "favorite", False))
+        self._after_inst_field_change(inst)
+        # 收藏影响排序（置顶），顺序变了要重建列表
+        self._refresh(switch=False)
 
     def _open_export_pack(self, inst: Instance):
         """导出整合包：**页内**（round-196）。
@@ -2303,7 +2413,7 @@ class InstancesPage(QWidget):
 
     # ia[instances]: 点「删除」 | 详情底部操作行 | 二次确认后移除实例并刷新列表
     def _delete_instance(self, inst: Instance):
-        from .win_rounded import confirm
+        from .win_rounded import confirm, toast
         if self._guard_running(inst.id):
             return
         if not confirm(
@@ -2311,8 +2421,11 @@ class InstancesPage(QWidget):
             t("instances.delete_confirm", name=inst.name),
         ):
             return
-        self._report_delete_leftovers(inst, self.mgr.remove(inst.id))
+        failed = self.mgr.remove(inst.id)
+        self._report_delete_leftovers(inst, failed)
         self._refresh()
+        toast(self, t("instances.delete_title"),
+              t("instances.delete_toast", name=inst.name), duration=3000)
 
     # ia[instances]: 点「打开文件夹」 | 详情「管理与诊断」网格 | 用系统文件管理器打开实例目录
     def _open_folder(self, inst: Instance):
@@ -2678,8 +2791,15 @@ class InstancesPage(QWidget):
             self._empty_btn.setEnabled(False)
         self._scan_panel = ScanPanel(self)
         self._scan_panel.done.connect(self._close_scan_panel)
+        # round-243：每导入成功一个就增量刷新左侧列表，玩家不用等关面板才看到
+        # 新实例（扫描面板自己不再整盘重扫）。
+        self._scan_panel.imported.connect(self._on_scan_imported)
         idx = self._body_stack.addWidget(self._scan_panel)
         self._body_stack.setCurrentIndex(idx)
+
+    def _on_scan_imported(self, _mc_dir: str) -> None:
+        """扫描面板导入成功 → 后台刷新实例列表（不切走面板）。"""
+        self._refresh(switch=False)
 
     def _close_scan_panel(self):
         """Remove the embedded scanner and refresh the instance list."""
@@ -2709,11 +2829,7 @@ class InstancesPage(QWidget):
         the right importer so the user has a single "Import pack" entry point.
         """
         from .win_rounded import pick_files, warn
-        from .modpack_import import (
-            detect_pack_format, import_curseforge_zip,
-            import_zip_as_instance, import_folder_as_instance,
-        )
-        from .net_api import NetError
+        from .modpack_import import detect_pack_format
 
         path = pick_files(
             self, t("modpack.file_pick"), "",
@@ -2741,18 +2857,37 @@ class InstancesPage(QWidget):
             self._show_mrpack_dialog(path)
             return
 
-        # CurseForge zip（round-142 起免 key 逐文件安装）不再需要前置确认，
-        # 直接进导入 worker；失败时走 _err 弹具体原因。
+        # ☠ round-244 P0：这里原本漏了 `fn = fn_map[fmt]` 就直接
+        # `Worker(fn, ...)` → 按钮一点必抛 NameError（用户实测「根本导不进去」）。
+        # 同时把拖拽那条路径的重复实现合并进来，避免两边再次跑偏。
+        self._run_pack_import(path, fmt)
 
-        # Run heavy import in a worker so the UI doesn't freeze.
+    def _run_pack_import(self, path: str, fmt: str) -> None:
+        """按钮/拖拽共用的导入实现：选对应 importer → 后台 worker → 任务中心。
+
+        ``fmt`` 取值见 :func:`modpack_import.detect_pack_format`：
+        ``curseforge`` / ``zip_mc`` / ``folder``（``mrpack`` 由调用方先弹预览框）。
+        """
+        from .modpack_import import (
+            import_curseforge_zip, import_zip_as_instance,
+            import_folder_as_instance,
+        )
+        from .net_api import NetError
+        from .core.task_center import get_task_center
+        from .win_rounded import warn, toast
+
         fn_map = {
             "curseforge": import_curseforge_zip,
             "zip_mc": import_zip_as_instance,
             "folder": import_folder_as_instance,
         }
+        fn = fn_map.get(fmt)
+        if fn is None:
+            warn(self, t("modpack.title"), t("modpack.unknown_format"))
+            return
+
         # 进度与结果统一进任务中心（状态栏「任务」→ 页内任务分区），不再弹
         # 独立进度对话框：导入期间可继续浏览，失败原因留在历史里。
-        from .core.task_center import get_task_center
         _tid = get_task_center().start(
             "import", os.path.basename(path), target_page="instances",
             stage=t("modpack.importing")).id
@@ -2763,6 +2898,7 @@ class InstancesPage(QWidget):
                     _tid, stage=str(label), completed=done, total=total)
             return True
 
+        # CurseForge 是逐文件下载，进度可报；zip/文件夹是一次性拷贝，不传 progress。
         kw = {"progress": _pr} if fmt == "curseforge" else {}
         worker = Worker(fn, path, self.mgr, **kw)
 
@@ -2832,7 +2968,10 @@ class InstancesPage(QWidget):
         except Exception:
             warn(self, t("mrpack.title"), t("mrpack.bad_file"))
             return
-        info = _parse_mrpack_info(raw)
+        # ☠ round-246：必须传 path！_parse_mrpack_info 要从 zip 里的
+        # modrinth.index.json 读 loader/mods 数；上轮漏传 → UI 仍显示
+        # vanilla/0，用户实测「模组数量看不到、加载器识别不到」。
+        info = _parse_mrpack_info(raw, path)
         info["launch_version"] = launch_version
         dlg = _MrpackDialog(path, info, self)
         dlg.exec()
@@ -2846,50 +2985,20 @@ class InstancesPage(QWidget):
         self._import_pack()
 
     def _import_pack_path(self, path: str):
-        """统一的整合包导入流程（拖拽/按钮共用）。round-42。"""
+        """拖拽入口：识别格式后复用按钮那条导入实现。round-244。"""
         from .win_rounded import warn
-        from .modpack_import import (
-            detect_pack_format, import_curseforge_zip,
-            import_zip_as_instance,
-        )
+        from .modpack_import import detect_pack_format
+
         fmt = detect_pack_format(path)
         if fmt is None:
             warn(self, t("modpack.title"), t("modpack.unknown_format"))
             return
-        from .worker import Worker
-        # round-74 交互反馈：导入动辄几十秒，给主窗口状态条转圈 + 文案，
-        # 避免"点了没反应"的错觉；结束（成功或报错）都恢复。
-        win = self.window()
-        bar = getattr(win, "_progress", None)
-        stat = win.statusBar() if win is not None else None
-        if bar is not None:
-            bar.setMaximum(0)
-            bar.setVisible(True)
-        if stat is not None:
-            stat.showMessage(t("modpack.importing"))
-
-        def _finish(*_a):
-            if bar is not None:
-                bar.setVisible(False)
-            if stat is not None:
-                stat.showMessage(t("status.ready"), 3000)
-
-        if fmt == "curseforge":
-            self._pack_worker = Worker(import_curseforge_zip, path, self.mgr)
-            self._pack_worker.finished.connect(_finish)
-            self._pack_worker.finished.connect(self._on_pack_imported)
-            self._pack_worker.error.connect(
-                lambda e: warn(self, t("modpack.title"), str(e)))
-            self._pack_worker.error.connect(_finish)
-            self._pack_worker.start()
-        elif fmt == "zip":
-            self._pack_worker = Worker(import_zip_as_instance, path, self.mgr)
-            self._pack_worker.finished.connect(_finish)
-            self._pack_worker.finished.connect(self._on_pack_imported)
-            self._pack_worker.error.connect(
-                lambda e: warn(self, t("modpack.title"), str(e)))
-            self._pack_worker.error.connect(_finish)
-            self._pack_worker.start()
+        # ☠ 原实现写 `elif fmt == "zip"`，而 detect_pack_format() 返回的是
+        # "zip_mc" → 拖普通 .zip 进去哪个分支都不进，静默无反应。
+        if fmt == "mrpack":
+            self._show_mrpack_dialog(path)
+            return
+        self._run_pack_import(path, fmt)
 
     def _on_pack_imported(self, inst):
         self._refresh()
@@ -2921,9 +3030,208 @@ class InstancesPage(QWidget):
         if self._selected_id == inst_id:
             self._selected_id = None
         self._refresh()
+        toast(self, t("instances.delete_title"),
+              t("instances.delete_toast", name=inst.name), duration=3000)
         cur = self.mgr.current_id
         if cur:
             self.current_changed.emit(cur)
+
+    # ── 回收站 ──
+    def _trash_state(self) -> QWidget:
+        """Build the trash page widget (page 4 in body stack)."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(16)
+
+        # Title row with back button and clear-all button
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        self._trash_back_btn = QPushButton()
+        self._trash_back_btn.setFixedSize(34, 34)
+        self._trash_back_btn.setCursor(Qt.PointingHandCursor)
+        self._trash_back_btn.setIcon(icon("home"))
+        self._trash_back_btn.setIconSize(QSize(15, 15))
+        self._trash_back_btn.setToolTip(t("common.back"))
+        self._trash_back_btn.setStyleSheet(
+            f"QPushButton {{ background: {COLORS['bg_btn']}; color: {COLORS['text_main']};"
+            f" border: 1px solid {COLORS['border']}; border-radius: 8px; }}"
+            f"QPushButton:hover {{ background: {COLORS['bg_hover']}; }}"
+        )
+        self._trash_back_btn.clicked.connect(self._close_trash)
+        title_row.addWidget(self._trash_back_btn)
+
+        title_lbl = ui_kit.group_label(t("instances.trash_title"))
+        title_row.addWidget(title_lbl)
+        title_row.addStretch(1)
+        self._trash_clear_btn = QPushButton(t("instances.trash_clear"))
+        self._trash_clear_btn.setCursor(Qt.PointingHandCursor)
+        self._trash_clear_btn.setMinimumHeight(32)
+        self._trash_clear_btn.setStyleSheet(
+            f"QPushButton {{ background: {COLORS['bg_btn']}; color: {COLORS['text_sub']};"
+            f" border: 1px solid {COLORS['border']}; border-radius: 8px;"
+            f" padding: 6px 14px; font-size: 13px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: {COLORS['danger']}; color: white; border-color: {COLORS['danger']}; }}"
+        )
+        self._trash_clear_btn.clicked.connect(self._clear_trash)
+        title_row.addWidget(self._trash_clear_btn)
+        lay.addLayout(title_row)
+
+        # Scrollable list of trashed instances
+        self._trash_scroll = QScrollArea()
+        self._trash_scroll.setWidgetResizable(True)
+        self._trash_scroll.setFrameShape(QFrame.NoFrame)
+        self._trash_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._trash_content = QWidget()
+        self._trash_vbox = QVBoxLayout(self._trash_content)
+        self._trash_vbox.setContentsMargins(0, 0, 0, 0)
+        self._trash_vbox.setSpacing(8)
+        self._trash_scroll.setWidget(self._trash_content)
+        lay.addWidget(self._trash_scroll, stretch=1)
+
+        # Empty state placeholder (will be shown/hidden by _refresh_trash)
+        self._trash_empty = ui_kit.empty_state(
+            "instances",
+            t("instances.trash_empty"),
+            "",
+            actions=[],
+            icon_size=64,
+        )
+        self._trash_empty.hide()
+        self._trash_vbox.addWidget(self._trash_empty)
+        self._trash_vbox.addStretch(1)
+
+        # Initial populate
+        self._refresh_trash()
+        return page
+
+    def _refresh_trash(self):
+        """Rebuild the trash list from the manager."""
+        # Clear existing cards (except empty state and stretch)
+        while self._trash_vbox.count() > 2:  # keep empty + stretch at the end
+            item = self._trash_vbox.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        items = self.mgr.list_trash()
+        if not items:
+            self._trash_empty.show()
+            self._trash_clear_btn.setEnabled(False)
+            return
+
+        self._trash_empty.hide()
+        self._trash_clear_btn.setEnabled(True)
+
+        from datetime import datetime
+        for item in items:
+            inst_id = item.get("id", "")
+            name = item.get("name", "")
+            version = item.get("game_version", "")
+            loader = item.get("loader", "")
+            deleted_at = item.get("deleted_at", 0)
+
+            card = RoundedCard(radius=10)
+            card.setMinimumHeight(80)
+            cl = QHBoxLayout(card)
+            cl.setContentsMargins(16, 12, 16, 12)
+            cl.setSpacing(16)
+
+            # Icon tile (instance type)
+            tile = ui_kit.tile("instances", 44, 22)
+            cl.addWidget(tile)
+
+            # Info column
+            info_col = QVBoxLayout()
+            info_col.setSpacing(4)
+            name_lbl = ui_kit.ElidedLabel(name or "—")
+            name_lbl.setProperty("cls", "title")
+            info_col.addWidget(name_lbl)
+
+            meta = QHBoxLayout()
+            meta.setSpacing(8)
+            if version:
+                v_lbl = QLabel(version)
+                v_lbl.setProperty("cls", "sub")
+                meta.addWidget(v_lbl)
+            if loader:
+                ld = _loader_badge(loader_name(loader), loader)
+                meta.addWidget(ld)
+            # Deletion time
+            if deleted_at:
+                dt = datetime.fromtimestamp(deleted_at).strftime("%Y-%m-%d %H:%M")
+                dt_lbl = QLabel(t("instances.trash_deleted_at", dt=dt))
+                dt_lbl.setProperty("cls", "sub")
+                meta.addWidget(dt_lbl)
+            meta.addStretch(1)
+            info_col.addLayout(meta)
+            cl.addLayout(info_col, stretch=1)
+
+            # Action buttons: Restore / Delete permanently
+            restore_btn = QPushButton(t("instances.trash_restore"))
+            restore_btn.setMinimumHeight(30)
+            restore_btn.setCursor(Qt.PointingHandCursor)
+            restore_btn.setStyleSheet(
+                f"QPushButton {{ background: {COLORS['accent']}; color: {COLORS['text_on_accent']};"
+                f" border: none; border-radius: 6px; padding: 4px 12px; font-size: 12px; }}"
+                f"QPushButton:hover {{ background: {with_alpha(COLORS['accent'], 0xCC)}; }}"
+            )
+            restore_btn.clicked.connect(lambda _checked=False, iid=inst_id, n=name: self._restore_from_trash(iid, n))
+
+            delete_btn = QPushButton(t("instances.trash_delete"))
+            delete_btn.setMinimumHeight(30)
+            delete_btn.setCursor(Qt.PointingHandCursor)
+            delete_btn.setProperty("cls", "danger")
+            delete_btn.setStyleSheet(
+                f"QPushButton {{ background: {COLORS['bg_btn']}; color: {COLORS['danger']};"
+                f" border: 1px solid {COLORS['danger']}; border-radius: 6px; padding: 4px 12px; font-size: 12px; }}"
+                f"QPushButton:hover {{ background: {COLORS['danger']}; color: white; }}"
+            )
+            delete_btn.clicked.connect(lambda _checked=False, iid=inst_id, n=name: self._delete_from_trash(iid, n))
+
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(8)
+            btn_row.addWidget(restore_btn)
+            btn_row.addWidget(delete_btn)
+            cl.addLayout(btn_row)
+
+            # Insert before the empty state + stretch (which are the last 2 items)
+            self._trash_vbox.insertWidget(self._trash_vbox.count() - 2, card)
+
+    def _open_trash(self):
+        """Switch the body stack to the trash page."""
+        self._body_stack.setCurrentWidget(self._trash_page)
+        self._refresh_trash()  # ensure up-to-date when opened
+        # Hide header action buttons while on trash page (consistent with other embedded panels)
+        self._set_header_buttons_enabled(False)
+
+    def _restore_from_trash(self, instance_id: str, name: str):
+        if not confirm(self, t("instances.trash_restore_confirm", name=name), ""):
+            return
+        if self.mgr.restore_from_trash(instance_id):
+            toast(self, t("common.hint"), t("instances.trash_toast_restored", name=name))
+            self._refresh_trash()
+            self._refresh()  # also refresh main list
+
+    def _delete_from_trash(self, instance_id: str, name: str):
+        if not confirm(self, t("instances.trash_delete_confirm", name=name), ""):
+            return
+        if self.mgr.delete_from_trash(instance_id):
+            toast(self, t("common.hint"), t("instances.trash_toast_deleted", name=name))
+            self._refresh_trash()
+
+    def _clear_trash(self):
+        if not confirm(self, t("instances.trash_clear_confirm"), ""):
+            return
+        count = self.mgr.clear_trash()
+        if count:
+            toast(self, t("common.hint"), t("instances.trash_toast_cleared", n=count))
+        self._refresh_trash()
+
+    def _close_trash(self):
+        """Return from trash page to the main instance list (page 1)."""
+        self._body_stack.setCurrentWidget(self._split_view)
+        self._set_header_buttons_enabled(True)
 
     def retranslate_ui(self):
         self.title_lbl.setText(t("instances.title"))
@@ -2998,7 +3306,7 @@ class ModCard(RoundedCard):
         # ── info column: name + meta (loader pill · state) ──
         col = QVBoxLayout()
         col.setSpacing(4)
-        name = QLabel(_mod_display_name(path))
+        name = ui_kit.ElidedLabel(_mod_display_name(path))
         name.setProperty("cls", "title")
         col.addWidget(name)
         meta = QHBoxLayout()
@@ -3263,8 +3571,11 @@ class _MrpackDialog(QDialog):
         grid.addRow(QLabel(t("mrpack.name")), QLabel(info.get("name") or "?"))
         grid.addRow(QLabel(t("mrpack.version")),
                     QLabel(info.get("mc_version") or "?"))
+        _loader = info.get("loader") or "vanilla"
+        _ldver = info.get("loader_version") or ""
         grid.addRow(QLabel(t("mrpack.loader")),
-                    QLabel(loader_name(info.get("loader") or "vanilla")))
+                    QLabel(loader_name(_loader) +
+                           (f" {_ldver}" if _ldver and _loader != "vanilla" else "")))
         grid.addRow(QLabel(t("mrpack.mods")),
                     QLabel(str(info.get("mods") or 0)))
         lay.addLayout(grid)
@@ -3313,6 +3624,7 @@ class _MrpackDialog(QDialog):
             name=name,
             game_version=self.info.get("mc_version") or "1.21.4",
             loader=self.info.get("loader") or "vanilla",
+            loader_version=self.info.get("loader_version") or "",
             isolation="default")
         inst.version_id = self.info.get("launch_version") or ""
         self.mgr._persist(inst)
@@ -3324,17 +3636,47 @@ class _MrpackDialog(QDialog):
         from .core import install
         # round-113：跟随用户设置的下载源，不再硬编码 BMCLAPI
         _cfg = load_config()
-        self._worker = Worker(
+        # ☠ round-246 P0：这里原来用 Worker，而 Worker 只有 finished/error，
+        # 根本没有 progress/status —— 对话框进度条从显示到结束一动不动，
+        # 用户实测「进度不涨」。换成 ProgressWorker 并接上状态/进度。
+        from .worker import ProgressWorker
+        self._worker = ProgressWorker(
             install.install_mrpack, self.path, inst.mc_dir,
             game_dir=inst.game_dir,
-            mirror=_cfg.get("download_mirror", "official"))
+            mirror=_cfg.get("download_mirror", "official"),
+            proxy=_cfg.get("download_proxy", ""))
+        self._worker.status.connect(self._on_pack_status)
+        self._worker.progress.connect(self._on_pack_progress)
+        self._worker.step.connect(self._on_pack_step)
         self._worker.finished.connect(self._done)
         self._worker.error.connect(self._err)
         self._worker.start()
 
-    def _done(self, _result):
+    def _on_pack_status(self, text: str) -> None:
+        self.status.setText(str(text))
+
+    def _on_pack_progress(self, value: int, maximum: int) -> None:
+        if maximum and maximum > 0:
+            self.bar.setVisible(True)
+            self.bar.setRange(0, maximum)
+            self.bar.setValue(max(0, min(int(value), maximum)))
+        else:
+            self.bar.setRange(0, 0)   # 未定长：保持"忙"指示
+
+    def _on_pack_step(self, key: str) -> None:
+        self.status.setText(str(key))
+
+    def _done(self, result):
         self.bar.setVisible(False)
         self.status.setText(t("mrpack.done"))
+        # ☠ round-245 P0：install_mrpack 返回的 launch version id 以前被当
+        # `_result` 丢弃 → 新建实例只有「预览时猜的」loader/game_version，
+        # version_id 空或错，启动永远 "Version xxx was not found"，补全也
+        # 按错的 loader/game_version 去装（用户实测「补全了也必失败」）。
+        # install_mrpack 真装的版本 id 才是启动的唯一真理源，必须回写落盘。
+        if isinstance(result, str) and result:
+            self._inst.version_id = result
+            self.mgr._persist(self._inst)
         from .core.task_center import get_task_center
         get_task_center().finish(getattr(self, "_task_id", ""),
                                  detail=self.info.get("name") or "")

@@ -24,7 +24,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton,
-    QFrame, QWidget,
+    QFrame, QWidget, QStackedWidget, QPlainTextEdit,
 )
 
 from .theme import COLORS
@@ -81,6 +81,8 @@ class LaunchProgressDialog(QDialog):
     progress = Signal(int, int)  # value, max
     # round-168：玩家点了「取消下载 / 取消启动」→ 主窗口弹确认后 abort worker。
     cancel_requested = Signal()
+    # round-241：玩家在游戏日志窗点「打开完整控制台」→ 主窗口切到控制台页
+    open_console_requested = Signal()
     # round-170：下载任务可暂停 / 继续 / 失败后重试（启动准备阶段不提供暂停）。
     pause_requested = Signal()
     resume_requested = Signal()
@@ -99,6 +101,12 @@ class LaunchProgressDialog(QDialog):
         self._paused = False
         self._failed = False
         self._steps = list(_DL_STEPS if mode == "download" else STEPS)
+        # round-241：游戏起来后从「步骤列表」切到「实时日志」视图（PCL2 式）
+        self._log_timer: QTimer | None = None
+        self._log_path = ""
+        self._log_offset = 0
+        self._log_displayed = 0
+        self._live_log_mode = False   # round-241：切到实时日志后为 True（可召回）
         self.setWindowTitle(t("launch.download_title") if mode == "download"
                             else t("launch.title"))
         self.setModal(False)
@@ -204,6 +212,38 @@ class LaunchProgressDialog(QDialog):
         self.sources_lbl.setWordWrap(True)
         self.sources_lbl.setVisible(False)
         lay.addWidget(self.sources_lbl)
+
+        # ── round-241：游戏运行中的实时日志视图（默认隐藏）──
+        self.log_view = QFrame()
+        self.log_view.setProperty("cls", "surface")
+        lv = QVBoxLayout(self.log_view)
+        lv.setContentsMargins(10, 8, 10, 8)
+        lv.setSpacing(8)
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumBlockCount(500)   # 防无限增长
+        self.log_text.setStyleSheet(
+            "QPlainTextEdit { background: %s; color: %s; "
+            "font-family: Consolas, 'Microsoft YaHei'; font-size: 11px; "
+            "border: none; }" % (COLORS.get("bg_input", "#F5F5F7"),
+                                 COLORS.get("text_main", "#1A1A2E")))
+        lv.addWidget(self.log_text, 1)
+        self.log_hint = QLabel(t("launch.running_hint"))
+        self.log_hint.setProperty("cls", "sub")
+        self.log_hint.setWordWrap(True)
+        lv.addWidget(self.log_hint)
+        self.console_btn = QPushButton(t("launch.log_open_console"))
+        self.console_btn.setProperty("cls", "secondary")
+        self.console_btn.setCursor(Qt.PointingHandCursor)
+        self.console_btn.clicked.connect(self._open_console_requested)
+        lv.addWidget(self.console_btn)
+        self.log_view.setVisible(False)
+        lay.addWidget(self.log_view, 1)
+        # 记录「准备阶段」的控件，切日志时隐藏（head/steps/progress/speed/status/sources）
+        self._prep_widgets = [
+            head, steps_box, prog_row, self.speed_lbl, self.status_lbl,
+            self.sources_lbl,
+        ]
 
         # ── footer ──
         foot = QHBoxLayout()
@@ -320,11 +360,13 @@ class LaunchProgressDialog(QDialog):
             self._fitting = False
 
     def closeEvent(self, event):  # noqa: N802 - Qt 约定
+        # round-241：日志 tail 定时器必须先停，否则关闭后仍在读文件。
+        self.stop_log_tail()
         # round-217：已结束的进度框没有召回价值（任务中心另有记录），关掉就销毁，
-        # 别让每个实例的进度框永久挂在主窗口下面。进行中的仍然只 hide()，
-        # 以便状态栏点击召回。
+        # 但 round-241 游戏运行中改为可召回（hide 而非 delete），所以只有非
+        # 运行中模式才 DeleteOnClose。
         try:
-            if self._finished:
+            if self._finished and not self._live_log_mode:
                 self.setAttribute(Qt.WA_DeleteOnClose, True)
         except RuntimeError:
             pass
@@ -487,9 +529,95 @@ class LaunchProgressDialog(QDialog):
         self.status_lbl.setStyleSheet(
             f"color: {COLORS['text_sub']}; font-size: 12px;")
 
-    def mark_launched(self):
-        """Game process spawned — flip every step to done (called by MainWindow)."""
+    def mark_launched(self, log_path: str = ""):
+        """Game process spawned — flip every step to done.
+
+        round-242：默认只点亮步骤（主窗口随后 900ms 关闭进度框）。
+        只有传入 ``log_path``（开发者模式）才切成实时日志窗、不自动关。
+        """
         self.mark_done(t("launch.started"))
+        # 无 log_path = 普通模式，保持原样（进度框点亮后由主窗口关闭）
+        if not log_path or self.mode != "launch":
+            return
+        self._log_path = log_path
+        self._live_log_mode = True
+        try:
+            from PySide6.QtWidgets import QApplication
+            self.titlebar.set_title(t("launch.running_log"))
+            self.title_lbl.setText(t("launch.running_log"))
+            self.sub_lbl.setText(t("launch.started"))
+            # 隐藏准备阶段控件，显示日志视图。_prep_widgets 里既有 QWidget
+            # 也有 QHBoxLayout（布局本身没有 setVisible，要逐个隐藏其子控件）。
+            for w in getattr(self, "_prep_widgets", []):
+                try:
+                    if hasattr(w, "setVisible"):
+                        w.setVisible(False)
+                    elif hasattr(w, "itemAt"):   # QHBoxLayout / QVBoxLayout
+                        for i in range(w.count()):
+                            it = w.itemAt(i)
+                            child = it.widget() if it is not None else None
+                            if child is not None:
+                                child.setVisible(False)
+                except RuntimeError:
+                    pass
+            self.log_view.setVisible(True)
+            self.cancel_btn.setVisible(False)
+            self.hide_btn.setText(t("common.close"))
+            # 日志视图内已有 log_hint，footer 的 hint 留空避免重复提示
+            self.hint_lbl.setText("")
+            self.adjustSize()
+            self._start_log_tail()
+        except RuntimeError:  # C++ 对象已销毁
+            pass
+
+    def _start_log_tail(self) -> None:
+        """启动定时器增量读取 latest.log（只显示关键行，避免 mod 刷屏）。"""
+        if self._log_timer is not None:
+            return
+        self._log_timer = QTimer(self)
+        self._log_timer.setInterval(500)
+        self._log_timer.timeout.connect(self._poll_log)
+        self._poll_log()          # 立即读一次
+        self._log_timer.start()
+
+    def _poll_log(self) -> None:
+        """从上次偏移增量读日志，追加关键行到文本框。"""
+        if not self._log_path:
+            return
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(self._log_offset)
+                chunk = f.read(256 * 1024)   # 一次最多 256KB
+                self._log_offset = f.tell()
+            if not chunk:
+                return
+            text = chunk.decode("utf-8", errors="replace")
+            for line in text.splitlines():
+                if self._is_key_log_line(line):
+                    self.log_text.appendPlainText(line.strip()[:200])
+        except (OSError, RuntimeError):
+            pass
+
+    @staticmethod
+    def _is_key_log_line(line: str) -> bool:
+        """只显示玩家关心的启动进度行（mod 加载 / 世界 / 错误），过滤噪音。"""
+        low = line.lower()
+        keys = ("loading", "loaded", "mod ", "world", "render", "sound",
+                "error", "warn", "fatal", "server", "client", "启动", "加载",
+                "错误", "完成", "done", "preparing", "eula")
+        return any(k in low for k in keys)
+
+    def _open_console_requested(self) -> None:
+        self.open_console_requested.emit()
+
+    def stop_log_tail(self) -> None:
+        """游戏退出/对话框关闭时停定时器。"""
+        if self._log_timer is not None:
+            try:
+                self._log_timer.stop()
+            except RuntimeError:
+                pass
+            self._log_timer = None
 
     def mark_done(self, subtitle: str = ""):
         """All steps done + optional subtitle (下载任务完成时也走这里）。"""

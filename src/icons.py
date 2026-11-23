@@ -52,8 +52,8 @@ _SIZE = 24
 # Fallbacks for icons referenced in nav/key paths that don't have a dedicated
 # SVG. Keep this list small — new icons should be added as their own .svg.
 _FALLBACKS = {
-    "lobby": "server",
-    "toolbox": "tools",   # round-124：AC 侧栏「其他」分组新增百宝箱入口
+    "lobby": "server",    # 大厅 → 复用服务器图标（无专属 lobby.svg）
+    "toolbox": "tools",   # round-124：AC 侧栏「工具」分组入口
 }
 
 # Icons whose artwork carries meaning and must NOT be recoloured: brand marks

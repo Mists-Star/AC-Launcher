@@ -15,6 +15,7 @@ from PySide6.QtCore import Qt, Signal, QRect
 
 from .theme import COLORS, RoundedCard
 from .icons import icon
+from . import ui_kit
 from .i18n import t
 from .win_rounded import _msgbox
 from .fix_feedback import attach, report, summarize
@@ -49,7 +50,7 @@ class _FindingCard(RoundedCard):
         color = _SEV_COLOR.get(finding.severity, COLORS["text_sub"])
         dot.setStyleSheet(f"background:{color}; border-radius:5px;")
         head.addWidget(dot)
-        title = QLabel(t(finding.title))
+        title = ui_kit.ElidedLabel(t(finding.title))
         title.setProperty("cls", "big")
         title.setStyleSheet(f"color:{color};")
         head.addWidget(title)
