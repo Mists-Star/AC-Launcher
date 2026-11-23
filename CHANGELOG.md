@@ -27,6 +27,33 @@
   只 emit 不 connect 的信号属于 `InstanceCard`/`ModCard` 遗留死代码
   （文件头已标注 old layout，仅在老测试里实例化），不动以免破坏测试。
 
+## round-252（2026-11-23）— 设置页 9 子页真机截图审查
+
+带 FONTDIR 逐页截图（basic/appearance/modules/launch/network/sound/account/
+advanced/java），修 2 个真显示问题：
+
+* **外观页主题 radio**：☀/月亮图标与「浅色/暗色」文字粘在一起（历史遗留
+  观察项「4 列 radio 文字挤压」坐实）。QRadioButton 默认 icon-text 间距太小，
+  加 QSS `spacing: 8px; padding-left: 2px`，截图复验间距清晰。
+* **Java 页快速选择区**：scan_javas 后台跑 1-2 秒，期间是一大块空白，像功能
+  坏了。构造时先放 `settings.java_quick_empty` 空状态提示。
+* 其余 7 个子页目视无截断/重叠/错位。
+* 全量编译 OK、pyflakes 无 undefined、smoke 17/17、相关探针 ALL PASS。
+
+## round-251（2026-11-23）— 离屏字体护栏 + 真机截图显示修复
+
+用户指出「offscreen 无文字不是修了吗？」——我第二次踩同一个坑：新写截图
+脚本漏 `QT_QPA_FONTDIR=C:\Windows\Fonts`，全 tofu 还误判成"环境不支持中文"。
+这次做成机制而非教训：
+
+* 新增 `tests/conftest.py`：pytest 收集前全局设 FONTDIR。
+* 新增 `tools/check_probe_font.py`：扫所有 `grab()/save()` 脚本有没有 FONTDIR。
+* 批量给 28 个漏设的截图脚本补上，复扫 OK、全量编译通过。
+* 带字体真看 8 页截图发现 2 个真显示问题并修：① 首页角色小字压皮肤模型头顶
+  → spacing 6→24px；② 设置页 gamma checkbox 与 spinbox 挤在一起 → addSpacing(12)。
+* ☠ 铁律：方框 = 脚本漏 FONTDIR，永远不是"环境不支持"。写完截图脚本先跑
+  `tools/check_probe_font.py`。
+
 ## round-250（2026-11-23）— 隐形问题扩大审查：文案/显示/功能分化/细节
 
 用户要求「扩大范围，细分查显示问题、文案问题、逻辑与功能分化、对外显示、
