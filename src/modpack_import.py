@@ -474,32 +474,83 @@ def import_folder_as_instance(folder: str, mgr) -> object:
 
 
 def _guess_mc_version_from_dir(mc_dir: str) -> str:
+    """从版本目录取**纯 MC 版本号**（不是加载器版本 id）。
+
+    ☠ round-249：旧实现直接返回第一个版本目录名，遇到
+    ``1.20.1-forge-47.4.0`` / ``fabric-loader-0.16.9-1.21.4`` 就把整串当
+    game_version 写进实例 → 之后补全按这个假版本下载，必然失败。
+    改用 scan._base_mc_version：优先读 json 的 inheritsFrom / clientVersion，
+    没有再从 id 里提取 ``1.20.1`` 这种纯版本号。
+    """
     versions_dir = os.path.join(mc_dir, "versions")
     if not os.path.isdir(versions_dir):
         return ""
+    from .scan import _base_mc_version
     try:
         for e in os.scandir(versions_dir):
             if e.is_dir() and os.path.isfile(
                 os.path.join(e.path, e.name + ".json")
             ):
-                return e.name
+                data = None
+                try:
+                    import json
+                    with open(os.path.join(e.path, e.name + ".json"),
+                              encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:  # noqa: BLE001
+                    pass
+                base = _base_mc_version(e.name, data)
+                if base:
+                    return base
     except OSError:
         pass
     return ""
 
 
 def _guess_loader_from_dir(mc_dir: str) -> str:
+    """从版本目录识别加载器（**不看 mod 文件名**）。
+
+    ☠ round-249：旧实现取 mods/ 里第一个 jar 的文件名交给 _loader_from_text，
+    但 mod 文件名跟加载器无关——`sodium-1.20.1.jar` 不含 "fabric"，
+    绝大多数 forge 包都被判成 vanilla；反过来带 "fabric" 字样的普通 mod
+    又能把 forge 包误判成 fabric。正确真理源是 versions/ 下的版本 id /
+    json 的 inheritsFrom（与 find_installed_loader 同口径）。
+    """
+    vdir = os.path.join(mc_dir, "versions")
+    if os.path.isdir(vdir):
+        try:
+            names = sorted(os.listdir(vdir), key=str.lower)
+        except OSError:
+            names = []
+        # 按优先级扫版本目录 id：neoforge 的 id 里也含 forge，必须先判。
+        for low in (n.lower() for n in names):
+            if not os.path.isfile(os.path.join(vdir, low, low + ".json")):
+                # 目录名大小写保留原名，重新拼一次
+                orig = next((n for n in names if n.lower() == low), low)
+                if not os.path.isfile(os.path.join(vdir, orig, orig + ".json")):
+                    continue
+            if "neoforge" in low:
+                return "neoforge"
+            if "quilt" in low:
+                return "quilt"
+            if "legacyfabric" in low:
+                return "fabric"
+            if "fabric" in low:
+                return "fabric"
+            if "forge" in low:
+                return "forge"
+    # 最后兜底才看 mod 文件名（仅当版本目录完全没有加载器痕迹时）
     mods_dir = os.path.join(mc_dir, "mods")
-    if not os.path.isdir(mods_dir):
-        return "vanilla"
-    from .scan import _loader_from_text
-    try:
-        for f in os.listdir(mods_dir):
-            fl = f.lower()
-            if fl.endswith(".jar"):
-                return _loader_from_text(f)
-    except OSError:
-        pass
+    if os.path.isdir(mods_dir):
+        from .scan import _loader_from_text
+        try:
+            for f in os.listdir(mods_dir):
+                if f.lower().endswith(".jar"):
+                    guessed = _loader_from_text(f)
+                    if guessed != "vanilla":
+                        return guessed
+        except OSError:
+            pass
     return "vanilla"
 
 

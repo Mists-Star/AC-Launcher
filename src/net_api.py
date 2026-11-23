@@ -2975,7 +2975,7 @@ def _lookup_cn_slugs(query: str) -> list[str]:
     q = (query or "").strip()
     if not q:
         return []
-    ranked: list[tuple[int, str]] = []
+    ranked: list[tuple[int, int, str]] = []
     for short, slugs in cn_slug_map().items():
         if q == short:
             rank = 0
@@ -2985,12 +2985,17 @@ def _lookup_cn_slugs(query: str) -> list[str]:
             rank = 2
         else:
             continue
+        # round-249：同 rank 时按 short name 长度排（越短越贴近查询词）。
+        # 旧实现只按 (rank, slug) 排 →「小地图」命中
+        # "E19 - Cobblemon小地图图标" 与 "Xaero 小地图" 都是 rank 2，
+        # 字母序让冷门资源包 e19_* 排到 xaeros-minimap 前面，
+        # 中文搜索/CF 免 key 通道第一条就搜错对象。
         for s in slugs:
-            ranked.append((rank, s))
+            ranked.append((rank, len(short), s))
     ranked.sort()
     seen: set[str] = set()
     out: list[str] = []
-    for _, slug in ranked:
+    for _rank, _len, slug in ranked:
         if slug not in seen:
             seen.add(slug)
             out.append(slug)

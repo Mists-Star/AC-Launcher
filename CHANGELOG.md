@@ -27,6 +27,45 @@
   只 emit 不 connect 的信号属于 `InstanceCard`/`ModCard` 遗留死代码
   （文件头已标注 old layout，仅在老测试里实例化），不动以免破坏测试。
 
+## round-249（2026-11-23）— 全库同类 bug 审查：右键菜单丢失 / 导入识别错误 / 中文搜索排序
+
+用户要求「自己审查所有出现过的 bug，查功能无法使用 + 识别错误」。按历史 bug
+的 7 类根因模式（导入快照/漏传参/结构假设/枚举不匹配/只发不接/用错 Worker/
+假校验）做了 AST + 静态全库扫描，逐个核实后修掉 3 个真问题：
+
+### 模组右键菜单丢失（功能无法使用，P1）
+* 旧 `ModCard` 有「打开所在文件夹 / 复制文件名」，换成新 `ModListPanel` 后
+  整行重写，右键菜单没迁移 → `copy_name`/`open_folder` 信号成了无人接的
+  孤儿（round-244 扫到过但误判为"遗留死代码"没动）。
+* 给 `ModRow` 补 `contextMenuEvent`，直接实现两个动作（不再绕信号）。
+  验证 `_probe_mod_context_menu.py` ALL PASS。
+
+### 整合包导入的加载器/MC 版本识别错误（P0）
+* `_guess_loader_from_dir` 旧实现取 mods/ 里**第一个 jar 的文件名**猜加载器
+  → `sodium-1.20.1.jar` 不含 fabric 就把 forge 包判成 vanilla；
+  `fabric-api.jar` 又能把 forge 包带偏。改成按 versions/ 版本目录 id 判定
+  （neoforge 优先于 forge，与 find_installed_loader 同口径），mod 名只兜底。
+* `_guess_mc_version_from_dir` 旧实现直接返回版本目录名，遇到
+  `1.20.1-forge-47.4.0` 就把整串当 game_version 写进实例 → 补全必失败。
+  改用 `scan._base_mc_version`（优先 inheritsFrom/clientVersion，再提取纯号）。
+* 验证 `_probe_loader_detect.py` ALL PASS（5 项，含"mod 名不再左右结果"）。
+
+### 中文搜索名库排序错（识别错误，P1）
+* `_lookup_cn_slugs` 同 rank 按 slug 字母序排 →「小地图」命中的冷门资源包
+  `e19_cobblemon_minimap_icons` 排在 `xaeros-minimap` 前面，中文搜/CF 免 key
+  通道第一条就搜错对象。改成同 rank 按 short name 长度（越短越精确）。
+  `test_round191`「名库精确优先」由红转绿。
+
+### 测试基建（非产品 bug）
+* `test_build_trim` 两处过时断言：① 用精确缩进字符串数 KeyboardInterrupt
+  （实际有 8/12 两种缩进）→ 改语义计数；② `dist_beta` 老路径造的产物不会被
+  新 build（临时目录）读到 → 该用例标 skip 并说明，产物完整性判定仍在真实
+  build 中验证。给 `_build(here, deploy_dir=None)` 加测试注入口。
+* 全量 104 个测试文件零失败；compile OK、smoke 17/17、9 个探针 ALL PASS。
+* ☠ 教训：round-244 把"只 emit 不 connect 的信号"一刀切判成死代码是误判——
+  其中 copy_name/open_folder 是**换面板时丢的功能**，不是遗留垃圾。信号无人接
+  要先确认对应功能在新实现里还在不在，再决定能不能不动。
+
 ## round-248（2026-11-23）— 体检误报可忽略 / 动画反馈开关接线 / 子进程终端
 
 ### 体检误报可忽略（用户要求：明明可用却报有问题）

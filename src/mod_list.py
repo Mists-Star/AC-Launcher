@@ -293,6 +293,35 @@ class ModRow(QFrame):
             self.check.setChecked(not self.check.isChecked())
         super().mousePressEvent(ev)
 
+    def contextMenuEvent(self, ev) -> None:  # noqa: N802 - Qt 命名
+        """round-249：换到新 ModListPanel 时丢掉的右键菜单补回来。
+
+        旧 ModCard 有「打开所在文件夹 / 复制文件名」，新版整行重写后没有，
+        用户排查冲突、去 Modrinth 搜对应 mod 都不方便。这里直接实现动作，
+        不再绕信号（旧 ModCard 的 copy_name/open_folder 信号没人接）。
+        """
+        from PySide6.QtWidgets import QMenu
+        from .i18n import t
+        m = QMenu(self)
+        m.addAction(t("mods.open_folder"), self._open_folder)
+        m.addAction(t("mods.copy_name"), self._copy_name)
+        m.exec(ev.globalPos())
+
+    def _open_folder(self) -> None:
+        from .os_open import open_local_path
+        try:
+            parent = os.path.dirname(self.path)
+            if parent:
+                open_local_path(self, parent)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _copy_name(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        from .win_rounded import toast
+        QApplication.clipboard().setText(os.path.basename(self.path))
+        toast(self, t("mods.copy_name"), t("mods.copy_name_done"))
+
     def is_checked(self) -> bool:
         return self.check.isChecked()
 

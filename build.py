@@ -126,8 +126,12 @@ def _deploy_to_test_dir(src: str, dest: str) -> bool:
     return True
 
 
-def _build(here: str) -> int:
-    """跑一次 PyInstaller（主包形态，spec 已排除 Chromium 整栈）。"""
+def _build(here: str, deploy_dir: str | None = None) -> int:
+    """跑一次 PyInstaller（主包形态，spec 已排除 Chromium 整栈）。
+
+    ``deploy_dir`` 仅供测试注入临时目录；生产调用一律走固定的
+    ``_get_test_deploy_dir()``（D:\\Appdata\\AC_Launcher）。
+    """
     venv_py = os.path.join(here, "venv", "Scripts", "python.exe")
     py = venv_py if os.path.isfile(venv_py) else sys.executable
 
@@ -175,8 +179,8 @@ def _build(here: str) -> int:
         print(f"[build] OK  产物完整；trim removed={removed} failed={failed}"
               + ("（瘦身未完成，不影响可用性）" if failed else ""))
 
-        # 部署到测试目录
-        test_dir = _get_test_deploy_dir()
+        # 部署到测试目录（deploy_dir 仅测试可注入，生产用固定路径）
+        test_dir = deploy_dir or _get_test_deploy_dir()
         if not _deploy_to_test_dir(dist_tmp, test_dir):
             return 1
 
