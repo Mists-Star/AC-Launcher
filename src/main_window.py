@@ -926,7 +926,9 @@ class HomePage(QWidget):
         self.char_meta_lbl.setProperty("cls", "sub")
         self.char_meta_lbl.setStyleSheet("font-size: 11px;")
         right.addWidget(self.char_meta_lbl, alignment=Qt.AlignRight)
-        right.addSpacing(6)
+        # round-251：截图实看「登录后即可同步…」小字与皮肤模型头顶相接，
+        # 视觉上像压在头上。原来是 6px，加大到 24px 留出呼吸空间。
+        right.addSpacing(24)
         self.char_stage = _CharStage()
         # A rebuilt home page owns a brand-new stage. Drop the cached render
         # stamp so the next _refresh_character() fills the new stage instead of

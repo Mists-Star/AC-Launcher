@@ -153,6 +153,7 @@ check("再点一次再发一次（不是幂等哨兵）", _p2.closed.n == 2)
 # ── 2b) 窗口模式弹窗不是空白（P1，round-223 目视巡检抓到） ────────────────
 print("\n[2b] window-mode dialogs are not blank")
 
+os.environ["QT_QPA_FONTDIR"] = r"C:\Windows\Fonts"
 from PySide6.QtWidgets import QApplication          # noqa: E402
 from src.frameless import enable_panel_window_chrome  # noqa: E402
 

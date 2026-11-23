@@ -696,6 +696,9 @@ class SettingsPage(QWidget):
             self.gamma_spin.setValue(1.0)
         self.gamma_spin.setEnabled(self.gamma_chk.isChecked())
         self.gamma_chk.toggled.connect(self.gamma_spin.setEnabled)
+        # round-251：截图实看发现「启动时覆盖游戏亮度 1.0 ▲▼」挤成一团，
+        # checkbox 文字与 spinbox 之间没有留白。加固定间距。
+        g_row.addSpacing(12)
         g_row.addWidget(self.gamma_spin)
         g_row.addStretch(1)
         gl.addLayout(g_row)

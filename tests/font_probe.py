@@ -11,6 +11,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+os.environ["QT_QPA_FONTDIR"] = r"C:\Windows\Fonts"
 from PySide6.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout  # noqa: E402
 from PySide6.QtGui import QFontDatabase, QFont  # noqa: E402
 
