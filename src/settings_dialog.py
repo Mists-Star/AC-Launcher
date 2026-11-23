@@ -789,6 +789,11 @@ class SettingsPage(QWidget):
         ]:
             rb = QRadioButton(label)
             rb.setIcon(QIcon(icon_pixmap(icon_name, 18)))
+            # round-251：截图实看 ☀/月亮 图标与「浅色/暗色」文字粘在一起
+            # （历史遗留观察项「4列radio挤压」坐实）。QRadioButton 默认
+            # icon-text 间距太小，用 QSS 撑开 8px。
+            rb.setStyleSheet("QRadioButton::indicator { width: 14px; height: 14px; }"
+                             "QRadioButton { spacing: 8px; padding-left: 2px; }")
             rb.setChecked(self.cfg.get("theme_mode", "light") == mode)
             rb.theme_mode_val = mode
             self.theme_btns.addButton(rb)
@@ -2226,6 +2231,11 @@ class SettingsPage(QWidget):
         qlay.setContentsMargins(0, 0, 0, 0)
         qlay.setSpacing(4)
         ll.addWidget(self.java_quick_list)
+        # round-251：scan 完成前先放空状态提示——否则打开设置页到扫描
+        # 完成这 1-2 秒内是一大块空白，用户以为功能坏了。
+        _hint = QLabel(t("settings.java_quick_empty"))
+        _hint.setProperty("cls", "sub")
+        qlay.addWidget(_hint)
         # round-46：scan_javas() 扫注册表可能 1-2 秒，
         # 改为 Worker 后台线程执行，完成后更新 UI。
         self._java_scan_worker = Worker(scan_javas)
