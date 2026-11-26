@@ -130,8 +130,14 @@ class _PressScaleMixin(QObject):
         button.installEventFilter(self)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if obj is not self._btn or FeedbackConfig.is_reduced_motion() or \
+        if obj is not self._btn:
+            return False
+        if FeedbackConfig.is_reduced_motion() or \
                 not FeedbackConfig.enable_press_scale:
+            # round-254：开关在按下途中被关掉时也要收尾，否则按钮卡在缩小态。
+            if self._orig_geom is not None and event.type() in (
+                    QEvent.Type.MouseButtonRelease, QEvent.Type.Leave):
+                self._release_press()
             return False
 
         etype = event.type()
@@ -194,6 +200,38 @@ class _PressScaleMixin(QObject):
         self._orig_geom = None
 
 
+class _RippleMixin(QObject):
+    """波纹：懒创建覆盖层，全局开关在事件期判定（round-254）。
+
+    旧实现在 ``apply_feedback_to_button()`` 构造期按
+    ``FeedbackConfig.enable_ripple`` 决定挂不挂 —— 设置页运行时打开开关后，
+    已存在的按钮永远拿不到波纹（"开了没反应"）。现在一律挂载 mixin，
+    开关在事件里读；覆盖层只在开关打开且真被点击时才创建（默认关→零开销）。
+    """
+
+    def __init__(self, button: QPushButton):
+        super().__init__(button)
+        self._btn = button
+        self._overlay: Optional[_RippleOverlay] = None
+        button.installEventFilter(self)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is not self._btn:
+            return False
+        if FeedbackConfig.is_reduced_motion() or not FeedbackConfig.enable_ripple:
+            if self._overlay is not None:
+                self._overlay.hide()
+            return False
+        if event.type() == QEvent.Type.MouseButtonPress:
+            me = event  # type: QMouseEvent
+            if isinstance(me, QMouseEvent) and \
+                    me.button() == Qt.MouseButton.LeftButton and self._btn.isEnabled():
+                if self._overlay is None:
+                    self._overlay = _RippleOverlay(self._btn)
+                self._overlay._start_ripple(me.position())
+        return False
+
+
 class _RippleOverlay(QWidget):
     """点击位置扩散的波纹覆盖层（作为按钮的子控件，不占布局）。"""
 
@@ -202,25 +240,12 @@ class _RippleOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setGeometry(parent.rect())
-        parent.installEventFilter(self)
         self._radius = 0.0
         self._opacity = 0.0
         self._center = QPointF()
         self._anim: Optional[QPropertyAnimation] = None
         self._color = QColor(0, 0, 0, 0)
         self.hide()
-
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if obj is not self.parent() or FeedbackConfig.is_reduced_motion():
-            return False
-        if not FeedbackConfig.enable_ripple:
-            return False
-
-        if event.type() == QEvent.Type.MouseButtonPress:
-            me = event  # type: QMouseEvent
-            if me.button() == Qt.MouseButton.LeftButton and self.parent().isEnabled():
-                self._start_ripple(me.position())
-        return False
 
     def _start_ripple(self, pos: QPointF):
         self._center = pos
@@ -347,16 +372,19 @@ def apply_feedback_to_button(
     参数默认值遵循 FeedbackConfig 全局开关，但可单独覆盖。
     返回的 mixin 对象可保留引用以便后续移除（通常不需要）。
     """
-    if press_scale and FeedbackConfig.enable_press_scale:
+    # round-254：一律挂载，开关在每个 mixin 的事件期实时读。
+    # 旧实现在构造期用全局开关决定"挂不挂"，而设置页是运行时改这些开关的
+    # ——已存在的按钮（导航/首页 CTA）永远不会获得效果，"开了没反应"。
+    if press_scale:
         _PressScaleMixin(button)
 
-    if ripple and FeedbackConfig.enable_ripple:
-        _RippleOverlay(button)
+    if ripple:
+        _RippleMixin(button)   # 懒建 overlay：默认关时零开销
 
-    if hover_glow and FeedbackConfig.enable_hover_glow:
+    if hover_glow:
         _HoverGlowMixin(button)
 
-    if focus_ring and FeedbackConfig.enable_focus_ring:
+    if focus_ring:
         _FocusRingMixin(button)
 
 

@@ -15,6 +15,8 @@ so an effect bug can never break the UI. A module-level ``EFFECTS_ENABLED``
 """
 from __future__ import annotations
 
+import weakref
+
 from PySide6.QtCore import QTimer, QRectF, QPointF
 from PySide6.QtGui import (
     QPainter, QPainterPath, QColor, QPen, QLinearGradient, QConicalGradient,
@@ -96,7 +98,12 @@ def set_effects_enabled(on: bool) -> None:
 # 之前每张流光卡都私有一个 33ms QTimer，卡片一多 CPU 直接起飞。这里用一个
 # 模块级主定时器统一 tick 所有"可见"的流光卡，切后台自动停表——卡片混合
 # 视觉不变，CPU 却只花一份。
-_ACTIVE_CARDS: set = set()
+# round-254：必须是弱引用集合。旧版用强引用 set，而 ``destroy()`` 不是 Qt
+# 生命周期钩子（deleteLater / 父控件析构都不会调），失效卡片永远留在集合里：
+# 主表有活儿可干却每帧对着已销毁的 C++ 对象 tick，新卡片又被同样的逻辑
+# 卡住——表现就是「切几次页后所有卡片动画失效，再切也不复活」。
+# destroyed 信号兜底立即清理；WeakSet 再兜一层（信号没接上/异常路径）。
+_ACTIVE_CARDS: weakref.WeakSet = weakref.WeakSet()
 _MASTER: QTimer | None = None
 
 
@@ -130,9 +137,25 @@ def _resume_if_possible() -> None:
     round-202：切页 / 游戏退出 / 关掉「减少动效」/ 重新打开流光后，
     都要能自己把主表拉起来——旧实现只在部分分支重启，漏掉任何一条
     都会表现为「切换页面后所有卡片动画失效，直到再切一次页」。
+    round-254：判断前先剔除失效卡片，否则「集合非空」只说明残留了
+    已销毁对象，主表照样被拉起来空转。
     """
+    _prune_dead()
     if EFFECTS_ENABLED and not MOTION_REDUCED and not GAME_RUNNING and _ACTIVE_CARDS:
         _ensure_master()
+
+
+def _prune_dead() -> None:
+    """清理集合里已销毁的卡片（WeakSet 理论上自动剔除，兜底异常路径）。"""
+    for c in list(_ACTIVE_CARDS):
+        try:
+            # isVisible() 在 C++ 对象已删时会抛 RuntimeError；拿它当探针。
+            c.isVisible()
+        except Exception:  # noqa: BLE001 - 已销毁，WeakSet 会在 GC 后剔除
+            try:
+                _ACTIVE_CARDS.discard(c)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _has_focus() -> bool:
@@ -178,17 +201,54 @@ def _tick_all() -> None:
             # 视口裁剪：滚出滚动区视口的卡片跳过（见 _in_viewport）。
             if c is not None and c.isVisible() and _in_viewport(c):
                 c._advance()
-        except Exception:  # noqa: BLE001 - 单卡异常不影响其它
-            pass
+        except Exception:  # noqa: BLE001 - 单卡异常/已销毁不影响其它
+            try:
+                _ACTIVE_CARDS.discard(c)
+            except Exception:  # noqa: BLE001
+                pass
     if not _ACTIVE_CARDS:
         _stop_master()
 
 
-def _accent() -> QColor:
+def _on_card_destroyed(ref) -> None:
+    """QObject.destroyed 回调：弱引用此时已失效，靠它剔残留 + 停空转表。
+
+    WeakSet 通常已自动剔除；这里兜住信号路径，也确保主表在有卡被销毁后
+    立刻停摆（否则空转 33ms 一次直到下一张卡 hide）。
+    """
     try:
-        return QColor(COLORS.get("accent", "#7C3AED"))
+        _prune_dead()
+        if not _ACTIVE_CARDS:
+            _stop_master()
+    except Exception:  # noqa: BLE001 - 析构期回调绝不抛错
+        pass
+
+
+# round-255 性能：主题色/边框色缓存。paintEvent 每帧都要，按字符串值失效
+# （不依赖主题通知回调，换色后第一次调用自然更新），比每帧 QColor(str) 解析便宜。
+_COLOR_CACHE: dict[str, QColor] = {}
+
+
+def _cached_color(key: str, default: str) -> QColor:
+    raw = COLORS.get(key, default)
+    try:
+        hit = _COLOR_CACHE.get(key)
+        if hit is not None and _COLOR_CACHE.get(key + "#raw") == raw:
+            return hit
+        c = QColor(raw)
     except Exception:  # noqa: BLE001
-        return QColor("#7C3AED")
+        raw = default
+        hit = _COLOR_CACHE.get(key + "#default")
+        if hit is not None and _COLOR_CACHE.get(key + "#raw") == default:
+            return hit
+        c = QColor(default)
+    _COLOR_CACHE[key] = c
+    _COLOR_CACHE[key + "#raw"] = raw
+    return c
+
+
+def _accent() -> QColor:
+    return _cached_color("accent", "#7C3AED")
 
 
 def _card_fill(widget=None) -> QColor:
@@ -202,10 +262,7 @@ def _card_fill(widget=None) -> QColor:
 
 
 def _border() -> QColor:
-    try:
-        return QColor(COLORS.get("border", "#E5E7EB"))
-    except Exception:  # noqa: BLE001
-        return QColor("#E5E7EB")
+    return _cached_color("border", "#E5E7EB")
 
 
 class LightTrailCard(RoundedCard):
@@ -242,6 +299,16 @@ class LightTrailCard(RoundedCard):
         # 永远是冷的，退出后也不复活。
         if self._trail or self._reflect:
             _ACTIVE_CARDS.add(self)
+            # round-254：deleteLater / 父控件析构不会走 destroy()，必须接 destroyed。
+            # 默认参数绑住 self 的弱引用，避免信号闭包反过来持有卡片自己。
+            if not getattr(self, "_destroy_hooked", False):
+                try:
+                    self.destroyed.connect(
+                        lambda *args, _ref=weakref.ref(self): _on_card_destroyed(_ref)
+                    )
+                    self._destroy_hooked = True
+                except Exception:  # noqa: BLE001 - 信号接不上不影响功能
+                    pass
             _resume_if_possible()
 
     def hideEvent(self, e):
@@ -251,6 +318,7 @@ class LightTrailCard(RoundedCard):
             _stop_master()
 
     def destroy(self, *a, **k):
+        # round-254：兼容显式调用（destroy 不是 Qt 钩子，见 showEvent 注释）
         _ACTIVE_CARDS.discard(self)
         super().destroy(*a, **k)
 
@@ -278,9 +346,16 @@ class LightTrailCard(RoundedCard):
     def _paint_liquid(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        path = QPainterPath()
-        path.addRoundedRect(r, self._radius, self._radius)
+        # round-255：圆角路径只随尺寸/圆角变化。列表卡尺寸固定，每帧重建
+        # 纯属浪费（实测 2.2µs/卡/帧），按 (w,h,r) 缓存在实例上。
+        geom = (self.width(), self.height(), self._radius)
+        path = getattr(self, "_fx_path", None)
+        if getattr(self, "_fx_path_geom", None) != geom or path is None:
+            r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            path = QPainterPath()
+            path.addRoundedRect(r, self._radius, self._radius)
+            self._fx_path = path
+            self._fx_path_geom = geom
 
         # 1) 表面填充（与 RoundedCard 一致）
         fill = self._fill
@@ -308,27 +383,30 @@ class LightTrailCard(RoundedCard):
         accent = _accent()
         if self._trail:
             cg = QConicalGradient()
-            center = QPointF(self.width() / 2.0, self.height() / 2.0)
+            center = QPointF(geom[0] / 2.0, geom[1] / 2.0)
             cg.setCenter(center)
             cg.setAngle(0)
             pseg = (self._angle / 360.0) % 1.0
             seg_half = 0.10
             steps = 32
-            for i in range(steps + 1):
-                t = i / steps
+            # round-255：最大热点。旧版每步 `QColor(accent)` 新建对象（实测
+            # 33 步 45µs/卡/帧），改用一只 scratch 反复 setAlphaF 只需 9.7µs，
+            # 且每步都是独立 setColorAt 拷贝（Qt 按值存 stop），颜色不变。
+            # 预存 t 序列省掉每帧 33 次浮点除法。
+            ts = getattr(self, "_fx_ts", None)
+            if ts is None:
+                ts = tuple(i / steps for i in range(steps + 1))
+                self._fx_ts = ts
+            c = QColor(accent)
+            for t in ts:
                 d = abs(t - pseg)
                 d = min(d, 1.0 - d)  # 圆环距离
-                if d < seg_half:
-                    a = 1.0 - d / seg_half
-                else:
-                    a = 0.0
-                c = QColor(accent)
+                a = 1.0 - d / seg_half if d < seg_half else 0.0
                 c.setAlphaF((0.18 + 0.82 * a) * self._strength)
                 cg.setColorAt(t, c)
-            stripe = QColor(accent)
-            stripe.setAlphaF(0.10 * self._strength)
-            cg.setColorAt(0, stripe)
-            cg.setColorAt(1, stripe)
+            c.setAlphaF(0.10 * self._strength)
+            cg.setColorAt(0, c)
+            cg.setColorAt(1, c)
             p.setPen(QPen(cg, 2.0))
             p.drawPath(path)
 

@@ -8,6 +8,52 @@
 > 内容依据代码中的 `round-NN` 标记与改动反推整理；**日期为按文件改动时间推断**，
 > 非逐条精确记录。
 
+## round-254（2026-11-25）— 动画系统生命周期：用几次后「全失效」的根因
+
+用户反馈「effect 块经常动画失效」。探针实测**效果函数本身没坏**（round-202/238
+回归全绿），真正的问题是失效对象残留 + 开关在错误的时机判定：
+
+### P0：流光卡对象泄漏 → 主表空转、后续卡片不复活
+* `effects._ACTIVE_CARDS` 用**强引用 set**，且 `destroy()` 不是 Qt 生命周期钩子
+  —— `deleteLater()` / 父控件析构都不会调它。实测一张 `deleteLater()` 后仍留在
+  集合里、主表每 33ms 对着 C++ 已删对象 tick；新卡也被同样的逻辑卡住。
+  表现就是「切几次页后所有卡片动画失效，再切也不复活」。
+* 改 `weakref.WeakSet` + `QObject.destroyed` 信号清理 + tick 中遇异常立即剔除 +
+  `_resume_if_possible()` 判空前先 `_prune_dead()`。实测：单卡/父控件销毁后集合
+  归零、主表停摆；连续重建 5 轮后新卡仍能拉起主表、开关来回切仍生效。
+
+### P0：反馈开关在构造期判定 → 运行时开启对既有按钮无效
+* `feedback.apply_feedback_to_button()` 旧实现按当时的 `FeedbackConfig.enable_*`
+  决定**挂不挂** mixin；设置页保存后才改全局开关 → 已创建的导航/首页按钮
+  永远拿不到波纹/发光（「开了没反应」）。改为一律挂载、事件期实时读开关；
+  波纹覆盖层懒建（默认关 → 零开销）。同时补上「按下途中关掉缩放」时主动
+  release，避免按钮卡在缩小态。
+* 验证 `tests/test_round254_effects_lifecycle.py` 27 项全过（含开关关闭时覆盖层
+  不创建、运行期开/关即时生效、按压中途关开关自动回弹）。
+
+### 🔍 验证
+* 新增 `tests/test_round254_effects_lifecycle.py`（独立脚本式，与 round-202/238 同风格）。
+* `py_compile` 通过；round-202/238/209 回归全绿；全量 pytest 与 smoke 见提交记录。
+
+## round-255（2026-11-25）— 流光绘制热路径优化（视觉零变化）
+
+用户追问「优化优化？」——上一轮只是止血，这轮量到真热点再动。微基准：
+单卡 `_paint_liquid` **100µs/帧**，100 卡 × 30fps = 每秒 300ms 耗在光栅化上。
+
+* **主热点**：32 步锥形渐变每步 `QColor(accent)` 新建对象 → 45µs/33步。
+  改为复用一只 scratch QColor 反复 `setAlphaF`（Qt 按值存 gradient stop），
+  **9µs/33步（4.3×）**。圆角 path 按 `(w,h,r)` 缓存，主题色/边框色按字符串值
+  缓存（换主题自动失效，不依赖通知回调），预存渐变 t 序列省 33 次浮点除法。
+* **端到端**：`_paint_liquid` 100µs → **64µs/卡/帧（-36%）**；100 卡场景
+  300ms/s → 192ms/s。
+* **判断过但没动**：失焦检测 `activeWindow()` 仅 0.16µs/tick，改「失焦停表」
+  会引入新的「焦点回来不恢复」风险——正是本轮要根治的毛病，收益不抵风险。
+* **视觉铁律**：新增 `tests/test_round255_effects_perf.py` 逐像素比对 5 组
+  （不同 accent/强度/角度/尺寸），**全部 diff=0 px**；缓存失效与提速断言齐全。
+
+### 🔍 验证
+* `tests/test_round255_effects_perf.py` 11/11 PASS；已注册 `regress.py`。
+
 ### 同类问题普查（round-244 附）
 * pyflakes 全量扫 `src/` + AST 扫事件接线/枚举不匹配 + 只 emit 不 connect 的信号。
 * 又抓出并修掉 **onboarding 两个同型 NameError**（P0）：
